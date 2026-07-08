@@ -111,8 +111,6 @@ class GrowthDerivativeNN(nnx.Module):
         dtype,
         rngs: nnx.Rngs,
     ):
-        if settings.approximation not in {"mlp", "rff"}:
-            raise ValueError(f"Unsupported approximation: {settings.approximation!r}")
         self.approximation = settings.approximation
         self.hidden_activation = ACTIVATIONS[settings.hidden_activation]
         self.input_scale = settings.input_scale
@@ -190,8 +188,6 @@ STATUS_TO_REASON = {
     LMStatus.MAX_STEPS: "max_steps",
 }
 
-LOG_EVERY_STEPS = 10  # verbose progress cadence inside the jitted solve
-
 
 def production(k, p):
     k_positive = jnp.maximum(k, DOMAIN_EPS)
@@ -203,39 +199,31 @@ def marginal_product(k, p):
     return jax.vmap(jax.grad(lambda x: production(x, p)))(k)
 
 
-def integrate_time_derivative(derivative_fn, t, initial_value, substeps, component):
-    derivative_at_t = jax.vmap(lambda s: derivative_fn(s)[component])(t)
+def integrate_time_derivative(derivative_fn, t, substeps):
+    derivative_at_t = jax.vmap(derivative_fn)(t)
 
     def interval_increment(left, right):
         nodes = jnp.linspace(left, right, substeps + 1)
-        values = jax.vmap(lambda s: derivative_fn(s)[component])(nodes)
+        values = jax.vmap(derivative_fn)(nodes)
         widths = nodes[1:] - nodes[:-1]
-        return jnp.sum(0.5 * widths * (values[:-1] + values[1:]))
+        return jnp.sum(0.5 * widths[:, None] * (values[:-1] + values[1:]), axis=0)
 
     increments = jax.vmap(interval_increment)(t[:-1], t[1:])
     integral = jnp.concatenate(
         [
-            jnp.zeros((1,), dtype=t.dtype),
-            jnp.cumsum(increments),
+            jnp.zeros((1, increments.shape[1]), dtype=t.dtype),
+            jnp.cumsum(increments, axis=0),
         ]
     )
-    return initial_value + integral, derivative_at_t
+    return integral, derivative_at_t
 
 
-def policy_values(
-    model,
-    t,
-    p,
-    integration_substeps,
-):
-    k_integral, dk_dt = integrate_time_derivative(
-        model, t, 0.0, integration_substeps, 0
-    )
-    c_integral, dc_dt = integrate_time_derivative(
-        model, t, 0.0, integration_substeps, 1
-    )
-    k = p.k_0 + k_integral
-    c = model.c_0[...] + c_integral
+def policy_values(model, t, p, integration_substeps):
+    integral, derivative = integrate_time_derivative(model, t, integration_substeps)
+    k = p.k_0 + integral[:, 0]
+    c = model.c_0[...] + integral[:, 1]
+    dk_dt = derivative[:, 0]
+    dc_dt = derivative[:, 1]
     output = production(k, p)
     mpk = marginal_product(k, p)
     resource = dk_dt - (output - p.delta * k - c)
@@ -261,12 +249,7 @@ def policy_values(
 
 
 def training_residual(model, data, p, integration_substeps):
-    values = policy_values(
-        model,
-        data["t"],
-        p,
-        integration_substeps,
-    )
+    values = policy_values(model, data["t"], p, integration_substeps)
     k_positivity = jnp.minimum(values["k"] - DOMAIN_EPS, 0.0)
     c_positivity = jnp.minimum(values["c"] - DOMAIN_EPS, 0.0)
     residual = jnp.concatenate(
@@ -280,20 +263,8 @@ def training_residual(model, data, p, integration_substeps):
     return residual / jnp.sqrt(residual.size)
 
 
-def snapshot(
-    data,
-    model,
-    p,
-    integration_substeps,
-):
-    values = jax.device_get(
-        policy_values(
-            model,
-            data["t"],
-            p,
-            integration_substeps,
-        )
-    )
+def snapshot(data, model, p, integration_substeps):
+    values = jax.device_get(policy_values(model, data["t"], p, integration_substeps))
     columns = {key: np.asarray(value) for key, value in values.items()}
     df = pd.DataFrame(columns)
     if "k_benchmark" in data:
@@ -376,8 +347,6 @@ def neoclassical_growth_nn_integrated(
             "k_benchmark": k_test_bar,
             "c_benchmark": c_test_bar,
         }
-    else:
-        benchmark_solution = None
 
     initial_output = float(A_value * max(k_0**a, b_1_value * k_0**a - b_2_value))
     c_flow_guess = max(initial_output - delta * k_0, DOMAIN_EPS)
@@ -390,14 +359,10 @@ def neoclassical_growth_nn_integrated(
     )
     graphdef, template_theta, fixed_state = nnx.split(template_model, nnx.Param, ...)
     rngs = nnx.Rngs(seed)
-    accepted = False
 
     def residual_fn(theta, data):
         return training_residual(
-            nnx.merge(graphdef, theta, fixed_state),
-            data,
-            p,
-            integration_substeps,
+            nnx.merge(graphdef, theta, fixed_state), data, p, integration_substeps
         )
 
     solver = UnderdeterminedLevenbergMarquardt(
@@ -411,37 +376,16 @@ def neoclassical_growth_nn_integrated(
     )
 
     # solve()'s atol is on the residual norm; the settings threshold is on
-    # the sum of squared residuals.
+    # the sum of squared residuals. Stopping is entirely solve()'s: atol for
+    # convergence, max_steps as the budget (a nonfinite candidate is rejected
+    # and damping raised, which recovers more often than aborting).
     atol = math.sqrt(stop_set.train_loss_threshold)
-
-    # Stopping is entirely solve()'s: atol for convergence, max_steps as the
-    # budget (a nonfinite candidate is rejected and damping raised, which
-    # recovers more often than aborting). The callback exists only for
-    # verbose progress logging.
-    def logging_callback(ctx):
-        def log(_):
-            jax.debug.print(
-                "step {step}: train_loss={loss:.3e} damping={damping:.1e}",
-                step=ctx.step,
-                loss=ctx.info.loss,
-                damping=ctx.lm_state.damping,
-            )
-
-        jax.lax.cond(ctx.step % LOG_EVERY_STEPS == 0, log, lambda _: None, operand=None)
-
-    callback = logging_callback if verbose else None
 
     compile_time = np.nan
     if measure_compilation:
         compile_start = time.perf_counter()
         jax.block_until_ready(
-            solver.solve(
-                template_theta,
-                train_data,
-                max_steps=1,
-                atol=atol,
-                callback=callback,
-            )
+            solver.solve(template_theta, train_data, max_steps=1, atol=atol)
         )
         compile_time = time.perf_counter() - compile_start
 
@@ -458,11 +402,7 @@ def neoclassical_growth_nn_integrated(
 
         start_time = time.perf_counter()
         result = solver.solve(
-            theta,
-            train_data,
-            max_steps=stop_set.max_steps,
-            atol=atol,
-            callback=callback,
+            theta, train_data, max_steps=stop_set.max_steps, atol=atol
         )
         theta, info, steps = result.x, result.info, int(result.steps)
         stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
@@ -475,18 +415,8 @@ def neoclassical_growth_nn_integrated(
         if accepted:
             break
 
-    train_df = snapshot(
-        train_data,
-        model,
-        p,
-        integration_substeps,
-    )
-    test_df = snapshot(
-        test_data,
-        model,
-        p,
-        integration_substeps,
-    )
+    train_df = snapshot(train_data, model, p, integration_substeps)
+    test_df = snapshot(test_data, model, p, integration_substeps)
     tvc_values = policy_values(
         model,
         jnp.asarray([0.0, data_set.test_tvc_T], dtype=dtype),

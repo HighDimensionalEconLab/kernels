@@ -171,8 +171,6 @@ STATUS_TO_REASON = {
     LMStatus.MAX_STEPS: "max_steps",
 }
 
-LOG_EVERY_STEPS = 10  # verbose progress cadence inside the jitted solve
-
 
 def production(k, p):
     k_positive = jnp.maximum(k, DOMAIN_EPS)
@@ -185,17 +183,13 @@ def marginal_product(k, p):
 
 
 def policy_values(model, t, p):
-    def k_fn(s):
-        return model(s)[0]
-
-    def c_fn(s):
-        return model(s)[1]
-
-    values = jax.vmap(model)(t)
+    values, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
+        t
+    )
     k = values[:, 0]
     c = values[:, 1]
-    dk_dt = jax.vmap(jax.grad(k_fn))(t)
-    dc_dt = jax.vmap(jax.grad(c_fn))(t)
+    dk_dt = derivatives[:, 0]
+    dc_dt = derivatives[:, 1]
     output = production(k, p)
     mpk = marginal_product(k, p)
     resource = dk_dt - (output - p.delta * k - c)
@@ -311,8 +305,6 @@ def neoclassical_growth_nn(
             "k_benchmark": k_test_bar,
             "c_benchmark": c_test_bar,
         }
-    else:
-        benchmark_solution = None
 
     initial_output = float(A_value * max(k_0**a, b_1_value * k_0**a - b_2_value))
     c_flow_guess = max(initial_output - delta * k_0, DOMAIN_EPS)
@@ -329,7 +321,6 @@ def neoclassical_growth_nn(
     )
     graphdef, template_theta = nnx.split(template_model, nnx.Param)
     rngs = nnx.Rngs(seed)
-    accepted = False
 
     def residual_fn(theta, data):
         return training_residual(nnx.merge(graphdef, theta), data, p)
@@ -345,37 +336,16 @@ def neoclassical_growth_nn(
     )
 
     # solve()'s atol is on the residual norm; the settings threshold is on
-    # the sum of squared residuals.
+    # the sum of squared residuals. Stopping is entirely solve()'s: atol for
+    # convergence, max_steps as the budget (a nonfinite candidate is rejected
+    # and damping raised, which recovers more often than aborting).
     atol = math.sqrt(stop_set.train_loss_threshold)
-
-    # Stopping is entirely solve()'s: atol for convergence, max_steps as the
-    # budget (a nonfinite candidate is rejected and damping raised, which
-    # recovers more often than aborting). The callback exists only for
-    # verbose progress logging.
-    def logging_callback(ctx):
-        def log(_):
-            jax.debug.print(
-                "step {step}: train_loss={loss:.3e} damping={damping:.1e}",
-                step=ctx.step,
-                loss=ctx.info.loss,
-                damping=ctx.lm_state.damping,
-            )
-
-        jax.lax.cond(ctx.step % LOG_EVERY_STEPS == 0, log, lambda _: None, operand=None)
-
-    callback = logging_callback if verbose else None
 
     compile_time = np.nan
     if measure_compilation:
         compile_start = time.perf_counter()
         jax.block_until_ready(
-            solver.solve(
-                template_theta,
-                train_data,
-                max_steps=1,
-                atol=atol,
-                callback=callback,
-            )
+            solver.solve(template_theta, train_data, max_steps=1, atol=atol)
         )
         compile_time = time.perf_counter() - compile_start
 
@@ -393,11 +363,7 @@ def neoclassical_growth_nn(
 
         start_time = time.perf_counter()
         result = solver.solve(
-            theta,
-            train_data,
-            max_steps=stop_set.max_steps,
-            atol=atol,
-            callback=callback,
+            theta, train_data, max_steps=stop_set.max_steps, atol=atol
         )
         theta, info, steps = result.x, result.info, int(result.steps)
         stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")

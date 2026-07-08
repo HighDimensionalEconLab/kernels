@@ -67,10 +67,6 @@ class StructuralParameters:
 
 @dataclass
 class DataSettings:
-    # "trajectory": collocation states from the forward-simulated rollout of the
-    # current policy. Single dispatch point (collocation_states) so "fixed" /
-    # "smolyak" grids can slot in later.
-    state_grid: str = "trajectory"
     # dt is the rollout's initial step and the grid spacing of the test /
     # settle evaluation paths (which use fixed-grid RK4 so test_df stays
     # comparable across seeds and against the benchmark).
@@ -186,8 +182,8 @@ STATUS_TO_REASON = {
     LMStatus.MAX_STEPS: "max_steps",
 }
 
-# The joint loss+TVC convergence gate (and the verbose log) runs on this
-# cadence: the certificate rollout is not free.
+# The joint loss+TVC convergence gate runs on this cadence: the certificate
+# rollout is not free.
 CERTIFICATE_EVERY_STEPS = 10
 
 
@@ -240,9 +236,7 @@ def positivity(y):
     return jnp.maximum(y, DOMAIN_EPS)
 
 
-def collocation_states(policy, p, data_set, dtype):
-    if data_set.state_grid != "trajectory":
-        raise ValueError(f"Unsupported state_grid: {data_set.state_grid!r}")
+def collocation_states(policy, p, data_set):
     _, states = integrators.tsit5_free(
         rollout_field(policy, p),
         p.k_0,
@@ -267,7 +261,7 @@ def collocation_states(policy, p, data_set, dtype):
 # the saddle path (the continuous-time analog of the stock-policy identity
 # initialization); this certificate is the ex-post check of that selection,
 # gating early stopping and acceptance.
-def log_tvc_residual(policy, T_start, T_end, dt, p, data_set):
+def log_tvc_residual(policy, T_start, T_end, p, data_set):
     ts, states = integrators.tsit5_free(
         rollout_field(policy, p),
         p.k_0,
@@ -275,7 +269,7 @@ def log_tvc_residual(policy, T_start, T_end, dt, p, data_set):
         data_set.tvc_adaptive_steps,
         rtol=data_set.rtol,
         atol=data_set.atol,
-        dt0=dt,
+        dt0=data_set.dt,
         project=positivity,
     )
     c = jnp.maximum(jax.vmap(lambda k: consumption(policy, k, p))(states), DOMAIN_EPS)
@@ -358,9 +352,9 @@ def neoclassical_growth_nn_recursive_i(
     )
     num_collocation_states = data_set.adaptive_steps + 1
 
-    def residual_fn(theta, batch):
+    def residual_fn(theta):
         policy = nnx.merge(graphdef, theta)
-        states = collocation_states(policy, p, data_set, dtype)
+        states = collocation_states(policy, p, data_set)
         residual = jnp.concatenate(
             [
                 euler_residuals(policy, states, p),
@@ -385,7 +379,6 @@ def neoclassical_growth_nn_recursive_i(
             nnx.merge(graphdef, theta),
             data_set.train_T,
             data_set.train_tvc_T,
-            data_set.dt,
             p,
             data_set,
         )
@@ -394,27 +387,9 @@ def neoclassical_growth_nn_recursive_i(
         # Joint loss+TVC convergence gate on the certificate cadence; a
         # nonfinite candidate is left to LM (reject and raise damping).
         def certificate_checks(_):
-            log_tvc = log_tvc_residual(
-                nnx.merge(graphdef, ctx.x),
-                data_set.train_T,
-                data_set.train_tvc_T,
-                data_set.dt,
-                p,
-                data_set,
+            return (ctx.info.loss < stop_set.train_loss_threshold) & (
+                tvc_certificate(ctx.x) < stop_set.log_tvc_threshold
             )
-            converged = (ctx.info.loss < stop_set.train_loss_threshold) & (
-                log_tvc < stop_set.log_tvc_threshold
-            )
-            if verbose:
-                jax.debug.print(
-                    "step {step}: train_loss={loss:.3e} log_tvc={tvc:.2f} "
-                    "damping={damping:.1e}",
-                    step=ctx.step,
-                    loss=ctx.info.loss,
-                    tvc=log_tvc,
-                    damping=ctx.lm_state.damping,
-                )
-            return converged
 
         converged = jax.lax.cond(
             ctx.step % CERTIFICATE_EVERY_STEPS == 0,
@@ -439,9 +414,6 @@ def neoclassical_growth_nn_recursive_i(
         )
         compile_time = time.perf_counter() - compile_start
 
-    accepted = False
-    max_log_tvc = np.nan
-    transversality_ok = False
     for attempt in range(1, stop_set.num_attempts + 1):
         policy = InvestmentPolicyNN(nn_set, dtype=dtype, rngs=rngs)
         _, theta = nnx.split(policy, nnx.Param)

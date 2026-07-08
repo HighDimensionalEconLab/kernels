@@ -90,20 +90,12 @@ def human_capital_initial_conditions(
     solver = UnderdeterminedLevenbergMarquardt(
         human_capital_initial_residual, init_damping=1e-4
     )
-    state = solver.init(dtype=dtype)
+    result = solver.solve(params, batch, max_steps=iterations)
 
-    @jax.jit
-    def step(params, state):
-        return solver.update(params, state, batch)
-
-    info = None
-    for _ in range(iterations):
-        params, state, info = step(params, state)
-
-    h_0 = jnp.exp(params["log_h"])
-    c_0 = jnp.exp(params["log_c"])
-    residual = human_capital_initial_residual(params, batch)
-    return h_0, c_0, residual, info
+    h_0 = jnp.exp(result.x["log_h"])
+    c_0 = jnp.exp(result.x["log_c"])
+    residual = human_capital_initial_residual(result.x, batch)
+    return h_0, c_0, residual, result.info
 
 
 def human_capital_kernel(

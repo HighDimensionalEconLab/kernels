@@ -10,8 +10,9 @@ import numpy as np
 import pandas as pd
 from flax import nnx
 from jax import config
+from jax.experimental import io_callback
 from jax.flatten_util import ravel_pytree
-from nlls_gram import UnderdeterminedLevenbergMarquardt
+from nlls_gram import LMSolveAction, LMStatus, UnderdeterminedLevenbergMarquardt
 
 import integrators
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
@@ -31,7 +32,7 @@ from neoclassical_growth_benchmark import neoclassical_growth_benchmark
 # (integrators.tsit5_free, differentiated through by the optimizer): the
 # solver's accepted states ARE the collocation points. The input derivative
 # i'(k) uses forward-mode jax.jvp inside the residual while the LM solver
-# keeps jac="vjp" reverse-mode over the parameters (reverse-over-forward).
+# uses reverse mode over the parameters (reverse-over-forward).
 
 config.update("jax_enable_x64", True)
 
@@ -182,17 +183,20 @@ class InvestmentPolicyNN(nnx.Module):
 # Early stopping requires BOTH the Euler loss and the exact log-TVC
 # certificate below their bars: no transversality penalty enters the training
 # loss, the certificate is computed post hoc on the auxiliary simulation.
-def stop_reason(train_loss, log_tvc, diverged, elapsed, stop_set):
-    if (
-        train_loss < stop_set.train_loss_threshold
-        and log_tvc < stop_set.log_tvc_threshold
-    ):
-        return "early_stopping_met"
-    if diverged:
-        return "loss_divergence"
-    if elapsed > stop_set.max_train_time:
-        return "max_time_reached"
-    return None
+# solve() status for the wall-clock budget (any int outside LMStatus).
+TIME_LIMIT_STATUS = 100
+
+STATUS_TO_REASON = {
+    LMStatus.CONVERGED: "early_stopping_met",
+    LMStatus.NONFINITE: "loss_divergence",
+    TIME_LIMIT_STATUS: "max_time_reached",
+    LMStatus.MAX_STEPS: "max_epochs",
+}
+
+
+def over_time_budget(start_and_budget, _step):
+    start, budget = start_and_budget
+    return np.bool_(time.perf_counter() - float(start) > float(budget))
 
 
 def production(k, p):
@@ -375,7 +379,6 @@ def neoclassical_growth_nn_recursive_i(
 
     solver = UnderdeterminedLevenbergMarquardt(
         residual_fn,
-        jac="vjp",
         linear_solver="cholesky",
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
@@ -383,19 +386,6 @@ def neoclassical_growth_nn_recursive_i(
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
-
-    @jax.jit
-    def train_step(theta, lm_state):
-        return solver.update(theta, lm_state, None)
-
-    compile_time = np.nan
-    if measure_compilation:
-        _, template_theta = nnx.split(
-            InvestmentPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(0)), nnx.Param
-        )
-        compile_start = time.perf_counter()
-        jax.block_until_ready(train_step(template_theta, solver.init(dtype)))
-        compile_time = time.perf_counter() - compile_start
 
     @jax.jit
     def tvc_certificate(theta):
@@ -408,39 +398,104 @@ def neoclassical_growth_nn_recursive_i(
             data_set,
         )
 
+    steps_per_epoch = stop_set.train_steps_per_epoch
+    max_steps = stop_set.max_epochs * steps_per_epoch
+    # The wall-clock budget is a coarse guard; each io_callback is a host
+    # sync that stalls the dispatch pipeline, so check it no more than once
+    # every 25 steps.
+    time_check_steps = max(steps_per_epoch, 25)
+
+    def stopping_callback(ctx):
+        # The TVC certificate rollout is not free, so the joint loss+TVC
+        # convergence check runs once per epoch; divergence is checked every
+        # step and the host clock every time_check_steps.
+        def epoch_checks(_):
+            log_tvc = log_tvc_residual(
+                nnx.merge(graphdef, ctx.x),
+                data_set.train_T,
+                data_set.train_tvc_T,
+                data_set.dt,
+                p,
+                data_set,
+            )
+            converged = (ctx.info.loss < stop_set.train_loss_threshold) & (
+                log_tvc < stop_set.log_tvc_threshold
+            )
+            if verbose:
+                jax.debug.print(
+                    "epoch {epoch}: train_loss={loss:.3e} log_tvc={tvc:.2f} "
+                    "damping={damping:.1e}",
+                    epoch=ctx.step // steps_per_epoch,
+                    loss=ctx.info.loss,
+                    tvc=log_tvc,
+                    damping=ctx.lm_state.damping,
+                )
+            return converged
+
+        converged = jax.lax.cond(
+            ctx.step % steps_per_epoch == 0,
+            epoch_checks,
+            lambda _: jnp.asarray(False),
+            operand=None,
+        )
+        timed_out = jax.lax.cond(
+            ctx.step % time_check_steps == 0,
+            lambda _: io_callback(
+                over_time_budget,
+                jax.ShapeDtypeStruct((), jnp.bool_),
+                ctx.user_state,
+                ctx.step,
+            ),
+            lambda _: jnp.asarray(False),
+            operand=None,
+        )
+        diverged = ~jnp.isfinite(ctx.info.loss_candidate)
+        status = jnp.where(
+            converged,
+            LMStatus.CONVERGED,
+            jnp.where(diverged, LMStatus.NONFINITE, TIME_LIMIT_STATUS),
+        )
+        return LMSolveAction(stop=converged | diverged | timed_out, status=status)
+
+    compile_time = np.nan
+    if measure_compilation:
+        _, template_theta = nnx.split(
+            InvestmentPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(0)), nnx.Param
+        )
+        compile_start = time.perf_counter()
+        jax.block_until_ready(
+            solver.solve(
+                template_theta,
+                max_steps=1,
+                callback=stopping_callback,
+                user_state=jnp.asarray([time.perf_counter(), stop_set.max_train_time]),
+            )
+        )
+        compile_time = time.perf_counter() - compile_start
+
     accepted = False
     max_log_tvc = np.nan
     transversality_ok = False
     for attempt in range(1, stop_set.num_attempts + 1):
         policy = InvestmentPolicyNN(nn_set, dtype=dtype, rngs=rngs)
         _, theta = nnx.split(policy, nnx.Param)
-        lm_state = solver.init(dtype)
+        if verbose and stop_set.num_attempts > 1:
+            print(f"attempt {attempt}")
 
         start_time = time.perf_counter()
-        stopping_reason = "max_epochs"
-        train_loss = np.nan
-        for epoch in range(stop_set.max_epochs):
-            for _ in range(stop_set.train_steps_per_epoch):
-                theta, lm_state, info = train_step(theta, lm_state)
-            train_loss = float(info.loss)
-            if not np.isfinite(train_loss):
-                train_loss = float(info.loss_old)
-            max_log_tvc = float(tvc_certificate(theta))
-            if verbose:
-                print(
-                    f"attempt {attempt}, epoch {epoch}: train_loss={train_loss:.3e} "
-                    f"log_tvc={max_log_tvc:.2f} damping={float(lm_state.damping):.1e}"
-                )
-            reason = stop_reason(
-                train_loss,
-                max_log_tvc,
-                not np.isfinite(float(info.loss_candidate)),
-                time.perf_counter() - start_time,
-                stop_set,
-            )
-            if reason:
-                stopping_reason = reason
-                break
+        result = solver.solve(
+            theta,
+            max_steps=max_steps,
+            callback=stopping_callback,
+            user_state=jnp.asarray([start_time, stop_set.max_train_time]),
+        )
+        theta, info, steps = result.x, result.info, int(result.steps)
+        stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_epochs")
+        train_loss = float(info.loss)
+        if not np.isfinite(train_loss):
+            train_loss = float(info.loss_old)
+        max_log_tvc = float(tvc_certificate(theta))
+        epochs_run = max(1, -(-steps // steps_per_epoch))
         train_time = time.perf_counter() - start_time
         policy = nnx.merge(graphdef, theta)
 
@@ -509,7 +564,7 @@ def neoclassical_growth_nn_recursive_i(
         "max_log_tvc_residual": max_log_tvc,
         "transversality_ok": transversality_ok,
         "min_test_c": float(jnp.min(test_c)),
-        "epochs": epoch + 1,
+        "epochs": epochs_run,
         "attempt": attempt,
         "stopping_reason": stopping_reason,
         "train_time": train_time,

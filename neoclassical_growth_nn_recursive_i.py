@@ -391,8 +391,8 @@ def neoclassical_growth_nn_recursive_i(
         )
 
     def stopping_callback(ctx):
-        # Joint loss+TVC convergence gate on the certificate cadence;
-        # divergence is checked every step.
+        # Joint loss+TVC convergence gate on the certificate cadence; a
+        # nonfinite candidate is left to LM (reject and raise damping).
         def certificate_checks(_):
             log_tvc = log_tvc_residual(
                 nnx.merge(graphdef, ctx.x),
@@ -422,9 +422,7 @@ def neoclassical_growth_nn_recursive_i(
             lambda _: jnp.asarray(False),
             operand=None,
         )
-        diverged = ~jnp.isfinite(ctx.info.loss_candidate)
-        status = jnp.where(converged, LMStatus.CONVERGED, LMStatus.NONFINITE)
-        return LMSolveAction(stop=converged | diverged, status=status)
+        return LMSolveAction(stop=converged, status=LMStatus.CONVERGED)
 
     compile_time = np.nan
     if measure_compilation:

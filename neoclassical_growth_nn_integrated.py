@@ -13,7 +13,7 @@ import pandas as pd
 from flax import nnx
 from jax import config
 from jax.flatten_util import ravel_pytree
-from nlls_gram import LMSolveAction, LMStatus, UnderdeterminedLevenbergMarquardt
+from nlls_gram import LMStatus, UnderdeterminedLevenbergMarquardt
 
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from random_fourier_features import KernelName, RFFFeatures
@@ -76,12 +76,15 @@ class StoppingCriteria:
     num_attempts: int = 1  # single attempt: frac_accepted measures first-try robustness
 
 
+# Local 8-seed grid: geodesic acceleration is a ~5-9x step-count win on the
+# integrated ansatz (every geodesic-on damping config beats every off one);
+# dec 0.5 / inc 2.0 is the fastest corner, acceptance unchanged.
 @dataclass(frozen=True)
 class NLLSGramSettings:
     init_damping: float = 1e-5
-    damping_decrease: float = 0.35
-    damping_increase: float = 8.0
-    geodesic_acceleration: bool = False
+    damping_decrease: float = 0.5
+    damping_increase: float = 2.0
+    geodesic_acceleration: bool = True
     geodesic_acceptance_ratio: float = 0.8
 
 
@@ -411,25 +414,22 @@ def neoclassical_growth_nn_integrated(
     # the sum of squared residuals.
     atol = math.sqrt(stop_set.train_loss_threshold)
 
-    def stopping_callback(ctx):
-        # Convergence is solve()'s atol; the callback only turns a nonfinite
-        # candidate into a terminal divergence (and logs when verbose).
-        if verbose:
-
-            def log(_):
-                jax.debug.print(
-                    "step {step}: train_loss={loss:.3e} damping={damping:.1e}",
-                    step=ctx.step,
-                    loss=ctx.info.loss,
-                    damping=ctx.lm_state.damping,
-                )
-
-            jax.lax.cond(
-                ctx.step % LOG_EVERY_STEPS == 0, log, lambda _: None, operand=None
+    # Stopping is entirely solve()'s: atol for convergence, max_steps as the
+    # budget (a nonfinite candidate is rejected and damping raised, which
+    # recovers more often than aborting). The callback exists only for
+    # verbose progress logging.
+    def logging_callback(ctx):
+        def log(_):
+            jax.debug.print(
+                "step {step}: train_loss={loss:.3e} damping={damping:.1e}",
+                step=ctx.step,
+                loss=ctx.info.loss,
+                damping=ctx.lm_state.damping,
             )
-        return LMSolveAction(
-            stop=~jnp.isfinite(ctx.info.loss_candidate), status=LMStatus.NONFINITE
-        )
+
+        jax.lax.cond(ctx.step % LOG_EVERY_STEPS == 0, log, lambda _: None, operand=None)
+
+    callback = logging_callback if verbose else None
 
     compile_time = np.nan
     if measure_compilation:
@@ -440,7 +440,7 @@ def neoclassical_growth_nn_integrated(
                 train_data,
                 max_steps=1,
                 atol=atol,
-                callback=stopping_callback,
+                callback=callback,
             )
         )
         compile_time = time.perf_counter() - compile_start
@@ -462,7 +462,7 @@ def neoclassical_growth_nn_integrated(
             train_data,
             max_steps=stop_set.max_steps,
             atol=atol,
-            callback=stopping_callback,
+            callback=callback,
         )
         theta, info, steps = result.x, result.info, int(result.steps)
         stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")

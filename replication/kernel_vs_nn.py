@@ -154,7 +154,7 @@ def run(
         options={
             "verbose": verbose,
             **BUTTERFLY,
-            "stop_set": dict(max_train_time=5.0),
+            "stop_set": dict(max_steps=500),
         },
     )
     results_df = classify_paths(results_df, frames["test_df"], ["k_0", "seed"])

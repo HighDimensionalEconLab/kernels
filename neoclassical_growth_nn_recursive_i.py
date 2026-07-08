@@ -10,7 +10,6 @@ import numpy as np
 import pandas as pd
 from flax import nnx
 from jax import config
-from jax.experimental import io_callback
 from jax.flatten_util import ravel_pytree
 from nlls_gram import LMSolveAction, LMStatus, UnderdeterminedLevenbergMarquardt
 
@@ -99,9 +98,7 @@ class DataSettings:
 
 @dataclass(frozen=True)
 class StoppingCriteria:
-    max_epochs: int = 100
-    max_train_time: float = 15.0
-    train_steps_per_epoch: int = 10
+    max_steps: int = 1000
     # 1e-14 certifies k rel error ~1.2e-6 against the tight benchmark within
     # the default budget (Fir HPO calibration).
     train_loss_threshold: float = 1e-14
@@ -183,20 +180,15 @@ class InvestmentPolicyNN(nnx.Module):
 # Early stopping requires BOTH the Euler loss and the exact log-TVC
 # certificate below their bars: no transversality penalty enters the training
 # loss, the certificate is computed post hoc on the auxiliary simulation.
-# solve() status for the wall-clock budget (any int outside LMStatus).
-TIME_LIMIT_STATUS = 100
-
 STATUS_TO_REASON = {
     LMStatus.CONVERGED: "early_stopping_met",
     LMStatus.NONFINITE: "loss_divergence",
-    TIME_LIMIT_STATUS: "max_time_reached",
-    LMStatus.MAX_STEPS: "max_epochs",
+    LMStatus.MAX_STEPS: "max_steps",
 }
 
-
-def over_time_budget(start_and_budget, _step):
-    start, budget = start_and_budget
-    return np.bool_(time.perf_counter() - float(start) > float(budget))
+# The joint loss+TVC convergence gate (and the verbose log) runs on this
+# cadence: the certificate rollout is not free.
+CERTIFICATE_EVERY_STEPS = 10
 
 
 def production(k, p):
@@ -398,18 +390,10 @@ def neoclassical_growth_nn_recursive_i(
             data_set,
         )
 
-    steps_per_epoch = stop_set.train_steps_per_epoch
-    max_steps = stop_set.max_epochs * steps_per_epoch
-    # The wall-clock budget is a coarse guard; each io_callback is a host
-    # sync that stalls the dispatch pipeline, so check it no more than once
-    # every 25 steps.
-    time_check_steps = max(steps_per_epoch, 25)
-
     def stopping_callback(ctx):
-        # The TVC certificate rollout is not free, so the joint loss+TVC
-        # convergence check runs once per epoch; divergence is checked every
-        # step and the host clock every time_check_steps.
-        def epoch_checks(_):
+        # Joint loss+TVC convergence gate on the certificate cadence;
+        # divergence is checked every step.
+        def certificate_checks(_):
             log_tvc = log_tvc_residual(
                 nnx.merge(graphdef, ctx.x),
                 data_set.train_T,
@@ -423,9 +407,9 @@ def neoclassical_growth_nn_recursive_i(
             )
             if verbose:
                 jax.debug.print(
-                    "epoch {epoch}: train_loss={loss:.3e} log_tvc={tvc:.2f} "
+                    "step {step}: train_loss={loss:.3e} log_tvc={tvc:.2f} "
                     "damping={damping:.1e}",
-                    epoch=ctx.step // steps_per_epoch,
+                    step=ctx.step,
                     loss=ctx.info.loss,
                     tvc=log_tvc,
                     damping=ctx.lm_state.damping,
@@ -433,29 +417,14 @@ def neoclassical_growth_nn_recursive_i(
             return converged
 
         converged = jax.lax.cond(
-            ctx.step % steps_per_epoch == 0,
-            epoch_checks,
-            lambda _: jnp.asarray(False),
-            operand=None,
-        )
-        timed_out = jax.lax.cond(
-            ctx.step % time_check_steps == 0,
-            lambda _: io_callback(
-                over_time_budget,
-                jax.ShapeDtypeStruct((), jnp.bool_),
-                ctx.user_state,
-                ctx.step,
-            ),
+            ctx.step % CERTIFICATE_EVERY_STEPS == 0,
+            certificate_checks,
             lambda _: jnp.asarray(False),
             operand=None,
         )
         diverged = ~jnp.isfinite(ctx.info.loss_candidate)
-        status = jnp.where(
-            converged,
-            LMStatus.CONVERGED,
-            jnp.where(diverged, LMStatus.NONFINITE, TIME_LIMIT_STATUS),
-        )
-        return LMSolveAction(stop=converged | diverged | timed_out, status=status)
+        status = jnp.where(converged, LMStatus.CONVERGED, LMStatus.NONFINITE)
+        return LMSolveAction(stop=converged | diverged, status=status)
 
     compile_time = np.nan
     if measure_compilation:
@@ -468,7 +437,6 @@ def neoclassical_growth_nn_recursive_i(
                 template_theta,
                 max_steps=1,
                 callback=stopping_callback,
-                user_state=jnp.asarray([time.perf_counter(), stop_set.max_train_time]),
             )
         )
         compile_time = time.perf_counter() - compile_start
@@ -485,17 +453,15 @@ def neoclassical_growth_nn_recursive_i(
         start_time = time.perf_counter()
         result = solver.solve(
             theta,
-            max_steps=max_steps,
+            max_steps=stop_set.max_steps,
             callback=stopping_callback,
-            user_state=jnp.asarray([start_time, stop_set.max_train_time]),
         )
         theta, info, steps = result.x, result.info, int(result.steps)
-        stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_epochs")
+        stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
         train_loss = float(info.loss)
         if not np.isfinite(train_loss):
             train_loss = float(info.loss_old)
         max_log_tvc = float(tvc_certificate(theta))
-        epochs_run = max(1, -(-steps // steps_per_epoch))
         train_time = time.perf_counter() - start_time
         policy = nnx.merge(graphdef, theta)
 
@@ -564,7 +530,7 @@ def neoclassical_growth_nn_recursive_i(
         "max_log_tvc_residual": max_log_tvc,
         "transversality_ok": transversality_ok,
         "min_test_c": float(jnp.min(test_c)),
-        "epochs": epochs_run,
+        "steps": steps,
         "attempt": attempt,
         "stopping_reason": stopping_reason,
         "train_time": train_time,

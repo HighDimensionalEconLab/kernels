@@ -59,7 +59,7 @@ def load(out, name):
 
 
 # Recursive output cleanup: drop None values (unavailable numbers) and print
-# integral floats as integers (epochs 2 and k_0 = 1, not 2.0 and 1.0).
+# integral floats as integers (steps 20 and k_0 = 1, not 20.0 and 1.0).
 def clean(x):
     if isinstance(x, dict):
         d = {k: clean(v) for k, v in x.items()}
@@ -399,8 +399,7 @@ def neoclassical_growth_nn_recursive(out):
         },
         "stopping": {
             "train_loss_threshold": hp["stop_set"]["train_loss_threshold"],
-            "max_epochs": hp["stop_set"]["max_epochs"],
-            "max_train_time": hp["stop_set"]["max_train_time"],
+            "max_steps": hp["stop_set"]["max_steps"],
             "num_attempts": hp["stop_set"]["num_attempts"],
             "log_tvc_threshold": hp["stop_set"]["log_tvc_threshold"],
         },
@@ -421,7 +420,7 @@ def neoclassical_growth_nn_recursive(out):
                     float(accepted["max_log_tvc_residual"].median()), 4
                 ),
                 "train_time_median": sig(float(accepted["train_time"].median())),
-                "epochs_median": sig(float(accepted["epochs"].median())),
+                "steps_median": sig(float(accepted["steps"].median())),
                 "num_collocation_states": int(
                     med(baseline_json["num_collocation_states"])
                 ),
@@ -518,8 +517,7 @@ def kernel_vs_nn(out):
         },
         "stopping": {
             "train_loss_threshold": hp_nn["stop_set"]["train_loss_threshold"],
-            "max_epochs": hp_nn["stop_set"]["max_epochs"],
-            "max_train_time": hp_nn["stop_set"]["max_train_time"],
+            "max_steps": hp_nn["stop_set"]["max_steps"],
         },
         "points_sweep": {
             "kernel": per_count(

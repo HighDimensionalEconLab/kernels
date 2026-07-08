@@ -30,7 +30,7 @@ lm_set.damping_increase=2.71  lm_set.geodesic_acceleration=true
 lm_set.geodesic_acceptance_ratio=0.541
 data_set.rtol=6.28e-07  data_set.atol=2.23e-07
 data_set.adaptive_steps=32  data_set.dt=1.0
-stop_set.train_steps_per_epoch=10  stop_set.train_loss_threshold=1e-14
+stop_set.train_loss_threshold=1e-14
 ```
 
 (The raw #1 at 0.259 s used dt=2, whose coarse RK4 *evaluation* grid inflates

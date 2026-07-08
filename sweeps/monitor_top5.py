@@ -27,7 +27,6 @@ CFG_KEYS = [
     "data_set.rtol",
     "data_set.adaptive_steps",
     "data_set.dt",
-    "stop_set.train_steps_per_epoch",
 ]
 
 

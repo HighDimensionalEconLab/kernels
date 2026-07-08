@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import asdict, dataclass, replace
 
@@ -10,7 +11,6 @@ import numpy as np
 import pandas as pd
 from flax import nnx
 from jax import config
-from jax.experimental import io_callback
 from jax.flatten_util import ravel_pytree
 from nlls_gram import LMSolveAction, LMStatus, UnderdeterminedLevenbergMarquardt
 
@@ -62,14 +62,11 @@ class DataSettings:
 
 @dataclass(frozen=True)
 class StoppingCriteria:
-    max_epochs: int = 100
-    max_train_time: float = 15.0
-    # Checking the stop conditions every 10 steps (not 5) costs nothing in
-    # accuracy and trims overhead; 1e-15 is reachable in <1 s at the default
-    # architecture and buys ~11x accuracy over 1e-12 (k rel error ~1.3e-6 vs
-    # ~1.5e-5 against the tight solve_bvp benchmark). w32 d3 tanh is
-    # right-sized: smaller/shallower nets and gelu all measure worse here.
-    train_steps_per_epoch: int = 10
+    max_steps: int = 1000
+    # 1e-15 is reachable in <1 s at the default architecture and buys ~11x
+    # accuracy over 1e-12 (k rel error ~1.3e-6 vs ~1.5e-5 against the tight
+    # solve_bvp benchmark). w32 d3 tanh is right-sized: smaller/shallower
+    # nets and gelu all measure worse here.
     train_loss_threshold: float = 1e-15
     # Bar on the post-hoc log-TVC check at test_tvc_T: 0.0 demands the
     # discounted value of capital in marginal-utility units is below its O(1)
@@ -165,20 +162,13 @@ def make_train_t_grid(data_set, dtype):
     return jnp.asarray(values, dtype=dtype)
 
 
-# solve() status for the wall-clock budget (any int outside LMStatus).
-TIME_LIMIT_STATUS = 100
-
 STATUS_TO_REASON = {
     LMStatus.CONVERGED: "early_stopping_met",
     LMStatus.NONFINITE: "loss_divergence",
-    TIME_LIMIT_STATUS: "max_time_reached",
-    LMStatus.MAX_STEPS: "max_epochs",
+    LMStatus.MAX_STEPS: "max_steps",
 }
 
-
-def over_time_budget(start_and_budget, _step):
-    start, budget = start_and_budget
-    return np.bool_(time.perf_counter() - float(start) > float(budget))
+LOG_EVERY_STEPS = 10  # verbose progress cadence inside the jitted solve
 
 
 def production(k, p):
@@ -235,7 +225,7 @@ def training_residual(model, data, p):
     return residual / jnp.sqrt(residual.size)
 
 
-def snapshot(data, model, p, step=None):
+def snapshot(data, model, p):
     values = jax.device_get(policy_values(model, data["t"], p))
     columns = {key: np.asarray(value) for key, value in values.items()}
     df = pd.DataFrame(columns)
@@ -250,8 +240,6 @@ def snapshot(data, model, p, step=None):
         df["c_rel_error"] = np.abs(df["c"] - c_bar) / np.maximum(
             np.abs(c_bar), DOMAIN_EPS
         )
-    if step is not None:
-        df.insert(0, "step", step)
     return df
 
 
@@ -271,7 +259,6 @@ def neoclassical_growth_nn(
     lm_set: NLLSGramSettings = NLLSGramSettings(),
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
-    record_snapshots: bool = False,
     measure_compilation: bool = True,
 ):
     if matmul_highest:
@@ -340,7 +327,6 @@ def neoclassical_growth_nn(
     graphdef, template_theta = nnx.split(template_model, nnx.Param)
     rngs = nnx.Rngs(seed)
     accepted = False
-    snapshots = []
 
     def residual_fn(theta, data):
         return training_residual(nnx.merge(graphdef, theta), data, p)
@@ -355,49 +341,29 @@ def neoclassical_growth_nn(
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
 
-    steps_per_epoch = stop_set.train_steps_per_epoch
-    max_steps = stop_set.max_epochs * steps_per_epoch
-    # The wall-clock budget is a coarse guard; each io_callback is a host
-    # sync that stalls the dispatch pipeline, so check it no more than once
-    # every 25 steps.
-    time_check_steps = max(steps_per_epoch, 25)
+    # solve()'s atol is on the residual norm; the settings threshold is on
+    # the sum of squared residuals.
+    atol = math.sqrt(stop_set.train_loss_threshold)
 
     def stopping_callback(ctx):
-        # Priority: converged, then divergence, then wall clock;
-        # loss and divergence are checked per step,
-        # the host clock still once per epoch.
-        converged = ctx.info.loss < stop_set.train_loss_threshold
-        diverged = ~jnp.isfinite(ctx.info.loss_candidate)
-        timed_out = jax.lax.cond(
-            ctx.step % time_check_steps == 0,
-            lambda _: io_callback(
-                over_time_budget,
-                jax.ShapeDtypeStruct((), jnp.bool_),
-                ctx.user_state,
-                ctx.step,
-            ),
-            lambda _: jnp.asarray(False),
-            operand=None,
-        )
+        # Convergence is solve()'s atol; the callback only turns a nonfinite
+        # candidate into a terminal divergence (and logs when verbose).
         if verbose:
 
             def log(_):
                 jax.debug.print(
-                    "epoch {epoch}: train_loss={loss:.3e} damping={damping:.1e}",
-                    epoch=ctx.step // steps_per_epoch,
+                    "step {step}: train_loss={loss:.3e} damping={damping:.1e}",
+                    step=ctx.step,
                     loss=ctx.info.loss,
                     damping=ctx.lm_state.damping,
                 )
 
             jax.lax.cond(
-                ctx.step % steps_per_epoch == 0, log, lambda _: None, operand=None
+                ctx.step % LOG_EVERY_STEPS == 0, log, lambda _: None, operand=None
             )
-        status = jnp.where(
-            converged,
-            LMStatus.CONVERGED,
-            jnp.where(diverged, LMStatus.NONFINITE, TIME_LIMIT_STATUS),
+        return LMSolveAction(
+            stop=~jnp.isfinite(ctx.info.loss_candidate), status=LMStatus.NONFINITE
         )
-        return LMSolveAction(stop=converged | diverged | timed_out, status=status)
 
     compile_time = np.nan
     if measure_compilation:
@@ -407,8 +373,8 @@ def neoclassical_growth_nn(
                 template_theta,
                 train_data,
                 max_steps=1,
+                atol=atol,
                 callback=stopping_callback,
-                user_state=jnp.asarray([time.perf_counter(), stop_set.max_train_time]),
             )
         )
         compile_time = time.perf_counter() - compile_start
@@ -422,52 +388,22 @@ def neoclassical_growth_nn(
             rngs=rngs,
         )
         _, theta = nnx.split(model, nnx.Param)
-        model = nnx.merge(graphdef, theta)
-        snapshots = [snapshot(test_data, model, p, 0)] if record_snapshots else []
         if verbose and stop_set.num_attempts > 1:
             print(f"attempt {attempt}")
 
         start_time = time.perf_counter()
-        user_state = jnp.asarray([start_time, stop_set.max_train_time])
-        if record_snapshots:
-            # One-step solve chunks so theta reaches the host after every
-            # step; same callback, so the stopping semantics are identical.
-            lm_state = None
-            info = None
-            steps = 0
-            stopping_reason = "max_epochs"
-            for step_idx in range(1, max_steps + 1):
-                result = solver.solve(
-                    theta,
-                    train_data,
-                    lm_state=lm_state,
-                    max_steps=1,
-                    callback=stopping_callback,
-                    user_state=user_state,
-                )
-                theta, lm_state, info = result.x, result.lm_state, result.info
-                steps = step_idx
-                snapshots.append(
-                    snapshot(test_data, nnx.merge(graphdef, theta), p, step_idx)
-                )
-                status = int(result.status)
-                if status != LMStatus.MAX_STEPS:
-                    stopping_reason = STATUS_TO_REASON.get(status, "max_epochs")
-                    break
-        else:
-            result = solver.solve(
-                theta,
-                train_data,
-                max_steps=max_steps,
-                callback=stopping_callback,
-                user_state=user_state,
-            )
-            theta, info, steps = result.x, result.info, int(result.steps)
-            stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_epochs")
+        result = solver.solve(
+            theta,
+            train_data,
+            max_steps=stop_set.max_steps,
+            atol=atol,
+            callback=stopping_callback,
+        )
+        theta, info, steps = result.x, result.info, int(result.steps)
+        stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
         train_loss = float(info.loss)
         if not np.isfinite(train_loss):
             train_loss = float(info.loss_old)
-        epochs_run = max(1, -(-steps // steps_per_epoch))
         train_time = time.perf_counter() - start_time
         model = nnx.merge(graphdef, theta)
         accepted = stopping_reason == "early_stopping_met"
@@ -514,7 +450,7 @@ def neoclassical_growth_nn(
         "max_test_residual": max_test_residual,
         "log_tvc_residual": log_tvc,
         "transversality_ok": transversality_ok,
-        "epochs": epochs_run,
+        "steps": steps,
         "attempt": attempt,
         "stopping_reason": stopping_reason,
         "train_time": train_time,
@@ -542,7 +478,6 @@ def neoclassical_growth_nn(
         for name, value in results.items():
             print(f"  {name}: {value}")
 
-    snapshots_df = pd.concat(snapshots, ignore_index=True) if snapshots else None
     hyperparameters = {
         "nn_set": asdict(policy_settings),
         "data_set": asdict(data_set),
@@ -563,7 +498,6 @@ def neoclassical_growth_nn(
         "model": model,
         "train_df": train_df,
         "test_df": test_df,
-        "snapshots": snapshots_df,
         "hyperparameters": hyperparameters,
     }
 

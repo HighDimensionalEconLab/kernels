@@ -140,9 +140,7 @@ class NNSmokeTests(unittest.TestCase):
             ),
             nn_set=GrowthNNSettings(width=16, depth=2),
             stop_set=GrowthNNStoppingCriteria(
-                max_epochs=20,
-                train_steps_per_epoch=2,
-                max_train_time=10.0,
+                max_steps=40,
                 train_loss_threshold=1e-10,
                 num_attempts=1,
             ),
@@ -173,9 +171,7 @@ class NNSmokeTests(unittest.TestCase):
                 rff_sigma=1.0,
             ),
             stop_set=IntegratedNNStoppingCriteria(
-                max_epochs=40,
-                train_steps_per_epoch=3,
-                max_train_time=15.0,
+                max_steps=120,
                 train_loss_threshold=1e-8,
                 num_attempts=1,
             ),
@@ -192,7 +188,7 @@ class NNSmokeTests(unittest.TestCase):
             data_set=RecursiveIDataSettings(
                 dt=2.0, train_T=20.0, train_tvc_T=100.0, test_T=20.0
             ),
-            stop_set=RecursiveIStoppingCriteria(max_epochs=20, num_attempts=1),
+            stop_set=RecursiveIStoppingCriteria(max_steps=200, num_attempts=1),
         )
 
         self.assertTrue(results["solution_accepted"], results["stopping_reason"])

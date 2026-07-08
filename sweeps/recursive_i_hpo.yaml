@@ -1,0 +1,51 @@
+# HPO for the recursive i(k) solver: bayes over MLP / LM / adaptive-rollout axes
+# under a hard 2 s training budget, single attempt, 11 seeds per trial. Objective:
+# median-seed train_time_success = time to a CERTIFIED solve (NaN when rejected, so
+# acceptance gates and speed is optimized). The acceptance bar was calibrated first
+# (2026-07): benchmark solve_bvp tol=1e-10, train_loss_threshold=1e-14 -> an accepted
+# solve certifies k-error ~1.5-2e-6; the swept rtol/atol range is capped at 1e-6,
+# below which integration error is already non-binding at that bar.
+# Launch: `wandb sweep sweeps/recursive_i_hpo.yaml`, then wandb agents (README.md).
+program: sweeps/wandb_sweep_wrapper.py
+project: kernels
+method: bayes
+metric:
+  name: train_time_success   # median seed; smaller = faster certified solve
+  goal: minimize
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args}
+parameters:
+  # --- wrapper config (consumed by wandb_sweep_wrapper.py) ---
+  sweep_settings.script:               {value: neoclassical_growth_nn_recursive_i.py}
+  sweep_settings.sort_criteria:        {value: train_time_success}
+  sweep_settings.num_seeds:            {value: 11}
+  sweep_settings.starting_seed:        {value: 0}
+  sweep_settings.min_successful_seeds: {value: 4}
+  sweep_settings.log_tables:           {value: "false"}
+  # --- fixed solver settings (passed through to the solver CLI) ---
+  verbose:                             {value: false}
+  measure_compilation:                 {value: true}   # warm-up outside the timed budget: Fir compiles ~2.8s, the whole budget
+  stop_set.max_train_time:             {value: 2.0}
+  stop_set.num_attempts:               {value: 1}
+  stop_set.train_loss_threshold:       {value: 1e-14}
+  data_set.tvc_adaptive_steps:         {value: 96}   # covers the tightest swept rtol
+  # --- MLP axes ---
+  nn_set.width:                 {values: [8, 16, 32, 64, 128]}
+  nn_set.depth:                 {values: [2, 3, 4, 5]}
+  nn_set.hidden_activation:     {values: [tanh, silu, gelu, softplus]}
+  # --- LM axes ---
+  lm_set.init_damping:          {distribution: log_uniform_values, min: 1e-8, max: 1e-2}
+  lm_set.damping_decrease:      {distribution: uniform, min: 0.1, max: 0.9}
+  lm_set.damping_increase:      {distribution: log_uniform_values, min: 1.5, max: 32.0}
+  lm_set.geodesic_acceleration: {values: [true, false]}
+  lm_set.geodesic_acceptance_ratio: {distribution: uniform, min: 0.5, max: 0.99}
+  # --- integrator / collocation axes ---
+  data_set.rtol:                {distribution: log_uniform_values, min: 1e-9, max: 1e-6}
+  data_set.atol:                {distribution: log_uniform_values, min: 1e-9, max: 1e-6}
+  data_set.adaptive_steps:      {values: [12, 16, 24, 32, 48]}
+  data_set.dt:                  {values: [0.25, 0.5, 1.0, 2.0]}
+  # --- stopping cadence (certificate gates once per epoch) ---
+  stop_set.train_steps_per_epoch: {values: [2, 5, 10]}

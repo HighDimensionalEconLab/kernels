@@ -16,6 +16,7 @@ from human_capital_kernel import human_capital_initial_conditions, human_capital
 from kernels import (
     gaussian_kernel,
     integrated_kernel_matrices,
+    matern_0p5_tridiagonal_precision,
     matern_kernel_0p5,
     matern_kernel_1p5,
     matern_kernel_2p5,
@@ -215,6 +216,20 @@ class KernelSmokeTests(unittest.TestCase):
                     self.assertLess(
                         float(jnp.max(jnp.abs(K_tilde @ v - k_tilde_v))), 1e-10
                     )
+
+    def test_matern_tridiagonal_precision_nonuniform(self):
+        rng = np.random.default_rng(11)
+        t = jnp.asarray(np.sort(rng.uniform(0.0, 50.0, 50)))
+        diag, off_diag = matern_0p5_tridiagonal_precision(t, 1.3, 10.0)
+        T = (
+            np.diag(np.asarray(diag))
+            + np.diag(np.asarray(off_diag), 1)
+            + np.diag(np.asarray(off_diag), -1)
+        )
+        K = 1.3**2 * np.exp(
+            -np.abs(np.asarray(t)[:, None] - np.asarray(t)[None, :]) / 10.0
+        )
+        self.assertLess(float(np.max(np.abs(T @ K - np.eye(50)))), 1e-10)
 
     def test_matern_qsm_solve_matches_dense(self):
         rng = np.random.default_rng(8)

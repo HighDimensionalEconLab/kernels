@@ -1,4 +1,3 @@
-import dataclasses
 import math
 from functools import partial
 
@@ -6,7 +5,6 @@ import jax
 import jax.numpy as jnp
 from jax import config
 from jax.scipy.special import erf
-from tinygp.kernels import quasisep
 
 # Everything downstream assumes float64 Gram matrices; enabling x64 here (the
 # lowest-level module) keeps consumers from touching float32 kernels before
@@ -266,29 +264,3 @@ def matern_0p5_tridiagonal_precision(t, sigma, ell):
     ) / sigma**2
     off_diag = -(rho / one_minus_rho_sq) / sigma**2
     return diag, off_diag
-
-
-# Exact O(n) solves with the Matern-3/2 and 5/2 Gram matrices through their
-# quasiseparable (celerite/state-space) structure, via tinygp; the matern12
-# inverse is exactly tridiagonal (above) and does not need this. The grid must
-# be sorted strictly increasing (tinygp silently returns garbage otherwise --
-# callers validate). jitter is an absolute nugget added to the diagonal: the
-# nugget-free Gram is numerically singular under grid refinement (cond ~ 1e21
-# for matern52 at n = 5000), a property of the matrix, not the solver.
-def matern_qsm_solve(kernel, t, sigma, ell, jitter):
-    name = normalize_kernel(kernel)
-    quasisep_kernel = {
-        "matern32": quasisep.Matern32,
-        "matern52": quasisep.Matern52,
-    }[name](scale=ell, sigma=sigma)
-    qsm = quasisep_kernel.to_symm_qsm(t)
-    qsm = dataclasses.replace(
-        qsm, diag=dataclasses.replace(qsm.diag, d=qsm.diag.d + jitter)
-    )
-    factor = qsm.cholesky()
-    factor_transpose = factor.transpose()
-
-    def solve(v):
-        return factor_transpose.solve(factor.solve(v))
-
-    return solve

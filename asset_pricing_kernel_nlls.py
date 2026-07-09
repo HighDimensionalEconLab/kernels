@@ -11,11 +11,12 @@ import pandas as pd
 from jax import config
 from nlls_gram import (
     LMStatus,
-    Metric,
     UnderdeterminedLevenbergMarquardt,
     blockdiag_metric,
+    matern_state_space,
     metric_from_cholesky,
     metric_from_diagonal,
+    metric_from_state_space,
     metric_from_tridiagonal_precision,
     sherman_morrison_preconditioner,
 )
@@ -25,7 +26,6 @@ from kernels import (
     integrated_kernel_matrices,
     matern_0p5_tridiagonal_precision,
     matern_kernel_matvec_pair,
-    matern_qsm_solve,
     normalize_kernel,
 )
 
@@ -129,9 +129,10 @@ def asset_pricing_kernel_nlls(
     n_train = len(train_data)
 
     increasing_grid = bool(jnp.all(jnp.diff(train_data) > 0))
-    # matern32's O(n) metric solve is a sequential scan (no associative form
-    # in tinygp), so auto only picks it on CPU; matern12's metric is fully
-    # parallel and profits from any backend.
+    # auto only picks matern32 matrix_free on CPU (a gate from the old
+    # sequential tinygp metric solve; nlls-gram >= 1.3 metrics use parallel
+    # scans off-CPU in float64, so this is now conservative); matern12's
+    # metric is fully parallel and profits from any backend.
     matrix_free_ok = increasing_grid and (
         kernel == "matern12"
         or (
@@ -196,14 +197,14 @@ def asset_pricing_kernel_nlls(
                 *matern_0p5_tridiagonal_precision(train_data, sigma, ell)
             )
         else:
-
-            def alpha_norm(x):
-                k_x, _ = matern_kernel_matvec_pair(kernel, train_data, x, sigma, ell)
-                return jnp.sqrt(x @ k_x + jitter * (x @ x))
-
-            alpha_metric = Metric(
-                solve=matern_qsm_solve(kernel, train_data, sigma, ell, jitter),
-                norm=alpha_norm,
+            # Exact O(n) state-space metric M = K + jitter I with all four
+            # callbacks (the nugget is folded into the metric itself).
+            alpha_metric = metric_from_state_space(
+                train_data,
+                *matern_state_space(
+                    sigma, ell, {"matern32": 1.5, "matern52": 2.5}[kernel]
+                ),
+                nugget=jitter,
             )
     else:
         K, K_tilde = integrated_kernel_matrices(

@@ -14,11 +14,12 @@ import pandas as pd
 from jax import config
 from nlls_gram import (
     LMStatus,
-    Metric,
     UnderdeterminedLevenbergMarquardt,
     blockdiag_metric,
+    matern_state_space,
     metric_from_cholesky,
     metric_from_diagonal,
+    metric_from_state_space,
     metric_from_tridiagonal_precision,
 )
 
@@ -26,7 +27,6 @@ from kernels import (
     integrated_kernel_matrices,
     matern_0p5_tridiagonal_precision,
     matern_kernel_matvec_pair,
-    matern_qsm_solve,
     normalize_kernel,
 )
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
@@ -193,14 +193,14 @@ def neoclassical_growth_kernel_nlls(
                 *matern_0p5_tridiagonal_precision(train_data, sigma, ell)
             )
         else:
-
-            def alpha_norm(x):
-                k_x, _ = matern_kernel_matvec_pair(kernel, train_data, x, sigma, ell)
-                return jnp.sqrt(x @ k_x + jitter * (x @ x))
-
-            alpha_metric = Metric(
-                solve=matern_qsm_solve(kernel, train_data, sigma, ell, jitter),
-                norm=alpha_norm,
+            # Exact O(n) state-space metric M = K + jitter I with all four
+            # callbacks (the nugget is folded into the metric itself).
+            alpha_metric = metric_from_state_space(
+                train_data,
+                *matern_state_space(
+                    sigma, ell, {"matern32": 1.5, "matern52": 2.5}[kernel]
+                ),
+                nugget=jitter,
             )
     else:
         K, K_tilde = integrated_kernel_matrices(

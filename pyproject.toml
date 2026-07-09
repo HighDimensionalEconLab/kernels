@@ -9,12 +9,11 @@ dependencies = [
     "jax>=0.7.2",
     "jsonargparse>=4.41.0",
     "matplotlib>=3.10.6",
-    "nlls-gram>=1.2.0",
+    "nlls-gram>=1.3.0",
     "pandas>=2.3.2",
     "pyarrow>=24.0.0",
     "scipy>=1.18.0",
     "tinydiffeq>=0.1.0",
-    "tinygp>=0.3.1",
     "unopy>=0.4.10",
 ]
 

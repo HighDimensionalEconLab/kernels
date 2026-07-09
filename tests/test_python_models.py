@@ -4,6 +4,7 @@ import unittest
 import jax.numpy as jnp
 import numpy as np
 import scipy.integrate
+from nlls_gram import matern_state_space, metric_from_state_space
 
 from asset_pricing_kernel import asset_pricing_kernel
 from asset_pricing_kernel_nlls import DataSettings as APDataSettings
@@ -21,7 +22,6 @@ from kernels import (
     matern_kernel_1p5,
     matern_kernel_2p5,
     matern_kernel_matvec_pair,
-    matern_qsm_solve,
     normalize_kernel,
 )
 from neoclassical_growth_concave_convex_kernel import (
@@ -231,21 +231,31 @@ class KernelSmokeTests(unittest.TestCase):
         )
         self.assertLess(float(np.max(np.abs(T @ K - np.eye(50)))), 1e-10)
 
-    def test_matern_qsm_solve_matches_dense(self):
+    def test_state_space_metric_matches_dense(self):
+        # The nlls-gram state-space metric replaced the tinygp qsm solve;
+        # keep the dense cross-check of the exact plumbing this repo uses.
         rng = np.random.default_rng(8)
         t = jnp.linspace(0.0, 50.0, 300)
         v = jnp.asarray(rng.standard_normal(300))
-        for name in ("matern32", "matern52"):
+        for name, nu in (("matern32", 1.5), ("matern52", 2.5)):
             with self.subTest(kernel=name):
                 jitter = 1e-8 * 1.3**2
                 K, _ = integrated_kernel_matrices(t, t, name, 1.3, 10.0)
                 K_jittered = np.asarray((K + K.T) / 2) + jitter * np.eye(300)
-                solution = matern_qsm_solve(name, t, 1.3, 10.0, jitter)(v)
+                metric = metric_from_state_space(
+                    t, *matern_state_space(1.3, 10.0, nu), nugget=jitter
+                )
+                solution = metric.solve(v)
                 reference = np.linalg.solve(K_jittered, np.asarray(v))
                 self.assertLess(
                     float(np.max(np.abs(np.asarray(solution) - reference)))
                     / float(np.max(np.abs(reference))),
                     1e-6,
+                )
+                norm_reference = float(np.sqrt(np.asarray(v) @ K_jittered @ v))
+                self.assertLess(
+                    abs(float(metric.norm(v)) - norm_reference) / norm_reference,
+                    1e-10,
                 )
 
     def test_asset_pricing_nlls_smoke(self):

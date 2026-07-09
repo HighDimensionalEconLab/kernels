@@ -398,7 +398,6 @@ dependencies = [
     { name = "pyarrow" },
     { name = "scipy" },
     { name = "tinydiffeq" },
-    { name = "tinygp" },
     { name = "unopy" },
 ]
 
@@ -416,12 +415,11 @@ requires-dist = [
     { name = "jax", specifier = ">=0.7.2" },
     { name = "jsonargparse", specifier = ">=4.41.0" },
     { name = "matplotlib", specifier = ">=3.10.6" },
-    { name = "nlls-gram", specifier = ">=1.2.0" },
+    { name = "nlls-gram", specifier = ">=1.3.0" },
     { name = "pandas", specifier = ">=2.3.2" },
     { name = "pyarrow", specifier = ">=24.0.0" },
     { name = "scipy", specifier = ">=1.18.0" },
     { name = "tinydiffeq", specifier = ">=0.1.0" },
-    { name = "tinygp", specifier = ">=0.3.1" },
     { name = "unopy", specifier = ">=0.4.10" },
 ]
 
@@ -662,15 +660,15 @@ wheels = [
 
 [[package]]
 name = "nlls-gram"
-version = "1.2.0"
+version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jax" },
     { name = "lineax" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/af/63/428632eff397bca0be8e9d90c43ca199788435ad17702a3c5a62b114c5f3/nlls_gram-1.2.0.tar.gz", hash = "sha256:ddf4ce5d8cdab07ac3bfdaff0302d08a402c25d8411759de18cecb6dfc377ca5", size = 140480, upload-time = "2026-07-09T14:58:05.247Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ea/a7/12ec41bebdedfc40e8f2d07a1d9b6f61fb9e811e68916630d9b0ed596e83/nlls_gram-1.3.0.tar.gz", hash = "sha256:b6c1195f662b3d65c937a88316215266e7aa0ed810ee0b4da3ae1e65fc379f0b", size = 152946, upload-time = "2026-07-09T18:53:44.602Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1a/81/2a70afc006a304c57d09f139d2b640a245ea6a209d482a3b9df74e89a053/nlls_gram-1.2.0-py3-none-any.whl", hash = "sha256:03a6187cd3723967c1e38cc5950ac980687fefae514c35d140e28961d8dacbd3", size = 19938, upload-time = "2026-07-09T14:58:03.948Z" },
+    { url = "https://files.pythonhosted.org/packages/ce/e0/21c08221b61c72ef4cc1c91dd1522c91a7c8a247337deab3747e1b42492d/nlls_gram-1.3.0-py3-none-any.whl", hash = "sha256:f2cc05f4af65fcf26b7684cb0ff0b74d614ecd8a81f3d71dfd6ad496cc21fce2", size = 25050, upload-time = "2026-07-09T18:53:42.934Z" },
 ]
 
 [[package]]
@@ -1322,19 +1320,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/55/6c/6de48c25c298332ca75e1c9775d0072b36159e70aebdcddd19b67925b12b/tinydiffeq-0.1.0.tar.gz", hash = "sha256:687595717ddb3c3e0bc7c1ac921fbf785e5061af023e218f392fed5e6e60649b", size = 95009, upload-time = "2026-07-09T18:51:50.448Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c1/a9/67b319f445477346d8029e407e9c25d9fcbb780b1c43cbe0ea7d92ce294a/tinydiffeq-0.1.0-py3-none-any.whl", hash = "sha256:300921718818f1cd5f5d87c7a225f87f78eb916afc389e96898a044f840002af", size = 15377, upload-time = "2026-07-09T18:51:48.951Z" },
-]
-
-[[package]]
-name = "tinygp"
-version = "0.3.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "equinox" },
-    { name = "jax" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/14/75/416a47815e1f95b0d595dc4309a4feeecf178385f7fd219df5cda52f5138/tinygp-0.3.1.tar.gz", hash = "sha256:14cd14dc4d33e15ac58a91b8aab71fb234524ccd1b52e40dc80fdf08d1f045d6", size = 174542, upload-time = "2026-03-15T14:46:37.952Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e9/ed/511ae07f5616833d27904bcffc194c9ef1712d2a1cdfbc6cd3700ee6e2db/tinygp-0.3.1-py3-none-any.whl", hash = "sha256:893169e1722b67279c33a17559cefa3179d05e0b9bd0db15b2a38d06b79138a4", size = 45215, upload-time = "2026-03-15T14:46:36.708Z" },
 ]
 
 [[package]]

@@ -338,7 +338,8 @@ def asset_pricing_kernel_nlls(
         "test_points": data_set.test_points,
         "p_0": float(p_0),
         "horizon_bias_p0": horizon_bias_p0,
-        "rkhs_norm_p": float(alpha_metric.norm(alpha) ** 2),
+        # Jitter-free alpha' K alpha (the metric norm includes the nugget).
+        "rkhs_norm_p": float(alpha_metric.norm(alpha) ** 2 - jitter * (alpha @ alpha)),
         "max_train_residual": max_train_residual,
         "max_test_residual": float(jnp.max(jnp.abs(test_residual))),
         # min/max error statistics exclude the pinned t = 0 point ([1:]).

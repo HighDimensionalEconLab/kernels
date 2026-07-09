@@ -166,6 +166,16 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertTrue(structured["solution_accepted"])
         self.assertLess(abs(structured["c_0"] - dense["c_0"]), 1e-4)
 
+    def test_neoclassical_growth_nlls_matern32_auto_stays_dense(self):
+        # The matern32 iterative window from asset pricing fails the growth
+        # gates at scale (measured at n >= 501): auto must not pick it.
+        results, _ = neoclassical_growth_kernel_nlls(
+            kernel_set=GrowthNLLSKernelSettings(kernel="matern32"),
+            data_set=GrowthNLLSDataSettings(train_points=501),
+        )
+        self.assertEqual(results["method_resolved"], "dense")
+        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+
     def test_neoclassical_growth_nlls_kernels_smoke(self):
         for kernel_set, error_bar in [
             (GrowthNLLSKernelSettings(kernel="matern32"), 2e-2),

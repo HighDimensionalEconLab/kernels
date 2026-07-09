@@ -1,3 +1,6 @@
+# NLLS port of the smooth-production neoclassical growth collocation; the
+# kinked-production variant (A, b_1, b_2 and its mpk-bound diagnostics) stays
+# with the IPOPT version in neoclassical_growth_kernel.py.
 from __future__ import annotations
 
 import time
@@ -37,11 +40,13 @@ STATUS_TO_REASON = {
     LMStatus.NONFINITE: "nonfinite",
     LMStatus.MAX_STEPS: "max_steps",
 }
-# Same auto boundaries as the asset-pricing model: dense wins below the
-# matrix_free threshold; the smoother kernels' iterative windows close under
-# grid refinement (matern52/rbf are dense-only).
+# Auto boundary as in the asset-pricing model: dense wins below the
+# matrix_free threshold. Unlike asset pricing, auto only picks matrix_free
+# for matern12 here: the growth dual operator's shadow-price block resists
+# the blockwise K preconditioner, and the matern32 iterative window that
+# worked there fails the growth gates at n >= 501 (measured). Explicit
+# matern32 matrix_free remains allowed and is policed by the gates.
 MATRIX_FREE_MIN_POINTS = 256
-MATERN32_MATRIX_FREE_MAX_POINTS = 4000
 DEFAULT_METRIC_JITTER = {
     "matern12": 0.0,
     "matern32": 1e-10,
@@ -83,9 +88,9 @@ class NLLSGramSettings:
     max_steps: int = 50
     residual_atol: float = 1e-9  # on the 1/sqrt(3n)-scaled residual norm
     ic_metric_weight: float = 1e-6  # m_0 on (c_0, mu_0): PD-completion
-    # "auto" | "dense" | "matrix_free"; same semantics as the asset-pricing
-    # model (matrix_free: matern12 any n / matern32 to the cap, strictly
-    # increasing grids; dense: universal fallback).
+    # "auto" | "dense" | "matrix_free". auto picks matrix_free only for
+    # matern12 on strictly increasing grids at scale (see the module comment
+    # on the growth dual operator); dense is the universal fallback.
     method: str = "auto"
     iterative_maxiter: int = 100  # CG inner budget per LM step (matrix_free)
     metric_jitter: float | None = None
@@ -112,14 +117,7 @@ def neoclassical_growth_kernel_nlls(
     n_train = len(train_data)
 
     increasing_grid = bool(jnp.all(jnp.diff(train_data) > 0))
-    matrix_free_ok = increasing_grid and (
-        kernel == "matern12"
-        or (
-            kernel == "matern32"
-            and n_train <= MATERN32_MATRIX_FREE_MAX_POINTS
-            and jax.default_backend() == "cpu"
-        )
-    )
+    matrix_free_ok = increasing_grid and kernel == "matern12"
     method = lm_set.method
     if method == "auto":
         if matrix_free_ok and n_train >= MATRIX_FREE_MIN_POINTS:
@@ -147,6 +145,11 @@ def neoclassical_growth_kernel_nlls(
     def production(k):
         return jnp.maximum(k, DOMAIN_EPS) ** a
 
+    # Deliberately the unclamped derivative evaluated at max(k, eps): below
+    # the clamp it stays large and positive (~a eps^{a-1}), blowing up the
+    # euler residual and repelling the unconstrained LM iterates from the
+    # k <= 0 region that IPOPT excluded with variable bounds. Autodiffing the
+    # clamped production would instead give mpk = 0 there and no repulsion.
     def marginal_product(k):
         return a * jnp.maximum(k, DOMAIN_EPS) ** (a - 1.0)
 
@@ -370,9 +373,17 @@ def neoclassical_growth_kernel_nlls(
         "test_points": data_set.test_points,
         "c_0": float(c_0),
         "mu_0": float(mu_0),
-        "rkhs_norm_k": float(alpha_metric.norm(alpha_k) ** 2),
-        "rkhs_norm_c": float(alpha_metric.norm(alpha_c) ** 2),
-        "rkhs_norm_mu": float(alpha_metric.norm(alpha_mu) ** 2),
+        # Jitter-free alpha' K alpha, matching the IPOPT report (the metric
+        # norm includes the nugget).
+        "rkhs_norm_k": float(
+            alpha_metric.norm(alpha_k) ** 2 - jitter * (alpha_k @ alpha_k)
+        ),
+        "rkhs_norm_c": float(
+            alpha_metric.norm(alpha_c) ** 2 - jitter * (alpha_c @ alpha_c)
+        ),
+        "rkhs_norm_mu": float(
+            alpha_metric.norm(alpha_mu) ** 2 - jitter * (alpha_mu @ alpha_mu)
+        ),
         "max_train_residual": max_train_residual,
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_eval["euler"]))),
         # min/max error statistics exclude the pinned t = 0 point ([1:]): its
@@ -381,6 +392,8 @@ def neoclassical_growth_kernel_nlls(
         "c_rel_error_mean": float(c_rel_error.mean()),
         "k_rel_error_max": float(k_rel_error[1:].max()),
         "c_rel_error_max": float(c_rel_error[1:].max()),
+        "k_rel_error_min": float(k_rel_error[1:].min()),
+        "c_rel_error_min": float(c_rel_error[1:].min()),
         "solve_time": elapsed,
         "wall_time": elapsed,
         "solver": "nlls-gram",

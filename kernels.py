@@ -1,3 +1,4 @@
+import dataclasses
 import math
 from functools import partial
 
@@ -5,17 +6,35 @@ import jax
 import jax.numpy as jnp
 from jax import config
 from jax.scipy.special import erf
-from quadax import quadgk
+from tinygp.kernels import quasisep
 
 # Everything downstream assumes float64 Gram matrices; enabling x64 here (the
-# lowest-level module) also keeps quadax from caching float32 quadrature state
-# when a consumer touches the kernels before flipping the flag.
+# lowest-level module) keeps consumers from touching float32 kernels before
+# flipping the flag.
 config.update("jax_enable_x64", True)
 
-# Stationary Matern kernels with length scale ell (the paper's l), smoothness nu,
-# and amplitude sigma, plus their Gaussian/RBF limit (nu = math.inf). The
-# integrated kernels K_tilde(t_i, t_j) = int_0^{t_i} K(t, t_j) dt implement the
-# integrated RKHS representation x(t) = x_0 + K_tilde alpha.
+# Stationary kernels with length scale ell (the paper's l) and amplitude
+# sigma, selected by name; the legacy Matern smoothness values nu in
+# {0.5, 1.5, 2.5, inf} are accepted as aliases. The integrated kernels
+# K_tilde(t_i, t_j) = int_0^{t_i} K(t, t_j) dt implement the integrated RKHS
+# representation x(t) = x_0 + K_tilde alpha; all four have closed forms.
+
+KERNEL_NAMES = ("matern12", "matern32", "matern52", "rbf")
+
+
+def normalize_kernel(kernel):
+    if kernel in {"rbf", "gaussian", "squared_exponential", "se", math.inf}:
+        return "rbf"
+    if kernel in {"matern12", "matern_1_2", "matern0.5", "matern_0.5", 0.5}:
+        return "matern12"
+    if kernel in {"matern32", "matern_3_2", "matern1.5", "matern_1.5", 1.5}:
+        return "matern32"
+    if kernel in {"matern52", "matern_5_2", "matern2.5", "matern_2.5", 2.5}:
+        return "matern52"
+    raise ValueError(
+        f"unknown kernel: {kernel!r} (use one of {KERNEL_NAMES} or "
+        "nu in {0.5, 1.5, 2.5, inf})"
+    )
 
 
 def matern_kernel_0p5(t_i, t_j, sigma, ell):
@@ -41,37 +60,56 @@ def gaussian_kernel(t_i, t_j, sigma, ell):
     return sigma**2 * jnp.exp(-(d**2) / (2 * ell**2))
 
 
+# Each half-integer Matern kernel is sigma^2 pi(a d) e^{-a d} with pi a
+# degree-p polynomial and a the decay rate below; its antiderivative is
+# h(d) = int_0^d k = (sigma^2/a) [c - e^{-a d} eta(a d)] with eta a degree-p
+# polynomial satisfying eta(0) = c (so h(0) = 0). Coefficients are in powers
+# of (a d).
+MATERN_ORDER = {"matern12": 0, "matern32": 1, "matern52": 2}
+MATERN_DECAY = {
+    "matern12": 1.0,
+    "matern32": math.sqrt(3.0),
+    "matern52": math.sqrt(5.0),
+}
+MATERN_PI = {
+    "matern12": (1.0,),
+    "matern32": (1.0, 1.0),
+    "matern52": (1.0, 1.0, 1.0 / 3.0),
+}
+MATERN_ETA = {
+    "matern12": (1.0,),
+    "matern32": (2.0, 1.0),
+    "matern52": (8.0 / 3.0, 5.0 / 3.0, 1.0 / 3.0),
+}
+
+
+def matern_antiderivative(name, d, sigma, ell):
+    a = MATERN_DECAY[name] / ell
+    eta = MATERN_ETA[name]
+    x = a * d
+    eta_x = sum(coefficient * x**k for k, coefficient in enumerate(eta))
+    return (sigma**2 / a) * (eta[0] - jnp.exp(-x) * eta_x)
+
+
 def integrated_matern_kernel_0p5(t_i, t_j, sigma, ell):
+    return integrated_matern_kernel("matern12", t_i, t_j, sigma, ell)
+
+
+def integrated_matern_kernel_1p5(t_i, t_j, sigma, ell):
+    return integrated_matern_kernel("matern32", t_i, t_j, sigma, ell)
+
+
+def integrated_matern_kernel_2p5(t_i, t_j, sigma, ell):
+    return integrated_matern_kernel("matern52", t_i, t_j, sigma, ell)
+
+
+def integrated_matern_kernel(name, t_i, t_j, sigma, ell):
+    # int_0^{t_i} k(|s - t_j|) ds splits at s = t_j: h(t_j) + h(t_i - t_j)
+    # when t_i >= t_j, and h(t_j) - h(t_j - t_i) otherwise.
     s = t_i - t_j
-    d = jnp.abs(s)
-
-    def if_s_neg():
-        return ell * (sigma**2) * (jnp.exp(-d / ell) - jnp.exp(-t_j / ell))
-
-    def if_s_non_neg():
-        return ell * (sigma**2) * (2 - jnp.exp(-d / ell) - jnp.exp(-t_j / ell))
-
-    return jax.lax.cond(s < 0, if_s_neg, if_s_non_neg)
-
-
-def integrated_matern_kernel_1p5(t_i, t_j, sigma, ell, quad_tol=1e-7):
-    def matern_integrand(t):
-        return matern_kernel_1p5(t, t_j, sigma, ell)
-
-    integral, info = quadgk(
-        matern_integrand, [0, t_i], epsabs=quad_tol, epsrel=quad_tol
-    )
-    return jnp.where(t_i == 0, 0, integral)
-
-
-def integrated_matern_kernel_2p5(t_i, t_j, sigma, ell, quad_tol=1e-7):
-    def matern_integrand(t):
-        return matern_kernel_2p5(t, t_j, sigma, ell)
-
-    integral, info = quadgk(
-        matern_integrand, [0, t_i], epsabs=quad_tol, epsrel=quad_tol
-    )
-    return jnp.where(t_i == 0, 0, integral)
+    h_t_j = matern_antiderivative(name, t_j, sigma, ell)
+    h_gap = matern_antiderivative(name, jnp.abs(s), sigma, ell)
+    return h_t_j + jnp.where(s < 0, -h_gap, h_gap)
 
 
 def integrated_gaussian_kernel(t_i, t_j, sigma, ell):
@@ -82,117 +120,131 @@ def integrated_gaussian_kernel(t_i, t_j, sigma, ell):
     return scale * (erf((t_i - t_j) / root_2_ell) + erf(t_j / root_2_ell))
 
 
-# Adaptive-quadrature cross-check for integrated_gaussian_kernel (tests only).
-def integrated_gaussian_kernel_quad(t_i, t_j, sigma, ell, quad_tol=1e-7):
-    def gaussian_integrand(t):
-        return gaussian_kernel(t, t_j, sigma, ell)
-
-    integral, info = quadgk(
-        gaussian_integrand, [0, t_i], epsabs=quad_tol, epsrel=quad_tol
-    )
-    return jnp.where(t_i == 0, 0, integral)
-
-
-# nu is static: the kernel pair is selected at trace time.
+# The kernel choice is static: the pair is selected at trace time. Accepts a
+# name from KERNEL_NAMES or a legacy nu float.
 @partial(jax.jit, static_argnums=(2,))
-def integrated_kernel_matrices(t_i, t_j, nu, sigma, ell):
-    if math.isinf(nu):
-        kernel, integrated_kernel = gaussian_kernel, integrated_gaussian_kernel
-    elif nu == 0.5:
-        kernel, integrated_kernel = matern_kernel_0p5, integrated_matern_kernel_0p5
-    elif nu == 1.5:
-        kernel, integrated_kernel = matern_kernel_1p5, integrated_matern_kernel_1p5
-    elif nu == 2.5:
-        kernel, integrated_kernel = matern_kernel_2p5, integrated_matern_kernel_2p5
-    else:
-        raise ValueError(f"Unsupported nu: {nu!r} (use 0.5, 1.5, 2.5, or math.inf)")
+def integrated_kernel_matrices(t_i, t_j, kernel, sigma, ell):
+    name = normalize_kernel(kernel)
+    kernel_fn, integrated_fn = {
+        "matern12": (matern_kernel_0p5, integrated_matern_kernel_0p5),
+        "matern32": (matern_kernel_1p5, integrated_matern_kernel_1p5),
+        "matern52": (matern_kernel_2p5, integrated_matern_kernel_2p5),
+        "rbf": (gaussian_kernel, integrated_gaussian_kernel),
+    }[name]
     K = jax.vmap(
-        jax.vmap(kernel, in_axes=(None, 0, None, None)),
+        jax.vmap(kernel_fn, in_axes=(None, 0, None, None)),
         in_axes=(0, None, None, None),
     )(t_i, t_j, sigma, ell)
     K_tilde = jax.vmap(
-        jax.vmap(integrated_kernel, in_axes=(None, 0, None, None)),
+        jax.vmap(integrated_fn, in_axes=(None, 0, None, None)),
         in_axes=(0, None, None, None),
     )(t_i, t_j, sigma, ell)
     return K, K_tilde
 
 
-# Matrix-free O(n) matvecs for the Matern-1/2 kernel and its integrated kernel
-# on a sorted strictly increasing grid t. The exponential terms telescope
-# through the classic Rybicki-Press forward/backward recurrences with
-# e_i = exp(-(t_{i+1} - t_i)/ell):
-#   lower_{i+1} = e_i (lower_i + v_i)          lower_i = sum_{j<i} e^{-(t_i-t_j)/ell} v_j
-#   upper_i     = e_i (upper_{i+1} + v_{i+1})  upper_i = sum_{j>i} e^{-(t_j-t_i)/ell} v_j
-# and the remaining integrated-kernel terms are prefix/suffix sums. Ties (the
-# diagonal) fall in the lower/prefix branch, matching integrated_matern_kernel_0p5.
-def matern_0p5_exp_recurrences(t, ell, v, parallel=None):
+# Matrix-free O(n) matvecs for the half-integer Matern kernels and their
+# integrated kernels on a sorted strictly increasing grid t. Both K v and
+# K_tilde v reduce to the exponential moments
+#   M^(k)_i = sum_j (a |t_i - t_j|)^k e^{-a |t_i - t_j|} v_j,  k = 0..p,
+# over j < i (forward) and j > i (backward), which obey the affine recurrence
+#   M^(k)_{i+1} = e [sum_m C(k, m) delta^{k-m} M^(m)_i + delta^k v_i]
+# with delta = a dt_i and e = e^{-delta} -- a (p+1)-dimensional carry per
+# step, so the classic Rybicki-Press scalar recurrence is the p = 0 case.
+# The remaining K_tilde pieces are prefix/suffix sums plus the row-independent
+# scalar sum_j h(t_j) v_j, since K_tilde(t_i, t_j) = h(t_j) +/- h(|t_i - t_j|).
+def matern_exp_moments(t, decay_rate, v, order, parallel=None):
     # parallel=None chooses by backend: off-CPU a sequential scan pays a
     # kernel launch per step (~1000x slower at n=1e5 on GPU), so use the
     # associative O(log n)-depth form; on CPU the tight sequential loop wins.
-    # The affine recurrence s -> e_i (s + v_i) composes associatively:
-    # applying (a1, b1) then (a2, b2) is (a2 a1, a2 b1 + b2).
+    # The affine maps M -> A M + b compose associatively:
+    # (A_1, b_1) then (A_2, b_2) is (A_2 A_1, A_2 b_1 + b_2).
     if parallel is None:
         parallel = jax.default_backend() != "cpu"
-    e = jnp.exp(-jnp.diff(t) / ell)
-    edge = jnp.zeros((1,), dtype=v.dtype)
+    size = order + 1
+    delta = decay_rate * jnp.diff(t)
+    e = jnp.exp(-delta)
+    powers = jnp.stack([delta**k for k in range(size)], axis=-1)
+    update = jnp.stack(
+        [
+            jnp.stack(
+                [
+                    math.comb(k, m) * delta ** (k - m)
+                    if m <= k
+                    else jnp.zeros_like(delta)
+                    for m in range(size)
+                ],
+                axis=-1,
+            )
+            for k in range(size)
+        ],
+        axis=-2,
+    )
+    update = e[:, None, None] * update
+    forward_input = e[:, None] * powers * v[:-1, None]
+    backward_input = e[:, None] * powers * v[1:, None]
+    edge = jnp.zeros((1, size), dtype=v.dtype)
 
     if parallel:
 
         def combine(earlier, later):
-            a_1, b_1 = earlier
-            a_2, b_2 = later
-            return a_2 * a_1, a_2 * b_1 + b_2
+            update_1, input_1 = earlier
+            update_2, input_2 = later
+            return (
+                update_2 @ update_1,
+                jnp.einsum("...ij,...j->...i", update_2, input_1) + input_2,
+            )
 
-        _, lower_rest = jax.lax.associative_scan(combine, (e, e * v[:-1]))
+        _, lower_rest = jax.lax.associative_scan(combine, (update, forward_input))
         lower = jnp.concatenate([edge, lower_rest])
-        _, upper_head = jax.lax.associative_scan(combine, (e, e * v[1:]), reverse=True)
+        _, upper_head = jax.lax.associative_scan(
+            combine, (update, backward_input), reverse=True
+        )
         upper = jnp.concatenate([upper_head, edge])
         return lower, upper
 
-    zero = jnp.zeros((), dtype=v.dtype)
-
     def step(carry, inputs):
-        e_i, v_i = inputs
-        out = e_i * (carry + v_i)
+        update_i, input_i = inputs
+        out = update_i @ carry + input_i
         return out, out
 
-    _, lower_rest = jax.lax.scan(step, zero, (e, v[:-1]))
+    zero = jnp.zeros((size,), dtype=v.dtype)
+    _, lower_rest = jax.lax.scan(step, zero, (update, forward_input))
     lower = jnp.concatenate([edge, lower_rest])
-    _, upper_head = jax.lax.scan(step, zero, (e, v[1:]), reverse=True)
+    _, upper_head = jax.lax.scan(step, zero, (update, backward_input), reverse=True)
     upper = jnp.concatenate([upper_head, edge])
     return lower, upper
 
 
-def matern_kernel_0p5_matvec(t, v, sigma, ell, parallel=None):
-    lower, upper = matern_0p5_exp_recurrences(t, ell, v, parallel=parallel)
-    return sigma**2 * (lower + v + upper)
+# Both matvecs from one moments pass: the scans dominate the matrix-free
+# residual, and each JVP/VJP inside the solver's CG loop replays them, so
+# sharing halves the hot-path work.
+def matern_kernel_matvec_pair(kernel, t, v, sigma, ell, parallel=None):
+    name = normalize_kernel(kernel)
+    if name not in MATERN_ORDER:
+        raise ValueError(f"matvecs require a Matern kernel, got {name!r}")
+    order = MATERN_ORDER[name]
+    a = MATERN_DECAY[name] / ell
+    pi = MATERN_PI[name]
+    eta = MATERN_ETA[name]
+    lower, upper = matern_exp_moments(t, a, v, order, parallel=parallel)
 
+    both = lower + upper
+    k_v = sigma**2 * (
+        v + sum(coefficient * both[:, k] for k, coefficient in enumerate(pi))
+    )
 
-def integrated_matern_0p5_terms(t, ell, v, lower, upper):
-    # Closed form split by t_j <= t_i vs t_j > t_i (see
-    # integrated_matern_kernel_0p5): (K_tilde v)_i = ell [A - B + C - D]
-    # with A the inclusive cumsum of (2 - e^{-t_j/ell}) v_j, B the inclusive
-    # forward recurrence, C the strict backward recurrence, and D the strict
-    # suffix sum of e^{-t_j/ell} v_j.
-    exp_neg = jnp.exp(-t / ell)
-    prefix = jnp.cumsum((2.0 - exp_neg) * v)
-    weighted = exp_neg * v
-    suffix = jnp.cumsum(weighted[::-1])[::-1] - weighted
-    return ell * (prefix - (lower + v) + upper - suffix)
-
-
-def integrated_matern_kernel_0p5_matvec(t, v, sigma, ell, parallel=None):
-    lower, upper = matern_0p5_exp_recurrences(t, ell, v, parallel=parallel)
-    return sigma**2 * integrated_matern_0p5_terms(t, ell, v, lower, upper)
-
-
-# Both matvecs from one recurrence pass: the sequential scans dominate the
-# matrix-free residual, and each JVP/VJP inside the solver's CG loop replays
-# them, so sharing halves the hot-path work.
-def matern_kernel_0p5_matvec_pair(t, v, sigma, ell, parallel=None):
-    lower, upper = matern_0p5_exp_recurrences(t, ell, v, parallel=parallel)
-    k_v = sigma**2 * (lower + v + upper)
-    k_tilde_v = sigma**2 * integrated_matern_0p5_terms(t, ell, v, lower, upper)
+    # (K_tilde v)_i = sum_j h(t_j) v_j
+    #   + (sigma^2/a) [c (P_i - Q_i) - eta-moments_{j<=i} + eta-moments_{j>i}]
+    # with P/Q the inclusive-prefix/strict-suffix sums of v and c = eta(0).
+    c = eta[0]
+    total = matern_antiderivative(name, t, sigma, ell) @ v
+    prefix = jnp.cumsum(v)
+    suffix = jnp.cumsum(v[::-1])[::-1] - v
+    eta_lower = (
+        sum(coefficient * lower[:, k] for k, coefficient in enumerate(eta)) + c * v
+    )
+    eta_upper = sum(coefficient * upper[:, k] for k, coefficient in enumerate(eta))
+    k_tilde_v = total + (sigma**2 / a) * (c * (prefix - suffix) - eta_lower + eta_upper)
     return k_v, k_tilde_v
 
 
@@ -209,3 +261,29 @@ def matern_0p5_tridiagonal_precision(t, sigma, ell):
     ) / sigma**2
     off_diag = -(rho / one_minus_rho_sq) / sigma**2
     return diag, off_diag
+
+
+# Exact O(n) solves with the Matern-3/2 and 5/2 Gram matrices through their
+# quasiseparable (celerite/state-space) structure, via tinygp; the matern12
+# inverse is exactly tridiagonal (above) and does not need this. The grid must
+# be sorted strictly increasing (tinygp silently returns garbage otherwise --
+# callers validate). jitter is an absolute nugget added to the diagonal: the
+# nugget-free Gram is numerically singular under grid refinement (cond ~ 1e21
+# for matern52 at n = 5000), a property of the matrix, not the solver.
+def matern_qsm_solve(kernel, t, sigma, ell, jitter):
+    name = normalize_kernel(kernel)
+    quasisep_kernel = {
+        "matern32": quasisep.Matern32,
+        "matern52": quasisep.Matern52,
+    }[name](scale=ell, sigma=sigma)
+    qsm = quasisep_kernel.to_symm_qsm(t)
+    qsm = dataclasses.replace(
+        qsm, diag=dataclasses.replace(qsm.diag, d=qsm.diag.d + jitter)
+    )
+    factor = qsm.cholesky()
+    factor_transpose = factor.transpose()
+
+    def solve(v):
+        return factor_transpose.solve(factor.solve(v))
+
+    return solve

@@ -13,15 +13,20 @@ from nlls_gram import (
     LMStatus,
     Metric,
     UnderdeterminedLevenbergMarquardt,
+    blockdiag_metric,
     metric_from_cholesky,
+    metric_from_diagonal,
     metric_from_tridiagonal_precision,
+    sherman_morrison_preconditioner,
 )
 
 from asset_pricing_benchmark import mu_f_array
 from kernels import (
     integrated_kernel_matrices,
     matern_0p5_tridiagonal_precision,
-    matern_kernel_0p5_matvec_pair,
+    matern_kernel_matvec_pair,
+    matern_qsm_solve,
+    normalize_kernel,
 )
 
 config.update("jax_enable_x64", True)
@@ -32,11 +37,30 @@ STATUS_TO_REASON = {
     LMStatus.NONFINITE: "nonfinite",
     LMStatus.MAX_STEPS: "max_steps",
 }
+# method="auto" thresholds: dense wins below MATRIX_FREE_MIN_POINTS; the
+# structured methods win beyond it (measured on CPU; the gap widens with n).
+# The smoother the kernel, the faster its nugget-free Gram becomes numerically
+# singular under grid refinement, and past that wall the iterative dual solves
+# stall where the direct dense factorization still works: matern32's iterative
+# window closes around n ~ 5000 (its accuracy already saturates by n ~ 2000),
+# and matern52/rbf are dense-only outright.
+MATRIX_FREE_MIN_POINTS = 256
+MATERN32_MATRIX_FREE_MAX_POINTS = 4000
+PRECONDITIONED_CG_MIN_POINTS = 1500
+# Per-kernel metric nugget (relative to sigma^2), applied wherever K is
+# factored; matern12 stays exact (closed-form, well-conditioned tridiagonal
+# precision).
+DEFAULT_METRIC_JITTER = {
+    "matern12": 0.0,
+    "matern32": 1e-10,
+    "matern52": 1e-9,
+    "rbf": 1e-9,
+}
 
 
 @dataclass(frozen=True)
 class KernelSettings:
-    nu: float = 0.5  # math.inf selects the Gaussian/RBF kernel
+    kernel: str = "matern12"  # matern12 | matern32 | matern52 | rbf
     ell: float = 10.0
     sigma: float = 1.0
 
@@ -62,20 +86,23 @@ class NLLSGramSettings:
     residual_atol: float = 1e-11  # unscaled residual norm; bounds max|residual|
     p0_metric_weight: float = 1e-6  # m_0: PD-completion of the semi-norm a'Ka
     p0_init: float = 0.0
-    # "dense": factor the dual system directly -- the right choice at small n
-    # and the only one for every kernel/grid combination.
-    # "preconditioned_cg": CG on the dual system with the Sherman-Morrison
-    # rank-1 preconditioner P = K + (r^2/m_0) 11' over the dense metric factor
-    # -- the inner budget stays flat in n (unpreconditioned CG needs a budget
-    # growing like n because metric.solve puts K^{-1} in the dual operator,
-    # cond ~ n^2); works for every kernel.
-    # "matrix_free": O(n) time and memory end to end -- Rybicki-Press matvec
-    # residual plus the exact tridiagonal Matern-1/2 metric/preconditioner
-    # (n = 100k solves in ~50-70ms); requires nu = 0.5 and a strictly
-    # increasing grid.
-    method: str = "dense"
-    iterative_maxiter: int = 20  # CG inner budget per LM step (cg methods);
-    # ~20 with the preconditioner reaches the exact Gauss-Newton step in 2 steps
+    # "auto" picks by kernel, grid, and size. "dense" factors the dual system
+    # directly -- the universal fallback (any kernel or grid; the only method
+    # for matern52 and rbf, whose smooth Grams put the iterative dual solves
+    # past the float64 conditioning wall). "matrix_free" is O(n) time and
+    # memory end to end -- structured matvec residual plus an O(n) kernel
+    # metric and Sherman-Morrison preconditioner -- for matern12 (any n) and
+    # matern32 (up to ~5000 points) on strictly increasing grids.
+    # "preconditioned_cg" keeps the dense metric factor but solves the dual
+    # system by preconditioned CG with a budget flat in n; its niche is
+    # matern12 on unsorted grids at scale.
+    method: str = "auto"
+    iterative_maxiter: int = 20  # CG inner budget per LM step (cg methods)
+    # Absolute nugget added to K wherever the metric factors it; None picks
+    # the per-kernel default (DEFAULT_METRIC_JITTER * sigma^2). A selection-
+    # side regularization only: residuals are unaffected, and every method
+    # uses the same value so their min-norm solutions agree.
+    metric_jitter: float | None = None
 
 
 def asset_pricing_kernel_nlls(
@@ -87,116 +114,128 @@ def asset_pricing_kernel_nlls(
     data_set: DataSettings = DataSettings(),
     lm_set: NLLSGramSettings = NLLSGramSettings(),
 ):
-    nu, ell, sigma = kernel_set.nu, kernel_set.ell, kernel_set.sigma
+    kernel = normalize_kernel(kernel_set.kernel)
+    ell, sigma = kernel_set.ell, kernel_set.sigma
     if data_set.train_points_list is None:
         train_data = jnp.linspace(0, data_set.train_T, data_set.train_points)
     else:
         train_data = jnp.array(data_set.train_points_list)
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points)
-
     n_train = len(train_data)
-    if lm_set.method not in ("dense", "preconditioned_cg", "matrix_free"):
+
+    increasing_grid = bool(jnp.all(jnp.diff(train_data) > 0))
+    matrix_free_ok = increasing_grid and (
+        kernel == "matern12"
+        or (kernel == "matern32" and n_train <= MATERN32_MATRIX_FREE_MAX_POINTS)
+    )
+    method = lm_set.method
+    if method == "auto":
+        if matrix_free_ok and n_train >= MATRIX_FREE_MIN_POINTS:
+            method = "matrix_free"
+        elif kernel == "matern12" and n_train >= PRECONDITIONED_CG_MIN_POINTS:
+            method = "preconditioned_cg"
+        else:
+            method = "dense"
+    elif method not in ("dense", "preconditioned_cg", "matrix_free"):
         raise ValueError(f"unknown method: {lm_set.method!r}")
-    if lm_set.method == "matrix_free":
-        if nu != 0.5:
-            raise ValueError('method="matrix_free" requires nu = 0.5')
-        # The AR(1) precision and the Rybicki-Press matvecs are only the
-        # Matern-1/2 kernel on a sorted grid; the dense paths have no such
-        # restriction, so guard here rather than silently solving the wrong
-        # operator.
-        if not bool(jnp.all(jnp.diff(train_data) > 0)):
-            raise ValueError(
-                'method="matrix_free" requires a strictly increasing train grid'
-            )
+    if method == "matrix_free" and not (
+        kernel in ("matern12", "matern32") and increasing_grid
+    ):
+        raise ValueError(
+            'method="matrix_free" requires matern12 or matern32 on a strictly '
+            'increasing train grid; use "dense" otherwise'
+        )
+    if method == "preconditioned_cg" and kernel != "matern12":
+        raise ValueError(
+            'method="preconditioned_cg" requires matern12; use "dense" otherwise'
+        )
+    jitter = lm_set.metric_jitter
+    if jitter is None:
+        jitter = DEFAULT_METRIC_JITTER[kernel] * sigma**2
 
     def dividends(t):
         return (x_0 + c / g) * jnp.exp(g * t) - c / g
 
     x_train = dividends(train_data)
 
-    # theta is the tuple (alpha, p_0); ravel_pytree flattens it in tuple order
-    # to [alpha (n_train), p_0 (1)], matching the n_train slicing in the metric
-    # callbacks below.
+    # theta is the tuple (alpha, p_0), which flattens to [alpha (n_train),
+    # p_0 (1)] -- the block order of the metric below.
     def path_values(theta, K_eval, K_tilde_eval):
         alpha, p_0 = theta
-        p = p_0 + K_tilde_eval @ alpha
-        dp_dt = K_eval @ alpha
-        return p, dp_dt
+        return p_0 + K_tilde_eval @ alpha, K_eval @ alpha
 
-    if lm_set.method == "matrix_free":
+    if method == "matrix_free":
 
         def train_path_values(theta):
             alpha, p_0 = theta
-            dp_dt, k_tilde_alpha = matern_kernel_0p5_matvec_pair(
-                train_data, alpha, sigma, ell
+            dp_dt, k_tilde_alpha = matern_kernel_matvec_pair(
+                kernel, train_data, alpha, sigma, ell
             )
             return p_0 + k_tilde_alpha, dp_dt
+
+        if kernel == "matern12":
+            # The Matern-1/2 precision is exactly tridiagonal; no nugget.
+            alpha_metric = metric_from_tridiagonal_precision(
+                *matern_0p5_tridiagonal_precision(train_data, sigma, ell)
+            )
+        else:
+
+            def alpha_norm(x):
+                k_x, _ = matern_kernel_matvec_pair(kernel, train_data, x, sigma, ell)
+                return jnp.sqrt(x @ k_x + jitter * (x @ x))
+
+            alpha_metric = Metric(
+                solve=matern_qsm_solve(kernel, train_data, sigma, ell, jitter),
+                norm=alpha_norm,
+            )
     else:
-        K, K_tilde = integrated_kernel_matrices(train_data, train_data, nu, sigma, ell)
+        K, K_tilde = integrated_kernel_matrices(
+            train_data, train_data, kernel, sigma, ell
+        )
         K_jax = (K + K.T) / 2
         K_tilde_jax = K_tilde
 
         def train_path_values(theta):
             return path_values(theta, K_jax, K_tilde_jax)
 
+        alpha_metric = metric_from_cholesky(
+            jnp.linalg.cholesky(K_jax + jitter * jnp.eye(n_train))
+        )
+
     def residual_fn(theta):
         p, dp_dt = train_path_values(theta)
         return dp_dt - (r * p - x_train)
 
     # The residual is affine in theta, so LM from theta_0 = 0 converges to the
-    # exact interpolant minimizing theta' M theta. With M = blockdiag(K, m_0)
-    # this recovers the min-RKHS-norm selection (the original a'Ka objective)
-    # up to a selection shift in p_0 that scales linearly with m_0 (~1e-7 at
-    # the default m_0 = 1e-6).
+    # exact interpolant minimizing theta' M theta with M = blockdiag(K, m_0):
+    # the min-RKHS-norm selection (the original a'Ka objective) up to a
+    # selection shift in p_0 that scales linearly with m_0 (~1e-7 at the
+    # default m_0 = 1e-6).
     m_0 = lm_set.p0_metric_weight
-    if lm_set.method == "matrix_free":
-        # Matern-1/2 is Markov, so K^{-1} is exactly tridiagonal with
-        # closed-form OU/AR(1) precision entries (nonuniform-grid-ready):
-        # nothing dense is ever factored on this path.
-        alpha_metric = metric_from_tridiagonal_precision(
-            *matern_0p5_tridiagonal_precision(train_data, sigma, ell)
+    metric = blockdiag_metric(
+        [(alpha_metric, n_train), (metric_from_diagonal(jnp.full(1, m_0)), 1)]
+    )
+
+    # The p_0 residual column -r*1 injects the exactly known rank-1 spike
+    # (r^2/m_0) 11' into the dual operator J M^{-1} J'; preconditioning with
+    # K + (r^2/m_0) 11' is spectrally equivalent uniformly in n, pinning the
+    # inner CG budget where the unpreconditioned budget grows with refinement.
+    dual_preconditioner = None
+    if method != "dense":
+        dual_preconditioner = sherman_morrison_preconditioner(
+            alpha_metric.solve, jnp.ones(n_train), r**2 / m_0
         )
-    else:
-        alpha_metric = metric_from_cholesky(jnp.linalg.cholesky(K_jax))
-    K_solve = alpha_metric.solve
-
-    def alpha_norm_sq(x):
-        return alpha_metric.norm(x) ** 2
-
-    def metric_solve(x):
-        # x may be a (n+1,) vector or (n+1, m) matrix of columns to solve.
-        return jnp.concatenate([K_solve(x[:n_train]), x[n_train:] / m_0])
-
-    def metric_norm(x):
-        return jnp.sqrt(alpha_norm_sq(x[:n_train]) + m_0 * jnp.sum(x[n_train:] ** 2))
-
-    # Dual preconditioner P = K + (r^2/m_0) 11' for the cg methods: the
-    # leading term of J M^{-1} J' = B K^{-1} B' + (r^2/m_0) 11' plus the exact
-    # rank-1 spike, applied as a K-solve with a Sherman-Morrison correction.
-    # It is spectrally equivalent to the dual operator uniformly in n, pinning
-    # the inner iteration count.
-    if lm_set.method == "dense":
-        dual_preconditioner = None
-    else:
-        ones = jnp.ones(n_train)
-        K_inv_ones = K_solve(ones)
-        sm_denominator = m_0 / r**2 + ones @ K_inv_ones
-
-        def dual_preconditioner(v, damping):
-            y = K_solve(v)
-            return y - K_inv_ones * ((ones @ y) / sm_denominator)
 
     solver = UnderdeterminedLevenbergMarquardt(
         residual_fn,
-        linear_solver="cholesky" if lm_set.method == "dense" else "cg",
+        linear_solver="cholesky" if method == "dense" else "cg",
         iterative_maxiter=lm_set.iterative_maxiter,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         dual_preconditioner=dual_preconditioner,
-        metric=Metric(solve=metric_solve, norm=metric_norm),
+        metric=metric,
     )
-
     theta_0 = (jnp.zeros(n_train), jnp.asarray(lm_set.p0_init))
 
     # The timed solve below reuses this solver instance, so its jit cache is
@@ -216,8 +255,6 @@ def asset_pricing_kernel_nlls(
     alpha, p_0 = theta
     steps = int(result.steps)
     status = int(result.status)
-    stopping_reason = STATUS_TO_REASON.get(status, "unknown")
-    train_loss = float(result.info.loss)
     p_train, dp_train = train_path_values(theta)
     train_residual = dp_train - (r * p_train - x_train)
     max_train_residual = float(jnp.max(jnp.abs(train_residual)))
@@ -225,10 +262,9 @@ def asset_pricing_kernel_nlls(
     @jax.jit
     def kernel_solution(test_points_data):
         K_test, K_tilde_test = integrated_kernel_matrices(
-            test_points_data, train_data, nu, sigma, ell
+            test_points_data, train_data, kernel, sigma, ell
         )
-        p_test, dp_test = path_values(theta, K_test, K_tilde_test)
-        return p_test, dp_test
+        return path_values(theta, K_test, K_tilde_test)
 
     p_test, dp_test = kernel_solution(test_data)
     test_residual = dp_test - (r * p_test - dividends(test_data))
@@ -243,7 +279,7 @@ def asset_pricing_kernel_nlls(
     # + f(0)^2 + f(T)^2]. The p_0 bias is zeta_T; the bias at time t is
     # zeta_T e^{rt}. At ell = 1/r it collapses to -(A/r) e^{(g-r)T}. The
     # remaining p_0 error is the O(dt^2) grid-spacing selection bias.
-    if nu == 0.5:
+    if kernel == "matern12":
         T = float(train_data[-1])
         A = g * (x_0 + c / g) / (r - g)  # p*'(t) = A e^{g t}
         E, F = np.exp((g + r) * T), np.exp(2 * r * T)
@@ -273,7 +309,7 @@ def asset_pricing_kernel_nlls(
         "c": c,
         "g": g,
         "x_0": x_0,
-        "nu": nu,
+        "kernel": kernel,
         "ell": ell,
         "sigma": sigma,
         "train_T": float(train_data[-1]),
@@ -282,7 +318,7 @@ def asset_pricing_kernel_nlls(
         "test_points": data_set.test_points,
         "p_0": float(p_0),
         "horizon_bias_p0": horizon_bias_p0,
-        "rkhs_norm_p": float(alpha_norm_sq(alpha)),
+        "rkhs_norm_p": float(alpha_metric.norm(alpha) ** 2),
         "max_train_residual": max_train_residual,
         "max_test_residual": float(jnp.max(jnp.abs(test_residual))),
         # min/max error statistics exclude the pinned t = 0 point ([1:]).
@@ -292,9 +328,11 @@ def asset_pricing_kernel_nlls(
         "solve_time": elapsed,
         "wall_time": elapsed,
         "solver": "nlls-gram",
-        "train_loss": train_loss,
+        "method_resolved": method,
+        "metric_jitter": jitter,
+        "train_loss": float(result.info.loss),
         "steps": steps,
-        "stopping_reason": stopping_reason,
+        "stopping_reason": STATUS_TO_REASON.get(status, "unknown"),
         "compile_time": compile_time,
         "solution_accepted": solution_accepted,
         "rejection_reason": "accepted"

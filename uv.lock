@@ -396,8 +396,8 @@ dependencies = [
     { name = "nlls-gram" },
     { name = "pandas" },
     { name = "pyarrow" },
-    { name = "quadax" },
     { name = "scipy" },
+    { name = "tinygp" },
     { name = "unopy" },
 ]
 
@@ -418,8 +418,8 @@ requires-dist = [
     { name = "nlls-gram", editable = "../nlls_gram" },
     { name = "pandas", specifier = ">=2.3.2" },
     { name = "pyarrow", specifier = ">=24.0.0" },
-    { name = "quadax", specifier = ">=0.2.9" },
     { name = "scipy", specifier = ">=1.18.0" },
+    { name = "tinygp", specifier = ">=0.3.1" },
     { name = "unopy", specifier = ">=0.4.10" },
 ]
 
@@ -1133,20 +1133,6 @@ wheels = [
 ]
 
 [[package]]
-name = "quadax"
-version = "0.2.13"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "equinox" },
-    { name = "jax" },
-    { name = "numpy" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/11/59/d45759a97e8acb0266444a3452c98139d4a75ada6ccf4020d62a09f4ac03/quadax-0.2.13.tar.gz", hash = "sha256:136359729026d42f8566dbdbfa361dab78ac906ffb8363705434fc5d4957354b", size = 36353, upload-time = "2026-04-18T00:36:04.701Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/22/cc/4fa4d2ac1c1a4c3d300f0f49f6052f34c13a0dcb8a5d9134a725c8410626/quadax-0.2.13-py3-none-any.whl", hash = "sha256:4ab69b77cc3ecdf64fcb1c5091bcadd280386406eab3609002808084860a3eb0", size = 31607, upload-time = "2026-04-18T00:36:03.201Z" },
-]
-
-[[package]]
 name = "requests"
 version = "2.34.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1337,6 +1323,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/01/99/2ea3b37864adb2e9f6e724c6959ab2b7f56aa4dad01964d4b32adf211e68/tensorstore-0.1.84-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:98e10cae5b3fc0828967b8ddf36242b3b26ac8bc79880bc3e36346063259212a", size = 14990904, upload-time = "2026-05-16T06:17:51.464Z" },
     { url = "https://files.pythonhosted.org/packages/ff/26/fe72887d7b91e832bef3033d244c4c548993d1b6fb19177dff3895659c12/tensorstore-0.1.84-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:98edbc57d453ba8ebcf0d19bc28e4de6de95922bee2eca0805955b0833b8ce26", size = 19365698, upload-time = "2026-05-16T06:17:53.748Z" },
     { url = "https://files.pythonhosted.org/packages/37/74/35a1d41343f86f6e2ef135e81f6b8107b9f16c777a3e8be9e3fbce541d18/tensorstore-0.1.84-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:0bd20de85c1b83dd3ca94db24e7bd449bdb055590a1b162b05691f6b81fff00f", size = 20986107, upload-time = "2026-05-16T06:17:56.571Z" },
+]
+
+[[package]]
+name = "tinygp"
+version = "0.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "equinox" },
+    { name = "jax" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/14/75/416a47815e1f95b0d595dc4309a4feeecf178385f7fd219df5cda52f5138/tinygp-0.3.1.tar.gz", hash = "sha256:14cd14dc4d33e15ac58a91b8aab71fb234524ccd1b52e40dc80fdf08d1f045d6", size = 174542, upload-time = "2026-03-15T14:46:37.952Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e9/ed/511ae07f5616833d27904bcffc194c9ef1712d2a1cdfbc6cd3700ee6e2db/tinygp-0.3.1-py3-none-any.whl", hash = "sha256:893169e1722b67279c33a17559cefa3179d05e0b9bd0db15b2a38d06b79138a4", size = 45215, upload-time = "2026-03-15T14:46:36.708Z" },
 ]
 
 [[package]]

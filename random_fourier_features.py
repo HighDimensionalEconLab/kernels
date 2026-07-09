@@ -8,6 +8,8 @@ import jax.numpy as jnp
 from flax import nnx
 from jax import config
 
+from kernels import normalize_kernel
+
 config.update("jax_enable_x64", True)
 
 KernelName = Literal["rbf", "matern12", "matern32"]
@@ -26,13 +28,10 @@ class RFFSettings:
 
 
 def normalize_kernel_name(kernel: KernelName | float) -> KernelName:
-    if kernel in {"rbf", "gaussian", "squared_exponential", "se"}:
-        return "rbf"
-    if kernel in {"matern12", "matern_1_2", "matern0.5", "matern_0.5", 0.5}:
-        return "matern12"
-    if kernel in {"matern32", "matern_3_2", "matern1.5", "matern_1.5", 1.5}:
-        return "matern32"
-    raise ValueError(f"Unsupported RFF kernel: {kernel!r}")
+    name = normalize_kernel(kernel)
+    if name not in ("rbf", "matern12", "matern32"):
+        raise ValueError(f"Unsupported RFF kernel: {kernel!r}")
+    return name
 
 
 def sample_frequencies(

@@ -35,8 +35,8 @@ STATUS_TO_REASON = {
     LMStatus.NONFINITE: "nonfinite",
     LMStatus.MAX_STEPS: "max_steps",
 }
-# method="auto" thresholds: dense wins below MATRIX_FREE_MIN_POINTS; the
-# structured methods win beyond it (measured on CPU; the gap widens with n).
+# method="auto" thresholds: dense wins below MATRIX_FREE_MIN_POINTS;
+# matrix_free wins beyond it (measured on CPU; the gap widens with n).
 # The smoother the kernel, the faster its nugget-free Gram becomes numerically
 # singular under grid refinement, and past that wall the iterative dual solves
 # stall where the direct dense factorization still works: matern32's iterative
@@ -46,7 +46,6 @@ STATUS_TO_REASON = {
 # allowed and policed by the acceptance gates.
 MATRIX_FREE_MIN_POINTS = 256
 MATERN32_MATRIX_FREE_MAX_POINTS = 4000
-PRECONDITIONED_CG_MIN_POINTS = 1500
 
 
 @dataclass(frozen=True)
@@ -81,14 +80,12 @@ class NLLSGramSettings:
     # for matern52 and rbf, whose smooth Grams put the iterative dual solves
     # past the float64 conditioning wall). "matrix_free" is O(n) time and
     # memory end to end -- structured matvec residual plus an O(n) kernel
-    # metric and Sherman-Morrison preconditioner -- for matern12 (any n) and
-    # matern32 (auto caps it at 4000 points; explicit requests beyond rely on
-    # the acceptance gates) on strictly increasing grids.
-    # "preconditioned_cg" keeps the dense metric factor but solves the dual
-    # system by preconditioned CG with a budget flat in n; its niche is
-    # matern12 on unsorted grids at scale.
+    # metric and Sherman-Morrison preconditioner, CG on the dual system --
+    # for matern12 (any n) and matern32 (auto caps it at 4000 points;
+    # explicit requests beyond rely on the acceptance gates) on strictly
+    # increasing grids.
     method: str = "auto"
-    iterative_maxiter: int = 20  # CG inner budget per LM step (cg methods)
+    iterative_maxiter: int = 20  # CG inner budget per LM step (matrix_free)
     # The single shift of the unified metric M = blockdiag(K, 0) + eps I:
     # the kernel block is factored as K + eps I and the free p_0 carries
     # weight eps, so ||M^{-1}|| = 1/eps uniformly in n and the min-M-norm
@@ -137,11 +134,9 @@ def asset_pricing_kernel_nlls(
     if method == "auto":
         if matrix_free_ok and n_train >= MATRIX_FREE_MIN_POINTS:
             method = "matrix_free"
-        elif kernel == "matern12" and n_train >= PRECONDITIONED_CG_MIN_POINTS:
-            method = "preconditioned_cg"
         else:
             method = "dense"
-    elif method not in ("dense", "preconditioned_cg", "matrix_free"):
+    elif method not in ("dense", "matrix_free"):
         raise ValueError(f"unknown method: {lm_set.method!r}")
     if method == "matrix_free" and not (
         kernel in ("matern12", "matern32") and increasing_grid
@@ -149,10 +144,6 @@ def asset_pricing_kernel_nlls(
         raise ValueError(
             'method="matrix_free" requires matern12 or matern32 on a strictly '
             'increasing train grid; use "dense" otherwise'
-        )
-    if method == "preconditioned_cg" and kernel != "matern12":
-        raise ValueError(
-            'method="preconditioned_cg" requires matern12; use "dense" otherwise'
         )
     eps = lm_set.metric_eps
     if eps <= 0:

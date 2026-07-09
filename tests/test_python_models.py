@@ -252,9 +252,9 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertLess(reference["p_rel_error_mean"], 5e-3)
         self.assertTrue((extras["test_df"]["p"] > 0.0).all())
 
-        # The structured CG methods must recover the same min-norm selection
-        # as the dense default, not just interpolate.
-        for method in ["preconditioned_cg", "matrix_free"]:
+        # matrix_free must recover the same min-norm selection as the dense
+        # default, not just interpolate.
+        for method in ["matrix_free"]:
             with self.subTest(method=method):
                 lm_set = NLLSGramSettings(method=method)
                 results, extras = asset_pricing_kernel_nlls(lm_set=lm_set)
@@ -372,14 +372,15 @@ class KernelSmokeTests(unittest.TestCase):
                 lm_set=NLLSGramSettings(method="matrix_free"),
             )
 
-        # An unsorted grid at scale sends auto to preconditioned_cg (its
-        # niche) and correctly refuses matrix_free.
+        # An unsorted grid falls back to dense at any size (the structured
+        # residual matvecs and state-space metric need sorted points) and
+        # correctly refuses matrix_free.
         points = np.linspace(0.0, 50.0, 1600)
         points[10], points[11] = points[11], points[10]
         unsorted, _ = asset_pricing_kernel_nlls(
             data_set=APDataSettings(train_points_list=[float(p) for p in points])
         )
-        self.assertEqual(unsorted["method_resolved"], "preconditioned_cg")
+        self.assertEqual(unsorted["method_resolved"], "dense")
         self.assertTrue(unsorted["solution_accepted"], unsorted["rejection_reason"])
         with self.assertRaises(ValueError):
             asset_pricing_kernel_nlls(

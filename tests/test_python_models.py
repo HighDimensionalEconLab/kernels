@@ -33,6 +33,18 @@ from neoclassical_growth_kernel import (
     KernelSettings,
     neoclassical_growth_kernel,
 )
+from neoclassical_growth_kernel_nlls import (
+    DataSettings as GrowthNLLSDataSettings,
+)
+from neoclassical_growth_kernel_nlls import (
+    KernelSettings as GrowthNLLSKernelSettings,
+)
+from neoclassical_growth_kernel_nlls import (
+    NLLSGramSettings as GrowthNLLSSettings,
+)
+from neoclassical_growth_kernel_nlls import (
+    neoclassical_growth_kernel_nlls,
+)
 from neoclassical_growth_nn import (
     DataSettings as GrowthNNDataSettings,
 )
@@ -69,6 +81,7 @@ from neoclassical_growth_nn_recursive_i import (
 from optimal_advertising_kernel import optimal_advertising_kernel
 
 FAST_GROWTH_DATA = GrowthDataSettings(train_T=10.0, train_points=11, test_T=10.0)
+FAST_GROWTH_NLLS = GrowthNLLSDataSettings(train_T=10.0, train_points=11, test_T=10.0)
 
 
 class KernelSmokeTests(unittest.TestCase):
@@ -129,6 +142,44 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertLess(results["solve_time"], 0.5)
         self.assertTrue((extras["test_df"]["k"] > 0.0).all())
         self.assertTrue((extras["test_df"]["c"] > 0.0).all())
+
+    def test_neoclassical_growth_nlls_smoke(self):
+        results, extras = neoclassical_growth_kernel_nlls(data_set=FAST_GROWTH_NLLS)
+
+        self.assertEqual(results["method_resolved"], "dense")
+        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+        self.assertLess(results["max_train_residual"], 1e-8)
+        self.assertLess(results["k_rel_error_mean"], 2e-2)
+        self.assertLess(results["c_rel_error_mean"], 2e-2)
+        self.assertTrue((extras["test_df"]["k"] > 0.0).all())
+        self.assertTrue((extras["test_df"]["c"] > 0.0).all())
+
+        # matrix_free recovers the same selection as dense at scale.
+        data_set = GrowthNLLSDataSettings(train_points=501)
+        dense, _ = neoclassical_growth_kernel_nlls(
+            data_set=data_set, lm_set=GrowthNLLSSettings(method="dense")
+        )
+        structured, _ = neoclassical_growth_kernel_nlls(
+            data_set=data_set, lm_set=GrowthNLLSSettings(method="matrix_free")
+        )
+        self.assertEqual(structured["method_resolved"], "matrix_free")
+        self.assertTrue(structured["solution_accepted"])
+        self.assertLess(abs(structured["c_0"] - dense["c_0"]), 1e-4)
+
+    def test_neoclassical_growth_nlls_kernels_smoke(self):
+        for kernel_set, error_bar in [
+            (GrowthNLLSKernelSettings(kernel="matern32"), 2e-2),
+            (GrowthNLLSKernelSettings(kernel="matern52"), 2e-2),
+            (GrowthNLLSKernelSettings(kernel="rbf", ell=2.0), 2e-2),
+        ]:
+            with self.subTest(kernel=kernel_set.kernel):
+                results, _ = neoclassical_growth_kernel_nlls(
+                    kernel_set=kernel_set, data_set=FAST_GROWTH_NLLS
+                )
+                self.assertTrue(
+                    results["solution_accepted"], results["rejection_reason"]
+                )
+                self.assertLess(results["k_rel_error_mean"], error_bar)
 
     def test_asset_pricing_smoke(self):
         results, extras = asset_pricing_kernel()

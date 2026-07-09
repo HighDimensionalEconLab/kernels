@@ -247,20 +247,3 @@ def matern_kernel_matvec_pair(kernel, t, v, sigma, ell, parallel=None):
     eta_upper = sum(coefficient * upper[:, k] for k, coefficient in enumerate(eta))
     k_tilde_v = total + (sigma**2 / a) * (c * (prefix - suffix) - eta_lower + eta_upper)
     return k_v, k_tilde_v
-
-
-# Closed-form tridiagonal precision of the Matern-1/2 Gram on a sorted strictly
-# increasing grid (not validated; callers validate -- duplicates divide by
-# zero, unsorted grids give an indefinite non-precision). With
-# rho_i = e^{-dt_i/ell},
-# T = K^{-1} has diag (1/sigma^2)[1_{i=1} + 1_{i>1}/(1-rho_{i-1}^2)
-# + 1_{i<n} rho_i^2/(1-rho_i^2)] and off-diagonal -(1/sigma^2) rho_i/(1-rho_i^2).
-def matern_0p5_tridiagonal_precision(t, sigma, ell):
-    rho = jnp.exp(-jnp.diff(t) / ell)
-    one_minus_rho_sq = 1.0 - rho**2
-    diag = (
-        jnp.concatenate([jnp.ones(1), 1.0 / one_minus_rho_sq])
-        + jnp.concatenate([rho**2 / one_minus_rho_sq, jnp.zeros(1)])
-    ) / sigma**2
-    off_diag = -(rho / one_minus_rho_sq) / sigma**2
-    return diag, off_diag

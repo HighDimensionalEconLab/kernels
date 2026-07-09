@@ -20,12 +20,10 @@ from nlls_gram import (
     metric_from_cholesky,
     metric_from_diagonal,
     metric_from_state_space,
-    metric_from_tridiagonal_precision,
 )
 
 from kernels import (
     integrated_kernel_matrices,
-    matern_0p5_tridiagonal_precision,
     matern_kernel_matvec_pair,
     normalize_kernel,
 )
@@ -47,12 +45,6 @@ STATUS_TO_REASON = {
 # worked there fails the growth gates at n >= 501 (measured). Explicit
 # matern32 matrix_free remains allowed and is policed by the gates.
 MATRIX_FREE_MIN_POINTS = 256
-DEFAULT_METRIC_JITTER = {
-    "matern12": 0.0,
-    "matern32": 1e-10,
-    "matern52": 1e-9,
-    "rbf": 1e-9,
-}
 
 
 @dataclass(frozen=True)
@@ -87,13 +79,22 @@ class NLLSGramSettings:
     # acceptance gates certify the stall).
     max_steps: int = 50
     residual_atol: float = 1e-9  # on the 1/sqrt(3n)-scaled residual norm
-    ic_metric_weight: float = 1e-6  # m_0 on (c_0, mu_0): PD-completion
     # "auto" | "dense" | "matrix_free". auto picks matrix_free only for
     # matern12 on strictly increasing grids at scale (see the module comment
     # on the growth dual operator); dense is the universal fallback.
     method: str = "auto"
     iterative_maxiter: int = 100  # CG inner budget per LM step (matrix_free)
-    metric_jitter: float | None = None
+    # The single shift of the unified metric M = blockdiag(K, K, K, 0) +
+    # eps I: every kernel block is factored as K + eps I and the free
+    # (c_0, mu_0) carry weight eps, so ||M^{-1}|| = 1/eps uniformly in n and
+    # the min-M-norm interpolant is O(eps) from the pure RKHS-seminorm
+    # solution with free initial values. Selection-side only; every method
+    # uses the same eps so their selections agree. The default balances the
+    # ends of the measured working range: larger shifts visibly bias the
+    # near-singular smooth Grams (rbf), while below ~1e-8 the
+    # (1/eps)-weighted dual spike outruns the inner CG budget. Tuning:
+    # https://highdimensionaleconlab.github.io/nlls_gram/tuning_guide/#the-metric
+    metric_eps: float = 1e-7
 
 
 def neoclassical_growth_kernel_nlls(
@@ -133,14 +134,9 @@ def neoclassical_growth_kernel_nlls(
             'method="matrix_free" requires matern12 or matern32 on a strictly '
             'increasing train grid; use "dense" otherwise'
         )
-    jitter = lm_set.metric_jitter
-    if jitter is None:
-        jitter = DEFAULT_METRIC_JITTER[kernel] * sigma**2
-    if method == "matrix_free" and kernel == "matern12" and jitter != 0.0:
-        raise ValueError(
-            'matern12 with method="matrix_free" uses the exact tridiagonal '
-            "precision, which has no nugget; metric_jitter must be 0"
-        )
+    eps = lm_set.metric_eps
+    if eps <= 0:
+        raise ValueError("metric_eps must be positive (the (c_0, mu_0) block needs PD)")
 
     def production(k):
         return jnp.maximum(k, DOMAIN_EPS) ** a
@@ -188,20 +184,15 @@ def neoclassical_growth_kernel_nlls(
                 dmu_dt,
             )
 
-        if kernel == "matern12":
-            alpha_metric = metric_from_tridiagonal_precision(
-                *matern_0p5_tridiagonal_precision(train_data, sigma, ell)
-            )
-        else:
-            # Exact O(n) state-space metric M = K + jitter I with all four
-            # callbacks (the nugget is folded into the metric itself).
-            alpha_metric = metric_from_state_space(
-                train_data,
-                *matern_state_space(
-                    sigma, ell, {"matern32": 1.5, "matern52": 2.5}[kernel]
-                ),
-                nugget=jitter,
-            )
+        # Exact O(n) state-space metric K + eps I with all four callbacks
+        # (the shift is folded into the metric itself).
+        alpha_metric = metric_from_state_space(
+            train_data,
+            *matern_state_space(
+                sigma, ell, {"matern12": 0.5, "matern32": 1.5, "matern52": 2.5}[kernel]
+            ),
+            nugget=eps,
+        )
     else:
         K, K_tilde = integrated_kernel_matrices(
             train_data, train_data, kernel, sigma, ell
@@ -213,7 +204,7 @@ def neoclassical_growth_kernel_nlls(
             return path_values(theta, K_jax, K_tilde_jax)
 
         alpha_metric = metric_from_cholesky(
-            jnp.linalg.cholesky(K_jax + jitter * jnp.eye(n_train))
+            jnp.linalg.cholesky(K_jax + eps * jnp.eye(n_train))
         )
 
     # The residual is scaled by 1/sqrt(3n) (the NN files' convention) so that
@@ -228,25 +219,38 @@ def neoclassical_growth_kernel_nlls(
         shadow_price = mu * c - 1.0
         return residual_scale * jnp.concatenate([resource, euler, shadow_price])
 
-    # 3n nonlinear residuals in 3n + 2 unknowns: LM with the block metric
-    # M = blockdiag(K, K, K, m_0 I_2) selects the interpolant minimizing the
-    # summed RKHS norms (the original objective) plus the PD-completion on the
-    # free initial values (c_0, mu_0).
-    m_0 = lm_set.ic_metric_weight
+    # 3n nonlinear residuals in 3n + 2 unknowns: LM with the unified shifted
+    # metric M = blockdiag(K, K, K, 0) + eps I selects the interpolant
+    # minimizing the summed RKHS norms (the original objective) with free
+    # initial values (c_0, mu_0), up to an O(eps) selection shift.
     metric = blockdiag_metric(
         [
             (alpha_metric, n_train),
             (alpha_metric, n_train),
             (alpha_metric, n_train),
-            (metric_from_diagonal(jnp.full(2, m_0)), 2),
+            (metric_from_diagonal(jnp.full(2, eps)), 2),
         ]
     )
 
-    # Blockwise K-solve preconditioner for the CG dual system: the resource
-    # and euler diagonal blocks of J M^{-1} J' are K plus bounded terms, and
-    # CG absorbs the few rank-1 spikes from the (c_0, mu_0) columns on its
-    # own. The shadow-price block is smoother (K_tilde K^{-1} K_tilde'-like),
-    # so the match is partial -- the budget below reflects that.
+    c_flow_guess = max(production(k_0) - delta * k_0, DOMAIN_EPS)
+    if c_0_guess is not None:
+        c_flow_guess = max(float(c_0_guess), DOMAIN_EPS)
+    theta_0 = (
+        jnp.zeros(n_train),
+        jnp.zeros(n_train),
+        jnp.zeros(n_train),
+        jnp.array([c_flow_guess, 1.0 / c_flow_guess]),
+    )
+
+    # Blockwise (K + eps I)-solve preconditioner for the CG dual system: the
+    # resource and euler diagonal blocks of J M^{-1} J' are K plus bounded
+    # terms, and CG absorbs the few rank-2 spikes from the (c_0, mu_0)
+    # columns on its own. Those columns depend on the current (k, c, mu)
+    # paths, so a fixed-U Woodbury correction evaluated at the warm start
+    # misdirects the spike at weight 1/eps and stalls the inner solve; the
+    # spike must be left to CG. The shadow-price block is smoother
+    # (K_tilde K^{-1} K_tilde'-like), so the match is partial -- the budget
+    # above reflects that.
     dual_preconditioner = None
     if method != "dense":
         K_solve = alpha_metric.solve
@@ -269,16 +273,6 @@ def neoclassical_growth_kernel_nlls(
         damping_increase=lm_set.damping_increase,
         dual_preconditioner=dual_preconditioner,
         metric=metric,
-    )
-
-    c_flow_guess = max(production(k_0) - delta * k_0, DOMAIN_EPS)
-    if c_0_guess is not None:
-        c_flow_guess = max(float(c_0_guess), DOMAIN_EPS)
-    theta_0 = (
-        jnp.zeros(n_train),
-        jnp.zeros(n_train),
-        jnp.zeros(n_train),
-        jnp.array([c_flow_guess, 1.0 / c_flow_guess]),
     )
 
     # The timed solve below reuses this solver instance, so its jit cache is
@@ -376,13 +370,13 @@ def neoclassical_growth_kernel_nlls(
         # Jitter-free alpha' K alpha, matching the IPOPT report (the metric
         # norm includes the nugget).
         "rkhs_norm_k": float(
-            alpha_metric.norm(alpha_k) ** 2 - jitter * (alpha_k @ alpha_k)
+            alpha_metric.norm(alpha_k) ** 2 - eps * (alpha_k @ alpha_k)
         ),
         "rkhs_norm_c": float(
-            alpha_metric.norm(alpha_c) ** 2 - jitter * (alpha_c @ alpha_c)
+            alpha_metric.norm(alpha_c) ** 2 - eps * (alpha_c @ alpha_c)
         ),
         "rkhs_norm_mu": float(
-            alpha_metric.norm(alpha_mu) ** 2 - jitter * (alpha_mu @ alpha_mu)
+            alpha_metric.norm(alpha_mu) ** 2 - eps * (alpha_mu @ alpha_mu)
         ),
         "max_train_residual": max_train_residual,
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_eval["euler"]))),
@@ -398,7 +392,7 @@ def neoclassical_growth_kernel_nlls(
         "wall_time": elapsed,
         "solver": "nlls-gram",
         "method_resolved": method,
-        "metric_jitter": jitter,
+        "metric_eps": eps,
         "train_loss": float(result.info.loss),
         "steps": steps,
         "stopping_reason": STATUS_TO_REASON.get(status, "unknown"),

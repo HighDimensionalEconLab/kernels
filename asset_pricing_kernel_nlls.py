@@ -17,14 +17,12 @@ from nlls_gram import (
     metric_from_cholesky,
     metric_from_diagonal,
     metric_from_state_space,
-    metric_from_tridiagonal_precision,
     sherman_morrison_preconditioner,
 )
 
 from asset_pricing_benchmark import mu_f_array
 from kernels import (
     integrated_kernel_matrices,
-    matern_0p5_tridiagonal_precision,
     matern_kernel_matvec_pair,
     normalize_kernel,
 )
@@ -49,15 +47,6 @@ STATUS_TO_REASON = {
 MATRIX_FREE_MIN_POINTS = 256
 MATERN32_MATRIX_FREE_MAX_POINTS = 4000
 PRECONDITIONED_CG_MIN_POINTS = 1500
-# Per-kernel metric nugget (relative to sigma^2), applied wherever K is
-# factored; matern12 stays exact (closed-form, well-conditioned tridiagonal
-# precision).
-DEFAULT_METRIC_JITTER = {
-    "matern12": 0.0,
-    "matern32": 1e-10,
-    "matern52": 1e-9,
-    "rbf": 1e-9,
-}
 
 
 @dataclass(frozen=True)
@@ -86,7 +75,6 @@ class NLLSGramSettings:
     damping_increase: float = 4.0
     max_steps: int = 100
     residual_atol: float = 1e-11  # unscaled residual norm; bounds max|residual|
-    p0_metric_weight: float = 1e-6  # m_0: PD-completion of the semi-norm a'Ka
     p0_init: float = 0.0
     # "auto" picks by kernel, grid, and size. "dense" factors the dual system
     # directly -- the universal fallback (any kernel or grid; the only method
@@ -101,13 +89,17 @@ class NLLSGramSettings:
     # matern12 on unsorted grids at scale.
     method: str = "auto"
     iterative_maxiter: int = 20  # CG inner budget per LM step (cg methods)
-    # Absolute nugget added to K wherever the metric factors it; None picks
-    # the per-kernel default (DEFAULT_METRIC_JITTER * sigma^2). A selection-
-    # side regularization only: residuals are unaffected, and every method
-    # uses the same value so their min-norm solutions agree. Exception:
-    # matern12 matrix_free is nugget-free by construction (exact tridiagonal
-    # precision) and rejects a nonzero value.
-    metric_jitter: float | None = None
+    # The single shift of the unified metric M = blockdiag(K, 0) + eps I:
+    # the kernel block is factored as K + eps I and the free p_0 carries
+    # weight eps, so ||M^{-1}|| = 1/eps uniformly in n and the min-M-norm
+    # interpolant is O(eps) from the pure RKHS-seminorm solution with p_0
+    # free. A selection-side regularization only: residuals are unaffected,
+    # and every method uses the same eps so their selections agree. The
+    # default balances the ends of the measured working range: larger shifts
+    # visibly bias the near-singular smooth Grams (rbf), while below ~1e-8
+    # the (c^2/eps)-weighted dual spike outruns the inner CG budgets. Tuning:
+    # https://highdimensionaleconlab.github.io/nlls_gram/tuning_guide/#the-metric
+    metric_eps: float = 1e-7
 
 
 def asset_pricing_kernel_nlls(
@@ -130,9 +122,9 @@ def asset_pricing_kernel_nlls(
 
     increasing_grid = bool(jnp.all(jnp.diff(train_data) > 0))
     # auto only picks matern32 matrix_free on CPU (a gate from the old
-    # sequential tinygp metric solve; nlls-gram >= 1.3 metrics use parallel
-    # scans off-CPU in float64, so this is now conservative); matern12's
-    # metric is fully parallel and profits from any backend.
+    # sequential tinygp metric solve; nlls-gram >= 1.3 state-space metrics —
+    # now used for every Matern order — run parallel scans off-CPU in
+    # float64, so this is conservative).
     matrix_free_ok = increasing_grid and (
         kernel == "matern12"
         or (
@@ -162,14 +154,9 @@ def asset_pricing_kernel_nlls(
         raise ValueError(
             'method="preconditioned_cg" requires matern12; use "dense" otherwise'
         )
-    jitter = lm_set.metric_jitter
-    if jitter is None:
-        jitter = DEFAULT_METRIC_JITTER[kernel] * sigma**2
-    if method == "matrix_free" and kernel == "matern12" and jitter != 0.0:
-        raise ValueError(
-            'matern12 with method="matrix_free" uses the exact tridiagonal '
-            "precision, which has no nugget; metric_jitter must be 0"
-        )
+    eps = lm_set.metric_eps
+    if eps <= 0:
+        raise ValueError("metric_eps must be positive (the p_0 block needs PD)")
 
     def dividends(t):
         return (x_0 + c / g) * jnp.exp(g * t) - c / g
@@ -191,21 +178,15 @@ def asset_pricing_kernel_nlls(
             )
             return p_0 + k_tilde_alpha, dp_dt
 
-        if kernel == "matern12":
-            # The Matern-1/2 precision is exactly tridiagonal; no nugget.
-            alpha_metric = metric_from_tridiagonal_precision(
-                *matern_0p5_tridiagonal_precision(train_data, sigma, ell)
-            )
-        else:
-            # Exact O(n) state-space metric M = K + jitter I with all four
-            # callbacks (the nugget is folded into the metric itself).
-            alpha_metric = metric_from_state_space(
-                train_data,
-                *matern_state_space(
-                    sigma, ell, {"matern32": 1.5, "matern52": 2.5}[kernel]
-                ),
-                nugget=jitter,
-            )
+        # Exact O(n) state-space metric K + eps I with all four callbacks
+        # (the shift is folded into the metric itself).
+        alpha_metric = metric_from_state_space(
+            train_data,
+            *matern_state_space(
+                sigma, ell, {"matern12": 0.5, "matern32": 1.5, "matern52": 2.5}[kernel]
+            ),
+            nugget=eps,
+        )
     else:
         K, K_tilde = integrated_kernel_matrices(
             train_data, train_data, kernel, sigma, ell
@@ -217,7 +198,7 @@ def asset_pricing_kernel_nlls(
             return path_values(theta, K_jax, K_tilde_jax)
 
         alpha_metric = metric_from_cholesky(
-            jnp.linalg.cholesky(K_jax + jitter * jnp.eye(n_train))
+            jnp.linalg.cholesky(K_jax + eps * jnp.eye(n_train))
         )
 
     def residual_fn(theta):
@@ -225,23 +206,23 @@ def asset_pricing_kernel_nlls(
         return dp_dt - (r * p - x_train)
 
     # The residual is affine in theta, so LM from theta_0 = 0 converges to the
-    # exact interpolant minimizing theta' M theta with M = blockdiag(K, m_0):
-    # the min-RKHS-norm selection (the original a'Ka objective) up to a
-    # selection shift in p_0 that scales linearly with m_0 (~1e-7 at the
-    # default m_0 = 1e-6).
-    m_0 = lm_set.p0_metric_weight
+    # exact interpolant minimizing theta' M theta with the unified shifted
+    # metric M = blockdiag(K, 0) + eps I: the min-RKHS-norm selection (the
+    # original a'Ka objective with p_0 free) up to an O(eps) selection shift
+    # in all parameters.
     metric = blockdiag_metric(
-        [(alpha_metric, n_train), (metric_from_diagonal(jnp.full(1, m_0)), 1)]
+        [(alpha_metric, n_train), (metric_from_diagonal(jnp.full(1, eps)), 1)]
     )
 
     # The p_0 residual column -r*1 injects the exactly known rank-1 spike
-    # (r^2/m_0) 11' into the dual operator J M^{-1} J'; preconditioning with
-    # K + (r^2/m_0) 11' is spectrally equivalent uniformly in n, pinning the
-    # inner CG budget where the unpreconditioned budget grows with refinement.
+    # (r^2/eps) 11' into the dual operator J M^{-1} J'; preconditioning with
+    # K + eps I + (r^2/eps) 11' is spectrally equivalent uniformly in n,
+    # pinning the inner CG budget where the unpreconditioned budget grows
+    # with refinement.
     dual_preconditioner = None
     if method != "dense":
         dual_preconditioner = sherman_morrison_preconditioner(
-            alpha_metric.solve, jnp.ones(n_train), r**2 / m_0
+            alpha_metric.solve, jnp.ones(n_train), r**2 / eps
         )
 
     solver = UnderdeterminedLevenbergMarquardt(
@@ -340,7 +321,7 @@ def asset_pricing_kernel_nlls(
         "p_0": float(p_0),
         "horizon_bias_p0": horizon_bias_p0,
         # Jitter-free alpha' K alpha (the metric norm includes the nugget).
-        "rkhs_norm_p": float(alpha_metric.norm(alpha) ** 2 - jitter * (alpha @ alpha)),
+        "rkhs_norm_p": float(alpha_metric.norm(alpha) ** 2 - eps * (alpha @ alpha)),
         "max_train_residual": max_train_residual,
         "max_test_residual": float(jnp.max(jnp.abs(test_residual))),
         # min/max error statistics exclude the pinned t = 0 point ([1:]).
@@ -351,7 +332,7 @@ def asset_pricing_kernel_nlls(
         "wall_time": elapsed,
         "solver": "nlls-gram",
         "method_resolved": method,
-        "metric_jitter": jitter,
+        "metric_eps": eps,
         "train_loss": float(result.info.loss),
         "steps": steps,
         "stopping_reason": STATUS_TO_REASON.get(status, "unknown"),

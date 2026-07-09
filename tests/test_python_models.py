@@ -17,7 +17,6 @@ from human_capital_kernel import human_capital_initial_conditions, human_capital
 from kernels import (
     gaussian_kernel,
     integrated_kernel_matrices,
-    matern_0p5_tridiagonal_precision,
     matern_kernel_0p5,
     matern_kernel_1p5,
     matern_kernel_2p5,
@@ -217,27 +216,13 @@ class KernelSmokeTests(unittest.TestCase):
                         float(jnp.max(jnp.abs(K_tilde @ v - k_tilde_v))), 1e-10
                     )
 
-    def test_matern_tridiagonal_precision_nonuniform(self):
-        rng = np.random.default_rng(11)
-        t = jnp.asarray(np.sort(rng.uniform(0.0, 50.0, 50)))
-        diag, off_diag = matern_0p5_tridiagonal_precision(t, 1.3, 10.0)
-        T = (
-            np.diag(np.asarray(diag))
-            + np.diag(np.asarray(off_diag), 1)
-            + np.diag(np.asarray(off_diag), -1)
-        )
-        K = 1.3**2 * np.exp(
-            -np.abs(np.asarray(t)[:, None] - np.asarray(t)[None, :]) / 10.0
-        )
-        self.assertLess(float(np.max(np.abs(T @ K - np.eye(50)))), 1e-10)
-
     def test_state_space_metric_matches_dense(self):
         # The nlls-gram state-space metric replaced the tinygp qsm solve;
         # keep the dense cross-check of the exact plumbing this repo uses.
         rng = np.random.default_rng(8)
         t = jnp.linspace(0.0, 50.0, 300)
         v = jnp.asarray(rng.standard_normal(300))
-        for name, nu in (("matern32", 1.5), ("matern52", 2.5)):
+        for name, nu in (("matern12", 0.5), ("matern32", 1.5), ("matern52", 2.5)):
             with self.subTest(kernel=name):
                 jitter = 1e-8 * 1.3**2
                 K, _ = integrated_kernel_matrices(t, t, name, 1.3, 10.0)
@@ -338,30 +323,32 @@ class KernelSmokeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize_kernel("matern72")
 
-    def test_asset_pricing_nlls_jitter_contract(self):
-        # A nonzero nugget applies identically across methods, so their
-        # min-norm selections agree.
-        kernel_set = APKernelSettings(kernel="matern32")
+    def test_asset_pricing_nlls_eps_contract(self):
+        # The unified shift applies identically across methods -- every
+        # method factors K + eps I and weights p_0 by eps -- so their
+        # min-M-norm selections agree, matern12 included (the newly unified
+        # case: its matrix_free metric is now state-space, not the old
+        # nugget-free tridiagonal precision).
         data_set = APDataSettings(train_T=50.0, train_points=501)
-        jitter = 1e-6
-        dense, _ = asset_pricing_kernel_nlls(
-            kernel_set=kernel_set,
-            data_set=data_set,
-            lm_set=NLLSGramSettings(method="dense", metric_jitter=jitter),
-        )
-        structured, _ = asset_pricing_kernel_nlls(
-            kernel_set=kernel_set,
-            data_set=data_set,
-            lm_set=NLLSGramSettings(method="matrix_free", metric_jitter=jitter),
-        )
-        self.assertTrue(structured["solution_accepted"])
-        self.assertLess(abs(structured["p_0"] - dense["p_0"]), 1e-8)
+        eps = 1e-6
+        for kernel in ("matern12", "matern32"):
+            with self.subTest(kernel=kernel):
+                kernel_set = APKernelSettings(kernel=kernel)
+                dense, _ = asset_pricing_kernel_nlls(
+                    kernel_set=kernel_set,
+                    data_set=data_set,
+                    lm_set=NLLSGramSettings(method="dense", metric_eps=eps),
+                )
+                structured, _ = asset_pricing_kernel_nlls(
+                    kernel_set=kernel_set,
+                    data_set=data_set,
+                    lm_set=NLLSGramSettings(method="matrix_free", metric_eps=eps),
+                )
+                self.assertTrue(structured["solution_accepted"])
+                self.assertLess(abs(structured["p_0"] - dense["p_0"]), 1e-8)
 
-        # matern12 matrix_free is nugget-free by construction.
         with self.assertRaises(ValueError):
-            asset_pricing_kernel_nlls(
-                lm_set=NLLSGramSettings(method="matrix_free", metric_jitter=1e-8)
-            )
+            asset_pricing_kernel_nlls(lm_set=NLLSGramSettings(metric_eps=0.0))
 
     def test_asset_pricing_nlls_auto_dispatch(self):
         small, _ = asset_pricing_kernel_nlls()

@@ -415,7 +415,7 @@ requires-dist = [
     { name = "jax", specifier = ">=0.7.2" },
     { name = "jsonargparse", specifier = ">=4.41.0" },
     { name = "matplotlib", specifier = ">=3.10.6" },
-    { name = "nlls-gram", specifier = ">=1.3.0" },
+    { name = "nlls-gram", specifier = ">=1.4.0" },
     { name = "pandas", specifier = ">=2.3.2" },
     { name = "pyarrow", specifier = ">=24.0.0" },
     { name = "scipy", specifier = ">=1.18.0" },
@@ -660,15 +660,15 @@ wheels = [
 
 [[package]]
 name = "nlls-gram"
-version = "1.3.0"
+version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jax" },
     { name = "lineax" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ea/a7/12ec41bebdedfc40e8f2d07a1d9b6f61fb9e811e68916630d9b0ed596e83/nlls_gram-1.3.0.tar.gz", hash = "sha256:b6c1195f662b3d65c937a88316215266e7aa0ed810ee0b4da3ae1e65fc379f0b", size = 152946, upload-time = "2026-07-09T18:53:44.602Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d7/e8/a2c5d1303a2f2bcd5db06f27512959602201b8671716ee15752698ac0f31/nlls_gram-1.4.0.tar.gz", hash = "sha256:ed990c0eb475648ae88dc6bcdc01a03d9efaced18e2b7e91463e34b9dc395a0f", size = 162118, upload-time = "2026-07-09T21:03:28.172Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ce/e0/21c08221b61c72ef4cc1c91dd1522c91a7c8a247337deab3747e1b42492d/nlls_gram-1.3.0-py3-none-any.whl", hash = "sha256:f2cc05f4af65fcf26b7684cb0ff0b74d614ecd8a81f3d71dfd6ad496cc21fce2", size = 25050, upload-time = "2026-07-09T18:53:42.934Z" },
+    { url = "https://files.pythonhosted.org/packages/4c/d0/1c163777fc2ce468d7f0eaa7635e5ba1b0b03c0c4903aab57f2d46ebc6c4/nlls_gram-1.4.0-py3-none-any.whl", hash = "sha256:85515231baf7e86753e8079922763c8396ae3cd62556d48a7697025df7468523", size = 26990, upload-time = "2026-07-09T21:03:26.694Z" },
 ]
 
 [[package]]

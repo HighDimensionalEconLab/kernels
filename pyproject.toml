@@ -9,7 +9,7 @@ dependencies = [
     "jax>=0.7.2",
     "jsonargparse>=4.41.0",
     "matplotlib>=3.10.6",
-    "nlls-gram>=1.1.0",
+    "nlls-gram>=1.2.0",
     "pandas>=2.3.2",
     "pyarrow>=24.0.0",
     "scipy>=1.18.0",
@@ -32,6 +32,3 @@ target-version = "py313"
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
 ignore = ["E501"]
-
-[tool.uv.sources]
-nlls-gram = { path = "../nlls_gram", editable = true }

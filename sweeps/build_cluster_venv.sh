@@ -42,6 +42,6 @@ source "$VENV/bin/activate"
 pip install --no-index --upgrade pip >/dev/null
 pip install --no-index $WHEELS
 pip install --no-index $GRAM_DEPS
-pip install --no-deps 'nlls-gram>=1.1.0'
+pip install --no-deps 'nlls-gram>=1.2.0'
 python -c "import jax, flax, jsonargparse, pandas, pyarrow, scipy, nlls_gram, wandb; print('venv ok | jax', jax.__version__, '| devices', jax.devices())"
 echo "BUILD_DONE (${VENV})"

@@ -415,7 +415,7 @@ requires-dist = [
     { name = "jax", specifier = ">=0.7.2" },
     { name = "jsonargparse", specifier = ">=4.41.0" },
     { name = "matplotlib", specifier = ">=3.10.6" },
-    { name = "nlls-gram", editable = "../nlls_gram" },
+    { name = "nlls-gram", specifier = ">=1.2.0" },
     { name = "pandas", specifier = ">=2.3.2" },
     { name = "pyarrow", specifier = ">=24.0.0" },
     { name = "scipy", specifier = ">=1.18.0" },
@@ -660,31 +660,16 @@ wheels = [
 
 [[package]]
 name = "nlls-gram"
-version = "1.1.1"
-source = { editable = "../nlls_gram" }
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jax" },
     { name = "lineax" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.7.0" },
-    { name = "lineax", specifier = ">=0.1.1" },
+sdist = { url = "https://files.pythonhosted.org/packages/af/63/428632eff397bca0be8e9d90c43ca199788435ad17702a3c5a62b114c5f3/nlls_gram-1.2.0.tar.gz", hash = "sha256:ddf4ce5d8cdab07ac3bfdaff0302d08a402c25d8411759de18cecb6dfc377ca5", size = 140480, upload-time = "2026-07-09T14:58:05.247Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1a/81/2a70afc006a304c57d09f139d2b640a245ea6a209d482a3b9df74e89a053/nlls_gram-1.2.0-py3-none-any.whl", hash = "sha256:03a6187cd3723967c1e38cc5950ac980687fefae514c35d140e28961d8dacbd3", size = 19938, upload-time = "2026-07-09T14:58:03.948Z" },
 ]
-
-[package.metadata.requires-dev]
-benchmark = [{ name = "pytest-benchmark", specifier = ">=5.2.3" }]
-dev = [
-    { name = "flax", specifier = ">=0.12.7" },
-    { name = "pytest", specifier = ">=8" },
-    { name = "ruff", specifier = ">=0.15.17" },
-]
-docs = [
-    { name = "mkdocs-material", specifier = ">=9.5" },
-    { name = "mkdocstrings", extras = ["python"], specifier = ">=0.26" },
-]
-gpu = [{ name = "jax", extras = ["cuda13"], marker = "sys_platform == 'linux'", specifier = ">=0.7.0" }]
 
 [[package]]
 name = "numpy"

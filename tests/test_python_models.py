@@ -372,19 +372,32 @@ class KernelSmokeTests(unittest.TestCase):
                 lm_set=NLLSGramSettings(method="matrix_free"),
             )
 
-        # An unsorted grid falls back to dense at any size (the structured
-        # residual matvecs and state-space metric need sorted points) and
-        # correctly refuses matrix_free.
+        # Point lists are sorted at intake (collocation is permutation-
+        # invariant), so an unsorted list resolves and solves exactly like
+        # its sorted version -- matrix_free at this scale.
         points = np.linspace(0.0, 50.0, 1600)
-        points[10], points[11] = points[11], points[10]
+        shuffled = points.copy()
+        shuffled[10], shuffled[11] = shuffled[11], shuffled[10]
         unsorted, _ = asset_pricing_kernel_nlls(
+            data_set=APDataSettings(train_points_list=[float(p) for p in shuffled])
+        )
+        sorted_run, _ = asset_pricing_kernel_nlls(
             data_set=APDataSettings(train_points_list=[float(p) for p in points])
         )
-        self.assertEqual(unsorted["method_resolved"], "dense")
+        self.assertEqual(unsorted["method_resolved"], "matrix_free")
         self.assertTrue(unsorted["solution_accepted"], unsorted["rejection_reason"])
+        self.assertEqual(unsorted["p_0"], sorted_run["p_0"])
+
+        # Duplicate points are the one remaining obstruction: auto falls
+        # back to dense, and explicit matrix_free refuses.
+        duplicated = [float(p) for p in points[:-1]] + [float(points[-2])]
+        dup, _ = asset_pricing_kernel_nlls(
+            data_set=APDataSettings(train_points_list=duplicated)
+        )
+        self.assertEqual(dup["method_resolved"], "dense")
         with self.assertRaises(ValueError):
             asset_pricing_kernel_nlls(
-                data_set=APDataSettings(train_points_list=[float(p) for p in points]),
+                data_set=APDataSettings(train_points_list=duplicated),
                 lm_set=NLLSGramSettings(method="matrix_free"),
             )
 

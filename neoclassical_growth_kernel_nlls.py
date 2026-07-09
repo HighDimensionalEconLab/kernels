@@ -112,11 +112,15 @@ def neoclassical_growth_kernel_nlls(
     if data_set.train_points_list is None:
         train_data = jnp.linspace(0, data_set.train_T, data_set.train_points)
     else:
-        train_data = jnp.array(data_set.train_points_list)
+        # The collocation problem is permutation-invariant, so sorting is
+        # free -- and it makes the structured matrix_free path (which needs
+        # increasing points) available for any point set without duplicates.
+        train_data = jnp.sort(jnp.array(data_set.train_points_list))
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points)
     benchmark_grid = jnp.linspace(0, data_set.benchmark_T, data_set.benchmark_points)
     n_train = len(train_data)
 
+    # False only for duplicate points (the grid is sorted above).
     increasing_grid = bool(jnp.all(jnp.diff(train_data) > 0))
     matrix_free_ok = increasing_grid and kernel == "matern12"
     method = lm_set.method
@@ -131,8 +135,8 @@ def neoclassical_growth_kernel_nlls(
         kernel in ("matern12", "matern32") and increasing_grid
     ):
         raise ValueError(
-            'method="matrix_free" requires matern12 or matern32 on a strictly '
-            'increasing train grid; use "dense" otherwise'
+            'method="matrix_free" requires matern12 or matern32 on a train '
+            'grid without duplicate points; use "dense" otherwise'
         )
     eps = lm_set.metric_eps
     if eps <= 0:

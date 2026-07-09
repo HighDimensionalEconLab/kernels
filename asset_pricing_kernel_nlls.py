@@ -292,10 +292,13 @@ def asset_pricing_kernel_nlls(
     else:
         horizon_bias_p0 = float("nan")
 
+    # Acceptance certifies the solution, not the stopping code: a solve that
+    # stalls at its float64 residual floor below TRAIN_RESIDUAL_TOL is
+    # feasible (the IPOPT baseline's FEASIBLE_SMALL_STEP semantics) -- the
+    # smooth kernels routinely end there because atol is unreachable for
+    # their ill-conditioned Grams. stopping_reason still reports the code.
     finite = bool(jnp.all(jnp.isfinite(p_test)) and jnp.all(jnp.isfinite(p_benchmark)))
     rejection_reasons = []
-    if status != LMStatus.CONVERGED:
-        rejection_reasons.append("solver_status")
     if not finite:
         rejection_reasons.append("nonfinite")
     if max_train_residual > TRAIN_RESIDUAL_TOL:

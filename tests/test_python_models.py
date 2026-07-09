@@ -21,6 +21,7 @@ from kernels import (
     matern_kernel_2p5,
     matern_kernel_matvec_pair,
     matern_qsm_solve,
+    normalize_kernel,
 )
 from neoclassical_growth_concave_convex_kernel import (
     neoclassical_growth_concave_convex_kernel,
@@ -235,6 +236,47 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertTrue(structured["solution_accepted"])
         self.assertLess(abs(structured["p_0"] - dense["p_0"]), 1e-8)
 
+    def test_normalize_kernel_aliases(self):
+        cases = [
+            (0.5, "matern12"),
+            (1.5, "matern32"),
+            (2.5, "matern52"),
+            (math.inf, "rbf"),
+            ("gaussian", "rbf"),
+            ("se", "rbf"),
+            ("matern_1_2", "matern12"),
+            ("matern2.5", "matern52"),
+        ]
+        for alias, expected in cases:
+            self.assertEqual(normalize_kernel(alias), expected)
+        with self.assertRaises(ValueError):
+            normalize_kernel("matern72")
+
+    def test_asset_pricing_nlls_jitter_contract(self):
+        # A nonzero nugget applies identically across methods, so their
+        # min-norm selections agree.
+        kernel_set = APKernelSettings(kernel="matern32")
+        data_set = APDataSettings(train_T=50.0, train_points=501)
+        jitter = 1e-6
+        dense, _ = asset_pricing_kernel_nlls(
+            kernel_set=kernel_set,
+            data_set=data_set,
+            lm_set=NLLSGramSettings(method="dense", metric_jitter=jitter),
+        )
+        structured, _ = asset_pricing_kernel_nlls(
+            kernel_set=kernel_set,
+            data_set=data_set,
+            lm_set=NLLSGramSettings(method="matrix_free", metric_jitter=jitter),
+        )
+        self.assertTrue(structured["solution_accepted"])
+        self.assertLess(abs(structured["p_0"] - dense["p_0"]), 1e-8)
+
+        # matern12 matrix_free is nugget-free by construction.
+        with self.assertRaises(ValueError):
+            asset_pricing_kernel_nlls(
+                lm_set=NLLSGramSettings(method="matrix_free", metric_jitter=1e-8)
+            )
+
     def test_asset_pricing_nlls_auto_dispatch(self):
         small, _ = asset_pricing_kernel_nlls()
         self.assertEqual(small["method_resolved"], "dense")
@@ -254,6 +296,21 @@ class KernelSmokeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             asset_pricing_kernel_nlls(
                 kernel_set=APKernelSettings(kernel="matern52"),
+                lm_set=NLLSGramSettings(method="matrix_free"),
+            )
+
+        # An unsorted grid at scale sends auto to preconditioned_cg (its
+        # niche) and correctly refuses matrix_free.
+        points = np.linspace(0.0, 50.0, 1600)
+        points[10], points[11] = points[11], points[10]
+        unsorted, _ = asset_pricing_kernel_nlls(
+            data_set=APDataSettings(train_points_list=[float(p) for p in points])
+        )
+        self.assertEqual(unsorted["method_resolved"], "preconditioned_cg")
+        self.assertTrue(unsorted["solution_accepted"], unsorted["rejection_reason"])
+        with self.assertRaises(ValueError):
+            asset_pricing_kernel_nlls(
+                data_set=APDataSettings(train_points_list=[float(p) for p in points]),
                 lm_set=NLLSGramSettings(method="matrix_free"),
             )
 

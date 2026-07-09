@@ -43,7 +43,9 @@ STATUS_TO_REASON = {
 # singular under grid refinement, and past that wall the iterative dual solves
 # stall where the direct dense factorization still works: matern32's iterative
 # window closes around n ~ 5000 (its accuracy already saturates by n ~ 2000),
-# and matern52/rbf are dense-only outright.
+# and matern52/rbf are dense-only outright. The matern32 cap below is a
+# conservative auto heuristic; an explicit method="matrix_free" beyond it is
+# allowed and policed by the acceptance gates.
 MATRIX_FREE_MIN_POINTS = 256
 MATERN32_MATRIX_FREE_MAX_POINTS = 4000
 PRECONDITIONED_CG_MIN_POINTS = 1500
@@ -92,7 +94,8 @@ class NLLSGramSettings:
     # past the float64 conditioning wall). "matrix_free" is O(n) time and
     # memory end to end -- structured matvec residual plus an O(n) kernel
     # metric and Sherman-Morrison preconditioner -- for matern12 (any n) and
-    # matern32 (up to ~5000 points) on strictly increasing grids.
+    # matern32 (auto caps it at 4000 points; explicit requests beyond rely on
+    # the acceptance gates) on strictly increasing grids.
     # "preconditioned_cg" keeps the dense metric factor but solves the dual
     # system by preconditioned CG with a budget flat in n; its niche is
     # matern12 on unsorted grids at scale.
@@ -101,7 +104,9 @@ class NLLSGramSettings:
     # Absolute nugget added to K wherever the metric factors it; None picks
     # the per-kernel default (DEFAULT_METRIC_JITTER * sigma^2). A selection-
     # side regularization only: residuals are unaffected, and every method
-    # uses the same value so their min-norm solutions agree.
+    # uses the same value so their min-norm solutions agree. Exception:
+    # matern12 matrix_free is nugget-free by construction (exact tridiagonal
+    # precision) and rejects a nonzero value.
     metric_jitter: float | None = None
 
 
@@ -159,6 +164,11 @@ def asset_pricing_kernel_nlls(
     jitter = lm_set.metric_jitter
     if jitter is None:
         jitter = DEFAULT_METRIC_JITTER[kernel] * sigma**2
+    if method == "matrix_free" and kernel == "matern12" and jitter != 0.0:
+        raise ValueError(
+            'matern12 with method="matrix_free" uses the exact tridiagonal '
+            "precision, which has no nugget; metric_jitter must be 0"
+        )
 
     def dividends(t):
         return (x_0 + c / g) * jnp.exp(g * t) - c / g

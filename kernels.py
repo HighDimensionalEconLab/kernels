@@ -105,7 +105,8 @@ def integrated_matern_kernel_2p5(t_i, t_j, sigma, ell):
 
 def integrated_matern_kernel(name, t_i, t_j, sigma, ell):
     # int_0^{t_i} k(|s - t_j|) ds splits at s = t_j: h(t_j) + h(t_i - t_j)
-    # when t_i >= t_j, and h(t_j) - h(t_j - t_i) otherwise.
+    # when t_i >= t_j, and h(t_j) - h(t_j - t_i) otherwise. Assumes
+    # t_i, t_j >= 0 (the split point must lie at or beyond the lower limit).
     s = t_i - t_j
     h_t_j = matern_antiderivative(name, t_j, sigma, ell)
     h_gap = matern_antiderivative(name, jnp.abs(s), sigma, ell)
@@ -217,7 +218,9 @@ def matern_exp_moments(t, decay_rate, v, order, parallel=None):
 
 # Both matvecs from one moments pass: the scans dominate the matrix-free
 # residual, and each JVP/VJP inside the solver's CG loop replays them, so
-# sharing halves the hot-path work.
+# sharing halves the hot-path work. t must be sorted strictly increasing --
+# not validated (t may be traced); unsorted input silently returns garbage,
+# so callers validate before entering jit.
 def matern_kernel_matvec_pair(kernel, t, v, sigma, ell, parallel=None):
     name = normalize_kernel(kernel)
     if name not in MATERN_ORDER:
@@ -249,7 +252,9 @@ def matern_kernel_matvec_pair(kernel, t, v, sigma, ell, parallel=None):
 
 
 # Closed-form tridiagonal precision of the Matern-1/2 Gram on a sorted strictly
-# increasing grid (the OU/AR(1) Markov property): with rho_i = e^{-dt_i/ell},
+# increasing grid (not validated; callers validate -- duplicates divide by
+# zero, unsorted grids give an indefinite non-precision). With
+# rho_i = e^{-dt_i/ell},
 # T = K^{-1} has diag (1/sigma^2)[1_{i=1} + 1_{i>1}/(1-rho_{i-1}^2)
 # + 1_{i<n} rho_i^2/(1-rho_i^2)] and off-diagonal -(1/sigma^2) rho_i/(1-rho_i^2).
 def matern_0p5_tridiagonal_precision(t, sigma, ell):

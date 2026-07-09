@@ -93,10 +93,11 @@ dataclasses.
   and the exact log-transversality certificate (computed post hoc on a short
   auxiliary simulation past the training window) gates early stopping and
   acceptance.
-- `integrators.py` — the differentiable rollout integrators (free-stepping
-  adaptive Tsit5 for training; fixed-grid RK4 for the test/settle evaluation
-  paths); forward- and reverse-mode differentiable through the states, array
-  states (scalar or vector).
+- The differentiable rollout integrators (free-stepping adaptive Tsit5 for
+  training; fixed-grid RK4 for the test/settle evaluation paths) come from
+  [tinydiffeq](https://github.com/HighDimensionalEconLab/tinydiffeq),
+  extracted from this repo; forward- and reverse-mode differentiable through
+  the states.
 
 Every solver exposes a `jsonargparse` CLI:
 

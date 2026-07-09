@@ -397,6 +397,7 @@ dependencies = [
     { name = "pandas" },
     { name = "pyarrow" },
     { name = "scipy" },
+    { name = "tinydiffeq" },
     { name = "tinygp" },
     { name = "unopy" },
 ]
@@ -419,6 +420,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.3.2" },
     { name = "pyarrow", specifier = ">=24.0.0" },
     { name = "scipy", specifier = ">=1.18.0" },
+    { name = "tinydiffeq", specifier = ">=0.1.0" },
     { name = "tinygp", specifier = ">=0.3.1" },
     { name = "unopy", specifier = ">=0.4.10" },
 ]
@@ -1308,6 +1310,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/01/99/2ea3b37864adb2e9f6e724c6959ab2b7f56aa4dad01964d4b32adf211e68/tensorstore-0.1.84-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:98e10cae5b3fc0828967b8ddf36242b3b26ac8bc79880bc3e36346063259212a", size = 14990904, upload-time = "2026-05-16T06:17:51.464Z" },
     { url = "https://files.pythonhosted.org/packages/ff/26/fe72887d7b91e832bef3033d244c4c548993d1b6fb19177dff3895659c12/tensorstore-0.1.84-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:98edbc57d453ba8ebcf0d19bc28e4de6de95922bee2eca0805955b0833b8ce26", size = 19365698, upload-time = "2026-05-16T06:17:53.748Z" },
     { url = "https://files.pythonhosted.org/packages/37/74/35a1d41343f86f6e2ef135e81f6b8107b9f16c777a3e8be9e3fbce541d18/tensorstore-0.1.84-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:0bd20de85c1b83dd3ca94db24e7bd449bdb055590a1b162b05691f6b81fff00f", size = 20986107, upload-time = "2026-05-16T06:17:56.571Z" },
+]
+
+[[package]]
+name = "tinydiffeq"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jax" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/55/6c/6de48c25c298332ca75e1c9775d0072b36159e70aebdcddd19b67925b12b/tinydiffeq-0.1.0.tar.gz", hash = "sha256:687595717ddb3c3e0bc7c1ac921fbf785e5061af023e218f392fed5e6e60649b", size = 95009, upload-time = "2026-07-09T18:51:50.448Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c1/a9/67b319f445477346d8029e407e9c25d9fcbb780b1c43cbe0ea7d92ce294a/tinydiffeq-0.1.0-py3-none-any.whl", hash = "sha256:300921718818f1cd5f5d87c7a225f87f78eb916afc389e96898a044f840002af", size = 15377, upload-time = "2026-07-09T18:51:48.951Z" },
 ]
 
 [[package]]

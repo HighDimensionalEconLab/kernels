@@ -12,8 +12,8 @@ from flax import nnx
 from jax import config
 from jax.flatten_util import ravel_pytree
 from nlls_gram import LMSolveAction, LMStatus, UnderdeterminedLevenbergMarquardt
+from tinydiffeq import RK4, IController, SaveAt, Tsit5, solve_ode
 
-import integrators
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
 
 # Recursive (state-space) neoclassical growth solver with log utility: the NN
@@ -28,7 +28,7 @@ from neoclassical_growth_benchmark import neoclassical_growth_benchmark
 #   R(k) = c'(k) dk(k) - c(k) (f'(k) - delta - rho_hat),
 # with c'(k) = f'(k) - i'(k). Collocation states come from a free-stepping
 # adaptive Tsit5 rollout of the learned policy from k_0
-# (integrators.tsit5_free, differentiated through by the optimizer): the
+# (tinydiffeq solve_ode, differentiated through by the optimizer): the
 # solver's accepted states ARE the collocation points. The input derivative
 # i'(k) uses forward-mode jax.jvp inside the residual while the LM solver
 # uses reverse mode over the parameters (reverse-over-forward).
@@ -71,7 +71,7 @@ class DataSettings:
     # settle evaluation paths (which use fixed-grid RK4 so test_df stays
     # comparable across seeds and against the benchmark).
     dt: float = 1.0
-    # Free-stepping adaptive Tsit5 rollout (integrators.tsit5_free): the
+    # Free-stepping adaptive Tsit5 rollout (tinydiffeq): the
     # solver's accepted states ARE the collocation points, steps clipped only
     # at the horizon; adaptive_steps is the fixed attempt budget over
     # [0, train_T]. 1e-6 tolerances already reach the policy-accuracy floor.
@@ -226,8 +226,10 @@ def consumption_positivity(policy, states, p):
     return jnp.minimum(c - DOMAIN_EPS, 0.0)
 
 
-# The training rollout and its states live in integrators.py; the policy's own
-# accepted states are the collocation points under the free-stepping default.
+# The training rollout is tinydiffeq's bounded-scan adaptive Tsit5; the
+# policy's own accepted states are the collocation points under the
+# free-stepping default (rejections and the post-horizon freeze emit
+# duplicate rows, harmless to the least-squares residual).
 def rollout_field(policy, p):
     return lambda k: drift(policy, k, p)
 
@@ -236,18 +238,26 @@ def positivity(y):
     return jnp.maximum(y, DOMAIN_EPS)
 
 
-def collocation_states(policy, p, data_set):
-    _, states = integrators.tsit5_free(
+def rollout(policy, T, budget, p, data_set):
+    return solve_ode(
         rollout_field(policy, p),
+        Tsit5(),
+        0.0,
+        T,
         p.k_0,
-        data_set.train_T,
-        data_set.adaptive_steps,
-        rtol=data_set.rtol,
-        atol=data_set.atol,
         dt0=data_set.dt,
+        controller=IController(rtol=data_set.rtol, atol=data_set.atol),
+        max_steps=budget,
+        saveat=SaveAt(steps=True),
         project=positivity,
     )
-    return states
+
+
+def collocation_states(policy, p, data_set):
+    sol = rollout(policy, data_set.train_T, data_set.adaptive_steps, p, data_set)
+    # budget exhausted before train_T -> poison (the residual rejects rather
+    # than reading a truncated path)
+    return jnp.where(sol.ok, sol.xs, jnp.inf)
 
 
 # Post-hoc transversality certificate (log utility): the max over horizons
@@ -262,16 +272,9 @@ def collocation_states(policy, p, data_set):
 # initialization); this certificate is the ex-post check of that selection,
 # gating early stopping and acceptance.
 def log_tvc_residual(policy, T_start, T_end, p, data_set):
-    ts, states = integrators.tsit5_free(
-        rollout_field(policy, p),
-        p.k_0,
-        T_end,
-        data_set.tvc_adaptive_steps,
-        rtol=data_set.rtol,
-        atol=data_set.atol,
-        dt0=data_set.dt,
-        project=positivity,
-    )
+    sol = rollout(policy, T_end, data_set.tvc_adaptive_steps, p, data_set)
+    ts = jnp.where(sol.ok, sol.ts, jnp.inf)
+    states = jnp.where(sol.ok, sol.xs, jnp.inf)
     c = jnp.maximum(jax.vmap(lambda k: consumption(policy, k, p))(states), DOMAIN_EPS)
     log_tvc = -p.rho_hat * ts - jnp.log(c) + jnp.log(states)
     return jnp.max(jnp.where(ts >= T_start, log_tvc, -jnp.inf))
@@ -444,13 +447,17 @@ def neoclassical_growth_nn_recursive_i(
     # Test path: simulate the final policy to test_T and evaluate the Euler
     # residual along it.
     n_test_steps = round(data_set.test_T / data_set.dt)
-    test_states = integrators.rk4_grid(
+    test_states = solve_ode(
         rollout_field(policy, p),
+        RK4(),
+        0.0,
+        n_test_steps * data_set.dt,
         p.k_0,
-        n_test_steps,
-        jnp.asarray(data_set.dt, dtype),
+        dt0=data_set.dt,
+        max_steps=n_test_steps,
+        saveat=SaveAt(steps=True),
         project=positivity,
-    )
+    ).xs
     test_i = jax.vmap(policy)(test_states)
     test_c = jax.vmap(lambda k: consumption(policy, k, p))(test_states)
     test_dk = jax.vmap(lambda k: drift(policy, k, p))(test_states)
@@ -519,13 +526,17 @@ def neoclassical_growth_nn_recursive_i(
         # Settle the trained policy to settle_T and classify the basin it
         # reaches (ball of 5% of the kink around a steady state).
         n_settle_steps = round(data_set.settle_T / data_set.dt)
-        settled = integrators.rk4_grid(
+        settled = solve_ode(
             rollout_field(policy, p),
+            RK4(),
+            0.0,
+            n_settle_steps * data_set.dt,
             p.k_0,
-            n_settle_steps,
-            jnp.asarray(data_set.dt, dtype),
+            dt0=data_set.dt,
+            max_steps=n_settle_steps,
+            saveat=SaveAt(steps=True),
             project=positivity,
-        )
+        ).xs
         k_settled = float(settled[-1])
         tol = 0.05 * k_thr
         target = k_ss_low if k_0 < k_thr else k_ss_high

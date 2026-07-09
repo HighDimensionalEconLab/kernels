@@ -14,6 +14,7 @@ from flax import nnx
 from jax import config
 from jax.flatten_util import ravel_pytree
 from nlls_gram import LMStatus, UnderdeterminedLevenbergMarquardt
+from tinydiffeq import cumulative_trapezoid
 
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from random_fourier_features import KernelName, RFFFeatures
@@ -199,27 +200,8 @@ def marginal_product(k, p):
     return jax.vmap(jax.grad(lambda x: production(x, p)))(k)
 
 
-def integrate_time_derivative(derivative_fn, t, substeps):
-    derivative_at_t = jax.vmap(derivative_fn)(t)
-
-    def interval_increment(left, right):
-        nodes = jnp.linspace(left, right, substeps + 1)
-        values = jax.vmap(derivative_fn)(nodes)
-        widths = nodes[1:] - nodes[:-1]
-        return jnp.sum(0.5 * widths[:, None] * (values[:-1] + values[1:]), axis=0)
-
-    increments = jax.vmap(interval_increment)(t[:-1], t[1:])
-    integral = jnp.concatenate(
-        [
-            jnp.zeros((1, increments.shape[1]), dtype=t.dtype),
-            jnp.cumsum(increments, axis=0),
-        ]
-    )
-    return integral, derivative_at_t
-
-
 def policy_values(model, t, p, integration_substeps):
-    integral, derivative = integrate_time_derivative(model, t, integration_substeps)
+    integral, derivative = cumulative_trapezoid(model, t, substeps=integration_substeps)
     k = p.k_0 + integral[:, 0]
     c = model.c_0[...] + integral[:, 1]
     dk_dt = derivative[:, 0]

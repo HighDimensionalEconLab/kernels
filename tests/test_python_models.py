@@ -146,7 +146,7 @@ class KernelSmokeTests(unittest.TestCase):
     def test_neoclassical_growth_nlls_smoke(self):
         results, extras = neoclassical_growth_kernel_nlls(data_set=FAST_GROWTH_NLLS)
 
-        self.assertEqual(results["method_resolved"], "dense")
+        self.assertEqual(results["method_resolved"], "dense_cholesky")
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertLess(results["max_train_residual"], 1e-8)
         self.assertLess(results["k_rel_error_mean"], 2e-2)
@@ -157,12 +157,12 @@ class KernelSmokeTests(unittest.TestCase):
         # matrix_free recovers the same selection as dense at scale.
         data_set = GrowthNLLSDataSettings(train_points=501)
         dense, _ = neoclassical_growth_kernel_nlls(
-            data_set=data_set, lm_set=GrowthNLLSSettings(method="dense")
+            data_set=data_set, lm_set=GrowthNLLSSettings(method="dense_cholesky")
         )
         structured, _ = neoclassical_growth_kernel_nlls(
-            data_set=data_set, lm_set=GrowthNLLSSettings(method="matrix_free")
+            data_set=data_set, lm_set=GrowthNLLSSettings(method="matrix_free_cg")
         )
-        self.assertEqual(structured["method_resolved"], "matrix_free")
+        self.assertEqual(structured["method_resolved"], "matrix_free_cg")
         self.assertTrue(structured["solution_accepted"])
         self.assertLess(abs(structured["c_0"] - dense["c_0"]), 1e-4)
 
@@ -173,7 +173,7 @@ class KernelSmokeTests(unittest.TestCase):
             kernel_set=GrowthNLLSKernelSettings(kernel="matern32"),
             data_set=GrowthNLLSDataSettings(train_points=501),
         )
-        self.assertEqual(results["method_resolved"], "dense")
+        self.assertEqual(results["method_resolved"], "dense_cholesky")
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
 
     def test_neoclassical_growth_nlls_kernels_smoke(self):
@@ -246,7 +246,7 @@ class KernelSmokeTests(unittest.TestCase):
     def test_asset_pricing_nlls_smoke(self):
         reference, extras = asset_pricing_kernel_nlls()
 
-        self.assertEqual(reference["method_resolved"], "dense")
+        self.assertEqual(reference["method_resolved"], "dense_cholesky")
         self.assertTrue(reference["solution_accepted"], reference["rejection_reason"])
         self.assertLess(reference["max_train_residual"], 1e-10)
         self.assertLess(reference["p_rel_error_mean"], 5e-3)
@@ -254,7 +254,7 @@ class KernelSmokeTests(unittest.TestCase):
 
         # matrix_free must recover the same min-norm selection as the dense
         # default, not just interpolate.
-        for method in ["matrix_free"]:
+        for method in ["matrix_free_cg"]:
             with self.subTest(method=method):
                 lm_set = NLLSGramSettings(method=method)
                 results, extras = asset_pricing_kernel_nlls(lm_set=lm_set)
@@ -284,7 +284,7 @@ class KernelSmokeTests(unittest.TestCase):
             with self.subTest(kernel=name):
                 results, _ = asset_pricing_kernel_nlls(kernel_set=kernel_set)
 
-                self.assertEqual(results["method_resolved"], "dense")
+                self.assertEqual(results["method_resolved"], "dense_cholesky")
                 self.assertTrue(
                     results["solution_accepted"], results["rejection_reason"]
                 )
@@ -297,12 +297,12 @@ class KernelSmokeTests(unittest.TestCase):
         dense, _ = asset_pricing_kernel_nlls(
             kernel_set=kernel_set,
             data_set=data_set,
-            lm_set=NLLSGramSettings(method="dense"),
+            lm_set=NLLSGramSettings(method="dense_cholesky"),
         )
         structured, _ = asset_pricing_kernel_nlls(
             kernel_set=kernel_set,
             data_set=data_set,
-            lm_set=NLLSGramSettings(method="matrix_free"),
+            lm_set=NLLSGramSettings(method="matrix_free_cg"),
         )
         self.assertTrue(structured["solution_accepted"])
         self.assertLess(abs(structured["p_0"] - dense["p_0"]), 1e-8)
@@ -337,12 +337,12 @@ class KernelSmokeTests(unittest.TestCase):
                 dense, _ = asset_pricing_kernel_nlls(
                     kernel_set=kernel_set,
                     data_set=data_set,
-                    lm_set=NLLSGramSettings(method="dense", metric_eps=eps),
+                    lm_set=NLLSGramSettings(method="dense_cholesky", metric_eps=eps),
                 )
                 structured, _ = asset_pricing_kernel_nlls(
                     kernel_set=kernel_set,
                     data_set=data_set,
-                    lm_set=NLLSGramSettings(method="matrix_free", metric_eps=eps),
+                    lm_set=NLLSGramSettings(method="matrix_free_cg", metric_eps=eps),
                 )
                 self.assertTrue(structured["solution_accepted"])
                 self.assertLess(abs(structured["p_0"] - dense["p_0"]), 1e-8)
@@ -352,24 +352,24 @@ class KernelSmokeTests(unittest.TestCase):
 
     def test_asset_pricing_nlls_auto_dispatch(self):
         small, _ = asset_pricing_kernel_nlls()
-        self.assertEqual(small["method_resolved"], "dense")
+        self.assertEqual(small["method_resolved"], "dense_cholesky")
 
         large, _ = asset_pricing_kernel_nlls(
             data_set=APDataSettings(train_T=50.0, train_points=501)
         )
-        self.assertEqual(large["method_resolved"], "matrix_free")
+        self.assertEqual(large["method_resolved"], "matrix_free_cg")
         self.assertTrue(large["solution_accepted"])
 
         rbf, _ = asset_pricing_kernel_nlls(
             kernel_set=APKernelSettings(kernel="rbf", ell=2.0),
             data_set=APDataSettings(train_T=50.0, train_points=501),
         )
-        self.assertEqual(rbf["method_resolved"], "dense")
+        self.assertEqual(rbf["method_resolved"], "dense_cholesky")
 
         with self.assertRaises(ValueError):
             asset_pricing_kernel_nlls(
                 kernel_set=APKernelSettings(kernel="matern52"),
-                lm_set=NLLSGramSettings(method="matrix_free"),
+                lm_set=NLLSGramSettings(method="matrix_free_cg"),
             )
 
         # Point lists are sorted at intake (collocation is permutation-
@@ -384,7 +384,7 @@ class KernelSmokeTests(unittest.TestCase):
         sorted_run, _ = asset_pricing_kernel_nlls(
             data_set=APDataSettings(train_points_list=[float(p) for p in points])
         )
-        self.assertEqual(unsorted["method_resolved"], "matrix_free")
+        self.assertEqual(unsorted["method_resolved"], "matrix_free_cg")
         self.assertTrue(unsorted["solution_accepted"], unsorted["rejection_reason"])
         self.assertEqual(unsorted["p_0"], sorted_run["p_0"])
 
@@ -394,11 +394,11 @@ class KernelSmokeTests(unittest.TestCase):
         dup, _ = asset_pricing_kernel_nlls(
             data_set=APDataSettings(train_points_list=duplicated)
         )
-        self.assertEqual(dup["method_resolved"], "dense")
+        self.assertEqual(dup["method_resolved"], "dense_cholesky")
         with self.assertRaises(ValueError):
             asset_pricing_kernel_nlls(
                 data_set=APDataSettings(train_points_list=duplicated),
-                lm_set=NLLSGramSettings(method="matrix_free"),
+                lm_set=NLLSGramSettings(method="matrix_free_cg"),
             )
 
     def test_optimal_advertising_smoke(self):

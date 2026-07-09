@@ -42,7 +42,7 @@ STATUS_TO_REASON = {
 # stall where the direct dense factorization still works: matern32's iterative
 # window closes around n ~ 5000 (its accuracy already saturates by n ~ 2000),
 # and matern52/rbf are dense-only outright. The matern32 cap below is a
-# conservative auto heuristic; an explicit method="matrix_free" beyond it is
+# conservative auto heuristic; an explicit method="matrix_free_cg" beyond it is
 # allowed and policed by the acceptance gates.
 MATRIX_FREE_MIN_POINTS = 256
 MATERN32_MATRIX_FREE_MAX_POINTS = 4000
@@ -75,15 +75,24 @@ class NLLSGramSettings:
     max_steps: int = 100
     residual_atol: float = 1e-11  # unscaled residual norm; bounds max|residual|
     p0_init: float = 0.0
-    # "auto" picks by kernel, grid, and size. "dense" factors the dual system
-    # directly -- the universal fallback (any kernel or grid; the only method
-    # for matern52 and rbf, whose smooth Grams put the iterative dual solves
-    # past the float64 conditioning wall). "matrix_free" is O(n) time and
-    # memory end to end -- structured matvec residual plus an O(n) kernel
-    # metric and Sherman-Morrison preconditioner, CG on the dual system --
-    # for matern12 (any n) and matern32 (auto caps it at 4000 points;
-    # explicit requests beyond rely on the acceptance gates) on strictly
-    # increasing grids.
+    # The method name encodes two independent choices,
+    # <residual representation>_<inner linear solver>:
+    # - "dense_cholesky": residuals via materialized n x n kernel matrices;
+    #   the LM dual system is factored directly. The universal fallback (any
+    #   kernel or grid; the only method for matern52 and rbf, whose smooth
+    #   Grams put iterative dual solves past the float64 conditioning wall).
+    # - "matrix_free_cg": residuals via O(n) structured scan matvecs; the
+    #   dual system is solved by preconditioned CG (Sherman-Morrison around
+    #   the metric solve), whose Jacobian queries are jvp/vjp through the
+    #   scans -- O(n) time and memory end to end. matern12 (any n) and
+    #   matern32 (auto caps it at 4000 points; explicit requests beyond rely
+    #   on the acceptance gates), duplicate-free grids.
+    # The metric applications are exact under both (dense Cholesky factor or
+    # O(n) state-space scans, chosen to match the residual representation).
+    # The remaining combinations are dominated: dense residuals + CG saves
+    # only the dual factorization while paying dense prices per CG iteration,
+    # and structured residuals + a materialized dual forfeits O(n).
+    # "auto" picks by kernel, grid, and size.
     method: str = "auto"
     iterative_maxiter: int = 20  # CG inner budget per LM step (matrix_free)
     # The single shift of the unified metric M = blockdiag(K, 0) + eps I:
@@ -137,17 +146,17 @@ def asset_pricing_kernel_nlls(
     method = lm_set.method
     if method == "auto":
         if matrix_free_ok and n_train >= MATRIX_FREE_MIN_POINTS:
-            method = "matrix_free"
+            method = "matrix_free_cg"
         else:
-            method = "dense"
-    elif method not in ("dense", "matrix_free"):
+            method = "dense_cholesky"
+    elif method not in ("dense_cholesky", "matrix_free_cg"):
         raise ValueError(f"unknown method: {lm_set.method!r}")
-    if method == "matrix_free" and not (
+    if method == "matrix_free_cg" and not (
         kernel in ("matern12", "matern32") and increasing_grid
     ):
         raise ValueError(
-            'method="matrix_free" requires matern12 or matern32 on a train '
-            'grid without duplicate points; use "dense" otherwise'
+            'method="matrix_free_cg" requires matern12 or matern32 on a train '
+            'grid without duplicate points; use "dense_cholesky" otherwise'
         )
     eps = lm_set.metric_eps
     if eps <= 0:
@@ -164,7 +173,7 @@ def asset_pricing_kernel_nlls(
         alpha, p_0 = theta
         return p_0 + K_tilde_eval @ alpha, K_eval @ alpha
 
-    if method == "matrix_free":
+    if method == "matrix_free_cg":
 
         def train_path_values(theta):
             alpha, p_0 = theta
@@ -215,14 +224,14 @@ def asset_pricing_kernel_nlls(
     # pinning the inner CG budget where the unpreconditioned budget grows
     # with refinement.
     dual_preconditioner = None
-    if method != "dense":
+    if method != "dense_cholesky":
         dual_preconditioner = sherman_morrison_preconditioner(
             alpha_metric.solve, jnp.ones(n_train), r**2 / eps
         )
 
     solver = UnderdeterminedLevenbergMarquardt(
         residual_fn,
-        linear_solver="cholesky" if method == "dense" else "cg",
+        linear_solver="cholesky" if method == "dense_cholesky" else "cg",
         iterative_maxiter=lm_set.iterative_maxiter,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,

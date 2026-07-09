@@ -124,9 +124,16 @@ def asset_pricing_kernel_nlls(
     n_train = len(train_data)
 
     increasing_grid = bool(jnp.all(jnp.diff(train_data) > 0))
+    # matern32's O(n) metric solve is a sequential scan (no associative form
+    # in tinygp), so auto only picks it on CPU; matern12's metric is fully
+    # parallel and profits from any backend.
     matrix_free_ok = increasing_grid and (
         kernel == "matern12"
-        or (kernel == "matern32" and n_train <= MATERN32_MATRIX_FREE_MAX_POINTS)
+        or (
+            kernel == "matern32"
+            and n_train <= MATERN32_MATRIX_FREE_MAX_POINTS
+            and jax.default_backend() == "cpu"
+        )
     )
     method = lm_set.method
     if method == "auto":

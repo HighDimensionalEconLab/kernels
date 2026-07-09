@@ -62,30 +62,20 @@ class NLLSGramSettings:
     residual_atol: float = 1e-11  # unscaled residual norm; bounds max|residual|
     p0_metric_weight: float = 1e-6  # m_0: PD-completion of the semi-norm a'Ka
     p0_init: float = 0.0
-    # "cholesky" or "cg"; the metric provides the solve/norm callbacks both
-    # need. Unpreconditioned CG stalls at scale: metric.solve puts K^{-1}
-    # inside the dual operator (cond ~ n^2), so the inner budget must grow
-    # with grid refinement. With an "_sm" preconditioner the budget is flat in
-    # n, and cg overtakes the dense path beyond n ~ 1000 with tridiagonal_sm
-    # (matrix_free extends it to O(n)); cholesky_sm gains little because its
-    # per-iteration cho_solve is O(n^2). Dense cholesky remains the right
-    # default at small n.
-    linear_solver: str = "cholesky"
-    iterative_maxiter: int = 8  # CG inner iterations per LM step; ~20 with a
-    # preconditioner reaches the exact Gauss-Newton step in 2 LM steps
-    # "none" | "cholesky_sm" | "tridiagonal_sm": dual preconditioner
-    # P = K + (r^2/m_0) 11' for linear_solver="cg", applied as a K-solve plus
-    # a Sherman-Morrison rank-1 correction. "cholesky_sm" reuses the dense
-    # metric factor; "tridiagonal_sm" also switches the metric itself to the
-    # exact O(n) Matern-1/2 tridiagonal precision (no dense factorization) and
-    # requires a strictly increasing grid. With linear_solver="cholesky" the
-    # preconditioner part is inert and only the metric choice applies.
-    preconditioner: str = "none"
-    # Replace the dense K/K_tilde train matrices with O(n) Rybicki-Press
-    # matvecs, making the whole solve O(n) time and memory (n = 100k trains in
-    # ~75ms). Requires nu = 0.5, linear_solver="cg", and
-    # preconditioner="tridiagonal_sm".
-    matrix_free: bool = False
+    # "dense": factor the dual system directly -- the right choice at small n
+    # and the only one for every kernel/grid combination.
+    # "preconditioned_cg": CG on the dual system with the Sherman-Morrison
+    # rank-1 preconditioner P = K + (r^2/m_0) 11' over the dense metric factor
+    # -- the inner budget stays flat in n (unpreconditioned CG needs a budget
+    # growing like n because metric.solve puts K^{-1} in the dual operator,
+    # cond ~ n^2); works for every kernel.
+    # "matrix_free": O(n) time and memory end to end -- Rybicki-Press matvec
+    # residual plus the exact tridiagonal Matern-1/2 metric/preconditioner
+    # (n = 100k solves in ~50-70ms); requires nu = 0.5 and a strictly
+    # increasing grid.
+    method: str = "dense"
+    iterative_maxiter: int = 20  # CG inner budget per LM step (cg methods);
+    # ~20 with the preconditioner reaches the exact Gauss-Newton step in 2 steps
 
 
 def asset_pricing_kernel_nlls(
@@ -105,27 +95,19 @@ def asset_pricing_kernel_nlls(
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points)
 
     n_train = len(train_data)
-    if lm_set.preconditioner not in ("none", "cholesky_sm", "tridiagonal_sm"):
-        raise ValueError(f"unknown preconditioner: {lm_set.preconditioner!r}")
-    if lm_set.preconditioner == "tridiagonal_sm":
+    if lm_set.method not in ("dense", "preconditioned_cg", "matrix_free"):
+        raise ValueError(f"unknown method: {lm_set.method!r}")
+    if lm_set.method == "matrix_free":
         if nu != 0.5:
-            raise ValueError('preconditioner="tridiagonal_sm" requires nu = 0.5')
+            raise ValueError('method="matrix_free" requires nu = 0.5')
         # The AR(1) precision and the Rybicki-Press matvecs are only the
-        # Matern-1/2 kernel on a sorted grid; the dense path has no such
+        # Matern-1/2 kernel on a sorted grid; the dense paths have no such
         # restriction, so guard here rather than silently solving the wrong
         # operator.
         if not bool(jnp.all(jnp.diff(train_data) > 0)):
             raise ValueError(
-                'preconditioner="tridiagonal_sm" requires a strictly '
-                "increasing train grid"
+                'method="matrix_free" requires a strictly increasing train grid'
             )
-    if lm_set.matrix_free and (
-        lm_set.linear_solver != "cg" or lm_set.preconditioner != "tridiagonal_sm"
-    ):
-        raise ValueError(
-            'matrix_free requires linear_solver="cg" and '
-            'preconditioner="tridiagonal_sm"'
-        )
 
     def dividends(t):
         return (x_0 + c / g) * jnp.exp(g * t) - c / g
@@ -141,7 +123,7 @@ def asset_pricing_kernel_nlls(
         dp_dt = K_eval @ alpha
         return p, dp_dt
 
-    if lm_set.matrix_free:
+    if lm_set.method == "matrix_free":
 
         def train_path_values(theta):
             alpha, p_0 = theta
@@ -167,7 +149,7 @@ def asset_pricing_kernel_nlls(
     # up to a selection shift in p_0 that scales linearly with m_0 (~1e-7 at
     # the default m_0 = 1e-6).
     m_0 = lm_set.p0_metric_weight
-    if lm_set.preconditioner == "tridiagonal_sm":
+    if lm_set.method == "matrix_free":
         # Matern-1/2 is Markov, so K^{-1} is exactly tridiagonal with
         # closed-form OU/AR(1) precision entries (nonuniform-grid-ready):
         # nothing dense is ever factored on this path.
@@ -188,12 +170,12 @@ def asset_pricing_kernel_nlls(
     def metric_norm(x):
         return jnp.sqrt(alpha_norm_sq(x[:n_train]) + m_0 * jnp.sum(x[n_train:] ** 2))
 
-    # Dual preconditioner P = K + (r^2/m_0) 11' for the CG path: the leading
-    # term of J M^{-1} J' = B K^{-1} B' + (r^2/m_0) 11' plus the exact rank-1
-    # spike, applied as a K-solve with a Sherman-Morrison correction. It is
-    # spectrally equivalent to the dual operator uniformly in n, pinning the
-    # inner iteration count; only used when linear_solver="cg".
-    if lm_set.preconditioner == "none" or lm_set.linear_solver != "cg":
+    # Dual preconditioner P = K + (r^2/m_0) 11' for the cg methods: the
+    # leading term of J M^{-1} J' = B K^{-1} B' + (r^2/m_0) 11' plus the exact
+    # rank-1 spike, applied as a K-solve with a Sherman-Morrison correction.
+    # It is spectrally equivalent to the dual operator uniformly in n, pinning
+    # the inner iteration count.
+    if lm_set.method == "dense":
         dual_preconditioner = None
     else:
         ones = jnp.ones(n_train)
@@ -206,7 +188,7 @@ def asset_pricing_kernel_nlls(
 
     solver = UnderdeterminedLevenbergMarquardt(
         residual_fn,
-        linear_solver=lm_set.linear_solver,
+        linear_solver="cholesky" if lm_set.method == "dense" else "cg",
         iterative_maxiter=lm_set.iterative_maxiter,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,

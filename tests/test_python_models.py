@@ -124,21 +124,11 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertLess(reference["p_rel_error_mean"], 5e-3)
         self.assertTrue((extras["test_df"]["p"] > 0.0).all())
 
-        # The structured CG variants must recover the same min-norm selection
+        # The structured CG methods must recover the same min-norm selection
         # as the dense default, not just interpolate.
-        variants = [
-            ("cholesky_sm", False),
-            ("tridiagonal_sm", False),
-            ("tridiagonal_sm", True),
-        ]
-        for preconditioner, matrix_free in variants:
-            with self.subTest(preconditioner=preconditioner, matrix_free=matrix_free):
-                lm_set = NLLSGramSettings(
-                    linear_solver="cg",
-                    iterative_maxiter=20,
-                    preconditioner=preconditioner,
-                    matrix_free=matrix_free,
-                )
+        for method in ["preconditioned_cg", "matrix_free"]:
+            with self.subTest(method=method):
+                lm_set = NLLSGramSettings(method=method)
                 results, extras = asset_pricing_kernel_nlls(lm_set=lm_set)
 
                 self.assertTrue(

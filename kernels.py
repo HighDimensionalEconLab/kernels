@@ -125,10 +125,31 @@ def integrated_kernel_matrices(t_i, t_j, nu, sigma, ell):
 #   upper_i     = e_i (upper_{i+1} + v_{i+1})  upper_i = sum_{j>i} e^{-(t_j-t_i)/ell} v_j
 # and the remaining integrated-kernel terms are prefix/suffix sums. Ties (the
 # diagonal) fall in the lower/prefix branch, matching integrated_matern_kernel_0p5.
-def matern_0p5_exp_recurrences(t, ell, v):
+def matern_0p5_exp_recurrences(t, ell, v, parallel=None):
+    # parallel=None chooses by backend: off-CPU a sequential scan pays a
+    # kernel launch per step (~1000x slower at n=1e5 on GPU), so use the
+    # associative O(log n)-depth form; on CPU the tight sequential loop wins.
+    # The affine recurrence s -> e_i (s + v_i) composes associatively:
+    # applying (a1, b1) then (a2, b2) is (a2 a1, a2 b1 + b2).
+    if parallel is None:
+        parallel = jax.default_backend() != "cpu"
     e = jnp.exp(-jnp.diff(t) / ell)
-    zero = jnp.zeros((), dtype=v.dtype)
     edge = jnp.zeros((1,), dtype=v.dtype)
+
+    if parallel:
+
+        def combine(earlier, later):
+            a_1, b_1 = earlier
+            a_2, b_2 = later
+            return a_2 * a_1, a_2 * b_1 + b_2
+
+        _, lower_rest = jax.lax.associative_scan(combine, (e, e * v[:-1]))
+        lower = jnp.concatenate([edge, lower_rest])
+        _, upper_head = jax.lax.associative_scan(combine, (e, e * v[1:]), reverse=True)
+        upper = jnp.concatenate([upper_head, edge])
+        return lower, upper
+
+    zero = jnp.zeros((), dtype=v.dtype)
 
     def step(carry, inputs):
         e_i, v_i = inputs
@@ -142,8 +163,8 @@ def matern_0p5_exp_recurrences(t, ell, v):
     return lower, upper
 
 
-def matern_kernel_0p5_matvec(t, v, sigma, ell):
-    lower, upper = matern_0p5_exp_recurrences(t, ell, v)
+def matern_kernel_0p5_matvec(t, v, sigma, ell, parallel=None):
+    lower, upper = matern_0p5_exp_recurrences(t, ell, v, parallel=parallel)
     return sigma**2 * (lower + v + upper)
 
 
@@ -160,16 +181,16 @@ def integrated_matern_0p5_terms(t, ell, v, lower, upper):
     return ell * (prefix - (lower + v) + upper - suffix)
 
 
-def integrated_matern_kernel_0p5_matvec(t, v, sigma, ell):
-    lower, upper = matern_0p5_exp_recurrences(t, ell, v)
+def integrated_matern_kernel_0p5_matvec(t, v, sigma, ell, parallel=None):
+    lower, upper = matern_0p5_exp_recurrences(t, ell, v, parallel=parallel)
     return sigma**2 * integrated_matern_0p5_terms(t, ell, v, lower, upper)
 
 
 # Both matvecs from one recurrence pass: the sequential scans dominate the
 # matrix-free residual, and each JVP/VJP inside the solver's CG loop replays
 # them, so sharing halves the hot-path work.
-def matern_kernel_0p5_matvec_pair(t, v, sigma, ell):
-    lower, upper = matern_0p5_exp_recurrences(t, ell, v)
+def matern_kernel_0p5_matvec_pair(t, v, sigma, ell, parallel=None):
+    lower, upper = matern_0p5_exp_recurrences(t, ell, v, parallel=parallel)
     k_v = sigma**2 * (lower + v + upper)
     k_tilde_v = sigma**2 * integrated_matern_0p5_terms(t, ell, v, lower, upper)
     return k_v, k_tilde_v

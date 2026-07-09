@@ -2,6 +2,7 @@ import math
 import unittest
 
 import jax.numpy as jnp
+import numpy as np
 
 from asset_pricing_kernel import asset_pricing_kernel
 from asset_pricing_kernel_nlls import NLLSGramSettings, asset_pricing_kernel_nlls
@@ -9,6 +10,7 @@ from human_capital_kernel import human_capital_initial_conditions, human_capital
 from kernels import (
     integrated_gaussian_kernel,
     integrated_gaussian_kernel_quad,
+    matern_kernel_0p5_matvec_pair,
 )
 from neoclassical_growth_concave_convex_kernel import (
     neoclassical_growth_concave_convex_kernel,
@@ -103,6 +105,16 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertLess(results["max_train_residual"], 1e-10)
         self.assertLess(results["p_rel_error_mean"], 5e-3)
         self.assertTrue((extras["test_df"]["p"] > 0.0).all())
+
+    def test_matern_matvec_parallel_matches_sequential(self):
+        rng = np.random.default_rng(7)
+        t = jnp.asarray(np.sort(rng.uniform(0.0, 50.0, 1001)))
+        v = jnp.asarray(rng.standard_normal(1001))
+        k_seq, kt_seq = matern_kernel_0p5_matvec_pair(t, v, 1.3, 10.0, parallel=False)
+        k_par, kt_par = matern_kernel_0p5_matvec_pair(t, v, 1.3, 10.0, parallel=True)
+
+        self.assertLess(float(jnp.max(jnp.abs(k_seq - k_par))), 1e-11)
+        self.assertLess(float(jnp.max(jnp.abs(kt_seq - kt_par))), 1e-11)
 
     def test_asset_pricing_nlls_smoke(self):
         reference, extras = asset_pricing_kernel_nlls()

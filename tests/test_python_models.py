@@ -4,6 +4,7 @@ import unittest
 import jax.numpy as jnp
 
 from asset_pricing_kernel import asset_pricing_kernel
+from asset_pricing_kernel_nlls import NLLSGramSettings, asset_pricing_kernel_nlls
 from human_capital_kernel import human_capital_initial_conditions, human_capital_kernel
 from kernels import (
     integrated_gaussian_kernel,
@@ -102,6 +103,42 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertLess(results["max_train_residual"], 1e-10)
         self.assertLess(results["p_rel_error_mean"], 5e-3)
         self.assertTrue((extras["test_df"]["p"] > 0.0).all())
+
+    def test_asset_pricing_nlls_smoke(self):
+        reference, extras = asset_pricing_kernel_nlls()
+
+        self.assertTrue(reference["solution_accepted"], reference["rejection_reason"])
+        self.assertLess(reference["max_train_residual"], 1e-10)
+        self.assertLess(reference["p_rel_error_mean"], 5e-3)
+        self.assertTrue((extras["test_df"]["p"] > 0.0).all())
+
+        # The structured CG variants must recover the same min-norm selection
+        # as the dense default, not just interpolate.
+        variants = [
+            ("cholesky_sm", False),
+            ("tridiagonal_sm", False),
+            ("tridiagonal_sm", True),
+        ]
+        for preconditioner, matrix_free in variants:
+            with self.subTest(preconditioner=preconditioner, matrix_free=matrix_free):
+                lm_set = NLLSGramSettings(
+                    linear_solver="cg",
+                    iterative_maxiter=20,
+                    preconditioner=preconditioner,
+                    matrix_free=matrix_free,
+                )
+                results, extras = asset_pricing_kernel_nlls(lm_set=lm_set)
+
+                self.assertTrue(
+                    results["solution_accepted"], results["rejection_reason"]
+                )
+                self.assertLess(results["max_train_residual"], 1e-10)
+                self.assertLess(results["p_rel_error_mean"], 5e-3)
+                self.assertLess(abs(results["p_0"] - reference["p_0"]), 1e-9)
+                self.assertLess(
+                    abs(results["rkhs_norm_p"] - reference["rkhs_norm_p"]), 1e-9
+                )
+                self.assertTrue((extras["test_df"]["p"] > 0.0).all())
 
     def test_optimal_advertising_smoke(self):
         results, extras = optimal_advertising_kernel()

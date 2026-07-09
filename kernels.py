@@ -115,3 +115,76 @@ def integrated_kernel_matrices(t_i, t_j, nu, sigma, ell):
         in_axes=(0, None, None, None),
     )(t_i, t_j, sigma, ell)
     return K, K_tilde
+
+
+# Matrix-free O(n) matvecs for the Matern-1/2 kernel and its integrated kernel
+# on a sorted strictly increasing grid t. The exponential terms telescope
+# through the classic Rybicki-Press forward/backward recurrences with
+# e_i = exp(-(t_{i+1} - t_i)/ell):
+#   lower_{i+1} = e_i (lower_i + v_i)          lower_i = sum_{j<i} e^{-(t_i-t_j)/ell} v_j
+#   upper_i     = e_i (upper_{i+1} + v_{i+1})  upper_i = sum_{j>i} e^{-(t_j-t_i)/ell} v_j
+# and the remaining integrated-kernel terms are prefix/suffix sums. Ties (the
+# diagonal) fall in the lower/prefix branch, matching integrated_matern_kernel_0p5.
+def matern_0p5_exp_recurrences(t, ell, v):
+    e = jnp.exp(-jnp.diff(t) / ell)
+    zero = jnp.zeros((), dtype=v.dtype)
+    edge = jnp.zeros((1,), dtype=v.dtype)
+
+    def step(carry, inputs):
+        e_i, v_i = inputs
+        out = e_i * (carry + v_i)
+        return out, out
+
+    _, lower_rest = jax.lax.scan(step, zero, (e, v[:-1]))
+    lower = jnp.concatenate([edge, lower_rest])
+    _, upper_head = jax.lax.scan(step, zero, (e, v[1:]), reverse=True)
+    upper = jnp.concatenate([upper_head, edge])
+    return lower, upper
+
+
+def matern_kernel_0p5_matvec(t, v, sigma, ell):
+    lower, upper = matern_0p5_exp_recurrences(t, ell, v)
+    return sigma**2 * (lower + v + upper)
+
+
+def integrated_matern_0p5_terms(t, ell, v, lower, upper):
+    # Closed form split by t_j <= t_i vs t_j > t_i (see
+    # integrated_matern_kernel_0p5): (K_tilde v)_i = ell [A - B + C - D]
+    # with A the inclusive cumsum of (2 - e^{-t_j/ell}) v_j, B the inclusive
+    # forward recurrence, C the strict backward recurrence, and D the strict
+    # suffix sum of e^{-t_j/ell} v_j.
+    exp_neg = jnp.exp(-t / ell)
+    prefix = jnp.cumsum((2.0 - exp_neg) * v)
+    weighted = exp_neg * v
+    suffix = jnp.cumsum(weighted[::-1])[::-1] - weighted
+    return ell * (prefix - (lower + v) + upper - suffix)
+
+
+def integrated_matern_kernel_0p5_matvec(t, v, sigma, ell):
+    lower, upper = matern_0p5_exp_recurrences(t, ell, v)
+    return sigma**2 * integrated_matern_0p5_terms(t, ell, v, lower, upper)
+
+
+# Both matvecs from one recurrence pass: the sequential scans dominate the
+# matrix-free residual, and each JVP/VJP inside the solver's CG loop replays
+# them, so sharing halves the hot-path work.
+def matern_kernel_0p5_matvec_pair(t, v, sigma, ell):
+    lower, upper = matern_0p5_exp_recurrences(t, ell, v)
+    k_v = sigma**2 * (lower + v + upper)
+    k_tilde_v = sigma**2 * integrated_matern_0p5_terms(t, ell, v, lower, upper)
+    return k_v, k_tilde_v
+
+
+# Closed-form tridiagonal precision of the Matern-1/2 Gram on a sorted strictly
+# increasing grid (the OU/AR(1) Markov property): with rho_i = e^{-dt_i/ell},
+# T = K^{-1} has diag (1/sigma^2)[1_{i=1} + 1_{i>1}/(1-rho_{i-1}^2)
+# + 1_{i<n} rho_i^2/(1-rho_i^2)] and off-diagonal -(1/sigma^2) rho_i/(1-rho_i^2).
+def matern_0p5_tridiagonal_precision(t, sigma, ell):
+    rho = jnp.exp(-jnp.diff(t) / ell)
+    one_minus_rho_sq = 1.0 - rho**2
+    diag = (
+        jnp.concatenate([jnp.ones(1), 1.0 / one_minus_rho_sq])
+        + jnp.concatenate([rho**2 / one_minus_rho_sq, jnp.zeros(1)])
+    ) / sigma**2
+    off_diag = -(rho / one_minus_rho_sq) / sigma**2
+    return diag, off_diag

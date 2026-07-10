@@ -228,8 +228,9 @@ def consumption_positivity(policy, states, p):
 
 # The training rollout is tinydiffeq's bounded-scan adaptive Tsit5; the
 # policy's own accepted states are the collocation points under the
-# free-stepping default (rejections and the post-horizon freeze emit
-# duplicate rows, harmless to the least-squares residual).
+# free-stepping default (tinydiffeq >= 0.2 drops rejected attempts from the
+# buffer and pads the unused tail of the attempt budget with the final
+# state -- duplicate endpoint rows, harmless to the least-squares residual).
 def rollout_field(policy, p):
     return lambda k: drift(policy, k, p)
 
@@ -245,10 +246,12 @@ def rollout(policy, T, budget, p, data_set):
         0.0,
         T,
         p.k_0,
-        dt0=data_set.dt,
-        controller=IController(rtol=data_set.rtol, atol=data_set.atol),
+        dt_0=data_set.dt,
+        # dt_min pins the tinydiffeq 0.1 controller floor (0.2's automatic
+        # floor is dtype-relative and far smaller).
+        controller=IController(rtol=data_set.rtol, atol=data_set.atol, dt_min=1e-10),
         max_steps=budget,
-        saveat=SaveAt(steps=True),
+        save_at=SaveAt(steps=True),
         project=positivity,
     )
 
@@ -453,9 +456,9 @@ def neoclassical_growth_nn_recursive_i(
         0.0,
         n_test_steps * data_set.dt,
         p.k_0,
-        dt0=data_set.dt,
+        dt_0=data_set.dt,
         max_steps=n_test_steps,
-        saveat=SaveAt(steps=True),
+        save_at=SaveAt(steps=True),
         project=positivity,
     ).xs
     test_i = jax.vmap(policy)(test_states)
@@ -532,9 +535,9 @@ def neoclassical_growth_nn_recursive_i(
             0.0,
             n_settle_steps * data_set.dt,
             p.k_0,
-            dt0=data_set.dt,
+            dt_0=data_set.dt,
             max_steps=n_settle_steps,
-            saveat=SaveAt(steps=True),
+            save_at=SaveAt(steps=True),
             project=positivity,
         ).xs
         k_settled = float(settled[-1])

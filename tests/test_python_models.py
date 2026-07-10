@@ -454,6 +454,35 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertEqual(results["residuals_method_resolved"], "dense")
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
 
+    def test_nlls_dual_solve_dtype_float64_is_noop_under_x64(self):
+        # dual_solve_dtype="float64" promotes only the dense dual solve; this
+        # repo runs float64 globally, so it must be an exact value no-op. It
+        # matters only for a float32/GPU move (see
+        # experiments/dual_solve_dtype_float32.py). Guards: an unknown value
+        # is rejected at intake, and cg + the flag is rejected upstream at
+        # construction (it promotes the dense cholesky paths only).
+        base_ap, _ = asset_pricing_kernel_nlls()
+        wide_ap, _ = asset_pricing_kernel_nlls(
+            lm_set=NLLSGramSettings(dual_solve_dtype="float64")
+        )
+        self.assertEqual(wide_ap["p_0"], base_ap["p_0"])
+        self.assertEqual(wide_ap["rkhs_norm_p"], base_ap["rkhs_norm_p"])
+        self.assertEqual(wide_ap["linear_solver_resolved"], "cholesky")
+
+        base_gr, _ = neoclassical_growth_kernel_nlls()
+        wide_gr, _ = neoclassical_growth_kernel_nlls(
+            lm_set=GrowthNLLSSettings(dual_solve_dtype="float64")
+        )
+        self.assertEqual(wide_gr["c_0"], base_gr["c_0"])
+        self.assertEqual(wide_gr["mu_0"], base_gr["mu_0"])
+
+        with self.assertRaises(ValueError):
+            asset_pricing_kernel_nlls(lm_set=NLLSGramSettings(dual_solve_dtype="f64"))
+        with self.assertRaises(ValueError):
+            asset_pricing_kernel_nlls(
+                lm_set=NLLSGramSettings(linear_solver="cg", dual_solve_dtype="float64")
+            )
+
     def test_optimal_advertising_smoke(self):
         results, extras = optimal_advertising_kernel()
 

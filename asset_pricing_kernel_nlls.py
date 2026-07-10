@@ -236,10 +236,17 @@ def asset_pricing_kernel_nlls(
     # pinning the inner CG budget where the unpreconditioned budget grows
     # with refinement.
     dual_preconditioner = None
+    implicit_preconditioner = None
     if linear_solver == "cg":
         dual_preconditioner = sherman_morrison_preconditioner(
             alpha_metric.solve, jnp.ones(n_train), r**2 / eps
         )
+
+        # nlls-gram >= 1.5 requires the undamped implicit preconditioner
+        # whenever the forward solver is cg; the Sherman-Morrison solve is
+        # reused at damping 0.
+        def implicit_preconditioner(v):
+            return dual_preconditioner(v, jnp.asarray(0.0, v.dtype))
 
     solver = UnderdeterminedLevenbergMarquardt(
         residual_fn,
@@ -249,6 +256,7 @@ def asset_pricing_kernel_nlls(
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         dual_preconditioner=dual_preconditioner,
+        implicit_preconditioner=implicit_preconditioner,
         metric=metric,
     )
     theta_0 = (jnp.zeros(n_train), jnp.asarray(lm_set.p0_init))

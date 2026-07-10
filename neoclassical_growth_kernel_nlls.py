@@ -286,10 +286,14 @@ def neoclassical_growth_kernel_nlls(
     # (K_tilde K^{-1} K_tilde'-like), so the match is partial -- the budget
     # above reflects that.
     dual_preconditioner = None
+    implicit_preconditioner = None
     if linear_solver == "cg":
         K_solve = alpha_metric.solve
 
-        def dual_preconditioner(v, damping):
+        # Damping-free by construction, so the same blockwise solve serves
+        # both cg hooks (nlls-gram >= 1.5 requires the undamped implicit
+        # preconditioner whenever the forward solver is cg).
+        def implicit_preconditioner(v):
             return jnp.concatenate(
                 [
                     K_solve(v[:n_train]),
@@ -297,6 +301,9 @@ def neoclassical_growth_kernel_nlls(
                     K_solve(v[2 * n_train :]),
                 ]
             )
+
+        def dual_preconditioner(v, damping):
+            return implicit_preconditioner(v)
 
     solver = UnderdeterminedLevenbergMarquardt(
         residual_fn,
@@ -306,6 +313,7 @@ def neoclassical_growth_kernel_nlls(
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         dual_preconditioner=dual_preconditioner,
+        implicit_preconditioner=implicit_preconditioner,
         metric=metric,
     )
 

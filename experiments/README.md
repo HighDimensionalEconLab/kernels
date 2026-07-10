@@ -107,5 +107,17 @@ Findings:
 Verdict: for these NN duals (m <= ~2000, fast solves) dense cholesky is
 simply the right solver — consistent with the prior that the NN models
 don't benefit from the new solver machinery in practice. The Nystrom+cg
-path would only become interesting at m >> 10^4, where forming and
-factoring the dense dual is prohibitive.
+path only becomes interesting once forming and factoring the dense dual is
+prohibitive — confirmed below.
+
+**Big-net follow-up** (single test; `run()` takes width/depth): a 128x4 net
+(p = 50050) on n = 10001 points (m = 20003, overparameterized again) under
+cg + nystrom (r = 256, 100 CG iters) reaches loss 1.2e-13 with k_err
+7.6e-6, c_err 1.2e-6, and a passing TVC in 100 LM steps — 346s total,
+~3.5s per step. It did not hit the 1e-15 certification bar within that
+step budget (the loss was still descending), but the quality already beats
+the small net's documented 1e-12-loss tier. Dense cholesky at this size
+would form a 3.2 GB dual from a 20003 x 50050 Jacobian at ~2e13 flops per
+LM step — hours per solve — so m ~ 2e4 is past the crossover: there the
+matrix-free Nystrom-preconditioned dual is the only practical option, and
+it delivers near-certification accuracy in minutes.

@@ -39,7 +39,7 @@ POINT_COUNTS = (41, 251, 1001)
 CG_MAXITER = 50
 
 
-def run(n_points, solver_name, rank=None):
+def run(n_points, solver_name, rank=None, width=32, depth=3):
     dtype = jnp.float64
     p = StructuralParameters.create(
         dtype,
@@ -59,7 +59,9 @@ def run(n_points, solver_name, rank=None):
     # The model's warm-start construction (scales from the initial condition).
     c_flow_guess = max(1.0 ** (1 / 3) - 0.1 * 1.0, 1e-8)
     default_head_level = jax.nn.softplus(0.0)
-    nn_set = GrowthPolicySettings(input_scale=max(float(data_set.train_T), 1.0))
+    nn_set = GrowthPolicySettings(
+        width=width, depth=depth, input_scale=max(float(data_set.train_T), 1.0)
+    )
     k_scale = max(1.0, float(1.0 / default_head_level))
     c_scale = max(1.0, float(c_flow_guess / default_head_level))
     model = GrowthPolicyNN(
@@ -134,8 +136,9 @@ def run(n_points, solver_name, rank=None):
     certified = train_loss < TRAIN_LOSS_THRESHOLD and log_tvc < 0.0
 
     label = solver_name if rank is None else f"{solver_name}+nystrom(r={rank})"
+    label = f"{label} w{width}d{depth}"
     print(
-        f"n={n_points:>5} m={m:>5} p={flat_0.size:>5} {label:20} "
+        f"n={n_points:>5} m={m:>5} p={flat_0.size:>5} {label:26} "
         f"certified={str(certified):5} steps={int(result.steps):>4} "
         f"loss={train_loss:.2e} k_err={k_rel:.2e} c_err={c_rel:.2e} "
         f"log_tvc={log_tvc:6.1f} compile={compile_time:5.1f}s "

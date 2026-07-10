@@ -38,12 +38,12 @@ STATUS_TO_REASON = {
     LMStatus.NONFINITE: "nonfinite",
     LMStatus.MAX_STEPS: "max_steps",
 }
-# Auto boundary as in the asset-pricing model: dense wins below the
-# matrix_free threshold. Unlike asset pricing, auto only picks matrix_free
+# linear_solver="auto" boundary as in the asset-pricing model: the dense
+# solvers win below the threshold. Unlike asset pricing, auto only picks cg
 # for matern12 here: the growth dual operator's shadow-price block resists
 # the blockwise K preconditioner, and the matern32 iterative window that
 # worked there fails the growth gates at n >= 501 (measured). Explicit
-# matern32 matrix_free remains allowed and is policed by the gates.
+# matern32 cg/matrix_free remains allowed and is policed by the gates.
 MATRIX_FREE_MIN_POINTS = 256
 
 
@@ -79,24 +79,30 @@ class NLLSGramSettings:
     # acceptance gates certify the stall).
     max_steps: int = 50
     residual_atol: float = 1e-9  # on the 1/sqrt(3n)-scaled residual norm
-    # The method name encodes two independent choices,
-    # <residual representation>_<inner linear solver>: dense residual
-    # matrices with a directly factored dual, or O(n) structured scan
-    # residuals with preconditioned CG on the dual (see the asset-pricing
-    # model for the full taxonomy; metric applications are exact under
-    # both). auto picks matrix_free_cg only for matern12 on duplicate-free
-    # grids at scale (see the module comment on the growth dual operator);
-    # dense_cholesky is the universal fallback.
-    method: str = "auto"
-    iterative_maxiter: int = 100  # CG inner budget per LM step (matrix_free)
+    # The inner linear solver for the LM step: "cholesky" forms and factors
+    # the dual Gram (fastest dense), "qr" factors the whitened Jacobian and
+    # never forms the dual (numerically safest dense), "cg" is the iterative
+    # matrix-free dual solve with the blockwise preconditioner below (see the
+    # asset-pricing model for the full taxonomy). "auto" picks cg only for
+    # matern12 on duplicate-free grids at scale (see the module comment on
+    # the growth dual operator); cholesky is the universal fallback.
+    linear_solver: str = "auto"
+    # The residual representation: "dense" materialized kernel matrices, or
+    # "matrix_free" O(n) structured scan matvecs plus the O(n) state-space
+    # metric (matern12 or matern32 on a duplicate-free grid only). "auto" is
+    # matrix_free iff the resolved solver is cg and the grid is eligible,
+    # dense otherwise.
+    residuals_method: str = "auto"
+    iterative_maxiter: int = 100  # CG inner budget per LM step (cg only)
     # The single shift of the unified metric M = blockdiag(K, K, K, 0) +
     # eps I: every kernel block is factored as K + eps I and the free
     # (c_0, mu_0) carry weight eps, so ||M^{-1}|| = 1/eps uniformly in n and
     # the min-M-norm interpolant is O(eps) from the pure RKHS-seminorm
-    # solution with free initial values. Selection-side only; every method
-    # uses the same eps so their selections agree. The default balances the
-    # ends of the measured working range: larger shifts visibly bias the
-    # near-singular smooth Grams (rbf), while below ~1e-8 the
+    # solution with free initial values. Selection-side only; every
+    # solver/representation combination uses the same eps so their selections
+    # agree. The default balances the ends of the measured working range:
+    # larger shifts visibly bias the near-singular smooth Grams (rbf), while
+    # below ~1e-8 the
     # (1/eps)-weighted dual spike outruns the inner CG budget. Tuning:
     # https://highdimensionaleconlab.github.io/nlls_gram/tuning_guide/#the-metric
     metric_eps: float = 1e-7
@@ -128,20 +134,26 @@ def neoclassical_growth_kernel_nlls(
     # False only for duplicate points (the grid is sorted above).
     increasing_grid = bool(jnp.all(jnp.diff(train_data) > 0))
     matrix_free_ok = increasing_grid and kernel == "matern12"
-    method = lm_set.method
-    if method == "auto":
-        if matrix_free_ok and n_train >= MATRIX_FREE_MIN_POINTS:
-            method = "matrix_free_cg"
-        else:
-            method = "dense_cholesky"
-    elif method not in ("dense_cholesky", "matrix_free_cg"):
-        raise ValueError(f"unknown method: {lm_set.method!r}")
-    if method == "matrix_free_cg" and not (
+    linear_solver = lm_set.linear_solver
+    if linear_solver == "auto":
+        linear_solver = (
+            "cg" if matrix_free_ok and n_train >= MATRIX_FREE_MIN_POINTS else "cholesky"
+        )
+    elif linear_solver not in ("cholesky", "qr", "cg"):
+        raise ValueError(f"unknown linear_solver: {lm_set.linear_solver!r}")
+    residuals_method = lm_set.residuals_method
+    if residuals_method == "auto":
+        residuals_method = (
+            "matrix_free" if linear_solver == "cg" and matrix_free_ok else "dense"
+        )
+    elif residuals_method not in ("dense", "matrix_free"):
+        raise ValueError(f"unknown residuals_method: {lm_set.residuals_method!r}")
+    if residuals_method == "matrix_free" and not (
         kernel in ("matern12", "matern32") and increasing_grid
     ):
         raise ValueError(
-            'method="matrix_free_cg" requires matern12 or matern32 on a train '
-            'grid without duplicate points; use "dense_cholesky" otherwise'
+            'residuals_method="matrix_free" requires matern12 or matern32 on a '
+            'train grid without duplicate points; use "dense" otherwise'
         )
     eps = lm_set.metric_eps
     if eps <= 0:
@@ -171,7 +183,7 @@ def neoclassical_growth_kernel_nlls(
         dk_dt = K_eval @ alpha_k
         return k, c, mu, dk_dt, dmu_dt
 
-    if method == "matrix_free_cg":
+    if residuals_method == "matrix_free":
 
         def train_path_values(theta):
             alpha_mu, alpha_c, alpha_k, initial = theta
@@ -261,7 +273,7 @@ def neoclassical_growth_kernel_nlls(
     # (K_tilde K^{-1} K_tilde'-like), so the match is partial -- the budget
     # above reflects that.
     dual_preconditioner = None
-    if method != "dense_cholesky":
+    if linear_solver == "cg":
         K_solve = alpha_metric.solve
 
         def dual_preconditioner(v, damping):
@@ -275,7 +287,7 @@ def neoclassical_growth_kernel_nlls(
 
     solver = UnderdeterminedLevenbergMarquardt(
         residual_fn,
-        linear_solver="cholesky" if method == "dense_cholesky" else "cg",
+        linear_solver=linear_solver,
         iterative_maxiter=lm_set.iterative_maxiter,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
@@ -400,7 +412,8 @@ def neoclassical_growth_kernel_nlls(
         "solve_time": elapsed,
         "wall_time": elapsed,
         "solver": "nlls-gram",
-        "method_resolved": method,
+        "linear_solver_resolved": linear_solver,
+        "residuals_method_resolved": residuals_method,
         "metric_eps": eps,
         "train_loss": float(result.info.loss),
         "steps": steps,

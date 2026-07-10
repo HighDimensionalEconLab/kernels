@@ -133,3 +133,57 @@ makes the accepted steps better. Per-chunk losses 1.2e-12 -> 4.0e-14 ->
 principled zero-rebuild version of this (Krylov recycling / deflated CG
 across LM steps) is filed upstream as nlls_gram#15 with a self-contained
 tracking benchmark.
+
+## `dual_solve_dtype_float32.py` — where the 1.7 wide-dual flag matters
+
+A float32 rebuild of the asset-pricing dense collocation solve (matrices
+computed in float64 then cast, so every configuration sees identical
+float32-representable inputs). The eps = 1e-7 unified metric puts the
+dense dual at condition ~1/eps — upstream's validated target for
+`dual_solve_dtype=jnp.float64`. Three configurations against the float64
+truth: plain f32, f32 + wide dual, full f64. Forward accuracy (`p_0`,
+train residual) and the implicit-AD path (`d p_0 / d r` through the
+solve). True IEEE float32 throughout (`JAX_DEFAULT_MATMUL_PRECISION=highest`
+on GPU, so Ampere TF32 does not contaminate the comparison).
+
+CPU (Apple Silicon, n = 41):
+
+| case | rel_err(p_0) | rel_err(d p_0/d r) | solve_s |
+| --- | --- | --- | --- |
+| f32 | 9.8e-8 | 5.3e-4 | 0.0018 |
+| f32+wide | 2.1e-8 | **1.1e-7** | 0.0027 |
+
+GPU (RTX 3090, driver 580, CUDA jax):
+
+| n | case | rel_err(p_0) | max_res | rel_err(grad) | s/step |
+| --- | --- | --- | --- | --- | --- |
+| 41 | f32 | 2.1e-8 | 9.7e-8 | **2.3e-2** | 0.0002 |
+| 41 | f32+wide | 9.8e-8 | 1.3e-7 | 1.1e-7 | 0.0004 |
+| 2001 | f32 | 6.5e-5 | **3.1e-2** | **NaN** | 0.007 |
+| 2001 | f32+wide | 5.7e-8 | 3.9e-7 | 1.4e-7 | 0.082 |
+| 2001 | f64 | 0 | 1.1e-14 | 0 | 0.156 |
+
+Findings:
+
+1. **Forward solves at small n are fine in plain float32; derivatives are
+   not.** On CPU the implicit gradient is wrong in the fourth digit
+   (5.3e-4); on the GPU it is wrong by **2.3%** at n = 41 and **NaN** at
+   n = 2001 (the undamped implicit Gram at condition 1e7 loses its f32
+   Cholesky). The wide dual restores ~1e-7 everywhere.
+2. **At n = 2001 on the GPU, plain float32 fails outright even forward**:
+   the train residual floor is 3.1e-2 — the acceptance gates would reject
+   — vs 3.9e-7 with the wide dual.
+3. **The economics work on consumer GPUs.** Per accepted LM step at
+   n = 2001 the wide dual costs 0.082s vs full float64's 0.156s (~2x
+   cheaper: only the n·m² dual assembly and m x m factorization run wide,
+   on a card with 1/64 native f64 throughput) and 12x plain f32 (which
+   buys a wrong answer). Raw `solve_s` in the script output is not
+   step-normalized: f64 stops at atol in 2 steps while the f32 residual
+   floor keeps both f32 configurations running the full budget — use a
+   dtype-appropriate atol in production.
+
+Verdict: whenever these models move to float32 (GPU especially),
+`dual_solve_dtype="float64"` (now surfaced in both kernel NLLS
+`NLLSGramSettings`) should be considered mandatory: it is the difference
+between rejected/NaN results and float64-grade accuracy, at half the cost
+of solving fully in float64 on consumer hardware.

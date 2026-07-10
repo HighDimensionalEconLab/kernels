@@ -45,6 +45,15 @@ STATUS_TO_REASON = {
 # worked there fails the growth gates at n >= 501 (measured). Explicit
 # matern32 cg/matrix_free remains allowed and is policed by the gates.
 MATRIX_FREE_MIN_POINTS = 256
+# On the dense branch, auto prefers qr over cholesky for the smooth Materns
+# once their nugget-free Grams turn ill-conditioned under refinement: at
+# n = 101 qr converges in 11 steps where cholesky caps out at 50 (matern32,
+# T = 40) and reaches 10-165x lower test error (matern52, n = 101/501);
+# below the boundary the two dense solvers agree to ~1e-13 and cholesky is
+# faster. rbf stays cholesky (mixed evidence: qr is worse at T = 40), and
+# asset pricing keeps cholesky outright (its affine residual shows no
+# difference at any measured n).
+DENSE_QR_MIN_POINTS = 101
 
 
 @dataclass(frozen=True)
@@ -84,8 +93,9 @@ class NLLSGramSettings:
     # never forms the dual (numerically safest dense), "cg" is the iterative
     # matrix-free dual solve with the blockwise preconditioner below (see the
     # asset-pricing model for the full taxonomy). "auto" picks cg only for
-    # matern12 on duplicate-free grids at scale (see the module comment on
-    # the growth dual operator); cholesky is the universal fallback.
+    # matern12 on duplicate-free grids at scale, qr for matern32/matern52 at
+    # n >= DENSE_QR_MIN_POINTS (see the module comments on both boundaries);
+    # cholesky is the universal fallback.
     linear_solver: str = "auto"
     # The residual representation: "dense" materialized kernel matrices, or
     # "matrix_free" O(n) structured scan matvecs plus the O(n) state-space
@@ -136,9 +146,12 @@ def neoclassical_growth_kernel_nlls(
     matrix_free_ok = increasing_grid and kernel == "matern12"
     linear_solver = lm_set.linear_solver
     if linear_solver == "auto":
-        linear_solver = (
-            "cg" if matrix_free_ok and n_train >= MATRIX_FREE_MIN_POINTS else "cholesky"
-        )
+        if matrix_free_ok and n_train >= MATRIX_FREE_MIN_POINTS:
+            linear_solver = "cg"
+        elif kernel in ("matern32", "matern52") and n_train >= DENSE_QR_MIN_POINTS:
+            linear_solver = "qr"
+        else:
+            linear_solver = "cholesky"
     elif linear_solver not in ("cholesky", "qr", "cg"):
         raise ValueError(f"unknown linear_solver: {lm_set.linear_solver!r}")
     residuals_method = lm_set.residuals_method

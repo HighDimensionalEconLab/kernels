@@ -170,12 +170,24 @@ class KernelSmokeTests(unittest.TestCase):
 
     def test_neoclassical_growth_nlls_matern32_auto_stays_dense(self):
         # The matern32 iterative window from asset pricing fails the growth
-        # gates at scale (measured at n >= 501): auto must not pick it.
+        # gates at scale (measured at n >= 501): auto must not pick cg. On
+        # the dense branch it prefers qr for the smooth Materns at
+        # n >= DENSE_QR_MIN_POINTS (the ill-conditioned regime where qr
+        # converges in 11 steps at n = 101 while cholesky caps out at 50).
+        results, _ = neoclassical_growth_kernel_nlls(
+            kernel_set=GrowthNLLSKernelSettings(kernel="matern32"),
+            data_set=GrowthNLLSDataSettings(train_points=101),
+        )
+        self.assertEqual(results["linear_solver_resolved"], "qr")
+        self.assertEqual(results["residuals_method_resolved"], "dense")
+        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+        self.assertLess(results["steps"], 50)
+
         results, _ = neoclassical_growth_kernel_nlls(
             kernel_set=GrowthNLLSKernelSettings(kernel="matern32"),
             data_set=GrowthNLLSDataSettings(train_points=501),
         )
-        self.assertEqual(results["linear_solver_resolved"], "cholesky")
+        self.assertEqual(results["linear_solver_resolved"], "qr")
         self.assertEqual(results["residuals_method_resolved"], "dense")
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
 

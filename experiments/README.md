@@ -121,3 +121,15 @@ would form a 3.2 GB dual from a 20003 x 50050 Jacobian at ~2e13 flops per
 LM step — hours per solve — so m ~ 2e4 is past the crossover: there the
 matrix-free Nystrom-preconditioned dual is the only practical option, and
 it delivers near-certification accuracy in minutes.
+
+**Staleness is the preconditioner's real bottleneck** (`run_refreshed`):
+rebuilding the Nystrom sketch at the current iterate every 25 LM steps
+(chunked warm-restarted solves, ~1-3s per rebuild) strictly dominates the
+frozen sketch on the same 10001-point big-net problem: loss 7.4e-15 vs
+1.2e-13 (16x), k_err 2.6e-6 vs 7.6e-6 (3x), in 283s vs 346s — faster
+despite four extra solver compiles, because the fresher preconditioner
+makes the accepted steps better. Per-chunk losses 1.2e-12 -> 4.0e-14 ->
+1.5e-14 -> 7.4e-15, still descending at the 100-step budget. The
+principled zero-rebuild version of this (Krylov recycling / deflated CG
+across LM steps) is filed upstream as nlls_gram#15 with a self-contained
+tracking benchmark.

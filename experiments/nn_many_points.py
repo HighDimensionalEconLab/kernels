@@ -146,6 +146,112 @@ def run(n_points, solver_name, rank=None, width=32, depth=3):
     )
 
 
+# Staleness fix for the frozen preconditioner: solve in chunks, rebuilding
+# the Nystrom sketch at the current iterate between chunks (each chunk pays
+# a fresh solver construction/compile plus a rank-cost sketch; LM damping
+# restarts at init_damping and re-adapts within a few steps).
+def run_refreshed(n_points, rank=256, width=128, depth=4, chunk=25, total=100):
+    dtype = jnp.float64
+    p = StructuralParameters.create(
+        dtype,
+        a=1 / 3,
+        delta=0.1,
+        rho_hat=0.11,
+        sigma_crra=1.0,
+        k_0=1.0,
+        A=1.0,
+        b_1=1.0,
+        b_2=0.0,
+    )
+    data_set = DataSettings(train_points=n_points)
+    train_data = {"t": make_train_t_grid(data_set, dtype)}
+    c_flow_guess = max(1.0 ** (1 / 3) - 0.1 * 1.0, 1e-8)
+    default_head_level = jax.nn.softplus(0.0)
+    nn_set = GrowthPolicySettings(
+        width=width, depth=depth, input_scale=max(float(data_set.train_T), 1.0)
+    )
+    model = GrowthPolicyNN(
+        nn_set,
+        k_scale=max(1.0, float(1.0 / default_head_level)),
+        c_scale=max(1.0, float(c_flow_guess / default_head_level)),
+        dtype=dtype,
+        rngs=nnx.Rngs(0),
+    )
+    graphdef, theta = nnx.split(model, nnx.Param)
+
+    def residual_fn(theta, data):
+        return training_residual(nnx.merge(graphdef, theta), data, p)
+
+    m = int(residual_fn(theta, train_data).shape[0])
+    lm = NLLSGramSettings()
+    atol = math.sqrt(TRAIN_LOSS_THRESHOLD)
+
+    start = time.perf_counter()
+    steps_done = 0
+    loss = float("inf")
+    while steps_done < total and loss**2 >= TRAIN_LOSS_THRESHOLD:
+        flat, unravel = ravel_pytree(theta)
+        _, jvp = jax.linearize(lambda f: residual_fn(unravel(f), train_data), flat)
+        vjp = jax.linear_transpose(jvp, flat)
+
+        def dual_matvec(V):
+            apply_one = lambda v: jvp(vjp(v)[0])  # noqa: E731
+            if V.ndim == 1:
+                return apply_one(V)
+            return jax.vmap(apply_one, in_axes=1, out_axes=1)(V)
+
+        pre = nystrom_preconditioner(
+            dual_matvec, m, min(rank, m), jax.random.PRNGKey(0)
+        )
+        solver = UnderdeterminedLevenbergMarquardt(
+            residual_fn,
+            linear_solver="cg",
+            iterative_maxiter=CG_MAXITER,
+            init_damping=lm.init_damping,
+            damping_decrease=lm.damping_decrease,
+            damping_increase=lm.damping_increase,
+            geodesic_acceleration=lm.geodesic_acceleration,
+            geodesic_acceptance_ratio=lm.geodesic_acceptance_ratio,
+            dual_preconditioner=pre,
+            implicit_preconditioner=pre,
+        )
+        result = solver.solve(
+            theta, train_data, max_steps=min(chunk, total - steps_done), atol=atol
+        )
+        jax.block_until_ready(result)
+        theta = result.x
+        steps_done += int(result.steps)
+        loss = math.sqrt(float(result.info.loss))
+        print(
+            f"  [refresh] steps={steps_done:>4} loss={float(result.info.loss):.2e} "
+            f"elapsed={time.perf_counter() - start:6.1f}s",
+            flush=True,
+        )
+    train_time = time.perf_counter() - start
+
+    trained = nnx.merge(graphdef, theta)
+    test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
+    values = policy_values(trained, test_t, p)
+    benchmark_grid = jnp.linspace(
+        0.0, data_set.benchmark_T, data_set.benchmark_points, dtype=dtype
+    )
+    k_bar, c_bar = neoclassical_growth_benchmark(
+        1 / 3, 0.1, 0.11, 1.0, 1.0, benchmark_grid
+    )(test_t)
+    k_rel = float(jnp.mean(jnp.abs(values["k"] - k_bar) / k_bar))
+    c_rel = float(jnp.mean(jnp.abs(values["c"] - c_bar) / c_bar))
+    tvc = policy_values(trained, jnp.atleast_1d(jnp.asarray(200.0, dtype)), p)
+    log_tvc = float(tvc["log_tvc"][0])
+    train_loss = loss**2
+    certified = train_loss < TRAIN_LOSS_THRESHOLD and log_tvc < 0.0
+    print(
+        f"n={n_points:>5} m={m:>5} cg+nystrom-refresh(r={rank},k={chunk}) "
+        f"w{width}d{depth} certified={str(certified):5} steps={steps_done:>4} "
+        f"loss={train_loss:.2e} k_err={k_rel:.2e} c_err={c_rel:.2e} "
+        f"log_tvc={log_tvc:6.1f} train={train_time:7.2f}s"
+    )
+
+
 if __name__ == "__main__":
     for n_points in POINT_COUNTS:
         run(n_points, "cholesky")

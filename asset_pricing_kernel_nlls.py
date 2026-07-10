@@ -100,6 +100,14 @@ class NLLSGramSettings:
     # Cholesky factor or O(n) state-space scans, chosen to match).
     residuals_method: str = "auto"
     iterative_maxiter: int = 20  # CG inner budget per LM step (cg only)
+    # nlls-gram >= 1.7: None | "float64". Promotes only the dense dual
+    # (Gram) pipeline to float64 while the model stays in its own dtype. A
+    # value no-op under this repo's global float64 -- the knob to reach for
+    # on a float32/GPU move, where the unified metric's 1/eps spike puts
+    # the dual at condition ~1/eps (the flag's validated target; see
+    # experiments/dual_solve_dtype_float32.py). Dense cholesky paths only:
+    # construction raises under the cg solver.
+    dual_solve_dtype: str | None = None
     # The single shift of the unified metric M = blockdiag(K, 0) + eps I:
     # the kernel block is factored as K + eps I and the free p_0 carries
     # weight eps, so ||M^{-1}|| = 1/eps uniformly in n and the min-M-norm
@@ -170,6 +178,9 @@ def asset_pricing_kernel_nlls(
             'residuals_method="matrix_free" requires matern12 or matern32 on a '
             'train grid without duplicate points; use "dense" otherwise'
         )
+    if lm_set.dual_solve_dtype not in (None, "float64"):
+        raise ValueError(f"unknown dual_solve_dtype: {lm_set.dual_solve_dtype!r}")
+    dual_solve_dtype = jnp.float64 if lm_set.dual_solve_dtype == "float64" else None
     eps = lm_set.metric_eps
     if eps <= 0:
         raise ValueError("metric_eps must be positive (the p_0 block needs PD)")
@@ -235,18 +246,13 @@ def asset_pricing_kernel_nlls(
     # K + eps I + (r^2/eps) 11' is spectrally equivalent uniformly in n,
     # pinning the inner CG budget where the unpreconditioned budget grows
     # with refinement.
+    # nlls-gram >= 1.7: the (v, damping) helper serves both cg hooks (the
+    # implicit side calls it at the undamped zero).
     dual_preconditioner = None
-    implicit_preconditioner = None
     if linear_solver == "cg":
         dual_preconditioner = sherman_morrison_preconditioner(
             alpha_metric.solve, jnp.ones(n_train), r**2 / eps
         )
-
-        # nlls-gram >= 1.5 requires the undamped implicit preconditioner
-        # whenever the forward solver is cg; the Sherman-Morrison solve is
-        # reused at damping 0.
-        def implicit_preconditioner(v):
-            return dual_preconditioner(v, jnp.asarray(0.0, v.dtype))
 
     solver = UnderdeterminedLevenbergMarquardt(
         residual_fn,
@@ -256,7 +262,8 @@ def asset_pricing_kernel_nlls(
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         dual_preconditioner=dual_preconditioner,
-        implicit_preconditioner=implicit_preconditioner,
+        implicit_preconditioner=dual_preconditioner,
+        dual_solve_dtype=dual_solve_dtype,
         metric=metric,
     )
     theta_0 = (jnp.zeros(n_train), jnp.asarray(lm_set.p0_init))

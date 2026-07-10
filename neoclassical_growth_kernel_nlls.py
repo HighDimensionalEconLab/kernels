@@ -104,6 +104,14 @@ class NLLSGramSettings:
     # dense otherwise.
     residuals_method: str = "auto"
     iterative_maxiter: int = 100  # CG inner budget per LM step (cg only)
+    # nlls-gram >= 1.7: None | "float64". Promotes only the dense dual
+    # (Gram) pipeline to float64 while the model stays in its own dtype. A
+    # value no-op under this repo's global float64 -- the knob to reach for
+    # on a float32/GPU move, where the unified metric's 1/eps spike puts
+    # the dual at condition ~1/eps (the flag's validated target; see
+    # experiments/dual_solve_dtype_float32.py). Dense cholesky paths only:
+    # construction raises under the cg solver.
+    dual_solve_dtype: str | None = None
     # The single shift of the unified metric M = blockdiag(K, K, K, 0) +
     # eps I: every kernel block is factored as K + eps I and the free
     # (c_0, mu_0) carry weight eps, so ||M^{-1}|| = 1/eps uniformly in n and
@@ -168,6 +176,9 @@ def neoclassical_growth_kernel_nlls(
             'residuals_method="matrix_free" requires matern12 or matern32 on a '
             'train grid without duplicate points; use "dense" otherwise'
         )
+    if lm_set.dual_solve_dtype not in (None, "float64"):
+        raise ValueError(f"unknown dual_solve_dtype: {lm_set.dual_solve_dtype!r}")
+    dual_solve_dtype = jnp.float64 if lm_set.dual_solve_dtype == "float64" else None
     eps = lm_set.metric_eps
     if eps <= 0:
         raise ValueError("metric_eps must be positive (the (c_0, mu_0) block needs PD)")
@@ -286,14 +297,13 @@ def neoclassical_growth_kernel_nlls(
     # (K_tilde K^{-1} K_tilde'-like), so the match is partial -- the budget
     # above reflects that.
     dual_preconditioner = None
-    implicit_preconditioner = None
     if linear_solver == "cg":
         K_solve = alpha_metric.solve
 
-        # Damping-free by construction, so the same blockwise solve serves
-        # both cg hooks (nlls-gram >= 1.5 requires the undamped implicit
-        # preconditioner whenever the forward solver is cg).
-        def implicit_preconditioner(v):
+        # Damping-free by construction, so the one blockwise solve serves
+        # both cg hooks (nlls-gram >= 1.7 calls a (v, damping) callable at
+        # the undamped zero on the implicit side).
+        def dual_preconditioner(v, damping):
             return jnp.concatenate(
                 [
                     K_solve(v[:n_train]),
@@ -301,9 +311,6 @@ def neoclassical_growth_kernel_nlls(
                     K_solve(v[2 * n_train :]),
                 ]
             )
-
-        def dual_preconditioner(v, damping):
-            return implicit_preconditioner(v)
 
     solver = UnderdeterminedLevenbergMarquardt(
         residual_fn,
@@ -313,7 +320,8 @@ def neoclassical_growth_kernel_nlls(
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         dual_preconditioner=dual_preconditioner,
-        implicit_preconditioner=implicit_preconditioner,
+        implicit_preconditioner=dual_preconditioner,
+        dual_solve_dtype=dual_solve_dtype,
         metric=metric,
     )
 

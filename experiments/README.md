@@ -69,3 +69,43 @@ five Matern rows — same accuracy class, not strict domination. The
 concave-convex growth, optimal-advertising, and human-capital experiments
 have no NLLS ports. Decision: replication stays on UNO for now; revisit
 switching later.
+
+## `nn_many_points.py` — oversampled NN collocation + the Nystrom preconditioner
+
+The sequential growth NN (width 32, depth 3, p = 2242 params) trained on
+far more collocation points than it needs — the kernel models' 1001-node
+stress test — comparing the in-model dense cholesky against cg with
+nlls-gram 1.5's `nystrom_preconditioner` built from the NTK dual J J' at
+the warm start (its canonical target). Same seed-0 initialization for every
+solver. All runs remain underdetermined (m = 2n + 1 <= 2003 < p).
+
+| n    | m    | cholesky                             | cg + nystrom (r=64/256, 50 CG iters)   |
+| ---- | ---- | ------------------------------------ | -------------------------------------- |
+| 41   | 83   | certified, 169 steps, k_err 1.1e-6, 0.15s | stalls at loss ~9e-13, k_err 1.5e-5, 2s |
+| 251  | 503  | certified, 191 steps, k_err 2.1e-6, 1.7s  | stalls at loss ~2e-12, k_err 1.6e-5, 10s |
+| 1001 | 2003 | certified, 186 steps, k_err 2.4e-6, 26s   | stalls at loss ~2e-12, k_err 1.6e-5, 29-32s |
+
+Findings:
+
+1. **Oversampling is harmless to quality.** With 24x unnecessary points the
+   NN still certifies at the 1e-15 loss bar in a flat number of LM steps
+   (169/191/186) with only mild error growth (1.1e-6 -> 2.4e-6). The cost
+   is wall time, which follows the m x m dual (0.15s -> 26s).
+2. **cg + Nystrom loses to cholesky at these sizes.** At every n it burns
+   the full 400-step budget, plateaus ~3 orders above the loss bar (the
+   plateau error k_err ~1.6e-5 matches the documented loss->error relation,
+   so it "works", it just cannot certify), and is slower than cholesky even
+   at m = 2003. Rank 64 vs 256 is indistinguishable — the bottleneck is not
+   the sketch rank.
+3. **The bottleneck is the inexact inner solve.** A diagnostic with a 4x CG
+   budget (200 iters, r=256, n=1001) reaches loss 7.8e-15 and the best test
+   error of the table (k_err 5.7e-7) — but at 124s vs cholesky's 26s and
+   still shy of the bar within 400 steps. The warm-start-frozen
+   preconditioner plus a finite CG budget throttles LM's terminal
+   convergence; exactness is what the certification bar buys.
+
+Verdict: for these NN duals (m <= ~2000, fast solves) dense cholesky is
+simply the right solver — consistent with the prior that the NN models
+don't benefit from the new solver machinery in practice. The Nystrom+cg
+path would only become interesting at m >> 10^4, where forming and
+factoring the dense dual is prohibitive.

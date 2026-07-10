@@ -1,10 +1,10 @@
 # QR vs Cholesky on the growth model at n = 101 across both horizons, the
-# regime where the two dense solvers separate. Also documents the observed
-# knife-edge: matern32/rbf at T = 50 under qr once stalled at the warm start
-# for all 50 steps inside a long-lived process (train residual 0.137, the
-# kernel-independent warm-start residual) while converging reproducibly in
-# fresh processes -- likely first-step accept/reject sensitivity at
-# init_damping = 1e-8. Findings in README.md.
+# regime where the two dense solvers separate. The stall once observed here
+# (matern32/rbf at T = 50 under qr frozen at the warm start for all 50
+# steps in one long-lived process) was traced to jaxlib heap corruption on
+# macOS arm64 (jax 0.10.2) -- the silent-corruption face of a bug whose loud
+# face is SIGSEGV/SIGTRAP inside libjax_common.dylib. Not an nlls-gram
+# issue; see README.md for the root-cause analysis.
 # Run from the repo root: uv run python -m experiments.qr_horizon_followup
 from neoclassical_growth_kernel_nlls import DataSettings as GrData
 from neoclassical_growth_kernel_nlls import KernelSettings as GrKernel

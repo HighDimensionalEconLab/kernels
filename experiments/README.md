@@ -31,9 +31,22 @@ The qr wins above hold at T = 40 and T = 50. One caveat observed while
 sweeping: growth matern32/rbf (n = 101, T = 50) under qr once stalled at the
 warm start for all 50 steps inside a long-lived process (train residual
 0.137 — the kernel-independent warm-start residual) yet converges
-reproducibly in fresh processes. Likely a knife-edge first-step
-accept/reject at `init_damping = 1e-8`; a reason to keep the auto-qr
-boundary conservative and possibly report upstream to nlls-gram.
+reproducibly in fresh processes.
+
+**Root cause found (2026-07-10): jaxlib heap corruption, not nlls-gram.**
+Instrumented reruns of the same workload produced SIGSEGV/SIGTRAP crashes
+inside `libjax_common.dylib` (jax 0.10.2, macOS arm64/M4 Max) with three
+distinct stacks — MLIR context creation, background-thread compilation,
+and an xzone-malloc heap-integrity trap — plus silent wrong-answer runs
+(identical solves returning different losses, an 8-step vs 50-step
+trajectory flip). The stall was the silent-corruption face of the same
+bug: a corrupted buffer makes every LM candidate rejectable without
+crashing. nlls-gram's qr path is exonerated — deterministic warm-start
+analysis shows matern32's first step improves 8x and rbf recovers by
+damping ~1e-2 (cond(R) ~ 2e11 at the warm start explains its early
+rejections, a benign and self-correcting effect). Reported upstream to
+jax with a dependency-free reproducer; see the jax issue linked in the
+repo discussion.
 
 ## `eps_sensitivity.py` — is the UNO error edge the metric shift?
 

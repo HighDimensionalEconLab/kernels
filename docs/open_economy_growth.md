@@ -1,9 +1,10 @@
 # Continuous-time open-economy growth with initial net foreign assets
 
-Status: implemented stepping-stone and design for the multicountry extension. This note
-fixes the economic object, derives the continuous-time equations, maps them to the
-repository's NLLS/RKHS formulation, and records how the minimum-norm solution is compared
-ex post with the conventional economic boundary-value solution.
+Status: implemented one-country stepping stone and two-country closed-world extension;
+design complete for the static-trade extension. This note fixes the economic object,
+derives the continuous-time equations, maps them to the repository's NLLS/RKHS
+formulation, and records how the minimum-norm solution is compared ex post with the
+conventional economic boundary-value solution.
 
 ## Executive decision
 
@@ -969,6 +970,11 @@ permanent external-position effect.
 
 ### Stage 3: two-country closed world
 
+Implemented in [multicountry_growth.py](../multicountry_growth.py),
+[multicountry_growth_benchmark.py](../multicountry_growth_benchmark.py), and
+[multicountry_growth_kernel_nlls.py](../multicountry_growth_kernel_nlls.py), with cached
+experiments and figures under `replication/multicountry_growth_kernel*.py`.
+
 Replace the fixed interest rate with an endogenous world rate \(r(t)\). To make country
 size explicit, define \(k_i,a_i,c_i,x_i\) per worker and let fixed population be \(L_i\).
 Use \(N-1\) independent NFA states and impose
@@ -1401,3 +1407,43 @@ A deliberately short year-50 diagnostic still has an ex-post asset TVC around 0.
 the same solution is DAE-accepted and matches the reporting-window benchmark. This is a
 numerical regression test that TVC and no-Ponzi diagnostics do not enter the NN residual,
 stopping criterion, or rejection logic.
+
+## Stage 3 implementation record
+
+The two-country one-good implementation eliminates common marginal wealth exactly and
+collocates only the five ODE blocks for
+\((k_1,k_2,q_1,q_2,a_1)\). With \(n\) points, the unknown vector contains five
+length-\(n\) kernel-coordinate blocks plus the two initial q offsets and
+\(\log\omega_2\): \(5n+3\) unknowns against \(5n\) equations. The metric is
+
+\[
+\operatorname{blockdiag}(K,K,K,K,K,0_3)+\epsilon I.
+\]
+
+No terminal projection, lifetime budget, TVC, no-Ponzi condition, debt target, or
+benchmark quantity appears in the kernel residual, initialization, stopping criterion,
+or rejection logic. The independent BVP separately uses three terminal restrictions
+from the unstable projection of the full coupled Jacobian. At the limiting allocation,
+that Jacobian has two stable, three unstable, and one center root, exactly matching the
+dimension count above.
+
+At the default \(T=160,n=96\), the Matérn-5/2 kernel converges in four LM steps. The
+measured warm solve is about 0.08 seconds after a roughly 2.7-second compile. The baseline
+maximum training residual is \(1.5\times10^{-8}\), the dense-grid residual is
+\(8.0\times10^{-6}\), and the maximum reporting-window discrepancy from the independent
+BVP is \(2.8\times10^{-5}\). Resource clearing, global asset clearing, the reconstructed
+country budget, and both interest-rate identities hold at their corresponding numerical
+tolerances.
+
+For first-country initial NFA \(a_{1,0}\in\{-0.5,0,0.5\}\), all three DAE solves pass.
+The selected \(\log\omega_2\) values agree with the conventional BVP to about
+\(1.2\times10^{-7}\), and opposite initial NFA positions select opposite consumption
+weights and distinct long-run NFA positions. Asymmetric initial capital and unequal
+country sizes/productivities also pass with BVP discrepancies below \(7\times10^{-5}\).
+
+The horizon sweep again treats economic selection as an outcome. With initial debt, a
+year-40 kernel solve is DAE-accepted even though its asset-TVC diagnostic is about 0.24
+and its BVP discrepancy is about 0.14. At years 80, 120, and 160, the BVP discrepancy
+falls to roughly \(1.3\times10^{-2}\), \(7.3\times10^{-4}\), and
+\(5.0\times10^{-5}\), respectively. This regression prevents ex-post solvency or
+benchmark information from becoming a hidden acceptance gate.

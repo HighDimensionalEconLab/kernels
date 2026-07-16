@@ -25,6 +25,16 @@ from kernels import (
     matern_kernel_matvec_pair,
     normalize_kernel,
 )
+from multicountry_growth import (
+    MulticountryParameters,
+    multicountry_allocations,
+    multicountry_steady_state,
+    two_country_full_linearization,
+)
+from multicountry_growth_kernel_nlls import (
+    DataSettings as MulticountryDataSettings,
+)
+from multicountry_growth_kernel_nlls import multicountry_growth_kernel_nlls
 from neoclassical_growth_concave_convex_kernel import (
     neoclassical_growth_concave_convex_kernel,
 )
@@ -110,6 +120,103 @@ FAST_GROWTH_NLLS = GrowthNLLSDataSettings(train_T=10.0, train_points=11, test_T=
 
 
 class KernelSmokeTests(unittest.TestCase):
+    def test_multicountry_growth_math(self):
+        parameters = MulticountryParameters()
+        log_relative_weight = jnp.zeros(1)
+        steady = multicountry_steady_state(log_relative_weight, parameters)
+        allocations = multicountry_allocations(
+            steady["k"], steady["q"], log_relative_weight, parameters
+        )
+        np.testing.assert_allclose(
+            allocations["capital_drift"], 0.0, atol=1e-14
+        )
+        np.testing.assert_allclose(
+            allocations["tobin_q_drift"], 0.0, atol=1e-14
+        )
+        self.assertAlmostEqual(
+            float(allocations["interest_rate"]), parameters.rho, places=14
+        )
+        self.assertAlmostEqual(
+            float(
+                allocations["interest_rate"]
+                - allocations["interest_rate_from_resources"]
+            ),
+            0.0,
+            places=14,
+        )
+        np.testing.assert_allclose(steady["a"], 0.0, atol=1e-14)
+
+        eigenvalues = np.linalg.eigvals(
+            np.asarray(two_country_full_linearization(0.0, parameters))
+        )
+        self.assertEqual(int(np.sum(eigenvalues.real < -1e-8)), 2)
+        self.assertEqual(int(np.sum(eigenvalues.real > 1e-8)), 3)
+        self.assertEqual(int(np.sum(np.abs(eigenvalues.real) <= 1e-8)), 1)
+
+    def test_multicountry_growth_kernel_smoke(self):
+        results, extras = multicountry_growth_kernel_nlls(a_0=(-0.5,))
+        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+        self.assertTrue(results["benchmark_match"])
+        self.assertEqual(results["terminal_residual_count"], 0)
+        self.assertEqual(
+            results["dae_residual_count"], 5 * results["num_train_points"]
+        )
+        self.assertEqual(
+            results["unknown_count"], results["dae_residual_count"] + 3
+        )
+        self.assertEqual(results["selection"], "minimum_shifted_rkhs_metric")
+        self.assertEqual(results["stable_roots"], 2)
+        self.assertEqual(results["unstable_roots"], 3)
+        self.assertEqual(results["center_roots"], 1)
+        self.assertGreater(results["relative_weight"], 1.0)
+        self.assertLess(results["long_run_a_1"], results["a_0_1"])
+        self.assertGreater(results["minimum_rate_denominator"], 0.0)
+        self.assertLess(results["max_train_residual"], 1e-5)
+        self.assertLess(results["max_validation_residual"], 5e-3)
+        self.assertLess(results["max_identity_residual"], 1e-8)
+        self.assertLess(results["max_omitted_budget_residual"], 5e-3)
+        self.assertLess(results["max_benchmark_error"], 2e-3)
+        self.assertLess(
+            abs(
+                results["log_relative_weight"]
+                - results["benchmark_log_relative_weight"]
+            ),
+            1e-5,
+        )
+        self.assertLess(results["benchmark_boundary_residual"], 1e-7)
+        self.assertAlmostEqual(
+            results["rkhs_norm_total"],
+            results["rkhs_norm_k_1"]
+            + results["rkhs_norm_k_2"]
+            + results["rkhs_norm_a_1"]
+            + results["rkhs_norm_q_1"]
+            + results["rkhs_norm_q_2"],
+            places=10,
+        )
+        self.assertTrue((extras["test_df"]["k_1"] > 0.0).all())
+        self.assertTrue((extras["test_df"]["k_2"] > 0.0).all())
+        self.assertTrue((extras["test_df"]["c_1"] > 0.0).all())
+        self.assertTrue((extras["test_df"]["c_2"] > 0.0).all())
+        self.assertLess(
+            extras["test_df"]["asset_clearing_residual"].abs().max(), 1e-10
+        )
+
+        short_horizon, _ = multicountry_growth_kernel_nlls(
+            a_0=(-0.5,),
+            data_set=MulticountryDataSettings(
+                train_T=40.0,
+                train_points=41,
+                sampling="uniform",
+                test_T=30.0,
+                validation_points=201,
+                benchmark_T=160.0,
+                benchmark_points=181,
+            ),
+        )
+        self.assertTrue(short_horizon["solution_accepted"])
+        self.assertFalse(short_horizon["benchmark_match"])
+        self.assertGreater(short_horizon["ex_post_asset_tvc"], 0.1)
+
     def test_open_economy_growth_math_and_benchmark(self):
         parameters = OpenEconomyParameters()
         steady = open_economy_steady_state(parameters)

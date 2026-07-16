@@ -5,13 +5,14 @@ Replication package for
 by Mahdi Ebrahimi Kahou, Jesse Perla, and Geoff Pleiss.
 
 The design and verification record for the deterministic international-macro example is
-in [docs/open_economy_growth.md](docs/open_economy_growth.md). The implemented Stage 1
-model solves a continuous-time small open economy with capital installation costs and
-initial net foreign assets, with an independent boundary-value benchmark. Both the
-kernel and sequential state-space NN use only the finite-time model equations. Their
-respective RKHS and neural-policy biases select the otherwise free jump variables, while
-no-Ponzi and transversality conditions are evaluated only ex post. The note then maps
-the model to the multicountry trade extension.
+in [docs/open_economy_growth.md](docs/open_economy_growth.md). Stage 1 solves a
+continuous-time small open economy with capital installation costs and initial net
+foreign assets. Stage 3 implements the two-country closed-world stepping stone with an
+endogenous world rate, global asset clearing, and free Negishi weights. The kernel and
+sequential state-space NN use only finite-time model equations; their respective RKHS
+and neural-policy biases select the otherwise free jump variables, while no-Ponzi and
+transversality conditions are evaluated only ex post. Independent boundary-value
+solutions provide conventional economic benchmarks.
 
 ## Setup
 
@@ -113,6 +114,14 @@ dataclasses.
   consumption head is intentionally avoided because it has no useful bias
   toward the annuity root. Solvency, TVCs, and the BVP comparison are ex-post
   diagnostics and never acceptance gates.
+- `multicountry_growth_kernel_nlls.py` — two-country closed-world kernel solve:
+  five integrated paths represent both capital stocks, both Tobin-q paths, and
+  one independent NFA position. World resource clearing eliminates common
+  marginal wealth, the index-reduced algebra determines the world interest
+  rate, and the RKHS metric selects both initial q values and the relative
+  Negishi weight. Its `5n` residuals contain no terminal, TVC, no-Ponzi, debt
+  target, or benchmark equation. `multicountry_growth_benchmark.py` supplies an
+  independent full-Jacobian unstable-projection BVP.
 - The differentiable rollout integrators (fixed RK4 by measured default, with
   Tsit5, Euler, and Rodas5P available; fixed RK4 for test/settle paths) come from
   [tinydiffeq](https://github.com/HighDimensionalEconLab/tinydiffeq),
@@ -126,6 +135,7 @@ uv run python neoclassical_growth_kernel.py --data_set.train_points 21
 uv run python asset_pricing_kernel.py --x_0 1.0
 uv run python neoclassical_growth_nn_recursive_i.py --seed 3 --data_set.rtol 1e-8
 uv run python open_economy_growth_nn_recursive.py --seed 0 --a_0 -0.5
+uv run python multicountry_growth_kernel_nlls.py --a_0 '[-0.5]'
 ```
 
 or import directly:

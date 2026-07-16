@@ -757,6 +757,92 @@ density check and \(T=200\) provides the horizon check. The long, sparse tail is
 terminal condition: it exposes explosive alternatives to the RKHS norm for long enough
 that their cost can dominate.
 
+### Sequential state-space neural mapping
+
+The NN implementation follows the best-performing recursive formulation in
+[neoclassical_growth_nn_recursive_i.py](../neoclassical_growth_nn_recursive_i.py): it
+learns level policies over the endogenous state rather than paths over time or time
+derivatives. A 32-by-3 GELU trunk maps \(\log(k/k_0)\) to two outputs. The first is
+positive investment expenditure through `unit_softplus`; the second is the signed
+current account:
+
+\[
+x_\theta(k)>0,
+\qquad
+b_\theta(k)=CA_\theta(k).
+\]
+
+The network rolls forward only the predetermined states,
+
+\[
+\dot k
+=k\left[\chi\left(\frac{x_\theta(k)}{k}\right)^\lambda-\delta\right],
+\qquad
+\dot a=b_\theta(k),
+\]
+
+and recovers both jump variables algebraically:
+
+\[
+q_\theta(k)
+=\frac{(x_\theta(k)/k)^{1-\lambda}}{\chi\lambda},
+\qquad
+c_\theta(k,a)
+=r^\star a+f(k)-x_\theta(k)-b_\theta(k).
+\tag{NN1}
+\]
+
+Automatic differentiation with respect to \(k\) supplies the two stationary policy
+residuals. The q equation is
+
+\[
+R_q
+=\frac{d\log q_\theta(k)}{dk}\dot k
+-\left[
+r^\star+\delta-(1-\lambda)\chi(x_\theta/k)^\lambda
+-\frac{f_k}{q_\theta}
+\right],
+\]
+
+while \(r^\star=\rho\) makes the consumption Euler equation
+
+\[
+R_c
+=\dot c
+=\left[f_k-x_\theta'(k)-b_\theta'(k)\right]\dot k
++r^\star b_\theta(k).
+\tag{NN2}
+\]
+
+Thus capital accumulation, NFA accumulation, the investment FOC, and the budget identity
+hold by construction. Training contains \(2n\) economic residuals plus \(n\) inactive
+consumption-domain rows, against 2,242 neural parameters. There are no terminal rows.
+The underdetermined LM solve uses the identity parameter metric, so it selects a
+minimum-metric update relative to the random feature trunk and near-zero output head.
+That initialization uses only current information: replacement investment
+\(\delta k_0\), a near-zero current account, and the output scale at \(k_0\). It
+contains no steady state, benchmark, stable-arm, present-value, TVC, or no-Ponzi
+quantity.
+
+Approximating consumption directly is intentionally avoided. A free constant-consumption
+head would make the annuity root depend primarily on its arbitrary output anchor. In
+contrast, on the stable capital arm the homogeneous current-account solution behaves
+locally like
+
+\[
+b_h(k)\propto |k-k^\star|^{r^\star/\xi_-},
+\]
+
+which diverges because \(\xi_-<0\). A finite smooth neural policy cannot represent that
+explosive branch at \(k^\star\); the architecture and identity-metric LM step therefore
+provide the selection experiment rather than an imposed solvency condition.
+
+Fixed-grid RK4 is the measured default. A 48-step Euler training rollout is faster for
+seed 0 but misses the independent continuous-time residual gate for seeds 1 and 2. All
+reported paths and acceptance residuals are therefore recomputed with a fixed-RK4
+validation rollout. Adaptive Tsit5 gives similar accuracy but is slower to train and
+substantially slower to compile for this small smooth problem.
+
 ## Independent benchmark
 
 The implemented SciPy boundary-value benchmark is analogous to
@@ -846,8 +932,11 @@ Implemented:
 - open_economy_growth.py for pure equations, parameters, steady state, and diagnostics;
 - open_economy_growth_benchmark.py for solve_bvp and semi-analytic checks;
 - open_economy_growth_kernel_nlls.py for the integrated-kernel solve;
-- replication/open_economy_growth_kernel.py for cached runs; and
-- replication/open_economy_growth_kernel_figures.py for transition plots.
+- open_economy_growth_nn_recursive.py for the sequential state-space NN solve;
+- replication/open_economy_growth_kernel.py for cached kernel runs;
+- replication/open_economy_growth_kernel_figures.py for kernel transition plots;
+- replication/open_economy_growth_nn_recursive.py for cached NN runs; and
+- replication/open_economy_growth_nn_recursive_figures.py for NN transition plots.
 
 Keep these pure functions separately testable:
 
@@ -1298,3 +1387,17 @@ not tuned using terminal residuals.
 A regression case at \(T=80\) deliberately has an asset-TVC diagnostic above \(0.1\) and
 does not match the economic benchmark, yet remains DAE-accepted. This locks in the
 distinction between ex-post economic verification and numerical rejection.
+
+The sequential NN uses the same DAE-only principle in state space. Across seeds 0--2,
+the default RK4 policy converges in 13--15 LM steps, has maximum train and validation
+residuals below \(8.6\times10^{-6}\), and has maximum normalized BVP discrepancy below
+\(7.1\times10^{-4}\) over the 50-year reporting window. The baseline warm solve is about
+0.34 seconds after a roughly seven-second CPU compile. The NFA sweep leaves the learned
+capital, investment, and current-account policies numerically identical and satisfies
+\(\Delta a_t=\Delta a_0\) and \(\Delta c=r^\star\Delta a_0\) to machine precision.
+Initial capital values 2 and 7 also pass, with BVP discrepancies below \(10^{-3}\).
+
+A deliberately short year-50 diagnostic still has an ex-post asset TVC around 0.67, yet
+the same solution is DAE-accepted and matches the reporting-window benchmark. This is a
+numerical regression test that TVC and no-Ponzi diagnostics do not enter the NN residual,
+stopping criterion, or rejection logic.

@@ -7,10 +7,11 @@ by Mahdi Ebrahimi Kahou, Jesse Perla, and Geoff Pleiss.
 The design and verification record for the deterministic international-macro example is
 in [docs/open_economy_growth.md](docs/open_economy_growth.md). The implemented Stage 1
 model solves a continuous-time small open economy with capital installation costs and
-initial net foreign assets, with an independent boundary-value benchmark. The kernel
-collocates only the finite-time DAE; its RKHS metric selects the otherwise free jump
-variables, while no-Ponzi and transversality conditions are evaluated only ex post. The
-note then maps the model to the multicountry trade extension.
+initial net foreign assets, with an independent boundary-value benchmark. Both the
+kernel and sequential state-space NN use only the finite-time model equations. Their
+respective RKHS and neural-policy biases select the otherwise free jump variables, while
+no-Ponzi and transversality conditions are evaluated only ex post. The note then maps
+the model to the multicountry trade extension.
 
 ## Setup
 
@@ -104,6 +105,14 @@ dataclasses.
   higher cost. No transversality penalty or callback enters training: the exact
   log-transversality certificate is evaluated once after the solve and gates
   final acceptance.
+- `open_economy_growth_nn_recursive.py` — recursive open-economy NN: a shared
+  state-space policy maps `log(k/k_0)` to positive investment expenditure and
+  the signed current account. It rolls forward capital and NFA, derives Tobin's
+  q and consumption algebraically, and enforces only the q Euler equation,
+  flat-consumption Euler equation, and the consumption domain. A direct
+  consumption head is intentionally avoided because it has no useful bias
+  toward the annuity root. Solvency, TVCs, and the BVP comparison are ex-post
+  diagnostics and never acceptance gates.
 - The differentiable rollout integrators (fixed RK4 by measured default, with
   Tsit5, Euler, and Rodas5P available; fixed RK4 for test/settle paths) come from
   [tinydiffeq](https://github.com/HighDimensionalEconLab/tinydiffeq),
@@ -116,6 +125,7 @@ uv run python neoclassical_growth_kernel.py --kernel_set.ell 5.0
 uv run python neoclassical_growth_kernel.py --data_set.train_points 21
 uv run python asset_pricing_kernel.py --x_0 1.0
 uv run python neoclassical_growth_nn_recursive_i.py --seed 3 --data_set.rtol 1e-8
+uv run python open_economy_growth_nn_recursive.py --seed 0 --a_0 -0.5
 ```
 
 or import directly:

@@ -97,6 +97,11 @@ from open_economy_growth_kernel_nlls import (
     DataSettings as OpenEconomyDataSettings,
 )
 from open_economy_growth_kernel_nlls import open_economy_growth_kernel_nlls
+from open_economy_growth_nn_recursive import (
+    DataSettings as OpenEconomyNNDataSettings,
+)
+from open_economy_growth_nn_recursive import evaluate_path as evaluate_open_economy_nn
+from open_economy_growth_nn_recursive import open_economy_growth_nn_recursive
 from optimal_advertising_kernel import optimal_advertising_kernel
 from optimal_advertising_kernel_nlls import optimal_advertising_kernel_nlls
 
@@ -171,6 +176,72 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertTrue(short_horizon["solution_accepted"])
         self.assertFalse(short_horizon["benchmark_match"])
         self.assertGreater(short_horizon["ex_post_asset_tvc"], 0.1)
+
+    def test_open_economy_growth_nn_recursive_smoke(self):
+        parameters = OpenEconomyParameters()
+        data_set = OpenEconomyNNDataSettings(
+            diagnostic_T=50.0,
+            diagnostic_points=51,
+            diagnostic_steps=50,
+        )
+        results, extras = open_economy_growth_nn_recursive(
+            parameters=parameters,
+            verbose=False,
+            measure_compilation=False,
+            data_set=data_set,
+        )
+
+        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+        self.assertTrue(results["benchmark_match"])
+        self.assertEqual(results["terminal_residual_count"], 0)
+        self.assertEqual(
+            results["dae_residual_count"], 2 * results["num_train_points"]
+        )
+        self.assertEqual(
+            results["domain_residual_count"], results["num_train_points"]
+        )
+        self.assertEqual(
+            results["residual_count"], 3 * results["num_train_points"]
+        )
+        self.assertGreater(results["unknown_count"], results["residual_count"])
+        self.assertEqual(
+            results["selection"], "minimum_identity_metric_parameter_step"
+        )
+        self.assertLess(results["max_train_residual"], 1e-5)
+        self.assertLess(results["max_validation_residual"], 5e-3)
+        self.assertLess(results["max_benchmark_error"], 1e-3)
+        self.assertGreater(results["ex_post_asset_tvc"], 0.1)
+        self.assertTrue((extras["test_df"]["k"] > 0.0).all())
+        self.assertTrue((extras["test_df"]["q"] > 0.0).all())
+        self.assertTrue((extras["test_df"]["c"] > 0.0).all())
+        self.assertTrue((extras["test_df"]["x"] > 0.0).all())
+
+        times = jnp.linspace(0.0, data_set.test_T, data_set.test_points)
+        output_ss = float(open_economy_steady_state(parameters)["output"])
+        asset_shift = 0.5 * output_ss
+        shifted = evaluate_open_economy_nn(
+            extras["model"],
+            times,
+            round(data_set.test_T / data_set.dt),
+            jnp.asarray(1.0),
+            jnp.asarray(asset_shift),
+            parameters,
+            data_set,
+        )
+        baseline = extras["test_df"]
+        np.testing.assert_allclose(shifted["k"], baseline["k"], atol=1e-12)
+        np.testing.assert_allclose(shifted["x"], baseline["x"], atol=1e-12)
+        np.testing.assert_allclose(
+            shifted["current_account"], baseline["current_account"], atol=1e-12
+        )
+        np.testing.assert_allclose(
+            shifted["a"] - baseline["a"], asset_shift, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            shifted["c"] - baseline["c"],
+            parameters.interest_rate * asset_shift,
+            atol=1e-12,
+        )
 
     def test_integrated_kernels_match_quadrature(self):
         # (32.161, 5.829) is where the removed adaptive-quadrature versions

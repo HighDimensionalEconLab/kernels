@@ -13,23 +13,21 @@ import pandas as pd
 from flax import nnx
 from jax import config
 from jax.flatten_util import ravel_pytree
-from nlls_gram import LMStatus, UnderdeterminedLevenbergMarquardt
+from nlls_gram import (
+    DrawNNXModule,
+    LMStatus,
+    MultiStart,
+    UnderdeterminedLevenbergMarquardt,
+)
 from tinydiffeq import cumulative_trapezoid
 
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
+from neural_networks import ACTIVATIONS, unit_softplus
 from random_fourier_features import KernelName, RFFFeatures
 
 config.update("jax_enable_x64", True)
 
 DOMAIN_EPS = 1e-8
-
-ACTIVATIONS = {
-    "tanh": jnp.tanh,
-    "silu": jax.nn.silu,
-    "gelu": jax.nn.gelu,
-    "relu": jax.nn.relu,
-    "identity": lambda x: x,
-}
 
 
 @dataclass(frozen=True)
@@ -65,7 +63,9 @@ class DataSettings:
 
 @dataclass(frozen=True)
 class StoppingCriteria:
-    max_steps: int = 1000
+    # Default MLP seeds converge in 30-67 steps; the cap is a failure budget,
+    # not the normal runtime path.
+    max_steps: int = 250
     # The integrated ansatz's loss floor is set by the trapezoid path
     # reconstruction, not the optimizer: 1e-12 is unreachable, 1e-9 certifies
     # k rel error ~1.3e-4 (the honest floor at integration_substeps=4;
@@ -160,7 +160,8 @@ class GrowthDerivativeNN(nnx.Module):
             param_dtype=dtype,
             rngs=rngs,
         )
-        self.c_0 = nnx.Param(jnp.asarray(c_0_guess, dtype=dtype))
+        self.c_0_scale = c_0_guess
+        self.c_0_raw = nnx.Param(jnp.zeros((), dtype=dtype))
 
     def __call__(self, t):
         if self.approximation == "rff":
@@ -179,7 +180,9 @@ def make_train_t_grid(data_set, dtype):
         values = np.linspace(
             0.0, data_set.train_T, data_set.train_points, dtype=np.float64
         ).tolist()
-    values = sorted(set(float(value) for value in values))
+    values = sorted({0.0, *(float(value) for value in values)})
+    if values[0] < 0.0:
+        raise ValueError("training times must be nonnegative")
     return jnp.asarray(values, dtype=dtype)
 
 
@@ -191,8 +194,7 @@ STATUS_TO_REASON = {
 
 
 def production(k, p):
-    k_positive = jnp.maximum(k, DOMAIN_EPS)
-    base = k_positive**p.a
+    base = k**p.a
     return p.A * jnp.maximum(base, p.b_1 * base - p.b_2)
 
 
@@ -203,23 +205,20 @@ def marginal_product(k, p):
 def policy_values(model, t, p, integration_substeps):
     integral, derivative = cumulative_trapezoid(model, t, substeps=integration_substeps)
     k = p.k_0 + integral[:, 0]
-    c = model.c_0[...] + integral[:, 1]
+    c_0 = model.c_0_scale * unit_softplus(model.c_0_raw[...])
+    c = c_0 + integral[:, 1]
     dk_dt = derivative[:, 0]
     dc_dt = derivative[:, 1]
     output = production(k, p)
     mpk = marginal_product(k, p)
     resource = dk_dt - (output - p.delta * k - c)
     euler = dc_dt - c * (mpk - p.delta - p.rho_hat) / p.sigma_crra
-    log_tvc = (
-        -p.rho_hat * t
-        - p.sigma_crra * jnp.log(jnp.maximum(c, DOMAIN_EPS))
-        + jnp.log(jnp.maximum(k, DOMAIN_EPS))
-    )
+    log_tvc = -p.rho_hat * t - p.sigma_crra * jnp.log(c) + jnp.log(k)
     return {
         "t": t,
         "k": k,
         "c": c,
-        "c_0": model.c_0[...],
+        "c_0": c_0,
         "dk_dt": dk_dt,
         "dc_dt": dc_dt,
         "Y": output,
@@ -333,14 +332,14 @@ def neoclassical_growth_nn_integrated(
     initial_output = float(A_value * max(k_0**a, b_1_value * k_0**a - b_2_value))
     c_flow_guess = max(initial_output - delta * k_0, DOMAIN_EPS)
     derivative_settings = replace(nn_set, input_scale=max(float(data_set.train_T), 1.0))
-    template_model = GrowthDerivativeNN(
+    init_key, multi_start_key = jax.random.split(jax.random.key(seed))
+    model = GrowthDerivativeNN(
         derivative_settings,
         c_flow_guess,
         dtype=dtype,
-        rngs=nnx.Rngs(seed),
+        rngs=nnx.Rngs(init_key),
     )
-    graphdef, template_theta, fixed_state = nnx.split(template_model, nnx.Param, ...)
-    rngs = nnx.Rngs(seed)
+    graphdef, theta_0, fixed_state = nnx.split(model, nnx.Param, ...)
 
     def residual_fn(theta, data):
         return training_residual(
@@ -362,52 +361,70 @@ def neoclassical_growth_nn_integrated(
     # convergence, max_steps as the budget (a nonfinite candidate is rejected
     # and damping raised, which recovers more often than aborting).
     atol = math.sqrt(stop_set.train_loss_threshold)
+    draw = DrawNNXModule(
+        GrowthDerivativeNN,
+        derivative_settings,
+        c_flow_guess,
+        dtype=dtype,
+    )
 
     compile_time = np.nan
     if measure_compilation:
         compile_start = time.perf_counter()
         jax.block_until_ready(
-            solver.solve(template_theta, train_data, max_steps=1, atol=atol)
+            solver.solve(
+                theta_0,
+                train_data,
+                max_steps=1,
+                atol=atol,
+                multi_start=MultiStart(
+                    key=jax.random.key(0),
+                    num_starts=stop_set.num_attempts,
+                    draw=draw,
+                ),
+            ).x
         )
         compile_time = time.perf_counter() - compile_start
 
-    for attempt in range(1, stop_set.num_attempts + 1):
-        model = GrowthDerivativeNN(
-            derivative_settings,
-            c_flow_guess,
-            dtype=dtype,
-            rngs=rngs,
-        )
-        _, theta, _ = nnx.split(model, nnx.Param, ...)
-        if verbose and stop_set.num_attempts > 1:
-            print(f"attempt {attempt}")
-
-        start_time = time.perf_counter()
-        result = solver.solve(
-            theta, train_data, max_steps=stop_set.max_steps, atol=atol
-        )
-        theta, info, steps = result.x, result.info, int(result.steps)
-        stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
-        train_loss = float(info.loss)
-        if not np.isfinite(train_loss):
-            train_loss = float(info.loss_old)
-        train_time = time.perf_counter() - start_time
-        model = nnx.merge(graphdef, theta, fixed_state)
-        accepted = stopping_reason == "early_stopping_met"
-        if accepted:
-            break
+    start_time = time.perf_counter()
+    result = solver.solve(
+        theta_0,
+        train_data,
+        max_steps=stop_set.max_steps,
+        atol=atol,
+        multi_start=MultiStart(
+            key=multi_start_key,
+            num_starts=stop_set.num_attempts,
+            draw=draw,
+        ),
+    )
+    jax.block_until_ready(result.x)
+    train_time = time.perf_counter() - start_time
+    model = nnx.merge(graphdef, result.x, fixed_state)
+    steps = int(result.steps)
+    attempt = int(result.multi_start.attempt) + 1
+    stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
+    train_loss = float(result.info.loss)
+    accepted = bool(result.multi_start.accepted)
 
     train_df = snapshot(train_data, model, p, integration_substeps)
     test_df = snapshot(test_data, model, p, integration_substeps)
-    tvc_values = policy_values(
-        model,
-        jnp.asarray([0.0, data_set.test_tvc_T], dtype=dtype),
-        p,
-        integration_substeps,
+    train_gaps = np.diff(np.asarray(t_train))
+    positive_gaps = train_gaps[train_gaps > 0.0]
+    train_spacing = (
+        float(np.median(positive_gaps))
+        if positive_gaps.size
+        else max(float(data_set.train_T), 1.0)
     )
+    tvc_intervals = max(1, math.ceil(data_set.test_tvc_T / train_spacing))
+    tvc_t = jnp.linspace(0.0, data_set.test_tvc_T, tvc_intervals + 1, dtype=dtype)
+    tvc_values = policy_values(model, tvc_t, p, integration_substeps)
     log_tvc = float(tvc_values["log_tvc"][-1])
     tvc_positive = bool(
-        tvc_values["k"][-1] > DOMAIN_EPS and tvc_values["c"][-1] > DOMAIN_EPS
+        jnp.all(jnp.isfinite(tvc_values["k"]))
+        and jnp.all(jnp.isfinite(tvc_values["c"]))
+        and jnp.min(tvc_values["k"]) > DOMAIN_EPS
+        and jnp.min(tvc_values["c"]) > DOMAIN_EPS
     )
     transversality_ok = bool(log_tvc < stop_set.log_tvc_threshold)
     finite_positive = bool(

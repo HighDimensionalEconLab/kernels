@@ -1,6 +1,7 @@
 import math
 import unittest
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import scipy.integrate
@@ -14,6 +15,7 @@ from asset_pricing_kernel_nlls import (
     asset_pricing_kernel_nlls,
 )
 from human_capital_kernel import human_capital_initial_conditions, human_capital_kernel
+from human_capital_kernel_nlls import human_capital_kernel_nlls
 from kernels import (
     gaussian_kernel,
     integrated_kernel_matrices,
@@ -25,6 +27,9 @@ from kernels import (
 )
 from neoclassical_growth_concave_convex_kernel import (
     neoclassical_growth_concave_convex_kernel,
+)
+from neoclassical_growth_concave_convex_kernel_nlls import (
+    neoclassical_growth_concave_convex_kernel_nlls,
 )
 from neoclassical_growth_kernel import (
     DataSettings as GrowthDataSettings,
@@ -79,6 +84,7 @@ from neoclassical_growth_nn_recursive_i import (
     neoclassical_growth_nn_recursive_i,
 )
 from optimal_advertising_kernel import optimal_advertising_kernel
+from optimal_advertising_kernel_nlls import optimal_advertising_kernel_nlls
 
 FAST_GROWTH_DATA = GrowthDataSettings(train_T=10.0, train_points=11, test_T=10.0)
 FAST_GROWTH_NLLS = GrowthNLLSDataSettings(train_T=10.0, train_points=11, test_T=10.0)
@@ -140,6 +146,17 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertLess(results["max_train_residual"], 1e-5)
         self.assertLess(results["max_validation_residual"], 5e-3)
         self.assertLess(results["solve_time"], 0.5)
+        self.assertTrue((extras["test_df"]["k"] > 0.0).all())
+        self.assertTrue((extras["test_df"]["c"] > 0.0).all())
+
+    def test_concave_convex_nlls_smoke(self):
+        results, extras = neoclassical_growth_concave_convex_kernel_nlls()
+
+        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+        self.assertLess(results["max_train_residual"], 1e-5)
+        self.assertLess(results["max_validation_residual"], 5e-3)
+        self.assertLess(results["p_lower_violation"], 1e-3)
+        self.assertLess(results["p_upper_violation"], 1e-3)
         self.assertTrue((extras["test_df"]["k"] > 0.0).all())
         self.assertTrue((extras["test_df"]["c"] > 0.0).all())
 
@@ -491,6 +508,16 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(results["gamma"], 0.32)
         self.assertTrue((extras["test_df"]["u"] > 0.0).all())
 
+    def test_optimal_advertising_nlls_smoke(self):
+        results, extras = optimal_advertising_kernel_nlls()
+
+        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+        self.assertLess(results["max_train_residual"], 1e-8)
+        self.assertAlmostEqual(results["mu_0"], 0.8835154879257, places=10)
+        self.assertAlmostEqual(results["u_0"], 0.2650546463776, places=10)
+        self.assertAlmostEqual(results["gamma"], 0.32)
+        self.assertTrue((extras["test_df"]["u"] > 0.0).all())
+
     def test_human_capital_smoke(self):
         h_0, c_0, residual, _ = human_capital_initial_conditions()
         self.assertAlmostEqual(float(h_0), 1.3745155888757778, places=10)
@@ -505,8 +532,24 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertLess(results["max_test_feasibility"], 1e-3)
         self.assertTrue((extras["test_df"]["c"] > 0.0).all())
 
+    def test_human_capital_nlls_smoke(self):
+        results, extras = human_capital_kernel_nlls()
+
+        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+        self.assertEqual(results["num_train_points"], 81)
+        self.assertAlmostEqual(results["h_0"], 1.3745155888757778, places=10)
+        self.assertLess(results["max_train_residual"], 1e-8)
+        self.assertLess(results["max_validation_residual"], 4e-4)
+        self.assertLess(results["max_test_feasibility"], 4e-4)
+        self.assertTrue((extras["test_df"]["c"] > 0.0).all())
+
 
 class NNSmokeTests(unittest.TestCase):
+    def tearDown(self):
+        # These solves retain large reverse-over-forward executables on GPU;
+        # release them before compiling the next model family.
+        jax.clear_caches()
+
     def test_neoclassical_growth_nn_smoke(self):
         results, frames = neoclassical_growth_nn(
             verbose=False,

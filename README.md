@@ -13,10 +13,11 @@ Python environment management:
 uv sync
 ```
 
-The RKHS collocation problems are solved through direct JAX callbacks to UNO
-via the `unopy` wheel; the neural-network solvers train pure-JAX MLPs with the
-`nlls_gram` Levenberg-Marquardt solver. No optimization DSL, external solver
-executable, or conda environment is needed.
+The published RKHS baselines remain available through direct JAX callbacks to
+UNO via the `unopy` wheel. Parallel `*_nlls.py` variants solve every kernel
+model with the released `nlls-gram` Levenberg-Marquardt package. The neural
+network solvers use the same pure-JAX optimizer. No optimization DSL, external
+solver executable, or conda environment is needed.
 
 ## Full replication
 
@@ -77,27 +78,28 @@ dataclasses.
 - `optimal_advertising_kernel.py` — optimal-advertising NLP.
 - `human_capital_kernel.py` — two-capital human-capital NLP
   (`lambda_p`-weighted policy norms).
+- `asset_pricing_kernel_nlls.py`, `neoclassical_growth_kernel_nlls.py`,
+  `neoclassical_growth_concave_convex_kernel_nlls.py`,
+  `optimal_advertising_kernel_nlls.py`, and `human_capital_kernel_nlls.py` —
+  metric-aware NLLS variants of every kernel model; the original unopy files
+  remain the paper-replication baselines.
 - `neoclassical_growth_nn.py` — sequential NN: MLP maps `t -> (k, c)`.
 - `neoclassical_growth_nn_integrated.py` — sequential NN: the net approximates
   the time derivatives, integrated to paths (MLP or random Fourier features via
   `random_fourier_features.py`).
 - `neoclassical_growth_nn_recursive_i.py` — recursive (state-space) NN: the
-  net approximates gross investment `i(k)` with a linear head anchored at the
-  replacement level (reversible for now — an `i >= 0` irreversibility
-  transform is the natural extension); drift and consumption are implied by
-  the resource constraint. Collocation states come from a
-  differentiated-through free-stepping adaptive Tsit5 rollout of the learned
-  policy from `k_0`: the solver's accepted states ARE the collocation points
-  (no grid; steps are clipped only at the horizon). No transversality penalty
-  enters training: the flat-start parameterization selects the saddle path,
-  and the exact log-transversality certificate (computed post hoc on a short
-  auxiliary simulation past the training window) gates early stopping and
-  acceptance.
-- The differentiable rollout integrators (free-stepping adaptive Tsit5 for
-  training; fixed-grid RK4 for the test/settle evaluation paths) come from
+  net approximates positive gross investment `i(k)` from the normalized input
+  `log(k/k_0)`. Drift and consumption are implied by the resource constraint.
+  Training integrates log capital and samples the differentiated-through
+  rollout on a fixed 65-point collocation grid. The default 32-by-3 GELU policy
+  has 2,209 parameters; wider networks reached the same measured accuracy at
+  higher cost. No transversality penalty or callback enters training: the exact
+  log-transversality certificate is evaluated once after the solve and gates
+  final acceptance.
+- The differentiable rollout integrators (fixed RK4 by measured default, with
+  Tsit5, Euler, and Rodas5P available; fixed RK4 for test/settle paths) come from
   [tinydiffeq](https://github.com/HighDimensionalEconLab/tinydiffeq),
-  extracted from this repo; forward- and reverse-mode differentiable through
-  the states.
+  and are forward- and reverse-mode differentiable through the states.
 
 Every solver exposes a `jsonargparse` CLI:
 

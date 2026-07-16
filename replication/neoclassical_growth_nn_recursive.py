@@ -21,7 +21,7 @@ SOLVER = neoclassical_growth_nn_recursive_i.neoclassical_growth_nn_recursive_i
 
 BUTTERFLY = dict(A=0.5, b_1=3.0, b_2=2.5)
 
-# Rollout-tolerance robustness of the adaptive collocation (JSON-only).
+# Rollout-tolerance robustness of adaptive Tsit5 (JSON-only).
 # (rtol/atol, rollout budget, certificate budget): a tighter tolerance needs
 # more accepted steps to cover the horizon, so the attempt budgets scale
 # with it -- otherwise exhausted budgets masquerade as tolerance failures.
@@ -67,6 +67,7 @@ def run(
                 **common,
                 "k_0": 1.0,
                 "data_set": dict(
+                    ode_solver="tsit5",
                     rtol=tolerance,
                     atol=tolerance,
                     adaptive_steps=adaptive_steps,

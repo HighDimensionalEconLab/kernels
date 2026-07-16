@@ -1,8 +1,24 @@
 # NLLS solver experiments
 
-One-off measurement scripts behind the NLLS solver decisions (2026-07-09,
-CPU, float64). Not part of the replication pipeline or the test suite. Run
+One-off measurements behind the solver decisions. Unless a section says
+otherwise, these are CPU/float64 experiments from 2026-07-09. They are not
+part of the replication pipeline or the test suite. Run Python experiments
 from the repo root as modules, e.g. `uv run python -m experiments.qr_sweep`.
+
+## `recursive_growth_hpo_results.json` — recursive NN capacity and ODE sweep
+
+A crude GPU/float64 sweep of the recursive growth network, collocation count,
+activation, and differentiated rollout solver. The old 8-by-2 network (97
+parameters, 17 points) was under-capacity: moving to 32-by-3 with 65 points
+reduced mean capital error from 1.35e-5 to 1.38e-6 and consumption error from
+1.39e-5 to 8.0e-7. Accuracy plateaued there: 8.5k and 33k parameter networks
+matched, rather than improved on, the 2,209-parameter candidate and cost more.
+
+Fixed RK4 is the balanced default. Adaptive Tsit5 matched its error but cost
+2.6x as much to compile and 1.7x as much for the warm solve; Rodas5P was slower
+again. Euler is a useful fast option (roughly 2.4x faster warm solve than RK4)
+with a modest error increase. The selected 32-by-3/65-point/RK4 configuration
+accepted for all three seeds tested, converging in 47-62 LM steps.
 
 ## `qr_sweep.py` — Cholesky vs QR across the dense configurations
 

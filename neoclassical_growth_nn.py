@@ -12,22 +12,19 @@ import pandas as pd
 from flax import nnx
 from jax import config
 from jax.flatten_util import ravel_pytree
-from nlls_gram import LMStatus, UnderdeterminedLevenbergMarquardt
+from nlls_gram import (
+    DrawNNXModule,
+    LMStatus,
+    MultiStart,
+    UnderdeterminedLevenbergMarquardt,
+)
 
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
+from neural_networks import ACTIVATIONS, unit_softplus
 
 config.update("jax_enable_x64", True)
 
 DOMAIN_EPS = 1e-8
-
-ACTIVATIONS = {
-    "tanh": jnp.tanh,
-    "silu": jax.nn.silu,
-    "gelu": jax.nn.gelu,
-    "relu": jax.nn.relu,
-    "softplus": jax.nn.softplus,
-    "identity": lambda x: x,
-}
 
 
 @dataclass(frozen=True)
@@ -62,7 +59,9 @@ class DataSettings:
 
 @dataclass(frozen=True)
 class StoppingCriteria:
-    max_steps: int = 1000
+    # Three-seed calibration converges in 141-181 steps at the default
+    # tolerance, leaving a useful margin without a 1,000-step runaway budget.
+    max_steps: int = 250
     # 1e-15 is reachable in <1 s at the default architecture and buys ~11x
     # accuracy over 1e-12 (k rel error ~1.3e-6 vs ~1.5e-5 against the tight
     # solve_bvp benchmark). w32 d3 tanh is right-sized: smaller/shallower
@@ -151,7 +150,7 @@ class GrowthPolicyNN(nnx.Module):
         output_scale = jnp.asarray(
             [self.k_scale, self.c_scale], dtype=self.head.kernel.dtype
         )
-        return output_scale * jax.nn.softplus(self.head(h)) + DOMAIN_EPS
+        return output_scale * unit_softplus(self.head(h))
 
 
 def make_train_t_grid(data_set, dtype):
@@ -173,8 +172,7 @@ STATUS_TO_REASON = {
 
 
 def production(k, p):
-    k_positive = jnp.maximum(k, DOMAIN_EPS)
-    base = k_positive**p.a
+    base = k**p.a
     return p.A * jnp.maximum(base, p.b_1 * base - p.b_2)
 
 
@@ -194,9 +192,7 @@ def policy_values(model, t, p):
     mpk = marginal_product(k, p)
     resource = dk_dt - (output - p.delta * k - c)
     euler = dc_dt - c * (mpk - p.delta - p.rho_hat) / p.sigma_crra
-    log_tvc = (
-        -p.rho_hat * t - p.sigma_crra * jnp.log(jnp.maximum(c, DOMAIN_EPS)) + jnp.log(k)
-    )
+    log_tvc = -p.rho_hat * t - p.sigma_crra * jnp.log(c) + jnp.log(k)
     return {
         "t": t,
         "k": k,
@@ -308,19 +304,28 @@ def neoclassical_growth_nn(
 
     initial_output = float(A_value * max(k_0**a, b_1_value * k_0**a - b_2_value))
     c_flow_guess = max(initial_output - delta * k_0, DOMAIN_EPS)
-    default_head_level = jax.nn.softplus(0.0)
     policy_settings = replace(nn_set, input_scale=max(float(data_set.train_T), 1.0))
-    k_scale = max(1.0, float(k_0 / default_head_level))
-    c_scale = max(1.0, float(c_flow_guess / default_head_level))
-    template_model = GrowthPolicyNN(
+    k_scale = max(float(k_0), DOMAIN_EPS)
+    c_scale = c_flow_guess
+    graphdef, _ = nnx.split(
+        GrowthPolicyNN(
+            policy_settings,
+            k_scale=k_scale,
+            c_scale=c_scale,
+            dtype=dtype,
+            rngs=nnx.Rngs(0),
+        ),
+        nnx.Param,
+    )
+    init_key, multi_start_key = jax.random.split(jax.random.key(seed))
+    model = GrowthPolicyNN(
         policy_settings,
         k_scale=k_scale,
         c_scale=c_scale,
         dtype=dtype,
-        rngs=nnx.Rngs(seed),
+        rngs=nnx.Rngs(init_key),
     )
-    graphdef, template_theta = nnx.split(template_model, nnx.Param)
-    rngs = nnx.Rngs(seed)
+    _, theta_0 = nnx.split(model, nnx.Param)
 
     def residual_fn(theta, data):
         return training_residual(nnx.merge(graphdef, theta), data, p)
@@ -340,41 +345,52 @@ def neoclassical_growth_nn(
     # convergence, max_steps as the budget (a nonfinite candidate is rejected
     # and damping raised, which recovers more often than aborting).
     atol = math.sqrt(stop_set.train_loss_threshold)
+    draw = DrawNNXModule(
+        GrowthPolicyNN,
+        policy_settings,
+        k_scale=k_scale,
+        c_scale=c_scale,
+        dtype=dtype,
+    )
 
     compile_time = np.nan
     if measure_compilation:
         compile_start = time.perf_counter()
         jax.block_until_ready(
-            solver.solve(template_theta, train_data, max_steps=1, atol=atol)
+            solver.solve(
+                theta_0,
+                train_data,
+                max_steps=1,
+                atol=atol,
+                multi_start=MultiStart(
+                    key=jax.random.key(0),
+                    num_starts=stop_set.num_attempts,
+                    draw=draw,
+                ),
+            ).x
         )
         compile_time = time.perf_counter() - compile_start
 
-    for attempt in range(1, stop_set.num_attempts + 1):
-        model = GrowthPolicyNN(
-            policy_settings,
-            k_scale=k_scale,
-            c_scale=c_scale,
-            dtype=dtype,
-            rngs=rngs,
-        )
-        _, theta = nnx.split(model, nnx.Param)
-        if verbose and stop_set.num_attempts > 1:
-            print(f"attempt {attempt}")
-
-        start_time = time.perf_counter()
-        result = solver.solve(
-            theta, train_data, max_steps=stop_set.max_steps, atol=atol
-        )
-        theta, info, steps = result.x, result.info, int(result.steps)
-        stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
-        train_loss = float(info.loss)
-        if not np.isfinite(train_loss):
-            train_loss = float(info.loss_old)
-        train_time = time.perf_counter() - start_time
-        model = nnx.merge(graphdef, theta)
-        accepted = stopping_reason == "early_stopping_met"
-        if accepted:
-            break
+    start_time = time.perf_counter()
+    result = solver.solve(
+        theta_0,
+        train_data,
+        max_steps=stop_set.max_steps,
+        atol=atol,
+        multi_start=MultiStart(
+            key=multi_start_key,
+            num_starts=stop_set.num_attempts,
+            draw=draw,
+        ),
+    )
+    jax.block_until_ready(result.x)
+    train_time = time.perf_counter() - start_time
+    model = nnx.merge(graphdef, result.x)
+    steps = int(result.steps)
+    attempt = int(result.multi_start.attempt) + 1
+    stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
+    train_loss = float(result.info.loss)
+    accepted = bool(result.multi_start.accepted)
 
     train_df = snapshot(train_data, model, p)
     test_df = snapshot(test_data, model, p)

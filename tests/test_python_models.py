@@ -83,6 +83,20 @@ from neoclassical_growth_nn_recursive_i import (
 from neoclassical_growth_nn_recursive_i import (
     neoclassical_growth_nn_recursive_i,
 )
+from open_economy_growth import (
+    ModelParameters as OpenEconomyParameters,
+)
+from open_economy_growth import (
+    stable_tail_terms as open_economy_stable_tail_terms,
+)
+from open_economy_growth import (
+    steady_state as open_economy_steady_state,
+)
+from open_economy_growth_benchmark import open_economy_growth_benchmark
+from open_economy_growth_kernel_nlls import (
+    DataSettings as OpenEconomyDataSettings,
+)
+from open_economy_growth_kernel_nlls import open_economy_growth_kernel_nlls
 from optimal_advertising_kernel import optimal_advertising_kernel
 from optimal_advertising_kernel_nlls import optimal_advertising_kernel_nlls
 
@@ -91,6 +105,73 @@ FAST_GROWTH_NLLS = GrowthNLLSDataSettings(train_T=10.0, train_points=11, test_T=
 
 
 class KernelSmokeTests(unittest.TestCase):
+    def test_open_economy_growth_math_and_benchmark(self):
+        parameters = OpenEconomyParameters()
+        steady = open_economy_steady_state(parameters)
+        tail = open_economy_stable_tail_terms(parameters)
+        self.assertAlmostEqual(float(steady["s"]), parameters.delta, places=14)
+        self.assertAlmostEqual(
+            float(steady["q"]),
+            1.0 / parameters.installation_elasticity,
+            places=14,
+        )
+        self.assertLess(float(tail["stable_root"]), 0.0)
+        self.assertGreater(float(tail["unstable_root"]), 0.0)
+
+        evaluate, diagnostics = open_economy_growth_benchmark(
+            1.0,
+            0.0,
+            np.linspace(0.0, 80.0, 81),
+            parameters=parameters,
+        )
+        values = evaluate(np.linspace(0.0, 50.0, 101))
+        self.assertLess(abs(diagnostics["a_0_gap"]), 1e-8)
+        self.assertLess(abs(diagnostics["stable_residual"]), 1e-10)
+        self.assertLess(abs(diagnostics["present_value_residual"]), 1e-10)
+        self.assertGreater(values["x"].min(), 0.0)
+
+    def test_open_economy_growth_nlls_smoke(self):
+        results, extras = open_economy_growth_kernel_nlls()
+        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+        self.assertTrue(results["benchmark_match"])
+        self.assertEqual(results["terminal_residual_count"], 0)
+        self.assertEqual(results["dae_residual_count"], 3 * results["num_train_points"])
+        self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 2)
+        self.assertEqual(results["selection"], "minimum_shifted_rkhs_metric")
+        self.assertEqual(results["initialization"], "zero_coordinate")
+        self.assertLess(results["max_train_residual"], 1e-5)
+        self.assertLess(results["max_validation_residual"], 5e-3)
+        self.assertLess(results["max_benchmark_error"], 1e-3)
+        self.assertLess(results["ex_post_present_value_gap"], 1e-3)
+        self.assertLess(results["ex_post_discounted_assets"], 1e-2)
+        self.assertLess(results["ex_post_asset_tvc"], 1e-2)
+        self.assertLess(results["ex_post_capital_tvc"], 1e-2)
+        self.assertAlmostEqual(
+            results["rkhs_norm_total"],
+            results["rkhs_norm_k"]
+            + results["rkhs_norm_a"]
+            + results["rkhs_norm_q"],
+            places=10,
+        )
+        self.assertGreaterEqual(
+            results["shifted_metric_norm_squared"], results["rkhs_norm_total"]
+        )
+        self.assertTrue((extras["test_df"]["k"] > 0.0).all())
+        self.assertTrue((extras["test_df"]["q"] > 0.0).all())
+        self.assertTrue((extras["test_df"]["x"] > 0.0).all())
+
+        short_horizon, _ = open_economy_growth_kernel_nlls(
+            data_set=OpenEconomyDataSettings(
+                train_T=80.0,
+                train_points=86,
+                tail_points=5,
+                benchmark_T=120.0,
+            )
+        )
+        self.assertTrue(short_horizon["solution_accepted"])
+        self.assertFalse(short_horizon["benchmark_match"])
+        self.assertGreater(short_horizon["ex_post_asset_tvc"], 0.1)
+
     def test_integrated_kernels_match_quadrature(self):
         # (32.161, 5.829) is where the removed adaptive-quadrature versions
         # silently missed their tolerance by ~2.6e-4.

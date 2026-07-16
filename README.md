@@ -4,6 +4,14 @@ Replication package for
 [Solving Models of Economic Dynamics with Ridgeless Kernel Regressions](https://arxiv.org/pdf/2406.01898)
 by Mahdi Ebrahimi Kahou, Jesse Perla, and Geoff Pleiss.
 
+The design and verification record for the deterministic international-macro example is
+in [docs/open_economy_growth.md](docs/open_economy_growth.md). The implemented Stage 1
+model solves a continuous-time small open economy with capital installation costs and
+initial net foreign assets, with an independent boundary-value benchmark. The kernel
+collocates only the finite-time DAE; its RKHS metric selects the otherwise free jump
+variables, while no-Ponzi and transversality conditions are evaluated only ex post. The
+note then maps the model to the multicountry trade extension.
+
 ## Setup
 
 Use [uv](https://docs.astral.sh/uv/getting-started/installation/) for all

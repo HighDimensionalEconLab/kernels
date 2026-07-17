@@ -42,6 +42,9 @@ from multicountry_trade_growth import (
     static_trade_equilibrium,
     symmetric_trade_growth_parameters,
 )
+from multicountry_trade_growth_comparative_statics import (
+    build_multicountry_trade_comparative_statics,
+)
 from multicountry_trade_growth_kernel_nlls import (
     DataSettings as MulticountryTradeDataSettings,
 )
@@ -512,6 +515,81 @@ class KernelSmokeTests(unittest.TestCase):
             rtol=1e-12,
             atol=1e-16,
         )
+
+    def test_multicountry_trade_structural_parameter_implicit_ad(self):
+        parameters = symmetric_trade_growth_parameters(2)
+        problem = build_multicountry_trade_comparative_statics(
+            k_0=(1.0, 0.9),
+            a_0=(-0.1, 0.1),
+            parameters=parameters,
+            data_set=MulticountryTradeDataSettings(
+                train_T=10.0,
+                train_points=5,
+                sampling="uniform",
+                dense_T=5.0,
+                tail_points=1,
+                test_T=10.0,
+                test_points=11,
+                validation_points=21,
+                quality_T=10.0,
+            ),
+            lm_set=MulticountryTradeNLLSGramSettings(
+                init_damping=1e-8,
+                residual_atol=1e-12,
+                max_steps=40,
+            ),
+            statistic_times=(0.0, 5.0, 10.0),
+        )
+        p = problem.structural_parameters
+        p_dot = jax.tree.map(jnp.zeros_like, p)
+        p_dot = {**p_dot, "rho": p["rho"]}
+        result, result_dot = jax.jvp(problem.solve, (p,), (p_dot,))
+
+        def residual(theta, parameters_pytree):
+            return problem.solver.residual_fn(theta, None, parameters_pytree)[0]
+
+        _, linearized_residual = jax.jvp(
+            residual,
+            (result.x, p),
+            (result_dot.x, p_dot),
+        )
+        self.assertEqual(int(result.status), 1)
+        self.assertLess(float(jnp.max(jnp.abs(residual(result.x, p)))), 1e-10)
+        self.assertLess(float(jnp.max(jnp.abs(linearized_residual))), 1e-8)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(result_dot.aux))))
+        self.assertIn("initial_log_capital[1]", problem.parameter_names)
+        self.assertIn("initial_aggregate_assets_free[1]", problem.parameter_names)
+
+        step = 1e-3
+        p_plus = jax.tree.map(lambda value, dot: value + step * dot, p, p_dot)
+        p_minus = jax.tree.map(lambda value, dot: value - step * dot, p, p_dot)
+        theta_plus = jax.tree.map(
+            lambda value, dot: value + step * dot,
+            result.x,
+            result_dot.x,
+        )
+        theta_minus = jax.tree.map(
+            lambda value, dot: value - step * dot,
+            result.x,
+            result_dot.x,
+        )
+        result_plus = problem.solver.solve(
+            theta_plus,
+            p=p_plus,
+            max_steps=40,
+            atol=1e-14,
+        )
+        result_minus = problem.solver.solve(
+            theta_minus,
+            p=p_minus,
+            max_steps=40,
+            atol=1e-14,
+        )
+        finite_difference = (result_plus.aux - result_minus.aux) / (2.0 * step)
+        relative_error = jnp.linalg.norm(
+            finite_difference - result_dot.aux
+        ) / jnp.linalg.norm(result_dot.aux)
+        self.assertLess(float(relative_error), 1e-4)
 
     def test_multicountry_trade_three_country_sequential_nn_solve(self):
         results, frames = multicountry_trade_growth_nn(

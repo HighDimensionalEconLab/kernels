@@ -353,6 +353,20 @@ def multicountry_trade_growth_kernel_nlls(
 
     validation_eval, validation_log_static = evaluate_grid(validation_data)
     test_eval, test_log_static = evaluate_grid(test_data)
+    tail_start = int(
+        np.searchsorted(
+            np.asarray(validation_data),
+            0.9 * float(validation_data[-1]),
+        )
+    )
+    plateau_index = int(
+        np.argmin(
+            np.abs(
+                np.asarray(validation_data)
+                - (2.0 / 3.0) * float(validation_data[-1])
+            )
+        )
+    )
     dynamic_names = ("capital", "assets", "tobin_q", "marginal_wealth_euler")
     max_train_residual = max(
         max(float(jnp.max(jnp.abs(train_eval[name]))) for name in dynamic_names),
@@ -429,6 +443,12 @@ def multicountry_trade_growth_kernel_nlls(
     unknown_count = num_dynamic_functions * n_train + algebraic_size
 
     results = {
+        "alpha": parameters.alpha,
+        "gamma": parameters.gamma,
+        "delta": parameters.delta,
+        "rho": parameters.rho,
+        "installation_elasticity": parameters.installation_elasticity,
+        "trade_elasticity": parameters.trade_elasticity,
         "num_countries": num_countries,
         "kernel": kernel,
         "ell": kernel_set.ell,
@@ -456,6 +476,17 @@ def multicountry_trade_growth_kernel_nlls(
         "ex_post_discounted_assets": float(jnp.max(jnp.abs(tvc["discounted_assets"][-1]))),
         "ex_post_asset_tvc": float(jnp.max(jnp.abs(tvc["asset_tvc"][-1]))),
         "ex_post_capital_tvc": float(jnp.max(jnp.abs(tvc["capital_tvc"][-1]))),
+        "terminal_interest_rate": float(validation_eval["interest_rate"][-1]),
+        "terminal_interest_rate_gap": float(
+            abs(validation_eval["interest_rate"][-1] - parameters.rho)
+        ),
+        "plateau_time": float(validation_data[plateau_index]),
+        "plateau_interest_rate": float(
+            validation_eval["interest_rate"][plateau_index]
+        ),
+        "plateau_interest_rate_gap": float(
+            abs(validation_eval["interest_rate"][plateau_index] - parameters.rho)
+        ),
         "rkhs_norm_total": float(rkhs_norm_total),
         "solve_time": solve_time,
         "wall_time": solve_time,
@@ -485,6 +516,77 @@ def multicountry_trade_growth_kernel_nlls(
                 f"q_0_{suffix}": float(test_eval["q"][0, country]),
                 f"m_0_{suffix}": float(test_eval["marginal_wealth"][0, country]),
                 f"terminal_a_{suffix}": float(validation_eval["a"][-1, country]),
+                f"terminal_k_{suffix}": float(validation_eval["k"][-1, country]),
+                f"terminal_consumption_{suffix}": float(
+                    validation_eval["consumption"][-1, country]
+                ),
+                f"terminal_investment_rate_{suffix}": float(
+                    validation_eval["investment"][-1, country]
+                    / validation_eval["k"][-1, country]
+                ),
+                f"terminal_current_account_{suffix}": float(
+                    validation_eval["current_account"][-1, country]
+                ),
+                f"terminal_trade_balance_{suffix}": float(
+                    validation_eval["trade_balance"][-1, country]
+                ),
+                f"terminal_steady_trade_gap_{suffix}": float(
+                    validation_eval["trade_balance"][-1, country]
+                    + validation_eval["interest_rate"][-1]
+                    * validation_eval["a"][-1, country]
+                ),
+                f"plateau_a_{suffix}": float(
+                    validation_eval["a"][plateau_index, country]
+                ),
+                f"plateau_k_{suffix}": float(
+                    validation_eval["k"][plateau_index, country]
+                ),
+                f"plateau_consumption_{suffix}": float(
+                    validation_eval["consumption"][plateau_index, country]
+                ),
+                f"plateau_investment_rate_{suffix}": float(
+                    validation_eval["investment"][plateau_index, country]
+                    / validation_eval["k"][plateau_index, country]
+                ),
+                f"plateau_investment_rate_gap_{suffix}": float(
+                    validation_eval["investment"][plateau_index, country]
+                    / validation_eval["k"][plateau_index, country]
+                    - parameters.delta
+                ),
+                f"plateau_current_account_{suffix}": float(
+                    validation_eval["current_account"][plateau_index, country]
+                ),
+                f"plateau_trade_balance_{suffix}": float(
+                    validation_eval["trade_balance"][plateau_index, country]
+                ),
+                f"plateau_steady_trade_gap_{suffix}": float(
+                    validation_eval["trade_balance"][plateau_index, country]
+                    + validation_eval["interest_rate"][plateau_index]
+                    * validation_eval["a"][plateau_index, country]
+                ),
+                f"tail_asset_change_{suffix}": float(
+                    validation_eval["a"][-1, country]
+                    - validation_eval["a"][tail_start, country]
+                ),
+                f"tail_log_capital_change_{suffix}": float(
+                    jnp.log(
+                        validation_eval["k"][-1, country]
+                        / validation_eval["k"][tail_start, country]
+                    )
+                ),
+                f"tail_log_consumption_change_{suffix}": float(
+                    jnp.log(
+                        validation_eval["consumption"][-1, country]
+                        / validation_eval["consumption"][tail_start, country]
+                    )
+                ),
+                f"tail_max_current_account_{suffix}": float(
+                    jnp.max(
+                        jnp.abs(
+                            validation_eval["current_account"][tail_start:, country]
+                        )
+                    )
+                ),
                 **{
                     f"rkhs_norm_{name}_{suffix}": float(rkhs_norms[f"{name}_{suffix}"])
                     for name in coefficient_groups
@@ -503,6 +605,7 @@ def multicountry_trade_growth_kernel_nlls(
                 "marginal_wealth",
                 "consumption",
                 "investment",
+                "investment_rate",
                 "trade_balance",
                 "current_account",
             ):

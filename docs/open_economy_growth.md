@@ -1526,10 +1526,62 @@ better than \(10^{-8}\). No terminal, steady-state, TVC, no-Ponzi, or benchmark 
 enters the solve; the corresponding quantities are reported only after convergence.
 
 The default 80-year, 24-point three-country case converges in 24 steps. On the measured
-CPU run, compilation takes 6.9 seconds and the post-compile solve takes 0.24 seconds. Its
+GPU run, compilation takes 6.9 seconds and the post-compile solve takes 0.24 seconds. Its
 training residual is \(1.1\times10^{-8}\), the fast monotone-cubic reporting grid has a
 maximum residual of \(3.0\times10^{-3}\), world-asset clearing is accurate to
 \(2.5\times10^{-7}\), and country-implied returns agree to \(5.7\times10^{-12}\).
 The reporting interpolation affects neither training nor the metric; the optional
 `static_evaluation="resolve"` mode instead re-solves every plotted static equilibrium for
 a stricter but slower audit.
+
+### Longer-horizon economics audit
+
+The horizon experiment changes only the collocation horizon, point count, and numerical
+tolerance. No terminal or tail equation is added. For initial NFA
+\((-0.2,0.1,0.1)\), the results are:
+
+| \(T\) | points | terminal \(a_1\) | max asset clearing | discounted assets | asset TVC | capital TVC |
+|---:|---:|---:|---:|---:|---:|---:|
+| 80 | 24 | -0.1604 | \(2.5\times10^{-7}\) | \(6.2\times10^{-3}\) | \(4.5\times10^{-2}\) | \(4.0\times10^{-1}\) |
+| 120 | 32 | -0.1850 | \(1.5\times10^{-8}\) | \(1.5\times10^{-3}\) | \(1.1\times10^{-2}\) | \(9.7\times10^{-2}\) |
+| 160 | 40 | -0.1828 | \(2.8\times10^{-8}\) | \(2.8\times10^{-4}\) | \(2.0\times10^{-3}\) | \(1.8\times10^{-2}\) |
+| 240 | 72 | -0.1830 | \(1.7\times10^{-7}\) | \(1.1\times10^{-5}\) | \(7.7\times10^{-5}\) | \(6.9\times10^{-4}\) |
+
+The long solve needs a tighter NLLS residual tolerance of \(10^{-10}\): at the default
+\(2\times10^{-8}\), small country-budget errors accumulate into a world-asset gap of
+about \(10^{-3}\) by year 240. Tightening the optimizer tolerance reduces that gap by
+four orders of magnitude without changing the selected NFA levels or ex-post TVCs.
+
+The finite RKHS horizon produces a boundary layer close to \(T\), especially in capital
+and consumption. Therefore the solver reports both terminal diagnostics and an interior
+plateau at \(2T/3\). In the \(T=240\) debt case, at year 160,
+
+\[
+r-\rho=-2.3\times10^{-6},\qquad
+s_1-\delta=-3.8\times10^{-6},\qquad
+\dot a_1=4.0\times10^{-6}.
+\]
+
+Capital, consumption, the world rate, and NFA are essentially flat through the interior
+plateau before the terminal boundary layer. A \(T=320\) check pushes that layer outward
+and lowers the terminal capital TVC to \(2.7\times10^{-5}\), while selecting the same NFA
+level, but is not the reported baseline because its off-grid world-asset interpolation
+gap is larger.
+
+At the common year-160 plateau of the \(T=240\) solves:
+
+| Initial \(a_1\) | selected \(a_1\) | consumption \(c_1\) | trade balance \(NX_1\) |
+|---:|---:|---:|---:|
+| -0.2 | -0.1840 | 0.3643 | 0.00751 |
+| 0.0 | \(0.0\) | 0.3734 | \(0.0\) |
+| 0.2 | 0.1838 | 0.3825 | -0.00751 |
+| -0.4 | -0.3682 | 0.3550 | 0.01504 |
+
+The other two symmetric countries hold the offsetting positions. Reversing initial NFA
+reverses the selected long-run positions, while doubling initial debt approximately
+doubles them. Debtors consume less and run trade surpluses; creditors consume more and
+run trade deficits. In every case the plateau satisfies
+\(NX_i+r a_i\approx\dot a_i\approx0\). Thus the tested metric-selected solution displays
+the intended initial-NFA history dependence without a debt target or imposed no-Ponzi
+condition. This is numerical evidence for the inductive-bias claim, not a theorem that
+every kernel and calibration selects the economically admissible root.

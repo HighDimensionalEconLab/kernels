@@ -434,6 +434,12 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertLess(results["max_asset_clearing_residual"], 5e-8)
         self.assertLess(results["max_rate_consistency_residual"], 1e-8)
         self.assertAlmostEqual(results["terminal_a_2"], results["terminal_a_3"], 7)
+        self.assertAlmostEqual(
+            results["terminal_steady_trade_gap_1"],
+            results["terminal_current_account_1"],
+            5,
+        )
+        self.assertTrue(np.isfinite(results["plateau_interest_rate_gap"]))
         self.assertLess(
             np.max(np.abs(frames["validation_df"]["consumption_basket_log_price"])),
             1e-4,

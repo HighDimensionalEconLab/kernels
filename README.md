@@ -142,7 +142,10 @@ dataclasses.
   dynamic RKHS paths, all `8N` static equations, every country budget, and a
   symmetric consumption-basket numeraire. The `2N` initial Tobin-q and
   marginal-wealth values are selected by the metric. Asset clearing, no-Ponzi,
-  and transversality conditions are evaluated only ex post.
+  and transversality conditions are evaluated only ex post. The replication
+  driver includes 80--240 year horizon checks and zero, reversed, and doubled
+  initial-NFA counterfactuals; its companion figure script plots the selected
+  history dependence and terminal diagnostics.
 - The differentiable rollout integrators (fixed RK4 by measured default, with
   Tsit5, Euler, and Rodas5P available; fixed RK4 for test/settle paths) come from
   [tinydiffeq](https://github.com/HighDimensionalEconLab/tinydiffeq),

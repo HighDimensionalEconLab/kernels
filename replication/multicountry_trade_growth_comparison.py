@@ -8,20 +8,18 @@ import jax
 import jsonargparse
 import pandas as pd
 
-jax.config.update("jax_enable_x64", True)
-jax.config.update("jax_default_matmul_precision", "highest")
-
-import multicountry_trade_growth_kernel_nlls  # noqa: E402
-import multicountry_trade_growth_nn  # noqa: E402
-from multicountry_trade_growth import (  # noqa: E402
-    symmetric_trade_growth_parameters,
-)
-from replication.utilities import (  # noqa: E402
+import multicountry_trade_growth_kernel_nlls
+import multicountry_trade_growth_nn
+from multicountry_trade_growth import symmetric_trade_growth_parameters
+from replication.utilities import (
     compare_residual_norm_frames,
     enable_compilation_cache,
     save_experiment,
     write_summary,
 )
+
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
 
 enable_compilation_cache()
 

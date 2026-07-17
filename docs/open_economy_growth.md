@@ -1,8 +1,8 @@
 # Continuous-time open-economy growth with initial net foreign assets
 
-Status: implemented one-country stepping stone and N-country closed-world extension,
-tested at two and three countries; design complete for the static-trade extension. This
-note fixes the economic object,
+Status: implemented one-country stepping stone, N-country closed-world extension,
+isolated N-country static-trade mechanics, and the joint trade-transition kernel DAE,
+tested at two and three countries. This note fixes the economic object,
 derives the continuous-time equations, maps them to the repository's NLLS/RKHS
 formulation, and records how the minimum-norm solution is compared ex post with the
 conventional economic boundary-value solution.
@@ -1126,6 +1126,88 @@ long-run differences.
 The final model keeps the same dynamic shell but replaces one-good production with an
 implicit static trade equilibrium at each time.
 
+The mechanics are implemented separately in
+[multicountry_trade_growth.py](../multicountry_trade_growth.py). The existing
+[multicountry_growth.py](../multicountry_growth.py) and its kernel solver remain the
+standalone one-good example; the trade extension does not mutate or specialize them.
+
+At a given date, define the eight positive algebraic values for each country as
+
+\[
+\zeta_i=(w_i,R_i,P_{c,i},P_{m,i},P_{x,i},V_{c,i},V_{m,i},V_{x,i}),
+\tag{35}
+\]
+
+where \(V_{b,i}=P_{b,i}Y_{b,i}\) is gross sectoral revenue. For sector
+\(b\in\{c,m,x\}\), its unit input cost is
+
+\[
+u_{b,i}
+=\frac{1}{A_{b,i}}
+\left(\frac{R_i}{\alpha\nu_{b,i}}\right)^{\alpha\nu_{b,i}}
+\left(\frac{w_i}{(1-\alpha)\nu_{b,i}}\right)^{(1-\alpha)\nu_{b,i}}
+\left(\frac{P_{m,i}}{1-\nu_{b,i}}\right)^{1-\nu_{b,i}},
+\tag{36}
+\]
+
+with the Fréchet scale \(T_{m,i}\) taking the place of \(A_{m,i}\) for traded
+intermediates. Using importer-first indexing, the Eaton-Kortum block is
+
+\[
+\pi_{ij}
+=\frac{T_{m,j}(u_{m,j}d_{ij})^{-\theta}}
+{\sum_\ell T_{m,\ell}(u_{m,\ell}d_{i\ell})^{-\theta}},
+\qquad
+P_{m,i}
+=\kappa_\eta
+\left[\sum_jT_{m,j}(u_{m,j}d_{ij})^{-\theta}\right]^{-1/\theta},
+\tag{37}
+\]
+
+where
+\(\kappa_\eta=\Gamma(1+(1-\eta)/\theta)^{1/(1-\eta)}\). The implementation evaluates
+the shares with a log-sum-exp, so adding countries changes array sizes but not the
+equations.
+
+Given dynamic \((k_i,q_i,m_i)\), consumption and investment determine two sectoral
+revenues,
+
+\[
+c_i=(m_iP_{c,i})^{-1/\gamma},
+\quad
+s_i=\left(\frac{\chi\lambda q_i}{P_{x,i}}\right)^{1/(1-\lambda)},
+\quad
+V_{c,i}=P_{c,i}L_ic_i,
+\quad
+V_{x,i}=P_{x,i}L_ik_is_i.
+\tag{38}
+\]
+
+The remaining country equations retain both factor markets and intermediate-market
+clearing explicitly:
+
+\[
+\begin{aligned}
+R_iK_i
+&=\alpha(\nu_{c,i}V_{c,i}+\nu_{m,i}V_{m,i}+\nu_{x,i}V_{x,i}),\\
+w_iL_i
+&=(1-\alpha)(\nu_{c,i}V_{c,i}+\nu_{m,i}V_{m,i}+\nu_{x,i}V_{x,i}),\\
+E_{m,i}
+&=(1-\nu_{c,i})V_{c,i}+(1-\nu_{m,i})V_{m,i}
+ +(1-\nu_{x,i})V_{x,i},\\
+V_{m,j}
+&=\sum_i\pi_{ij}E_{m,i}.
+\end{aligned}
+\tag{39}
+\]
+
+Together with the three unit-cost equations and the two final-good market equations,
+these are \(8N\) algebraic equations in the \(8N\) entries of \(\zeta\). No country,
+budget, factor market, or bilateral partner is removed using a two-country relative
+representation. Bilateral shares are evaluated directly because (37) is already an
+explicit structural formula; making all \(N^2\) shares solver unknowns would add no
+economic degree of freedom.
+
 For country \(i\), retain the same per-worker dynamic variables
 \((k_i,a_i,q_i,m_i)\), including all \(N\) asset and marginal-wealth paths. The
 static trade block returns the consumption price \(P_{c,i}\), investment price
@@ -1136,7 +1218,7 @@ and market-clearing residuals. Use the algebraic household equations
 c_i=(m_iP_{c,i})^{-1/\gamma},
 \qquad
 \frac{\dot m_i}{m_i}=\rho-r,
-\tag{35}
+\tag{40}
 \]
 
 \[
@@ -1149,7 +1231,7 @@ s_i
 \left(
 \frac{\chi\lambda q_i}{P_{x,i}}
 \right)^{1/(1-\lambda)}.
-\tag{36}
+\tag{41}
 \]
 
 The installed-capital co-state equation is
@@ -1159,7 +1241,7 @@ The installed-capital co-state equation is
 =
 \left[r+\delta-(1-\lambda)\chi s_i^\lambda\right]q_i
 -R_{k,i}.
-\tag{37}
+\tag{42}
 \]
 
 The budget/current-account equation uses all prices in a common numeraire:
@@ -1169,7 +1251,7 @@ The budget/current-account equation uses all prices in a common numeraire:
 =
 r a_i+\text{factor income}_i
 -P_{c,i}c_i-P_{x,i}x_i.
-\tag{38}
+\tag{43}
 \]
 
 The income term must use the same price system as the q equation. Under competitive
@@ -1187,20 +1269,22 @@ closure in (30). Require the resulting DAE Jacobian with respect to the static p
 allocations, and world rate to have full rank along the entire path. Rank failure is not a
 reason to add an external debt-stationarity device.
 
-All per-worker flows must be aggregated with \(L_i\). In particular,
-\(\sum_i L_i a_i=0\) is retained as a global algebraic equation over the explicit asset
-blocks. Keep static_trade_equilibrium, static_trade_residuals, world_asset_clearing, and
-multicountry_tail_diagnostics as explicit function boundaries. The last is evaluation
-only and must never be concatenated into the kernel residual. This lets the same trade
+All per-worker flows must be aggregated with \(L_i\). Require
+\(\sum_i L_i a_i(0)=0\) as an admissible initial condition. With every country budget
+and the complete static block present, Walras' law implies preservation of world asset
+clearing, so repeating it in the residual would add a redundant row. Keep
+static_trade_equilibrium, static_trade_residuals, world_asset_clearing, and
+multicountry_trade_tvc_diagnostics as explicit function boundaries. The last two are
+evaluation only and must never be concatenated into the kernel residual. This lets the same trade
 block be tested first in isolation, then under a nested solve, and finally as part of the
 joint NLLS system. In code, call the installed-capital value tobin_q and reserve r for
 the world bond return; this avoids colliding with the paper's use of \(q_t\) for the bond
 return.
 
 Retain all \(N\) asset paths and all \(N\) country budget equations. Include only an
-independent basis of the global resource, asset, and static-market-clearing equations;
-drop the genuinely redundant Walras row rather than a country block. Equation (31) is the
-one-good prototype for this rank accounting.
+independent basis of the static-market and numeraire equations; do not duplicate their
+Walras implication as another path equation. Equation (31) is the one-good prototype for
+this rank accounting, but the full trade block supplies its own world-flow identity.
 
 The Alvarez–Lucas uniqueness result is a useful static benchmark, but the exact RSS block
 has capital, intermediates, and endogenous imbalances. Verify its assumptions or establish
@@ -1208,13 +1292,20 @@ local uniqueness directly from the normalized static Jacobian. The solver must r
 rank-deficient static equilibrium rather than silently choosing a branch. This check is
 separate from, and must not eliminate, the intended dynamic history dependence.
 
-Impose one conventional numeraire normalization on the static price system. This removes
-only a common nominal price scale. A constant rescaling correspondingly rescales all
-\(m_i\), but leaves their log derivatives, the real interest rate, allocations, and
-external positions unchanged. The redundant normalization is one time-invariant global scale, not a fresh
-independent scale at every date: a time-varying price rescaling changes the measured
-numeraire return by its inflation rate. Fix the intertemporal numeraire consistently
-before interpreting \(r(t)\).
+Impose one conventional numeraire normalization on the static price system. For a common
+scale \(e^{\phi(t)}\), nominal prices, revenues, \(q_i\), and \(a_i\) scale by
+\(e^{\phi(t)}\), marginal wealth scales by \(e^{-\phi(t)}\), and the measured return
+changes to \(r+\dot\phi\). This is a gauge freedom, not economic multiplicity. Define a
+consistent real unit at every date with
+
+\[
+\sum_i\frac{L_i}{\sum_jL_j}\log P_{c,i}(t)=0.
+\tag{44}
+\]
+
+Thus the population-weighted geometric consumption price is one, and \(a_i,q_i,m_i,r\)
+are interpreted in that basket. This removes only the nominal gauge and leaves real
+allocations and initial-account hysteresis unchanged.
 
 Do not add debt-elastic rates, portfolio costs, borrowing wedges, target-NFA laws, or
 terminal conditions of the form \(a_i(T)=0\) or \(a_i(T)=a_i(0)\). Such devices would
@@ -1387,3 +1478,58 @@ converges in nine LM steps with a 0.82-second post-compile GPU solve,
 With symmetric countries 2 and 3, their selected welfare weights and terminal assets
 agree to better than \(10^{-6}\). This is the executable guard against reintroducing a
 two-country-only parameterization before the static trade block is added.
+
+## Stage 4 mechanics record
+
+The separate trade module now implements the full three-sector static mechanics from the
+paper rather than a one-sector shortcut. Conditional on dynamic \((k_i,q_i,m_i)\), the
+JAX residual has eight log equations per country for the eight values in (35). It keeps
+both domestic factor markets, all three sector prices and revenues, and every exporter's
+intermediate-market equation. The importer-by-exporter trade-share matrix is computed by
+the closed-form Eaton-Kortum map in (37).
+
+An independent host-side reference solve exercises the JAX residual and its exact
+Jacobian. Symmetric two- and three-country cases both converge in nine residual
+evaluations with maximum residual (1.8\times10^{-15}\). The minimum singular value of
+the static Jacobian is approximately (0.075), with condition number about (46.1), so
+the tested equilibrium is locally unique conditional on the dynamic values. Factor
+allocations exhaust each country's capital and labor, bilateral shares sum to one, and
+the household-budget and net-export representations agree to machine precision.
+
+The module also implements the continuous-time capital, NFA, installed-capital co-state,
+and marginal-wealth residuals around this static block. The static reference solve
+introduces no debt stationarity, terminal target, TVC, or no-Ponzi equation.
+
+## Stage 5 joint trade-transition record
+
+The joint solver keeps \(4N\) integrated-kernel paths for
+\((\log k_i,a_i,\log q_i,\log m_i)\), the \(8N\) static log values at every collocation
+date, and one algebraic world return. It appends (44) but no asset-clearing row: initial
+world asset clearing is checked as input, while Walras' law and all country budgets imply
+its subsequent preservation. With \(n\) dates, the solver therefore has
+
+\[
+(12N+1)n+2N\ \text{unknowns},\qquad (12N+1)n\ \text{equations},
+\]
+
+leaving exactly \(2N\) directions to the metric. Only the \(4N\) dynamic paths receive
+the repeated RKHS block; static values, the world return, and the free initial values have
+the common \(\epsilon I\) shift.
+
+An eight-point smoke solve with initial NFA \((-0.2,0.1,0.1)\) exercises the complete
+three-country system. It converges in five LM steps with a maximum training residual of
+\(6.7\times10^{-12}\), an exact-static-audit dense residual of
+\(1.1\times10^{-4}\), world-asset
+clearing error of \(7.2\times10^{-12}\), and cross-country return discrepancy of
+\(5.6\times10^{-14}\). The two symmetric creditor countries agree in terminal assets to
+better than \(10^{-8}\). No terminal, steady-state, TVC, no-Ponzi, or benchmark equation
+enters the solve; the corresponding quantities are reported only after convergence.
+
+The default 80-year, 24-point three-country case converges in 24 steps. On the measured
+CPU run, compilation takes 6.9 seconds and the post-compile solve takes 0.24 seconds. Its
+training residual is \(1.1\times10^{-8}\), the fast monotone-cubic reporting grid has a
+maximum residual of \(3.0\times10^{-3}\), world-asset clearing is accurate to
+\(2.5\times10^{-7}\), and country-implied returns agree to \(5.7\times10^{-12}\).
+The reporting interpolation affects neither training nor the metric; the optional
+`static_evaluation="resolve"` mode instead re-solves every plotted static equilibrium for
+a stricter but slower audit.

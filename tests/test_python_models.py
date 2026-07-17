@@ -34,6 +34,22 @@ from multicountry_growth import (
     multicountry_steady_state,
 )
 from multicountry_growth_kernel_nlls import multicountry_growth_kernel_nlls
+from multicountry_trade_growth import (
+    TradeGrowthParameters,
+    multicountry_trade_allocations,
+    multicountry_trade_path_values,
+    static_trade_equilibrium,
+    symmetric_trade_growth_parameters,
+)
+from multicountry_trade_growth_kernel_nlls import (
+    DataSettings as MulticountryTradeDataSettings,
+)
+from multicountry_trade_growth_kernel_nlls import (
+    NLLSGramSettings as MulticountryTradeNLLSGramSettings,
+)
+from multicountry_trade_growth_kernel_nlls import (
+    multicountry_trade_growth_kernel_nlls,
+)
 from neoclassical_growth_concave_convex_kernel import (
     neoclassical_growth_concave_convex_kernel,
 )
@@ -294,6 +310,162 @@ class KernelSmokeTests(unittest.TestCase):
                 a_0=(-0.5, 0.25, 0.0),
                 parameters=parameters,
             )
+
+    def test_multicountry_trade_static_equilibrium(self):
+        for num_countries in (2, 3):
+            parameters = symmetric_trade_growth_parameters(num_countries)
+            k = jnp.ones(num_countries)
+            tobin_q = jnp.full(num_countries, 1.0 / parameters.installation_elasticity)
+            marginal_wealth = jnp.ones(num_countries)
+            values, diagnostics = static_trade_equilibrium(
+                k,
+                tobin_q,
+                marginal_wealth,
+                parameters,
+            )
+            self.assertLess(diagnostics["max_residual"], 1e-10)
+            self.assertGreater(diagnostics["minimum_jacobian_singular_value"], 1e-3)
+            np.testing.assert_allclose(
+                values["trade_shares"].sum(axis=1), 1.0, atol=1e-13
+            )
+            np.testing.assert_allclose(values["budget_trade_gap"], 0.0, atol=1e-13)
+            np.testing.assert_allclose(values["world_trade_balance"], 0.0, atol=1e-13)
+            np.testing.assert_allclose(values["wage"], values["wage"][0], atol=1e-13)
+            np.testing.assert_allclose(
+                values["sector_capital"].sum(axis=0),
+                k * jnp.asarray(parameters.populations),
+                atol=1e-12,
+            )
+            np.testing.assert_allclose(
+                values["sector_labor"].sum(axis=0),
+                parameters.populations,
+                atol=1e-12,
+            )
+            self.assertTrue(
+                np.all(np.diag(values["trade_shares"]) > values["trade_shares"][0, -1])
+            )
+
+    def test_multicountry_trade_dynamic_shell(self):
+        parameters = symmetric_trade_growth_parameters(3)
+        k = jnp.ones(3)
+        tobin_q = jnp.full(3, 1.0 / parameters.installation_elasticity)
+        marginal_wealth = jnp.ones(3)
+        static, _ = static_trade_equilibrium(
+            k,
+            tobin_q,
+            marginal_wealth,
+            parameters,
+        )
+        k_path = k[None, :]
+        q_path = tobin_q[None, :]
+        marginal_wealth_path = marginal_wealth[None, :]
+        interest_rate = jnp.asarray((parameters.rho,))
+        log_static = static["log_static"][None, :, :]
+        allocations = multicountry_trade_allocations(
+            k_path,
+            q_path,
+            marginal_wealth_path,
+            interest_rate,
+            log_static,
+            parameters,
+        )
+        a = jnp.zeros((1, 3))
+        da_dt = (
+            interest_rate[:, None] * a
+            + allocations["factor_income"]
+            - allocations["final_expenditure"]
+        )
+        values = multicountry_trade_path_values(
+            k=k_path,
+            a=a,
+            tobin_q=q_path,
+            marginal_wealth=marginal_wealth_path,
+            interest_rate=interest_rate,
+            log_static=log_static,
+            dlog_k_dt=allocations["capital_drift"] / k_path,
+            da_dt=da_dt,
+            dlog_q_dt=allocations["tobin_q_drift"] / q_path,
+            dlog_marginal_wealth_dt=jnp.zeros((1, 3)),
+            parameters=parameters,
+        )
+        for name in (
+            "capital",
+            "assets",
+            "tobin_q",
+            "marginal_wealth_euler",
+            "world_flow",
+            "asset_clearing",
+        ):
+            np.testing.assert_allclose(values[name], 0.0, atol=1e-12)
+        np.testing.assert_allclose(values["static_residuals"], 0.0, atol=1e-12)
+        np.testing.assert_allclose(values["budget_trade_gap"], 0.0, atol=1e-12)
+
+    def test_multicountry_trade_three_country_joint_kernel_solve(self):
+        parameters = symmetric_trade_growth_parameters(3)
+        results, frames = multicountry_trade_growth_kernel_nlls(
+            a_0=(-0.2, 0.1, 0.1),
+            parameters=parameters,
+            data_set=MulticountryTradeDataSettings(
+                train_T=15.0,
+                train_points=6,
+                sampling="uniform",
+                dense_T=8.0,
+                tail_points=2,
+                test_T=8.0,
+                test_points=9,
+                validation_points=13,
+                rank_audit=True,
+            ),
+            lm_set=MulticountryTradeNLLSGramSettings(
+                max_steps=30,
+                residual_atol=1e-7,
+            ),
+        )
+
+        self.assertTrue(results["solution_accepted"])
+        self.assertEqual(results["terminal_residual_count"], 0)
+        self.assertEqual(results["dynamic_rkhs_function_count"], 12)
+        self.assertEqual(results["metric_selection_dimension"], 6)
+        self.assertEqual(results["unknown_count"] - results["dae_residual_count"], 6)
+        self.assertEqual(results["dae_jacobian_rank"], results["dae_residual_count"])
+        self.assertGreater(results["dae_jacobian_min_singular_value"], 1e-8)
+        self.assertLess(results["max_train_residual"], 1e-8)
+        self.assertLess(results["max_validation_residual"], 1e-3)
+        self.assertLess(results["max_asset_clearing_residual"], 5e-8)
+        self.assertLess(results["max_rate_consistency_residual"], 1e-8)
+        self.assertAlmostEqual(results["terminal_a_2"], results["terminal_a_3"], 7)
+        self.assertLess(
+            np.max(np.abs(frames["validation_df"]["consumption_basket_log_price"])),
+            1e-4,
+        )
+
+    def test_multicountry_trade_heterogeneous_static_equilibrium(self):
+        parameters = TradeGrowthParameters(
+            populations=(1.0, 2.0, 1.5),
+            intermediate_productivities=(1.0, 1.1, 0.9),
+            consumption_productivities=(1.0, 1.05, 0.95),
+            investment_productivities=(1.0, 0.9, 1.1),
+            consumption_value_added_shares=(0.75, 0.7, 0.8),
+            intermediate_value_added_shares=(0.5, 0.55, 0.45),
+            investment_value_added_shares=(0.5, 0.45, 0.55),
+            trade_costs=(
+                (1.0, 1.3, 1.8),
+                (1.5, 1.0, 1.4),
+                (1.2, 1.6, 1.0),
+            ),
+        )
+        values, diagnostics = static_trade_equilibrium(
+            k=jnp.asarray((1.0, 0.8, 1.3)),
+            tobin_q=jnp.full(3, 1.0 / parameters.installation_elasticity),
+            marginal_wealth=jnp.asarray((1.0, 1.1, 0.9)),
+            parameters=parameters,
+        )
+        self.assertLess(diagnostics["max_residual"], 1e-10)
+        self.assertGreater(diagnostics["minimum_jacobian_singular_value"], 1e-3)
+        np.testing.assert_allclose(values["trade_shares"].sum(axis=1), 1.0, atol=1e-13)
+        np.testing.assert_allclose(values["budget_trade_gap"], 0.0, atol=1e-13)
+        np.testing.assert_allclose(values["world_trade_balance"], 0.0, atol=1e-13)
+        self.assertFalse(np.allclose(values["trade_shares"], values["trade_shares"].T))
 
     def test_open_economy_growth_math_and_benchmark(self):
         parameters = OpenEconomyParameters()

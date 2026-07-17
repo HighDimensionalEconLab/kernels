@@ -9,7 +9,9 @@ in [docs/open_economy_growth.md](docs/open_economy_growth.md). Stage 1 solves a
 continuous-time small open economy with capital installation costs and initial net
 foreign assets. Stage 3 implements an N-country closed-world stepping stone, evaluated
 at two and three countries, with an endogenous world rate and explicit country asset and
-marginal-wealth blocks. The kernel and
+marginal-wealth blocks. Stage 5 joins the same generic dynamic blocks to the full
+three-sector trade system and verifies the complete DAE at two and three countries. The
+kernel and
 sequential state-space NN use only finite-time model equations; their respective RKHS
 and neural-policy biases select the otherwise free jump variables, while no-Ponzi and
 transversality conditions are evaluated only ex post. Independent boundary-value
@@ -127,6 +129,20 @@ dataclasses.
   equation. The default two-country run is checked against an independent
   full-Jacobian unstable-projection BVP, and a three-country acceptance run
   verifies that the solved system is generic.
+- `multicountry_trade_growth.py` — separate N-country trade-growth mechanics:
+  an explicit `8N`-equation static block retains wages, rentals, three sector
+  prices, and three sector revenues for every country. Eaton-Kortum shares are
+  evaluated as an importer-by-exporter matrix, while both factor markets and
+  every country's intermediate-market equation remain explicit. The module
+  also supplies the continuous-time capital, NFA, Tobin-q, and marginal-wealth
+  shell used by the joint solver; it does not modify the useful one-good
+  implementation.
+- `multicountry_trade_growth_kernel_nlls.py` — complete generic N-country
+  trade-growth DAE, exercised at two and three countries. It retains all `4N`
+  dynamic RKHS paths, all `8N` static equations, every country budget, and a
+  symmetric consumption-basket numeraire. The `2N` initial Tobin-q and
+  marginal-wealth values are selected by the metric. Asset clearing, no-Ponzi,
+  and transversality conditions are evaluated only ex post.
 - The differentiable rollout integrators (fixed RK4 by measured default, with
   Tsit5, Euler, and Rodas5P available; fixed RK4 for test/settle paths) come from
   [tinydiffeq](https://github.com/HighDimensionalEconLab/tinydiffeq),

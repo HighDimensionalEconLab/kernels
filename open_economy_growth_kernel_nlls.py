@@ -12,11 +12,11 @@ from jax import config
 from nlls_gram import (
     LMStatus,
     UnderdeterminedLevenbergMarquardt,
-    blockdiag_metric,
     metric_from_cholesky,
     metric_from_diagonal,
 )
 
+from kernel_metrics import repeated_blockdiag_metric
 from kernels import integrated_kernel_matrices, normalize_kernel
 from open_economy_growth import (
     ModelParameters,
@@ -187,13 +187,11 @@ def open_economy_growth_kernel_nlls(
 
     # There are 3n DAE equations in 3n + 2 unknowns. No terminal equation is
     # appended: the metric supplies the two-dimensional selection.
-    metric = blockdiag_metric(
-        [
-            (alpha_metric, n_train),
-            (alpha_metric, n_train),
-            (alpha_metric, n_train),
-            (metric_from_diagonal(jnp.full(2, eps)), 2),
-        ]
+    metric = repeated_blockdiag_metric(
+        alpha_metric,
+        n_train,
+        3,
+        additional=(metric_from_diagonal(jnp.full(2, eps)), 2),
     )
 
     # The zero coordinate contains no saddle-path or present-value information:
@@ -356,16 +354,12 @@ def open_economy_growth_kernel_nlls(
     rkhs_norm_a = alpha_metric.norm(alpha_a) ** 2 - eps * (alpha_a @ alpha_a)
     rkhs_norm_q = alpha_metric.norm(alpha_q) ** 2 - eps * (alpha_q @ alpha_q)
     rkhs_norm_total = rkhs_norm_k + rkhs_norm_a + rkhs_norm_q
-    shifted_metric_norm_squared = (
-        rkhs_norm_total
-        + eps
-        * (
-            alpha_k @ alpha_k
-            + alpha_a @ alpha_a
-            + alpha_q @ alpha_q
-            + q_offset**2
-            + c_offset**2
-        )
+    shifted_metric_norm_squared = rkhs_norm_total + eps * (
+        alpha_k @ alpha_k
+        + alpha_a @ alpha_a
+        + alpha_q @ alpha_q
+        + q_offset**2
+        + c_offset**2
     )
 
     @jax.jit

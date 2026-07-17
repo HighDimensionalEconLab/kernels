@@ -18,6 +18,7 @@ from nlls_gram import (
 )
 
 from human_capital_kernel import human_capital_initial_conditions
+from kernel_metrics import repeated_blockdiag_metric
 from kernels import integrated_kernel_matrices, normalize_kernel
 
 config.update("jax_enable_x64", True)
@@ -167,15 +168,13 @@ def human_capital_kernel_nlls(
             residuals(path_values(theta, K, K_tilde))
         )
 
+    state_pair_metric = repeated_blockdiag_metric(state_metric, n_train, 2)
+    policy_triplet_metric = repeated_blockdiag_metric(policy_metric, n_train, 3)
     metric = blockdiag_metric(
         [
-            (state_metric, n_train),
-            (state_metric, n_train),
-            (policy_metric, n_train),
-            (policy_metric, n_train),
-            (policy_metric, n_train),
-            (state_metric, n_train),
-            (state_metric, n_train),
+            (state_pair_metric, 2 * n_train),
+            (policy_triplet_metric, 3 * n_train),
+            (state_pair_metric, 2 * n_train),
             (metric_from_diagonal(jnp.full(5, eps)), 5),
         ]
     )

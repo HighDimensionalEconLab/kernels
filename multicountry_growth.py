@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-import jax
 import jax.numpy as jnp
 
 
@@ -59,34 +58,28 @@ def investment_rate_from_tobin_q(tobin_q, parameters):
     )
 
 
-def relative_consumption_weights(log_relative_weights, parameters):
-    log_relative_weights = jnp.atleast_1d(log_relative_weights)
-    if log_relative_weights.shape[-1] != parameters.num_countries - 1:
-        raise ValueError("one relative weight is required for each country after the first")
-    log_weights = jnp.concatenate(
-        [jnp.zeros(1, dtype=log_relative_weights.dtype), log_relative_weights]
-    )
-    weights = jnp.exp(log_weights)
-    consumption_weights = jnp.exp(log_weights / parameters.gamma)
-    return weights, consumption_weights
+def consumption_from_marginal_wealth(marginal_wealth, parameters):
+    return marginal_wealth ** (-1.0 / parameters.gamma)
 
 
-def multicountry_allocations(k, tobin_q, log_relative_weights, parameters):
-    populations = jnp.asarray(parameters.populations, dtype=k.dtype)
+def relative_welfare_weights(marginal_wealth):
+    return marginal_wealth[..., :1] / marginal_wealth
+
+
+def multicountry_allocations(
+    k,
+    tobin_q,
+    marginal_wealth,
+    interest_rate,
+    parameters,
+):
     productivities = jnp.asarray(parameters.productivities, dtype=k.dtype)
-    weights, consumption_weights = relative_consumption_weights(
-        log_relative_weights, parameters
-    )
     investment_rate = investment_rate_from_tobin_q(tobin_q, parameters)
     investment = k * investment_rate
     output = production(k, productivities, parameters)
     mpk = marginal_product(k, productivities, parameters)
     resources = output - investment
-    aggregate_resources = jnp.sum(populations * resources)
-    weight_sum = jnp.sum(populations * consumption_weights)
-    consumption = consumption_weights * aggregate_resources / weight_sum
-    marginal_wealth = (weight_sum / aggregate_resources) ** parameters.gamma
-
+    consumption = consumption_from_marginal_wealth(marginal_wealth, parameters)
     capital_drift = k * (
         parameters.installation_efficiency
         * investment_rate**parameters.installation_elasticity
@@ -99,94 +92,58 @@ def multicountry_allocations(k, tobin_q, log_relative_weights, parameters):
         * investment_rate**parameters.installation_elasticity
         - mpk / tobin_q
     )
-    rate_denominator = aggregate_resources / parameters.gamma + jnp.sum(
-        populations
-        * investment
-        / (1.0 - parameters.installation_elasticity)
-    )
-    rate_numerator = (
-        jnp.sum(populations * (mpk - investment_rate) * capital_drift)
-        + parameters.rho * aggregate_resources / parameters.gamma
-        - jnp.sum(
-            populations
-            * investment
-            * q_intercept
-            / (1.0 - parameters.installation_elasticity)
-        )
-    )
-    interest_rate = rate_numerator / rate_denominator
-    tobin_q_drift = tobin_q * (interest_rate + q_intercept)
-    resource_drift = jnp.sum(
-        populations
-        * (
-            (mpk - investment_rate) * capital_drift
-            - investment
-            * (interest_rate + q_intercept)
-            / (1.0 - parameters.installation_elasticity)
-        )
-    )
-    interest_rate_from_resources = (
-        parameters.rho
-        + parameters.gamma * resource_drift / aggregate_resources
-    )
+    rate = jnp.asarray(interest_rate, dtype=k.dtype)[..., None]
     return {
-        "weights": weights,
-        "consumption_weights": consumption_weights,
         "investment_rate": investment_rate,
         "investment": investment,
         "output": output,
         "mpk": mpk,
         "resources": resources,
-        "aggregate_resources": aggregate_resources,
-        "weight_sum": weight_sum,
         "consumption": consumption,
-        "marginal_wealth": marginal_wealth,
         "capital_drift": capital_drift,
         "q_intercept": q_intercept,
-        "interest_rate": interest_rate,
-        "tobin_q_drift": tobin_q_drift,
-        "resource_drift": resource_drift,
-        "interest_rate_from_resources": interest_rate_from_resources,
-        "rate_denominator": rate_denominator,
+        "tobin_q_drift": tobin_q * (rate + q_intercept),
+        "marginal_wealth_drift": marginal_wealth * (parameters.rho - rate),
     }
 
 
-def reconstruct_assets(a_independent, parameters):
-    populations = jnp.asarray(parameters.populations, dtype=a_independent.dtype)
-    final_asset = -jnp.sum(
-        populations[:-1] * a_independent, axis=-1, keepdims=True
-    ) / populations[-1]
-    return jnp.concatenate([a_independent, final_asset], axis=-1)
-
-
-def reconstruct_asset_drifts(da_independent_dt, parameters):
-    populations = jnp.asarray(
-        parameters.populations, dtype=da_independent_dt.dtype
-    )
-    final_drift = -jnp.sum(
-        populations[:-1] * da_independent_dt, axis=-1, keepdims=True
-    ) / populations[-1]
-    return jnp.concatenate([da_independent_dt, final_drift], axis=-1)
-
-
-def multicountry_steady_state(log_relative_weights, parameters):
-    dtype = jnp.asarray(log_relative_weights).dtype
+def multicountry_reference_marginal_wealth(parameters, dtype=jnp.float64):
     productivities = jnp.asarray(parameters.productivities, dtype=dtype)
+    populations = jnp.asarray(parameters.populations, dtype=dtype)
+    mpk = parameters.delta + parameters.rho / parameters.installation_elasticity
+    k = (parameters.alpha * productivities / mpk) ** (1.0 / (1.0 - parameters.alpha))
+    investment = parameters.delta * k
+    resources = production(k, productivities, parameters) - investment
+    consumption = jnp.sum(populations * resources) / jnp.sum(populations)
+    return jnp.full(
+        parameters.num_countries,
+        consumption ** (-parameters.gamma),
+        dtype=dtype,
+    )
+
+
+def multicountry_steady_state(marginal_wealth, parameters):
+    marginal_wealth = jnp.atleast_1d(marginal_wealth)
+    if marginal_wealth.shape[-1] != parameters.num_countries:
+        raise ValueError("marginal_wealth must contain one value per country")
+    dtype = marginal_wealth.dtype
+    productivities = jnp.asarray(parameters.productivities, dtype=dtype)
+    populations = jnp.asarray(parameters.populations, dtype=dtype)
     tobin_q = jnp.full(
         parameters.num_countries,
         1.0 / parameters.installation_elasticity,
         dtype=dtype,
     )
-    mpk_ss = parameters.delta + parameters.rho / parameters.installation_elasticity
-    k = (parameters.alpha * productivities / mpk_ss) ** (
-        1.0 / (1.0 - parameters.alpha)
-    )
+    mpk = parameters.delta + parameters.rho / parameters.installation_elasticity
+    k = (parameters.alpha * productivities / mpk) ** (1.0 / (1.0 - parameters.alpha))
     allocations = multicountry_allocations(
-        k, tobin_q, log_relative_weights, parameters
+        k,
+        tobin_q,
+        marginal_wealth,
+        jnp.asarray(parameters.rho, dtype=dtype),
+        parameters,
     )
-    assets = (
-        allocations["consumption"] - allocations["resources"]
-    ) / parameters.rho
+    assets = (allocations["consumption"] - allocations["resources"]) / parameters.rho
     return {
         "k": k,
         "q": tobin_q,
@@ -195,134 +152,99 @@ def multicountry_steady_state(log_relative_weights, parameters):
         "x": allocations["investment"],
         "output": allocations["output"],
         "resources": allocations["resources"],
-        "marginal_wealth": allocations["marginal_wealth"],
+        "marginal_wealth": marginal_wealth,
+        "relative_welfare_weights": relative_welfare_weights(marginal_wealth),
         "interest_rate": jnp.asarray(parameters.rho, dtype=dtype),
+        "resource_gap": jnp.sum(
+            populations * (allocations["resources"] - allocations["consumption"])
+        ),
+        "asset_clearing_gap": jnp.sum(populations * assets),
     }
 
 
-def multicountry_output_scale(parameters, dtype=jnp.float64):
-    steady = multicountry_steady_state(
-        jnp.zeros(parameters.num_countries - 1, dtype=dtype), parameters
+def multicountry_reference_steady_state(parameters, dtype=jnp.float64):
+    return multicountry_steady_state(
+        multicountry_reference_marginal_wealth(parameters, dtype),
+        parameters,
     )
+
+
+def multicountry_output_scale(parameters, dtype=jnp.float64):
+    steady = multicountry_reference_steady_state(parameters, dtype)
     populations = jnp.asarray(parameters.populations, dtype=dtype)
     return jnp.sum(populations * steady["output"]) / jnp.sum(populations)
 
 
 def multicountry_path_values(
     k,
-    a_independent,
+    a,
     tobin_q,
-    log_relative_weights,
+    marginal_wealth,
+    interest_rate,
     dlog_k_dt,
-    da_independent_dt,
+    da_dt,
     dlog_q_dt,
+    dlog_marginal_wealth_dt,
     parameters,
 ):
-    allocations = jax.vmap(
-        lambda k_t, q_t: multicountry_allocations(
-            k_t, q_t, log_relative_weights, parameters
-        )
-    )(k, tobin_q)
-    assets = reconstruct_assets(a_independent, parameters)
-    asset_drifts = reconstruct_asset_drifts(da_independent_dt, parameters)
+    allocations = multicountry_allocations(
+        k,
+        tobin_q,
+        marginal_wealth,
+        interest_rate,
+        parameters,
+    )
+    populations = jnp.asarray(parameters.populations, dtype=k.dtype)
+    flow_scale = multicountry_output_scale(parameters, k.dtype)
     budget_drift = (
-        allocations["interest_rate"][:, None] * assets
+        interest_rate[:, None] * a
         + allocations["resources"]
         - allocations["consumption"]
     )
-    flow_scale = multicountry_output_scale(parameters, k.dtype)
     residuals = {
-        "capital": dlog_k_dt
-        - allocations["capital_drift"] / k,
-        "tobin_q": dlog_q_dt
-        - allocations["tobin_q_drift"] / tobin_q,
-        "assets": (
-            da_independent_dt - budget_drift[:, :-1]
-        ) / flow_scale,
-        "omitted_asset": (asset_drifts[:, -1] - budget_drift[:, -1])
-        / flow_scale,
+        "capital": dlog_k_dt - allocations["capital_drift"] / k,
+        "assets": (da_dt - budget_drift) / flow_scale,
+        "tobin_q": dlog_q_dt - allocations["tobin_q_drift"] / tobin_q,
+        "marginal_wealth_euler": dlog_marginal_wealth_dt
+        - (parameters.rho - interest_rate[:, None]),
         "resource": jnp.sum(
-            jnp.asarray(parameters.populations, dtype=k.dtype)
-            * (allocations["resources"] - allocations["consumption"]),
+            populations * (allocations["resources"] - allocations["consumption"]),
             axis=-1,
         )
         / flow_scale,
-        "asset_clearing": jnp.sum(
-            jnp.asarray(parameters.populations, dtype=k.dtype) * assets,
+        "resource_drift": jnp.sum(
+            populations
+            * (
+                (allocations["mpk"] * k - allocations["investment"]) * dlog_k_dt
+                - allocations["investment"]
+                * dlog_q_dt
+                / (1.0 - parameters.installation_elasticity)
+                + allocations["consumption"]
+                * dlog_marginal_wealth_dt
+                / parameters.gamma
+            ),
             axis=-1,
         )
         / flow_scale,
-        "interest_rate_index_gap": allocations["interest_rate"]
-        - allocations["interest_rate_from_resources"],
+        "asset_clearing": jnp.sum(populations * a, axis=-1) / flow_scale,
+        "interest_rate_country_gap": parameters.rho
+        - dlog_marginal_wealth_dt
+        - interest_rate[:, None],
     }
     return {
         "k": k,
-        "a": assets,
+        "a": a,
         "q": tobin_q,
         "c": allocations["consumption"],
         "x": allocations["investment"],
         "output": allocations["output"],
         "resources": allocations["resources"],
-        "current_account": asset_drifts,
-        "interest_rate": allocations["interest_rate"],
-        "marginal_wealth": allocations["marginal_wealth"],
-        "rate_denominator": allocations["rate_denominator"],
+        "current_account": da_dt,
+        "interest_rate": interest_rate,
+        "marginal_wealth": marginal_wealth,
+        "relative_welfare_weights": relative_welfare_weights(marginal_wealth),
         **residuals,
     }
-
-
-def two_country_transformed_drift(state, log_relative_weight, parameters):
-    if parameters.num_countries != 2:
-        raise ValueError("the reduced transformed system requires two countries")
-    steady = multicountry_steady_state(
-        jnp.atleast_1d(log_relative_weight), parameters
-    )
-    scale = multicountry_output_scale(parameters, state.dtype)
-    k = steady["k"] * jnp.exp(state[:2])
-    tobin_q = steady["q"] * jnp.exp(state[2:4])
-    a_1 = scale * state[4]
-    allocations = multicountry_allocations(
-        k, tobin_q, jnp.atleast_1d(log_relative_weight), parameters
-    )
-    budget_1 = (
-        allocations["interest_rate"] * a_1
-        + allocations["resources"][0]
-        - allocations["consumption"][0]
-    )
-    return jnp.concatenate(
-        [
-            allocations["capital_drift"] / k,
-            allocations["tobin_q_drift"] / tobin_q,
-            jnp.atleast_1d(budget_1 / scale),
-        ]
-    )
-
-
-def two_country_transformed_steady_state(log_relative_weight, parameters):
-    steady = multicountry_steady_state(
-        jnp.atleast_1d(log_relative_weight), parameters
-    )
-    scale = multicountry_output_scale(parameters, steady["k"].dtype)
-    return jnp.concatenate([jnp.zeros(4, dtype=scale.dtype), steady["a"][:1] / scale])
-
-
-def two_country_full_linearization(log_relative_weight, parameters):
-    steady_state = two_country_transformed_steady_state(
-        log_relative_weight, parameters
-    )
-    full_state = jnp.concatenate(
-        [steady_state, jnp.atleast_1d(log_relative_weight)]
-    )
-
-    def full_drift(state):
-        return jnp.concatenate(
-            [
-                two_country_transformed_drift(state[:5], state[5], parameters),
-                jnp.zeros(1, dtype=state.dtype),
-            ]
-        )
-
-    return jax.jacfwd(full_drift)(full_state)
 
 
 def multicountry_tvc_diagnostics(t, values, parameters):
@@ -335,23 +257,20 @@ def multicountry_tvc_diagnostics(t, values, parameters):
     marginal_utility = terminal_consumption ** (-parameters.gamma)
     return {
         "discounted_assets": jnp.abs(discount * terminal_assets),
-        "asset_tvc": jnp.abs(
-            utility_discount * marginal_utility * terminal_assets
-        ),
+        "asset_tvc": jnp.abs(utility_discount * marginal_utility * terminal_assets),
         "capital_tvc": jnp.abs(
             utility_discount * marginal_utility * terminal_q * terminal_k
         ),
     }
 
 
-def multicountry_tail_diagnostics(values, log_relative_weights, parameters):
-    steady = multicountry_steady_state(log_relative_weights, parameters)
+def multicountry_tail_diagnostics(values, parameters):
+    steady = multicountry_steady_state(values["marginal_wealth"][-1], parameters)
     scale = multicountry_output_scale(parameters, values["k"].dtype)
     return {
         "k_log_gap": jnp.abs(jnp.log(values["k"][-1] / steady["k"])),
         "q_log_gap": jnp.abs(jnp.log(values["q"][-1] / steady["q"])),
         "asset_scaled_gap": jnp.abs(values["a"][-1] - steady["a"]) / scale,
-        "interest_rate_gap": jnp.abs(
-            values["interest_rate"][-1] - parameters.rho
-        ),
+        "marginal_wealth_drift": jnp.abs(parameters.rho - values["interest_rate"][-1]),
+        "interest_rate_gap": jnp.abs(values["interest_rate"][-1] - parameters.rho),
     }

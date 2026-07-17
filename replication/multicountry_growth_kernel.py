@@ -20,6 +20,13 @@ SOLVER = multicountry_growth_kernel_nlls.multicountry_growth_kernel_nlls
 def run(output_dir: str = ".results"):
     parameters = MulticountryParameters()
     output_scale = float(multicountry_output_scale(parameters))
+    three_country_parameters = MulticountryParameters(
+        populations=(1.0, 1.0, 1.0),
+        productivities=(1.0, 1.0, 1.0),
+    )
+    three_country_output_scale = float(
+        multicountry_output_scale(three_country_parameters)
+    )
     meta = dict(n_seeds=1)
 
     def go(name, **experiment):
@@ -40,9 +47,21 @@ def run(output_dir: str = ".results"):
         )
 
     go("baseline")
-    go("initial_debt", a_0=(-0.5 * output_scale,))
-    go("initial_assets", a_0=(0.5 * output_scale,))
+    go("initial_debt", a_0=(-0.5 * output_scale, 0.5 * output_scale))
+    go("initial_assets", a_0=(0.5 * output_scale, -0.5 * output_scale))
     go("asymmetric_capital", k_0=(1.0, 2.0))
+    go(
+        "three_countries",
+        a_0=(
+            -0.5 * three_country_output_scale,
+            0.25 * three_country_output_scale,
+            0.25 * three_country_output_scale,
+        ),
+        parameters=dict(
+            populations=(1.0, 1.0, 1.0),
+            productivities=(1.0, 1.0, 1.0),
+        ),
+    )
     go(
         "heterogeneous_countries",
         parameters=dict(
@@ -53,7 +72,7 @@ def run(output_dir: str = ".results"):
     for horizon, points in ((40.0, 41), (80.0, 61), (120.0, 81)):
         go(
             f"horizon_{round(horizon)}",
-            a_0=(-0.5 * output_scale,),
+            a_0=(-0.5 * output_scale, 0.5 * output_scale),
             data_set=dict(
                 train_T=horizon,
                 train_points=points,

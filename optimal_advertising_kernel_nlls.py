@@ -12,11 +12,11 @@ from jax import config
 from nlls_gram import (
     LMStatus,
     UnderdeterminedLevenbergMarquardt,
-    blockdiag_metric,
     metric_from_cholesky,
     metric_from_diagonal,
 )
 
+from kernel_metrics import repeated_blockdiag_metric
 from kernels import integrated_kernel_matrices, normalize_kernel
 
 config.update("jax_enable_x64", True)
@@ -117,13 +117,11 @@ def optimal_advertising_kernel_nlls(
             residuals(path_values(theta, K, K_tilde))
         )
 
-    metric = blockdiag_metric(
-        [
-            (alpha_metric, n_train),
-            (alpha_metric, n_train),
-            (alpha_metric, n_train),
-            (metric_from_diagonal(jnp.full(2, eps)), 2),
-        ]
+    metric = repeated_blockdiag_metric(
+        alpha_metric,
+        n_train,
+        3,
+        additional=(metric_from_diagonal(jnp.full(2, eps)), 2),
     )
     u_0_guess = max(beta * x_0 / max(1.0 - x_0, DOMAIN_EPS), DOMAIN_EPS)
     mu_0_guess = max(gamma / (rho_hat + beta + u_0_guess), DOMAIN_EPS)

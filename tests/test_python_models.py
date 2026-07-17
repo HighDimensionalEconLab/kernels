@@ -28,11 +28,10 @@ from kernels import (
 from multicountry_growth import (
     MulticountryParameters,
     multicountry_allocations,
+    multicountry_output_scale,
+    multicountry_path_values,
+    multicountry_reference_marginal_wealth,
     multicountry_steady_state,
-    two_country_full_linearization,
-)
-from multicountry_growth_kernel_nlls import (
-    DataSettings as MulticountryDataSettings,
 )
 from multicountry_growth_kernel_nlls import multicountry_growth_kernel_nlls
 from neoclassical_growth_concave_convex_kernel import (
@@ -121,48 +120,104 @@ FAST_GROWTH_NLLS = GrowthNLLSDataSettings(train_T=10.0, train_points=11, test_T=
 
 class KernelSmokeTests(unittest.TestCase):
     def test_multicountry_growth_math(self):
-        parameters = MulticountryParameters()
-        log_relative_weight = jnp.zeros(1)
-        steady = multicountry_steady_state(log_relative_weight, parameters)
+        parameters = MulticountryParameters(
+            populations=(1.0, 2.0, 1.5),
+            productivities=(1.0, 1.1, 0.9),
+        )
+        marginal_wealth = multicountry_reference_marginal_wealth(parameters)
+        steady = multicountry_steady_state(marginal_wealth, parameters)
         allocations = multicountry_allocations(
-            steady["k"], steady["q"], log_relative_weight, parameters
+            steady["k"],
+            steady["q"],
+            marginal_wealth,
+            parameters.rho,
+            parameters,
         )
+        np.testing.assert_allclose(allocations["capital_drift"], 0.0, atol=1e-14)
+        np.testing.assert_allclose(allocations["tobin_q_drift"], 0.0, atol=1e-14)
         np.testing.assert_allclose(
-            allocations["capital_drift"], 0.0, atol=1e-14
+            allocations["marginal_wealth_drift"], 0.0, atol=1e-14
         )
-        np.testing.assert_allclose(
-            allocations["tobin_q_drift"], 0.0, atol=1e-14
-        )
-        self.assertAlmostEqual(
-            float(allocations["interest_rate"]), parameters.rho, places=14
-        )
-        self.assertAlmostEqual(
-            float(
-                allocations["interest_rate"]
-                - allocations["interest_rate_from_resources"]
-            ),
-            0.0,
-            places=14,
-        )
-        np.testing.assert_allclose(steady["a"], 0.0, atol=1e-14)
+        self.assertAlmostEqual(float(steady["resource_gap"]), 0.0, places=13)
+        self.assertAlmostEqual(float(steady["asset_clearing_gap"]), 0.0, places=13)
+        np.testing.assert_allclose(steady["relative_welfare_weights"], 1.0, atol=1e-14)
 
-        eigenvalues = np.linalg.eigvals(
-            np.asarray(two_country_full_linearization(0.0, parameters))
+        log_state = jnp.log(
+            jnp.concatenate(
+                [
+                    steady["k"] * jnp.asarray((0.9, 1.1, 1.05)),
+                    steady["q"] * jnp.asarray((1.1, 0.95, 1.02)),
+                    marginal_wealth * jnp.asarray((0.95, 1.08, 1.03)),
+                ]
+            )
         )
-        self.assertEqual(int(np.sum(eigenvalues.real < -1e-8)), 2)
-        self.assertEqual(int(np.sum(eigenvalues.real > 1e-8)), 3)
-        self.assertEqual(int(np.sum(np.abs(eigenvalues.real) <= 1e-8)), 1)
+        log_direction = jnp.asarray(
+            (0.02, -0.01, 0.03, -0.04, 0.01, 0.02, 0.03, -0.02, 0.01)
+        )
+        k, q, marginal_wealth_test = jnp.split(jnp.exp(log_state), 3)
+        dlog_k_dt, dlog_q_dt, dlog_m_dt = jnp.split(log_direction, 3)
+        values = multicountry_path_values(
+            k=k[None, :],
+            a=jnp.zeros((1, 3)),
+            tobin_q=q[None, :],
+            marginal_wealth=marginal_wealth_test[None, :],
+            interest_rate=jnp.asarray((parameters.rho,)),
+            dlog_k_dt=dlog_k_dt[None, :],
+            da_dt=jnp.zeros((1, 3)),
+            dlog_q_dt=dlog_q_dt[None, :],
+            dlog_marginal_wealth_dt=dlog_m_dt[None, :],
+            parameters=parameters,
+        )
+        populations = jnp.asarray(parameters.populations)
+        flow_scale = multicountry_output_scale(parameters)
+
+        def normalized_resource(logs):
+            k_jvp, q_jvp, m_jvp = jnp.split(jnp.exp(logs), 3)
+            allocation_jvp = multicountry_allocations(
+                k_jvp,
+                q_jvp,
+                m_jvp,
+                parameters.rho,
+                parameters,
+            )
+            return (
+                jnp.sum(
+                    populations
+                    * (allocation_jvp["resources"] - allocation_jvp["consumption"])
+                )
+                / flow_scale
+            )
+
+        _, resource_jvp = jax.jvp(
+            normalized_resource,
+            (log_state,),
+            (log_direction,),
+        )
+        self.assertAlmostEqual(
+            float(values["resource_drift"][0]),
+            float(resource_jvp),
+            places=13,
+        )
 
     def test_multicountry_growth_kernel_smoke(self):
-        results, extras = multicountry_growth_kernel_nlls(a_0=(-0.5,))
+        results, extras = multicountry_growth_kernel_nlls(a_0=(-0.5, 0.5))
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertTrue(results["benchmark_match"])
         self.assertEqual(results["terminal_residual_count"], 0)
         self.assertEqual(
-            results["dae_residual_count"], 5 * results["num_train_points"]
+            results["dae_residual_count"],
+            9 * results["num_train_points"] + 1,
         )
+        self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 3)
+        self.assertEqual(results["dynamic_rkhs_function_count"], 8)
         self.assertEqual(
-            results["unknown_count"], results["dae_residual_count"] + 3
+            results["algebraic_rate_value_count"], results["num_train_points"]
+        )
+        self.assertEqual(results["free_initial_value_count"], 4)
+        self.assertEqual(results["metric_selection_dimension"], 3)
+        self.assertEqual(
+            results["global_closure"],
+            "explicit_assets_and_algebraic_clearing",
         )
         self.assertEqual(results["selection"], "minimum_shifted_rkhs_metric")
         self.assertEqual(results["stable_roots"], 2)
@@ -172,9 +227,10 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertLess(results["long_run_a_1"], results["a_0_1"])
         self.assertGreater(results["minimum_rate_denominator"], 0.0)
         self.assertLess(results["max_train_residual"], 1e-5)
+        self.assertLess(abs(results["initial_resource_drift_residual"]), 1e-5)
         self.assertLess(results["max_validation_residual"], 5e-3)
-        self.assertLess(results["max_identity_residual"], 1e-8)
-        self.assertLess(results["max_omitted_budget_residual"], 5e-3)
+        self.assertLess(results["max_asset_clearing_residual"], 5e-5)
+        self.assertLess(results["max_rate_consistency_residual"], 5e-5)
         self.assertLess(results["max_benchmark_error"], 2e-3)
         self.assertLess(
             abs(
@@ -189,33 +245,55 @@ class KernelSmokeTests(unittest.TestCase):
             results["rkhs_norm_k_1"]
             + results["rkhs_norm_k_2"]
             + results["rkhs_norm_a_1"]
+            + results["rkhs_norm_a_2"]
             + results["rkhs_norm_q_1"]
-            + results["rkhs_norm_q_2"],
+            + results["rkhs_norm_q_2"]
+            + results["rkhs_norm_m_1"]
+            + results["rkhs_norm_m_2"],
             places=10,
         )
         self.assertTrue((extras["test_df"]["k_1"] > 0.0).all())
         self.assertTrue((extras["test_df"]["k_2"] > 0.0).all())
         self.assertTrue((extras["test_df"]["c_1"] > 0.0).all())
         self.assertTrue((extras["test_df"]["c_2"] > 0.0).all())
-        self.assertLess(
-            extras["test_df"]["asset_clearing_residual"].abs().max(), 1e-10
-        )
+        self.assertLess(extras["test_df"]["asset_clearing_residual"].abs().max(), 5e-5)
 
-        short_horizon, _ = multicountry_growth_kernel_nlls(
-            a_0=(-0.5,),
-            data_set=MulticountryDataSettings(
-                train_T=40.0,
-                train_points=41,
-                sampling="uniform",
-                test_T=30.0,
-                validation_points=201,
-                benchmark_T=160.0,
-                benchmark_points=181,
-            ),
+    def test_multicountry_growth_three_country_smoke(self):
+        parameters = MulticountryParameters(
+            populations=(1.0, 1.0, 1.0),
+            productivities=(1.0, 1.0, 1.0),
         )
-        self.assertTrue(short_horizon["solution_accepted"])
-        self.assertFalse(short_horizon["benchmark_match"])
-        self.assertGreater(short_horizon["ex_post_asset_tvc"], 0.1)
+        results, extras = multicountry_growth_kernel_nlls(
+            a_0=(-0.5, 0.25, 0.25),
+            parameters=parameters,
+        )
+        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+        self.assertFalse(results["benchmark_available"])
+        self.assertEqual(results["num_countries"], 3)
+        self.assertEqual(results["dynamic_rkhs_function_count"], 12)
+        self.assertEqual(results["free_initial_value_count"], 6)
+        self.assertEqual(results["metric_selection_dimension"], 5)
+        self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 5)
+        self.assertLess(results["max_train_residual"], 1e-5)
+        self.assertLess(results["max_validation_residual"], 5e-3)
+        self.assertLess(results["max_asset_clearing_residual"], 5e-5)
+        self.assertAlmostEqual(
+            results["relative_weight_2"],
+            results["relative_weight_3"],
+            places=6,
+        )
+        self.assertAlmostEqual(
+            results["terminal_a_2"], results["terminal_a_3"], places=6
+        )
+        self.assertIn("k_3", extras["test_df"])
+        self.assertIn("marginal_wealth_3", extras["test_df"])
+        self.assertIn("resource_drift_residual", extras["test_df"])
+
+        with self.assertRaisesRegex(ValueError, "must sum to zero"):
+            multicountry_growth_kernel_nlls(
+                a_0=(-0.5, 0.25, 0.0),
+                parameters=parameters,
+            )
 
     def test_open_economy_growth_math_and_benchmark(self):
         parameters = OpenEconomyParameters()
@@ -260,9 +338,7 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertLess(results["ex_post_capital_tvc"], 1e-2)
         self.assertAlmostEqual(
             results["rkhs_norm_total"],
-            results["rkhs_norm_k"]
-            + results["rkhs_norm_a"]
-            + results["rkhs_norm_q"],
+            results["rkhs_norm_k"] + results["rkhs_norm_a"] + results["rkhs_norm_q"],
             places=10,
         )
         self.assertGreaterEqual(
@@ -301,19 +377,11 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertTrue(results["benchmark_match"])
         self.assertEqual(results["terminal_residual_count"], 0)
-        self.assertEqual(
-            results["dae_residual_count"], 2 * results["num_train_points"]
-        )
-        self.assertEqual(
-            results["domain_residual_count"], results["num_train_points"]
-        )
-        self.assertEqual(
-            results["residual_count"], 3 * results["num_train_points"]
-        )
+        self.assertEqual(results["dae_residual_count"], 2 * results["num_train_points"])
+        self.assertEqual(results["domain_residual_count"], results["num_train_points"])
+        self.assertEqual(results["residual_count"], 3 * results["num_train_points"])
         self.assertGreater(results["unknown_count"], results["residual_count"])
-        self.assertEqual(
-            results["selection"], "minimum_identity_metric_parameter_step"
-        )
+        self.assertEqual(results["selection"], "minimum_identity_metric_parameter_step")
         self.assertLess(results["max_train_residual"], 1e-5)
         self.assertLess(results["max_validation_residual"], 5e-3)
         self.assertLess(results["max_benchmark_error"], 1e-3)

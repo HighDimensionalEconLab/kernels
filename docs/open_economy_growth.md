@@ -1,7 +1,8 @@
 # Continuous-time open-economy growth with initial net foreign assets
 
-Status: implemented one-country stepping stone and two-country closed-world extension;
-design complete for the static-trade extension. This note fixes the economic object,
+Status: implemented one-country stepping stone and N-country closed-world extension,
+tested at two and three countries; design complete for the static-trade extension. This
+note fixes the economic object,
 derives the continuous-time equations, maps them to the repository's NLLS/RKHS
 formulation, and records how the minimum-norm solution is compared ex post with the
 conventional economic boundary-value solution.
@@ -891,9 +892,9 @@ The example is ready only when all of the following hold.
 - The normalized static trade Jacobian and the independent benchmark's dynamic boundary
   Jacobian have the expected ranks; the only removed static direction is the common
   price numeraire.
-- In the one-good \(N\)-country extension, the reduced Jacobian has \(N\) stable,
-  \(2N-1\) unstable, and \(N-1\) center directions, and the return from (28) agrees with
-  the Euler and q-equation diagnostics.
+- In the one-good \(N\)-country extension, all country marginal-wealth and q equations
+  recover the same algebraic return, and the explicit global asset and resource equations
+  have the expected one-row Walras redundancy.
 - No debt target, artificial stationarity device, TVC, no-Ponzi equation, or terminal
   residual appears in the kernel system.
 
@@ -968,7 +969,7 @@ Plot capital, investment, consumption, NFA, debt, current account, and the disco
 solvency diagnostics. This stage is the decisive test that a temporary event leaves a
 permanent external-position effect.
 
-### Stage 3: two-country closed world
+### Stage 3: N-country closed world
 
 Implemented in [multicountry_growth.py](../multicountry_growth.py),
 [multicountry_growth_benchmark.py](../multicountry_growth_benchmark.py), and
@@ -977,208 +978,165 @@ experiments and figures under `replication/multicountry_growth_kernel*.py`.
 
 Replace the fixed interest rate with an endogenous world rate \(r(t)\). To make country
 size explicit, define \(k_i,a_i,c_i,x_i\) per worker and let fixed population be \(L_i\).
-Use \(N-1\) independent NFA states and impose
+Retain the same dynamic block for every country,
 
 \[
-\sum_{i=1}^N L_i a_i(t)=0.
+(\log k_i,a_i,\log q_i,\log m_i),
+\]
+
+including all \(N\) NFA paths. The supplied initial positions must satisfy
+
+\[
+\sum_{i=1}^N L_i a_i(0)=0.
+\tag{26}
 \]
 
 Fixed \(L_i\) is part of the baseline. Population growth would add dilution terms to
 per-worker capital and assets and must also enter the derivative of global asset clearing;
 it cannot be introduced by changing calibration alone.
 
-For the common-discount-rate baseline, the country marginal values of wealth satisfy
+For the common-discount-rate baseline, retain each country's positive marginal value of
+wealth \(m_i(t)\) instead of eliminating it into a common path and relative Negishi
+weights. Household optimality is
 
 \[
-\frac{m_i(t)}{m_j(t)}=\text{constant}.
-\]
-
-Introduce one positive common marginal-wealth path \(M(t)\) and positive constant
-relative wealth weights \(\omega_i\), defined exactly by
-
-\[
-m_i(t)=\frac{M(t)}{\omega_i},
-\qquad \omega_1=1.
-\tag{26}
-\]
-
-The normalization removes only the common scale of \((M,\omega_1,\ldots,\omega_N)\);
-it does not normalize consumption, assets, or any long-run external position. Household
-optimality gives
-
-\[
-c_i(t)
-=
-\left(\frac{M(t)P_{c,i}(t)}{\omega_i}\right)^{-1/\gamma},
-\qquad
-r(t)=\rho-\frac{\dot M(t)}{M(t)}.
+ c_i=m_i^{-1/\gamma},
+ \qquad
+ \frac{\dot m_i}{m_i}=\rho-r.
 \tag{27}
 \]
 
-In the one-good model \(P_{c,i}=1\). Retain the \(N-1\) independent country asset laws
-and one world resource-clearing residual. Do **not** try to determine \(r\) from the
-omitted country's asset law. Substitution of the other asset laws and global asset
-clearing makes every \(rL_i a_i\) term cancel, so that omitted law is precisely world
-resource clearing. Equation (27), solved jointly with resource clearing and household
-policies, identifies the interest-rate path even when every current asset position is
-zero. Conditional on a complete differentiable path, a country with \(a_i\ne0\) also
-recovers the same rate from its own budget law; this is a diagnostic, not the closure.
-
-Each capital co-state equation supplies another exact diagnostic,
+Thus \(m_i/m_j\) is constant along an exact solution, but that fact is an implication of
+the country Euler equations rather than a reduced parameterization. Ex-post relative
+welfare weights can be reported under the normalization \(\omega_1=1\) as
 
 \[
-r_i^{(q)}
-=
-\frac{\dot q_i}{q_i}-\delta+(1-\lambda)\chi s_i^\lambda
-+\frac{R_{k,i}}{q_i},
-\]
-
-where \(R_{k,i}=f_{k,i}\) in the one-good model, and all \(r_i^{(q)}\) must equal the
-rate in (27). This rearrangement is a consistency diagnostic, not an independent closure:
-it is simply the q law solved for \(r\), with \(\dot q_i\) endogenous. The world return is
-instead determined jointly by resource clearing and intertemporal saving and investment
-optimality. There is no additional informative static bond-clearing equation once the
-zero-net-supply
-identity is imposed; with adjustment costs, the return also need not equal a raw marginal
-product of physical capital at each instant.
-
-For the one-good model this identification can be made explicit. Define
-
-\[
-\Phi(k,q,M;\omega)
-=
-\sum_{i=1}^N L_i\left[f_i(k_i)-c_i(M,\omega_i)-x_i(k_i,q_i)\right].
-\]
-
-World resource clearing is \(\Phi=0\). Differentiating it along the household and
-capital first-order conditions gives an index-reduced algebraic formula for \(r\):
-
-\[
-r
-\left[
-\frac{1}{\gamma}\sum_i L_i c_i
-+\frac{1}{1-\lambda}\sum_i L_i x_i
-\right]
-=
-\sum_i L_i(R_{k,i}-s_i)\dot k_i
-+\frac{\rho}{\gamma}\sum_i L_i c_i
--\frac{1}{1-\lambda}\sum_i L_i x_i\mathcal J_i,
+\omega_i=\frac{m_1}{m_i}.
 \tag{28}
 \]
 
-where
+For each country retain the four equations
 
 \[
-\mathcal J_i
-=
-\delta-(1-\lambda)\chi s_i^\lambda-\frac{R_{k,i}}{q_i}.
+\frac{\dot k_i}{k_i}=\chi s_i^\lambda-\delta,
 \]
-
-The coefficient on \(r\) in (28) is strictly positive for interior \(c_i,x_i\), so the
-one-good return is uniquely defined at every regular point, including when all
-\(a_i=0\). In the full trade model endogenous static prices add implicit-derivative terms;
-the corresponding index-reduction coefficient must be checked for nonzero rank rather
-than assumed positive.
-
-In the economic equilibrium, the \(N-1\) given initial asset positions determine the
-\(N-1\) relative weights through their lifetime budget/PV conditions. Thus (26) is the
-continuous-time Negishi representation of the competitive equilibrium, not an artificial
-stationarity device. In the kernel DAE these weights remain free coordinates selected by
-the metric, and their lifetime budgets are checked only ex post. Different initial NFA
-vectors may select different weights and long-run NFA positions, while a given complete
-initial state should select one locally determinate path.
-
-An independent conventional BVP benchmark should construct its finite-horizon boundary
-conditions from the unstable projection of the **full coupled Jacobian**, while retaining
-its center directions. That benchmark uses exactly \(2N-1\) terminal restrictions:
-
-- \(N\) coupled stable-subspace conditions for installed capital;
-- \(N-1\) independent present-value tail conditions for external assets.
-
-Do not additionally impose \(\dot M(T)=0\) or \(r(T)=\rho\) in that benchmark. Those
-equalities hold only at the limiting stationary allocation; at finite \(T\), imposing one
-on top of the full unstable projection cuts a legitimate stable direction and
-overdetermines the economic BVP. The kernel system, by contrast, appends none of these
-conditions and uses the BVP only for ex-post comparison.
-
-The differential variables are the \(N\) capital paths, \(N\) installed-capital-value
-paths, and \(N-1\) asset paths: \(3N-1\) paths. Marginal wealth \(M\) is algebraic,
-because \(\Phi=0\) fixes its level given \((k,q,\omega)\). Either eliminate \(M\)
-pointwise or represent it with an algebraic kernel block having no free initial offset;
-do not give it an integrated-path initial condition. The free constants are the \(N\)
-initial Tobin-q values and \(N-1\) relative weights, for a total of \(2N-1\).
-
-If the algebraic \(M\) block has \(n\) coefficients, the kernel collocation count is
-\(3Nn+2N-1\) unknowns: \((3N-1)n\) differential-path coefficients, \(n\) algebraic
-coefficients, and \(2N-1\) constants. There are \(3Nn\) pointwise equations from the
-capital laws, q laws, \(N-1\) budgets, and \(\Phi=0\). The system is underdetermined by
-\(2N-1\), and its block RKHS metric selects those degrees of freedom. Verify numerically
-that the reduced Jacobian has \(N\) stable roots, \(2N-1\) unstable roots, and \(N-1\)
-center directions associated with relative wealth; also verify the normalized DAE
-Jacobian and the independent benchmark projection have their intended ranks.
-
-For the two-country one-good baseline, eliminate \(M\) exactly. With \(\omega_1=1\),
-define aggregate resources available for consumption and the weight sum by
 
 \[
-\mathcal R(k,q)
-=
-\sum_{i=1}^2 L_i\left[f_i(k_i)-x_i(k_i,q_i)\right],
-\qquad
-\mathcal W(\omega_2)
-=
-L_1+L_2\omega_2^{1/\gamma}.
+\dot a_i=ra_i+f_i(k_i)-x_i(k_i,q_i)-c_i,
 \]
-
-Resource clearing gives
 
 \[
-M
-=
-\left(\frac{\mathcal W}{\mathcal R}\right)^\gamma,
-\qquad
-c_i
-=
-\omega_i^{1/\gamma}\frac{\mathcal R}{\mathcal W},
-\qquad
-a_2=-\frac{L_1}{L_2}a_1,
+\frac{\dot q_i}{q_i}
+=r+\delta-(1-\lambda)\chi s_i^\lambda-\frac{f_{k,i}}{q_i},
 \]
 
-provided \(\mathcal R>0\). Compute \(r\) with the explicit index-reduced formula (28),
-which is equivalent to \(r=\rho+\gamma\dot{\mathcal R}/\mathcal R\) after substituting
-the q equations. The differential paths are then only
-\((k_1,k_2,q_1,q_2,a_1)\), and \(\omega_2\) is a positive constant. With \(n\)
-collocation points, the minimal integrated-kernel system has \(5n+3\) unknowns and
-\(5n\) equations: five coefficient vectors, the two initial q offsets,
-\(\log\omega_2\), and five ODE residuals per point. The RKHS metric selects the three
-free constants without capital-tail or asset-PV residuals. This is the preferred Stage 3
-implementation because it removes the algebraic path before optimization without
-changing the economics.
+\[
+\frac{\dot m_i}{m_i}=\rho-r.
+\tag{29}
+\]
 
-Begin with two symmetric countries, equal \(L_i\), and opposite initial NFA positions.
-Verify global asset clearing, every retained budget law, the reconstructed country's
-budget law, and Walras' law at every time. Continue initial NFA away from zero and check
-that the same starting state does not produce distinct branches, while different starting
-NFA positions retain their economically intended long-run differences.
+The common rate is an explicit algebraic value at every collocation point. It is not
+recovered by dividing a budget equation by \(a_i\), so the system remains regular when
+one or every current asset position is zero. The \(N\) marginal-wealth equations and the
+capital co-state equations require the same rate country by country.
+
+The two global algebraic identities are
+
+\[
+ A(t)=\sum_iL_i a_i(t)=0,
+ \qquad
+ G(t)=\sum_iL_i[f_i(k_i)-x_i(k_i,q_i)-c_i(t)]=0.
+\tag{30}
+\]
+
+They are linked by the retained country budgets:
+
+\[
+\dot A=rA+G.
+\tag{31}
+\]
+
+Consequently only one global path equation is independent once \(A(0)=0\) is supplied.
+The collocation system keeps the algebraic asset-clearing rows for every positive-time
+node. At the initial node, where \(A(0)=0\) is fixed and its residual would have an
+identically zero Jacobian, the row is replaced by \(G(0)=0\). Because \(G=0\) is an
+index constraint that does not contain the algebraic rate directly, the initial
+consistency row \(\dot G(0)=0\) is also retained. It is computed by differentiating the
+model's own resource flow:
+
+\[
+\dot G
+=\sum_iL_i\left[
+ (f_{k,i}k_i-x_i)\frac{\dot k_i}{k_i}
+ -\frac{x_i}{1-\lambda}\frac{\dot q_i}{q_i}
+ +\frac{c_i}{\gamma}\frac{\dot m_i}{m_i}
+\right].
+\tag{32}
+\]
+
+This identifies the initial algebraic rate while leaving every country block symmetric.
+All country budgets remain present. Dense validation checks both \(A(t)\) and \(G(t)\)
+over the entire interval. This is the nonredundant collocation form of the two algebraic
+identities, not an elimination of the last country or an added economic restriction.
+
+With \(n\) collocation points, the solved system has \((4N+1)n+1\) residuals: four
+country equations per country, one global algebraic row per point, and the initial
+index-consistency row. Its unknowns are
+
+\[
+4Nn+n+2N=(4N+1)n+2N:
+\tag{33}
+\]
+
+- \(4Nn\) integrated-kernel coefficients for the country paths;
+- \(n\) algebraic world-rate values; and
+- \(2N\) free initial values for \((q_i,m_i)\).
+
+The metric is
+
+\[
+\operatorname{blockdiag}(\underbrace{K,\ldots,K}_{4N\text{ times}},0_{n+2N})
++\epsilon I.
+\tag{34}
+\]
+
+The algebraic rate and free initial values receive only the common \(\epsilon\) shift;
+they do not acquire an extra RKHS selection penalty. The minimum norm therefore acts on
+the same four dynamic functions for every country. The unknown-residual difference is
+\(2N-1\), exactly the number of initial \((q_i,m_i)\) directions left after initial DAE
+consistency and world clearing. No terminal projection, lifetime budget, TVC, no-Ponzi
+condition, debt target, or steady-state target enters the residual, initialization,
+stopping rule, or acceptance rule.
+
+The independent BVP remains a deliberately separate two-country validator. It may use
+index reduction and relative weights internally because it is not the system being
+scaled or the source of kernel selection. The production DAE and its notation contain no
+two-country branch. A three-country acceptance case with three explicit asset and
+marginal-wealth blocks verifies this in executable code.
+
+Begin with two symmetric countries, equal \(L_i\), and opposite initial NFA positions,
+then run at least three countries before adding trade. Verify global asset clearing, every
+country budget law, world resource clearing, and the common-rate identities at every
+time. Continue initial NFA away from zero and check that the same starting state does not
+produce distinct branches, while different starting NFA positions retain their intended
+long-run differences.
 
 ## Mapping to the full Ravikumar-Santacreu-Sposi trade model
 
 The final model keeps the same dynamic shell but replaces one-good production with an
 implicit static trade equilibrium at each time.
 
-For country \(i\), retain per-worker dynamic variables \((k_i,a_i,q_i)\), with only
-\(N-1\) independent \(a_i\) paths, and solve for common marginal wealth \(M\)
-algebraically from world resource clearing. Country marginal wealth is recovered from
-(26), rather than represented by \(N\) redundant dynamic paths. The
+For country \(i\), retain the same per-worker dynamic variables
+\((k_i,a_i,q_i,m_i)\), including all \(N\) asset and marginal-wealth paths. The
 static trade block returns the consumption price \(P_{c,i}\), investment price
 \(P_{x,i}\), rental income per unit of capital \(R_{k,i}\), wages, trade shares, output,
 and market-clearing residuals. Use the algebraic household equations
 
 \[
-c_i
-=
-\left(\frac{M P_{c,i}}{\omega_i}\right)^{-1/\gamma},
-\tag{29}
+c_i=(m_iP_{c,i})^{-1/\gamma},
+\qquad
+\frac{\dot m_i}{m_i}=\rho-r,
+\tag{35}
 \]
 
 \[
@@ -1191,22 +1149,17 @@ s_i
 \left(
 \frac{\chi\lambda q_i}{P_{x,i}}
 \right)^{1/(1-\lambda)}.
-\tag{30}
+\tag{36}
 \]
 
-The endogenous world return and installed-capital co-state equations are
-
-\[
-r=\rho-\frac{\dot M}{M},
-\tag{31}
-\]
+The installed-capital co-state equation is
 
 \[
 \dot q_i
 =
 \left[r+\delta-(1-\lambda)\chi s_i^\lambda\right]q_i
 -R_{k,i}.
-\tag{32}
+\tag{37}
 \]
 
 The budget/current-account equation uses all prices in a common numeraire:
@@ -1216,7 +1169,7 @@ The budget/current-account equation uses all prices in a common numeraire:
 =
 r a_i+\text{factor income}_i
 -P_{c,i}c_i-P_{x,i}x_i.
-\tag{33}
+\tag{38}
 \]
 
 The income term must use the same price system as the q equation. Under competitive
@@ -1229,15 +1182,14 @@ allocations may be solved internally by a differentiable implicit function; they
 be included as algebraic DAE unknowns and residuals if nested solves prove expensive or
 fragile.
 
-In the full trade block, the implicit derivative of resource clearing with respect to
-\(M\) and the dynamic variables replaces the explicit one-good formula (28). Require the
-resulting DAE/index-reduction Jacobian to have full rank along the entire path. A zero or
-near-zero coefficient is a failure of local interest-rate identification, not a reason to
-add an external debt-stationarity device.
+In the full trade block the normalized static trade residuals join the global algebraic
+closure in (30). Require the resulting DAE Jacobian with respect to the static prices,
+allocations, and world rate to have full rank along the entire path. Rank failure is not a
+reason to add an external debt-stationarity device.
 
 All per-worker flows must be aggregated with \(L_i\). In particular,
-\(\sum_i L_i a_i=0\), and the omitted asset path is reconstructed with those population
-weights. Keep static_trade_equilibrium, static_trade_residuals, world_asset_clearing, and
+\(\sum_i L_i a_i=0\) is retained as a global algebraic equation over the explicit asset
+blocks. Keep static_trade_equilibrium, static_trade_residuals, world_asset_clearing, and
 multicountry_tail_diagnostics as explicit function boundaries. The last is evaluation
 only and must never be concatenated into the kernel residual. This lets the same trade
 block be tested first in isolation, then under a nested solve, and finally as part of the
@@ -1245,11 +1197,10 @@ joint NLLS system. In code, call the installed-capital value tobin_q and reserve
 the world bond return; this avoids colliding with the paper's use of \(q_t\) for the bond
 return.
 
-Represent only \(N-1\) asset paths and set the last by global clearing. Retain one
-independent global resource/static-market-clearing equation and drop only the genuinely
-redundant Walras equation. The reconstructed country's asset equation must then hold as a
-diagnostic; it cannot determine the world interest rate because its interest terms cancel
-against those in the retained budget equations.
+Retain all \(N\) asset paths and all \(N\) country budget equations. Include only an
+independent basis of the global resource, asset, and static-market-clearing equations;
+drop the genuinely redundant Walras row rather than a country block. Equation (31) is the
+one-good prototype for this rank accounting.
 
 The Alvarez–Lucas uniqueness result is a useful static benchmark, but the exact RSS block
 has capital, intermediates, and endogenous imbalances. Verify its assumptions or establish
@@ -1258,9 +1209,9 @@ rank-deficient static equilibrium rather than silently choosing a branch. This c
 separate from, and must not eliminate, the intended dynamic history dependence.
 
 Impose one conventional numeraire normalization on the static price system. This removes
-only a common nominal price scale. A constant rescaling correspondingly rescales \(M\),
-but leaves \(-\dot M/M\), the real interest rate, allocations, and external positions
-unchanged. The redundant normalization is one time-invariant global scale, not a fresh
+only a common nominal price scale. A constant rescaling correspondingly rescales all
+\(m_i\), but leaves their log derivatives, the real interest rate, allocations, and
+external positions unchanged. The redundant normalization is one time-invariant global scale, not a fresh
 independent scale at every date: a time-varying price rescaling changes the measured
 numeraire return by its inflation rate. Fix the intertemporal numeraire consistently
 before interpreting \(r(t)\).
@@ -1268,14 +1219,14 @@ before interpreting \(r(t)\).
 Do not add debt-elastic rates, portfolio costs, borrowing wedges, target-NFA laws, or
 terminal conditions of the form \(a_i(T)=0\) or \(a_i(T)=a_i(0)\). Such devices would
 erase the phenomenon this example is meant to study. Heterogeneous discount rates are a
-later extension: then \(m_i/m_j\) is no longer constant and the common-weight reduction
-must be generalized rather than patched with a stationarity device.
+later extension: then \(m_i/m_j\) is no longer constant, but the explicit country
+marginal-wealth blocks require no change in notation.
 
 The progression should be:
 
 1. one country, one good, fixed \(r^\star\);
 2. one country with a temporary productivity shock;
-3. two countries, one good, endogenous \(r(t)\);
+3. N countries, one good, endogenous \(r(t)\), tested first at two and three;
 4. two countries with the static Eaton-Kortum trade block;
 5. a small calibrated subset of countries;
 6. all 44 countries and the paper's permanent trade-cost experiment; and
@@ -1284,10 +1235,6 @@ The progression should be:
 
 ## Questions deliberately left for implementation experiments
 
-- Whether the multicountry implementation should use an algebraic kernel block for
-  common \(M\), with no free initial offset, or eliminate \(M\) pointwise through world
-  resource clearing. It should not use an integrated \(M\) path or reintroduce \(N\)
-  redundant marginal-wealth paths under common discounting.
 - How quickly the minimum-RKHS solution approaches the independent BVP as the observation
   horizon grows, and how that rate changes with kernel order and length scale.
 - Whether the static multicountry equilibrium should be a nested implicit solve or part
@@ -1313,9 +1260,10 @@ system, reducing it from \(4n+2\) to \(3n+2\) unknowns against \(3n\) DAE equati
 The final extra-high-reasoning audit independently rederived equations (4)-(21), the
 stable eigenvector, the PV-tail coefficient, and the conventional BVP boundary count. It
 found one material error in the proposed multicountry extension: after imposing global
-asset clearing, the omitted country budget law cannot determine \(r\), because its interest
-terms cancel and it reduces to world resource clearing. Equations (26)-(33) incorporate
-the resulting common-marginal-wealth correction. That audit
+asset clearing, dropping one country budget does not produce a separate equation for
+\(r\), because its interest terms cancel and the aggregate reduces to world resource
+clearing. Equations (26)-(34) now retain every country budget and an independent basis of
+the global algebraic rows. That audit
 also added the investment-corner, shock-timing, population-weighting, static-uniqueness,
 and no-artificial-stationarity qualifications above.
 
@@ -1347,18 +1295,15 @@ terminal conditions project out explosive modes without selecting an NFA level. 
 subsequent implementation deliberately omits them from the RKHS system so this projection
 must instead emerge from the metric.
 
-The multicountry Opus audit proved the omitted-budget cancellation and verified the
-one-good index reduction in (28), but found a second material counting error: treating
-algebraic \(M(0)\) as a free initial value and adding \(r(T)=\rho\) introduced two
-offsetting extra dimensions. The Stage 3 DAE now has \(2N-1\) free
-q/relative-wealth constants selected by its RKHS metric; an independent BVP benchmark
-would use \(2N-1\) terminal projections, with no terminal restriction on \(r\). This
-correction was independently checked by differentiating \(\Phi=0\) to recover (28) and
-by counting the reduced differential, unstable, and center dimensions. A separate JAX
-automatic-differentiation check at a generic two-country interior point gave a resource
-residual of \(2.2\times10^{-16}\), resource-residual drift of
-\(4.2\times10^{-17}\), and agreement to \(2.8\times10^{-17}\) between (28) and
-\(r=\rho+\gamma\dot{\mathcal R}/\mathcal R\).
+The multicountry Opus audit proved the Walras-law cancellation and verified the original
+one-good index reduction, but found a material counting error: treating algebraic
+\(M(0)\) as a free initial value and adding \(r(T)=\rho\) introduced two offsetting extra
+dimensions. The independent two-country BVP retains that reduced representation and uses
+three terminal projections with no terminal restriction on \(r\). The production DAE was
+subsequently expanded, without changing the economics, to keep every country asset and
+marginal-wealth block plus explicit algebraic rate and clearing variables. Equations
+(26)-(34) give the expanded count, retain initial index consistency, and identify the one
+redundant global path row explicitly.
 
 ## Stage 1 implementation record
 
@@ -1410,40 +1355,35 @@ stopping criterion, or rejection logic.
 
 ## Stage 3 implementation record
 
-The two-country one-good implementation eliminates common marginal wealth exactly and
-collocates only the five ODE blocks for
-\((k_1,k_2,q_1,q_2,a_1)\). With \(n\) points, the unknown vector contains five
-length-\(n\) kernel-coordinate blocks plus the two initial q offsets and
-\(\log\omega_2\): \(5n+3\) unknowns against \(5n\) equations. The metric is
+The one-good implementation is generic in \(N\). Each country has explicit
+\((k_i,a_i,q_i,m_i)\) paths, every country budget remains in the DAE, and the world rate
+is an algebraic value at every collocation point. With \(n\) points, the system has
+\((4N+1)n+2N\) unknowns against \((4N+1)n+1\) equations. The extra row is the
+model-derived initial index-consistency condition \(\dot G(0)=0\), leaving \(2N-1\)
+directions for metric selection. The metric is
 
 \[
-\operatorname{blockdiag}(K,K,K,K,K,0_3)+\epsilon I.
+\operatorname{blockdiag}(\underbrace{K,\ldots,K}_{4N},0_{n+2N})+\epsilon I.
 \]
 
 No terminal projection, lifetime budget, TVC, no-Ponzi condition, debt target, or
 benchmark quantity appears in the kernel residual, initialization, stopping criterion,
-or rejection logic. The independent BVP separately uses three terminal restrictions
-from the unstable projection of the full coupled Jacobian. At the limiting allocation,
-that Jacobian has two stable, three unstable, and one center root, exactly matching the
-dimension count above.
+or rejection logic. The independent two-country BVP separately uses its reduced
+full-Jacobian unstable projection and is only an ex-post validator.
 
-At the default \(T=160,n=96\), the Matérn-5/2 kernel converges in four LM steps. The
-measured warm solve is about 0.08 seconds after a roughly 2.7-second compile. The baseline
-maximum training residual is \(1.5\times10^{-8}\), the dense-grid residual is
-\(8.0\times10^{-6}\), and the maximum reporting-window discrepancy from the independent
-BVP is \(2.8\times10^{-5}\). Resource clearing, global asset clearing, the reconstructed
-country budget, and both interest-rate identities hold at their corresponding numerical
-tolerances.
+With the default numerical settings, \(T=160,n=96\), and
+\(a(0)=(-0.5,0.5)\), the two-country Matérn-5/2 kernel converges in 11 LM steps.
+The measured post-compile GPU solve is about 0.50 seconds. The maximum training residual
+is \(4.1\times10^{-8}\), the dense-grid residual is \(8.2\times10^{-6}\), global asset
+clearing is accurate to \(5.7\times10^{-8}\), and country-implied world rates agree to
+\(2.0\times10^{-11}\). The maximum reporting-window discrepancy from the independent BVP
+is \(3.1\times10^{-4}\), below the \(2\times10^{-3}\) benchmark gate. The selected
+two-country log welfare-weight ratio differs from the BVP value by \(1.2\times10^{-6}\).
 
-For first-country initial NFA \(a_{1,0}\in\{-0.5,0,0.5\}\), all three DAE solves pass.
-The selected \(\log\omega_2\) values agree with the conventional BVP to about
-\(1.2\times10^{-7}\), and opposite initial NFA positions select opposite consumption
-weights and distinct long-run NFA positions. Asymmetric initial capital and unequal
-country sizes/productivities also pass with BVP discrepancies below \(7\times10^{-5}\).
-
-The horizon sweep again treats economic selection as an outcome. With initial debt, a
-year-40 kernel solve is DAE-accepted even though its asset-TVC diagnostic is about 0.24
-and its BVP discrepancy is about 0.14. At years 80, 120, and 160, the BVP discrepancy
-falls to roughly \(1.3\times10^{-2}\), \(7.3\times10^{-4}\), and
-\(5.0\times10^{-5}\), respectively. This regression prevents ex-post solvency or
-benchmark information from becoming a hidden acceptance gate.
+The corresponding three-country smoke case uses
+\(a(0)=(-0.5,0.25,0.25)\), 12 dynamic RKHS functions, and six free initial values. It
+converges in nine LM steps with a 0.82-second post-compile GPU solve,
+\(8.2\times10^{-6}\) dense-grid residual, and \(2.3\times10^{-8}\) asset-clearing error.
+With symmetric countries 2 and 3, their selected welfare weights and terminal assets
+agree to better than \(10^{-6}\). This is the executable guard against reintroducing a
+two-country-only parameterization before the static trade block is added.

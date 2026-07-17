@@ -13,13 +13,13 @@ from jax import config
 from nlls_gram import (
     LMStatus,
     UnderdeterminedLevenbergMarquardt,
-    blockdiag_metric,
     matern_state_space,
     metric_from_cholesky,
     metric_from_diagonal,
     metric_from_state_space,
 )
 
+from kernel_metrics import repeated_blockdiag_metric
 from kernels import (
     integrated_kernel_matrices,
     matern_kernel_matvec_pair,
@@ -282,13 +282,11 @@ def neoclassical_growth_kernel_nlls(
     # metric M = blockdiag(K, K, K, 0) + eps I selects the interpolant
     # minimizing the summed RKHS norms (the original objective) with free
     # initial values (c_0, mu_0), up to an O(eps) selection shift.
-    metric = blockdiag_metric(
-        [
-            (alpha_metric, n_train),
-            (alpha_metric, n_train),
-            (alpha_metric, n_train),
-            (metric_from_diagonal(jnp.full(2, eps)), 2),
-        ]
+    metric = repeated_blockdiag_metric(
+        alpha_metric,
+        n_train,
+        3,
+        additional=(metric_from_diagonal(jnp.full(2, eps)), 2),
     )
 
     c_flow_guess = max(production(k_0) - delta * k_0, DOMAIN_EPS)

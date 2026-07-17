@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-import json
 import pathlib
 
 import jsonargparse
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+import scipy.integrate
 
 from replication.utilities import style
 
 PREFIX = "multicountry_trade_growth_kernel"
 SCENARIOS = (
-    ("three_country_horizon_240", "Initial debt", "#b2182b"),
+    ("three_country_initial_nfa", "Initial debt", "#b2182b"),
     ("three_country_zero_nfa", "Zero initial NFA", "#2166ac"),
     ("three_country_reversed_nfa", "Initial assets", "#1b7837"),
     ("three_country_large_debt", "Twice initial debt", "#762a83"),
@@ -21,12 +22,6 @@ PANELS = (
     ("consumption_1", "Country 1 consumption"),
     ("k_1", "Country 1 capital"),
     ("trade_balance_1", "Country 1 trade balance"),
-)
-HORIZONS = (
-    (80, "three_country_initial_nfa"),
-    (120, "three_country_horizon_120"),
-    (160, "three_country_horizon_160"),
-    (240, "three_country_horizon_240"),
 )
 
 
@@ -53,41 +48,45 @@ def run(output_dir: str = ".results"):
     plt.close(figure)
     print(f"wrote {path}")
 
-    summaries = []
-    for horizon, name in HORIZONS:
-        summary = json.loads((out / f"{PREFIX}_{name}.json").read_text())
-        summaries.append((horizon, summary))
-
     style(figsize=(12, 5), fontsize=14, ticksize=12)
     figure, axes = plt.subplots(1, 2, figsize=(12, 5))
-    horizons = [horizon for horizon, _ in summaries]
-    axes[0].plot(
-        horizons,
-        [summary["terminal_a_1"] for _, summary in summaries],
-        marker="o",
-        color="#b2182b",
+    frame = frames["three_country_initial_nfa"]
+    discount = np.exp(
+        -scipy.integrate.cumulative_trapezoid(
+            frame["interest_rate"], frame["t"], initial=0.0
+        )
     )
-    axes[0].set_xlabel("Solve horizon")
-    axes[0].set_ylabel("Terminal country 1 NFA")
+    for country, color in zip(
+        range(1, 4), ("#b2182b", "#2166ac", "#1b7837"), strict=True
+    ):
+        axes[0].semilogy(
+            frame["t"],
+            np.maximum(np.abs(discount * frame[f"a_{country}"]), 1e-16),
+            color=color,
+            label=f"Country {country}",
+        )
+    axes[0].set_xlabel("Time")
+    axes[0].set_ylabel("Absolute discounted NFA")
     axes[0].grid(alpha=0.2)
-    for key, label, color in (
-        ("ex_post_discounted_assets", "Discounted assets", "#2166ac"),
-        ("ex_post_asset_tvc", "Asset TVC", "#1b7837"),
-        ("ex_post_capital_tvc", "Capital TVC", "#762a83"),
+    axes[0].legend()
+    for column, label, color in (
+        ("k", "Capital", "#b2182b"),
+        ("a", "NFA", "#2166ac"),
+        ("consumption", "Consumption", "#1b7837"),
+        ("trade_balance", "Trade balance", "#762a83"),
     ):
         axes[1].semilogy(
-            horizons,
-            [summary[key] for _, summary in summaries],
-            marker="o",
+            frame["t"],
+            np.maximum(np.abs(frame[f"{column}_2"] - frame[f"{column}_3"]), 1e-16),
             color=color,
             label=label,
         )
-    axes[1].set_xlabel("Solve horizon")
-    axes[1].set_ylabel("Ex-post terminal diagnostic")
+    axes[1].set_xlabel("Time")
+    axes[1].set_ylabel("Absolute country 2/3 path gap")
     axes[1].grid(alpha=0.2)
     axes[1].legend()
     figure.tight_layout()
-    path = out / "multicountry_trade_growth_horizon_diagnostics.pdf"
+    path = out / "multicountry_trade_growth_ex_post_diagnostics.pdf"
     figure.savefig(path, format="pdf")
     plt.close(figure)
     print(f"wrote {path}")

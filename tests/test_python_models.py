@@ -35,6 +35,7 @@ from multicountry_growth import (
 )
 from multicountry_growth_kernel_nlls import multicountry_growth_kernel_nlls
 from multicountry_trade_growth import (
+    STATIC_BLOCK_NAMES,
     TradeGrowthParameters,
     multicountry_trade_allocations,
     multicountry_trade_path_values,
@@ -433,7 +434,27 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertLess(results["max_validation_residual"], 1e-3)
         self.assertLess(results["max_asset_clearing_residual"], 5e-8)
         self.assertLess(results["max_rate_consistency_residual"], 1e-8)
+        self.assertEqual(results["backend"], jax.default_backend())
+        self.assertTrue(np.isfinite(results["ex_post_discounted_assets_decay_ratio"]))
+        self.assertTrue(np.isfinite(results["ex_post_asset_tvc_decay_ratio"]))
+        self.assertTrue(np.isfinite(results["ex_post_capital_tvc_decay_ratio"]))
+        self.assertTrue(results["ex_post_discounted_assets_decay_ratio_applicable"])
+        self.assertTrue(results["ex_post_asset_tvc_decay_ratio_applicable"])
+        self.assertTrue(results["ex_post_capital_tvc_decay_ratio_applicable"])
         self.assertAlmostEqual(results["terminal_a_2"], results["terminal_a_3"], 7)
+        for name in (
+            "capital",
+            "assets",
+            "tobin_q",
+            "marginal_wealth",
+            "consumption",
+            "investment_rate",
+            "trade_balance",
+            "current_account",
+            *STATIC_BLOCK_NAMES,
+        ):
+            self.assertLess(results[f"max_country_2_3_{name}_gap"], 1e-7)
+        self.assertLess(results["max_country_2_3_trade_share_permutation_gap"], 1e-7)
         self.assertAlmostEqual(
             results["terminal_steady_trade_gap_1"],
             results["terminal_current_account_1"],

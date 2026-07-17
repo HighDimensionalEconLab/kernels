@@ -152,9 +152,7 @@ def multicountry_trade_growth_kernel_nlls(
         kernel_set.ell,
     )
     K = 0.5 * (K + K.T)
-    alpha_metric = metric_from_cholesky(
-        jnp.linalg.cholesky(K + eps * jnp.eye(n_train))
-    )
+    alpha_metric = metric_from_cholesky(jnp.linalg.cholesky(K + eps * jnp.eye(n_train)))
 
     static_size = n_train * len(STATIC_BLOCK_NAMES) * num_countries
     algebraic_size = n_train + 2 * num_countries + static_size
@@ -362,8 +360,7 @@ def multicountry_trade_growth_kernel_nlls(
     plateau_index = int(
         np.argmin(
             np.abs(
-                np.asarray(validation_data)
-                - (2.0 / 3.0) * float(validation_data[-1])
+                np.asarray(validation_data) - (2.0 / 3.0) * float(validation_data[-1])
             )
         )
     )
@@ -372,11 +369,7 @@ def multicountry_trade_growth_kernel_nlls(
         max(float(jnp.max(jnp.abs(train_eval[name]))) for name in dynamic_names),
         float(jnp.max(jnp.abs(train_eval["static_residuals"]))),
         float(
-            jnp.max(
-                jnp.abs(
-                    consumption_basket_log_price(train_log_static, parameters)
-                )
-            )
+            jnp.max(jnp.abs(consumption_basket_log_price(train_log_static, parameters)))
         ),
     )
     max_validation_residual = max(
@@ -384,9 +377,7 @@ def multicountry_trade_growth_kernel_nlls(
         float(jnp.max(jnp.abs(validation_eval["static_residuals"]))),
         float(
             jnp.max(
-                jnp.abs(
-                    consumption_basket_log_price(validation_log_static, parameters)
-                )
+                jnp.abs(consumption_basket_log_price(validation_log_static, parameters))
             )
         ),
     )
@@ -426,7 +417,26 @@ def multicountry_trade_growth_kernel_nlls(
     if max_rate_consistency_residual > ACCOUNTING_RESIDUAL_TOL:
         rejection_reasons.append("rate_consistency")
 
-    tvc = multicountry_trade_tvc_diagnostics(validation_data, validation_eval, parameters)
+    tvc = multicountry_trade_tvc_diagnostics(
+        validation_data, validation_eval, parameters
+    )
+
+    def endpoint_max(name: str, index: int) -> float:
+        return float(jnp.max(jnp.abs(tvc[name][index])))
+
+    def endpoint_decay_ratio(name: str) -> float:
+        initial = endpoint_max(name, 0)
+        terminal = endpoint_max(name, -1)
+        scale = max(1e-10, 100.0 * np.finfo(np.asarray(tvc[name]).dtype).eps)
+        if initial <= scale:
+            return 0.0
+        return terminal / initial
+
+    def endpoint_decay_ratio_applicable(name: str) -> bool:
+        initial = endpoint_max(name, 0)
+        scale = max(1e-10, 100.0 * np.finfo(np.asarray(tvc[name]).dtype).eps)
+        return initial > scale
+
     coefficient_groups = {
         "k": theta[0],
         "a": theta[1],
@@ -473,17 +483,36 @@ def multicountry_trade_growth_kernel_nlls(
         "selection": "minimum_shifted_rkhs_metric",
         "initialization": "normalized_static_reference",
         "global_closure": "all_country_budgets_with_ex_post_asset_clearing",
-        "ex_post_discounted_assets": float(jnp.max(jnp.abs(tvc["discounted_assets"][-1]))),
-        "ex_post_asset_tvc": float(jnp.max(jnp.abs(tvc["asset_tvc"][-1]))),
-        "ex_post_capital_tvc": float(jnp.max(jnp.abs(tvc["capital_tvc"][-1]))),
+        "backend": jax.default_backend(),
+        "device": str(jax.devices()[0]),
+        "dtype": str(k_0_array.dtype),
+        "minimum_interest_rate": float(jnp.min(validation_eval["interest_rate"])),
+        "ex_post_discounted_assets_initial": endpoint_max("discounted_assets", 0),
+        "ex_post_discounted_assets": endpoint_max("discounted_assets", -1),
+        "ex_post_discounted_assets_decay_ratio": endpoint_decay_ratio(
+            "discounted_assets"
+        ),
+        "ex_post_discounted_assets_decay_ratio_applicable": (
+            endpoint_decay_ratio_applicable("discounted_assets")
+        ),
+        "ex_post_asset_tvc_initial": endpoint_max("asset_tvc", 0),
+        "ex_post_asset_tvc": endpoint_max("asset_tvc", -1),
+        "ex_post_asset_tvc_decay_ratio": endpoint_decay_ratio("asset_tvc"),
+        "ex_post_asset_tvc_decay_ratio_applicable": endpoint_decay_ratio_applicable(
+            "asset_tvc"
+        ),
+        "ex_post_capital_tvc_initial": endpoint_max("capital_tvc", 0),
+        "ex_post_capital_tvc": endpoint_max("capital_tvc", -1),
+        "ex_post_capital_tvc_decay_ratio": endpoint_decay_ratio("capital_tvc"),
+        "ex_post_capital_tvc_decay_ratio_applicable": (
+            endpoint_decay_ratio_applicable("capital_tvc")
+        ),
         "terminal_interest_rate": float(validation_eval["interest_rate"][-1]),
         "terminal_interest_rate_gap": float(
             abs(validation_eval["interest_rate"][-1] - parameters.rho)
         ),
         "plateau_time": float(validation_data[plateau_index]),
-        "plateau_interest_rate": float(
-            validation_eval["interest_rate"][plateau_index]
-        ),
+        "plateau_interest_rate": float(validation_eval["interest_rate"][plateau_index]),
         "plateau_interest_rate_gap": float(
             abs(validation_eval["interest_rate"][plateau_index] - parameters.rho)
         ),
@@ -592,6 +621,34 @@ def multicountry_trade_growth_kernel_nlls(
                     for name in coefficient_groups
                 },
             }
+        )
+
+    if num_countries >= 3:
+        symmetry_paths = {
+            "capital": "k",
+            "assets": "a",
+            "tobin_q": "q",
+            "marginal_wealth": "marginal_wealth",
+            "consumption": "consumption",
+            "investment_rate": "investment_rate",
+            "trade_balance": "trade_balance",
+            "current_account": "current_account",
+            **{name: name for name in STATIC_BLOCK_NAMES},
+        }
+        for label, name in symmetry_paths.items():
+            results[f"max_country_2_3_{label}_gap"] = float(
+                jnp.max(
+                    jnp.abs(validation_eval[name][:, 1] - validation_eval[name][:, 2])
+                )
+            )
+        permutation = jnp.asarray((0, 2, 1, *range(3, num_countries)))
+        permuted_trade_shares = jnp.take(
+            jnp.take(validation_eval["trade_shares"], permutation, axis=-2),
+            permutation,
+            axis=-1,
+        )
+        results["max_country_2_3_trade_share_permutation_gap"] = float(
+            jnp.max(jnp.abs(validation_eval["trade_shares"] - permuted_trade_shares))
         )
 
     def frame(points, values, log_static):

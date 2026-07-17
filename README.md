@@ -146,6 +146,12 @@ dataclasses.
   driver uses a 120-year CPU transition window and includes zero, reversed, and
   doubled initial-NFA counterfactuals; its companion figure script plots the
   selected history dependence, discounted NFA, and country-symmetry diagnostics.
+- `multicountry_trade_growth_nn.py` — sequential time-path NN for the same full
+  trade-growth DAE. Predetermined capital and NFA initial conditions are built
+  into the level ansatz; positive Tobin-q and marginal-wealth paths use
+  `unit_softplus`. The static trade values and world rate are smooth algebraic
+  NN outputs. Minimum identity-metric parameter movement selects the path, with
+  no terminal, TVC, no-Ponzi, debt-target, or kernel-reference residual.
 - The differentiable rollout integrators (fixed RK4 by measured default, with
   Tsit5, Euler, and Rodas5P available; fixed RK4 for test/settle paths) come from
   [tinydiffeq](https://github.com/HighDimensionalEconLab/tinydiffeq),

@@ -1,8 +1,8 @@
 # Continuous-time open-economy growth with initial net foreign assets
 
 Status: implemented one-country stepping stone, N-country closed-world extension,
-isolated N-country static-trade mechanics, and the joint trade-transition kernel DAE,
-tested at two and three countries. This note fixes the economic object,
+isolated N-country static-trade mechanics, and joint trade-transition kernel and
+sequential-NN DAEs, tested at two and three countries. This note fixes the economic object,
 derives the continuous-time equations, maps them to the repository's NLLS/RKHS
 formulation, and records how the minimum-norm solution is compared ex post with the
 conventional economic boundary-value solution.
@@ -1583,3 +1583,48 @@ consumption, investment-rate, trade-balance, and current-account paths is
 countries 2 and 3 up to \(2.30\times10^{-11}\). This checks that the generic
 \(N\)-country implementation does not introduce a hidden two-country normalization or
 asymmetric closure.
+
+## Stage 6 joint trade-transition NN record
+
+The sequential NN solves the same DAE without using the kernel path as an input. A shared
+time network has \(12N+1\) outputs: \(4N\) dynamic coordinates, \(8N\) static-trade
+coordinates, and the world return. The static values and return remain algebraic because
+their derivatives never enter the residual; making them network outputs simply gives
+their off-grid values the same smoothness bias as the dynamic paths.
+
+The predetermined states are built into the level ansatz,
+
+\[
+k_i(t)=k_i(0)\exp\!\left(\frac{t}{T_s}h_i^k(t)\right),
+\qquad
+a_i(t)=a_i(0)+\bar y\frac{t}{T_s}h_i^a(t),
+\]
+
+so no initial-condition penalty or residual is needed. Tobin's \(q_i(t)\) and marginal
+wealth \(m_i(t)\) are positive `unit_softplus` transforms anchored at the normalized
+static reference but remain free at time zero. Static prices and revenues are log
+deviations from that reference. The NLLS-gram solve uses the identity metric, so the
+minimum parameter movement from this initialization is the only selection device.
+
+For \(N=3\) and 32 collocation dates, the network has 3,397 parameters and the DAE has
+1,184 residuals. No terminal, steady-state, TVC, no-Ponzi, debt-target, symmetry, or
+kernel-reference quantity enters those residuals or the stopping criterion. Across three
+random initializations, all solutions pass the independent quality gates. The worst
+training and validation residuals are \(7.1\times10^{-8}\) and
+\(7.7\times10^{-8}\), world-asset clearing is within \(3.0\times10^{-5}\), and
+country-implied returns agree within \(3.8\times10^{-8}\). In the matched same-process
+timing, the post-compile CPU solve takes 21.8 seconds, versus 2.87 seconds for the kernel
+solve.
+
+The selected transition is seed-stable without penalized transversality. Country 1's
+year-120 NFA lies between \(-0.184073\) and \(-0.184055\) across the three seeds, and its
+consumption is \(0.364318\) to six decimal places. The maximum discounted NFA is
+\(1.458\times10^{-3}\), essentially the same ex-post decay as the kernel solution.
+
+Over the paper-relevant reporting interval \(t\leq80\), the NN and kernel paths agree to
+maximum relative discrepancies of \(2.55\times10^{-4}\) for capital,
+\(1.08\times10^{-4}\) for Tobin's \(q\), \(5.07\times10^{-5}\) for consumption, and
+\(4.57\times10^{-4}\) for the investment rate. The maximum absolute NFA discrepancy is
+\(5.83\times10^{-4}\). Differences are larger close to the artificial year-120 boundary,
+reaching 1.63 percent for the investment rate, which is why the comparison emphasizes
+transition dynamics rather than treating the endpoint as a computed steady state.

@@ -51,6 +51,14 @@ from multicountry_trade_growth_kernel_nlls import (
 from multicountry_trade_growth_kernel_nlls import (
     multicountry_trade_growth_kernel_nlls,
 )
+from multicountry_trade_growth_nn import DataSettings as MulticountryTradeNNDataSettings
+from multicountry_trade_growth_nn import (
+    NLLSGramSettings as MulticountryTradeNNNLLSGramSettings,
+)
+from multicountry_trade_growth_nn import (
+    SequentialNNSettings,
+    multicountry_trade_growth_nn,
+)
 from neoclassical_growth_concave_convex_kernel import (
     neoclassical_growth_concave_convex_kernel,
 )
@@ -461,6 +469,73 @@ class KernelSmokeTests(unittest.TestCase):
             5,
         )
         self.assertTrue(np.isfinite(results["plateau_interest_rate_gap"]))
+        self.assertLess(
+            np.max(np.abs(frames["validation_df"]["consumption_basket_log_price"])),
+            1e-4,
+        )
+
+    def test_multicountry_trade_three_country_sequential_nn_solve(self):
+        results, frames = multicountry_trade_growth_nn(
+            a_0=(-0.2, 0.1, 0.1),
+            parameters=symmetric_trade_growth_parameters(3),
+            seed=0,
+            data_set=MulticountryTradeNNDataSettings(
+                train_T=15.0,
+                train_points=6,
+                sampling="uniform",
+                dense_T=8.0,
+                tail_points=2,
+                test_T=8.0,
+                test_points=9,
+                validation_points=13,
+            ),
+            nn_set=SequentialNNSettings(
+                width=16,
+                depth=2,
+                input_scale=10.0,
+            ),
+            lm_set=MulticountryTradeNNNLLSGramSettings(
+                max_steps=60,
+                residual_atol=1e-10,
+            ),
+            verbose=False,
+        )
+
+        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+        self.assertEqual(results["terminal_residual_count"], 0)
+        self.assertEqual(results["initial_residual_count"], 0)
+        self.assertEqual(results["network_output_count"], 37)
+        self.assertEqual(results["algebraic_network_output_count"], 25)
+        self.assertEqual(results["dae_residual_count"], 37 * 6)
+        self.assertGreater(results["unknown_count"], results["dae_residual_count"])
+        self.assertEqual(
+            results["selection"],
+            "minimum_identity_metric_parameter_step",
+        )
+        self.assertLess(results["max_initial_residual"], 1e-12)
+        self.assertLess(results["max_train_residual"], 1e-8)
+        self.assertLess(results["max_validation_residual"], 1e-3)
+        self.assertLess(results["max_asset_clearing_residual"], 5e-5)
+        self.assertLess(results["max_rate_consistency_residual"], 1e-5)
+        self.assertTrue(np.isfinite(results["ex_post_discounted_assets"]))
+        self.assertTrue(np.isfinite(results["ex_post_asset_tvc"]))
+        self.assertTrue(np.isfinite(results["ex_post_capital_tvc"]))
+        for name in (
+            "capital",
+            "assets",
+            "tobin_q",
+            "marginal_wealth",
+            "consumption",
+            "investment_rate",
+            "trade_balance",
+            "current_account",
+            *STATIC_BLOCK_NAMES,
+        ):
+            self.assertLess(results[f"max_country_2_3_{name}_gap"], 2e-4)
+        self.assertLess(
+            results["max_country_2_3_trade_share_permutation_gap"],
+            2e-4,
+        )
         self.assertLess(
             np.max(np.abs(frames["validation_df"]["consumption_basket_log_price"])),
             1e-4,

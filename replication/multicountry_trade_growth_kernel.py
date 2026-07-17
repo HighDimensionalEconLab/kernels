@@ -71,6 +71,7 @@ def run(output_dir: str = ".results", use_float64: bool = True):
         test_T=80.0,
         test_points=161,
         validation_points=241,
+        quality_T=100.0,
     )
     transition_lm = dict(init_damping=1e-8, residual_atol=1e-10, max_steps=100)
     for name, initial_nfa in (

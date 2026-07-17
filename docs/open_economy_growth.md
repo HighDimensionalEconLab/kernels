@@ -1528,14 +1528,19 @@ enters the solve; the corresponding quantities are reported only after convergen
 The canonical replication is instead a 120-year, 32-point CPU solve. The horizon is long
 enough to display the transition and evaluate solvency diagnostics without making a
 very-long-horizon steady-state exercise the object of the calculation. The measured
-float64 run converges in 24 LM steps: compilation takes 2.79 seconds and the post-compile
-solve takes 2.72 seconds. Its maximum training residual is
-\(3.35\times10^{-10}\), the fast monotone-cubic reporting grid has a maximum residual of
-\(3.31\times10^{-4}\), world-asset clearing is accurate to
-\(6.13\times10^{-9}\), and country-implied returns agree to
-\(2.19\times10^{-13}\). The reporting interpolation affects neither training nor the
-metric; the optional `static_evaluation="resolve"` mode instead re-solves every plotted
-static equilibrium for a stricter but slower audit.
+float64 run converges in 24 LM steps: compilation takes 0.91 seconds with the persistent
+cache warm and the post-compile solve takes 1.98 seconds. The optimizer continues to fit
+all collocation dates through year 120, but the key off-grid quality window ends at year
+100. Its maximum training
+residual is \(3.35\times10^{-10}\); the fast monotone-cubic grid has a maximum residual
+of \(9.66\times10^{-5}\) over \(t\leq100\), versus \(3.31\times10^{-4}\) over the full
+reporting horizon. World-asset clearing is accurate to \(2.69\times10^{-9}\) in the
+quality window and \(6.13\times10^{-9}\) through year 120, while country-implied returns
+agree to \(2.19\times10^{-13}\). The reporting interpolation affects neither training
+nor the metric; the optional `static_evaluation="resolve"` mode instead re-solves every
+plotted static equilibrium for a stricter but slower audit. Full-horizon residuals remain
+reported under separate `max_full_horizon_*` fields, and ex-post TVC diagnostics continue
+to use the complete path.
 
 ### Finite-horizon transition and solvency audit
 
@@ -1574,7 +1579,7 @@ asset and capital TVC magnitudes fall from \(1.436\) to \(0.0106\) and from \(12
 evidence. They are not residuals, stopping conditions, rejection gates, or proof that the
 metric always enforces the infinite-horizon no-Ponzi condition.
 
-Finally, symmetry is checked over the entire validation path, not only at the endpoint.
+Finally, symmetry is checked over the \(t\leq100\) quality window, not only at one date.
 With identical parameters and initial conditions for countries 2 and 3, the largest
 absolute difference among their capital, NFA, Tobin's \(q\), marginal wealth,
 consumption, investment-rate, trade-balance, and current-account paths is
@@ -1610,21 +1615,35 @@ For \(N=3\) and 32 collocation dates, the network has 3,397 parameters and the D
 1,184 residuals. No terminal, steady-state, TVC, no-Ponzi, debt-target, symmetry, or
 kernel-reference quantity enters those residuals or the stopping criterion. Across three
 random initializations, all solutions pass the independent quality gates. The worst
-training and validation residuals are \(7.1\times10^{-8}\) and
-\(7.7\times10^{-8}\), world-asset clearing is within \(3.0\times10^{-5}\), and
-country-implied returns agree within \(3.8\times10^{-8}\). In the matched same-process
-timing, the post-compile CPU solve takes 21.8 seconds, versus 2.87 seconds for the kernel
-solve.
+training and \(t\leq100\) validation residuals are \(7.1\times10^{-8}\) and
+\(7.7\times10^{-8}\). World-asset clearing is within \(1.32\times10^{-5}\) in the
+quality window and \(3.0\times10^{-5}\) through year 120; the corresponding
+country-implied-return discrepancies are \(3.11\times10^{-8}\) and
+\(3.76\times10^{-8}\). In the current CPU replication, the median post-compile NN solve
+takes 15.9 seconds, versus 1.98 seconds for the kernel baseline.
 
 The selected transition is seed-stable without penalized transversality. Country 1's
 year-120 NFA lies between \(-0.184073\) and \(-0.184055\) across the three seeds, and its
 consumption is \(0.364318\) to six decimal places. The maximum discounted NFA is
 \(1.458\times10^{-3}\), essentially the same ex-post decay as the kernel solution.
 
-Over the paper-relevant reporting interval \(t\leq80\), the NN and kernel paths agree to
-maximum relative discrepancies of \(2.55\times10^{-4}\) for capital,
-\(1.08\times10^{-4}\) for Tobin's \(q\), \(5.07\times10^{-5}\) for consumption, and
-\(4.57\times10^{-4}\) for the investment rate. The maximum absolute NFA discrepancy is
-\(5.83\times10^{-4}\). Differences are larger close to the artificial year-120 boundary,
-reaching 1.63 percent for the investment rate, which is why the comparison emphasizes
-transition dynamics rather than treating the endpoint as a computed steady state.
+Over the common \(t\leq100\) quality window, the NN and kernel paths agree to maximum
+relative discrepancies of \(1.46\times10^{-3}\) for capital,
+\(6.56\times10^{-4}\) for Tobin's \(q\), \(3.07\times10^{-4}\) for consumption, and
+\(2.74\times10^{-3}\) for the investment rate. The maximum absolute NFA discrepancy is
+\(1.14\times10^{-3}\), and the world-return discrepancy is 0.51 basis points. These
+statistics use 201 dense dates inside the fitted horizon and never use extrapolated
+points. Differences are larger close to the artificial year-120 boundary, reaching 1.63
+percent for the investment rate, which is why year 120 remains a reporting and ex-post
+TVC endpoint rather than part of the key quality comparison.
+
+Residual quality is also decomposed at every reporting date. The ODE norm is the RMS of
+the \(4N\) dynamic equations, the algebraic norm is the RMS of the \(8N+1\) static and
+numeraire equations, and the full DAE norm combines all \(12N+1\) equations with their
+equation-count weights. Over the 201 dates in the \(t\leq100\) quality grid, the NN-to-
+kernel ratios of the aggregate RMS norms are \(0.00618\), \(0.00104\), and \(0.00140\)
+for the ODE, algebraic, and full DAE blocks. Thus the NN has much smaller off-collocation
+residuals, even though the kernel is tighter at its collocation dates. Every absolute
+pointwise norm and NN-to-kernel ratio is stored by the comparison driver; a maximum
+pointwise ratio is deliberately not used as a headline statistic because a nearly exact
+kernel residual at a collocation date makes that ratio ill-conditioned.

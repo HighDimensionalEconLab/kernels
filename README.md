@@ -152,6 +152,11 @@ dataclasses.
   `unit_softplus`. The static trade values and world rate are smooth algebraic
   NN outputs. Minimum identity-metric parameter movement selects the path, with
   no terminal, TVC, no-Ponzi, debt-target, or kernel-reference residual.
+  For the 120-year three-country runs, both NN and kernel quality gates use dense
+  points through year 100; full-horizon endpoint and TVC diagnostics remain separate.
+- `replication/multicountry_trade_growth_comparison.py` — matched CPU comparison
+  storing pointwise ODE, algebraic, and full-DAE residual RMS norms and NN-to-kernel
+  norm ratios over the common year-100 quality grid.
 - The differentiable rollout integrators (fixed RK4 by measured default, with
   Tsit5, Euler, and Rodas5P available; fixed RK4 for test/settle paths) come from
   [tinydiffeq](https://github.com/HighDimensionalEconLab/tinydiffeq),

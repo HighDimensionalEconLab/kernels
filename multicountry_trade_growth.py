@@ -30,6 +30,13 @@ STATIC_RESIDUAL_NAMES = (
     "investment_market",
 )
 
+DYNAMIC_RESIDUAL_NAMES = (
+    "capital",
+    "assets",
+    "tobin_q",
+    "marginal_wealth_euler",
+)
+
 
 @dataclass(frozen=True)
 class TradeGrowthParameters:
@@ -583,6 +590,80 @@ def multicountry_trade_path_values(
         "interest_rate_country_gap": parameters.rho
         - dlog_marginal_wealth_dt
         - interest_rate[:, None],
+    }
+
+
+def multicountry_trade_dae_residual(
+    values,
+    log_static,
+    parameters,
+):
+    dynamic_residual = jnp.concatenate(
+        [values[name].reshape(-1) for name in DYNAMIC_RESIDUAL_NAMES]
+    )
+    static_residual = values["static_residuals"].reshape(-1)
+    numeraire_residual = consumption_basket_log_price(log_static, parameters)
+    return jnp.concatenate(
+        [
+            dynamic_residual
+            / jnp.sqrt(
+                jnp.asarray(dynamic_residual.size, dtype=dynamic_residual.dtype)
+            ),
+            static_residual
+            / jnp.sqrt(jnp.asarray(static_residual.size, dtype=static_residual.dtype)),
+            numeraire_residual
+            / jnp.sqrt(
+                jnp.asarray(numeraire_residual.size, dtype=numeraire_residual.dtype)
+            ),
+        ]
+    )
+
+
+def multicountry_trade_max_dae_residual(
+    values,
+    log_static,
+    parameters,
+    time_selection=None,
+):
+    def select(value):
+        return value if time_selection is None else value[time_selection]
+
+    residuals = [
+        *[select(values[name]).reshape(-1) for name in DYNAMIC_RESIDUAL_NAMES],
+        select(values["static_residuals"]).reshape(-1),
+        select(consumption_basket_log_price(log_static, parameters)).reshape(-1),
+    ]
+    return jnp.max(jnp.abs(jnp.concatenate(residuals)))
+
+
+def multicountry_trade_pointwise_residual_norms(
+    values,
+    log_static,
+    parameters,
+):
+    num_points = values[DYNAMIC_RESIDUAL_NAMES[0]].shape[0]
+    ode_residual = jnp.concatenate(
+        [values[name].reshape(num_points, -1) for name in DYNAMIC_RESIDUAL_NAMES],
+        axis=1,
+    )
+    algebraic_residual = jnp.concatenate(
+        [
+            values["static_residuals"].reshape(num_points, -1),
+            consumption_basket_log_price(log_static, parameters)[:, None],
+        ],
+        axis=1,
+    )
+    ode_sum_squares = jnp.sum(jnp.square(ode_residual), axis=1)
+    algebraic_sum_squares = jnp.sum(jnp.square(algebraic_residual), axis=1)
+    return {
+        "ode_residual_rms": jnp.sqrt(ode_sum_squares / ode_residual.shape[1]),
+        "algebraic_residual_rms": jnp.sqrt(
+            algebraic_sum_squares / algebraic_residual.shape[1]
+        ),
+        "dae_residual_rms": jnp.sqrt(
+            (ode_sum_squares + algebraic_sum_squares)
+            / (ode_residual.shape[1] + algebraic_residual.shape[1])
+        ),
     }
 
 

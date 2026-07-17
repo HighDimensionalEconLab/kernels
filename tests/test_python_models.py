@@ -426,6 +426,7 @@ class KernelSmokeTests(unittest.TestCase):
                 test_T=8.0,
                 test_points=9,
                 validation_points=13,
+                quality_T=10.0,
                 rank_audit=True,
             ),
             lm_set=MulticountryTradeNLLSGramSettings(
@@ -441,10 +442,24 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertEqual(results["unknown_count"] - results["dae_residual_count"], 6)
         self.assertEqual(results["dae_jacobian_rank"], results["dae_residual_count"])
         self.assertGreater(results["dae_jacobian_min_singular_value"], 1e-8)
+        self.assertEqual(results["quality_T"], 10.0)
+        self.assertEqual(results["quality_validation_point_count"], 9)
         self.assertLess(results["max_train_residual"], 1e-8)
         self.assertLess(results["max_validation_residual"], 1e-3)
+        self.assertGreaterEqual(
+            results["max_full_horizon_validation_residual"],
+            results["max_validation_residual"],
+        )
         self.assertLess(results["max_asset_clearing_residual"], 5e-8)
+        self.assertGreaterEqual(
+            results["max_full_horizon_asset_clearing_residual"],
+            results["max_asset_clearing_residual"],
+        )
         self.assertLess(results["max_rate_consistency_residual"], 1e-8)
+        self.assertGreaterEqual(
+            results["max_full_horizon_rate_consistency_residual"],
+            results["max_rate_consistency_residual"],
+        )
         self.assertEqual(results["backend"], jax.default_backend())
         self.assertTrue(np.isfinite(results["ex_post_discounted_assets_decay_ratio"]))
         self.assertTrue(np.isfinite(results["ex_post_asset_tvc_decay_ratio"]))
@@ -472,9 +487,30 @@ class KernelSmokeTests(unittest.TestCase):
             5,
         )
         self.assertTrue(np.isfinite(results["plateau_interest_rate_gap"]))
+        quality_frame = frames["validation_df"].query("t <= 10.0")
         self.assertLess(
-            np.max(np.abs(frames["validation_df"]["consumption_basket_log_price"])),
+            np.max(np.abs(quality_frame["consumption_basket_log_price"])),
             1e-4,
+        )
+        for name in (
+            "ode_residual_rms",
+            "algebraic_residual_rms",
+            "dae_residual_rms",
+        ):
+            self.assertTrue(np.isfinite(quality_frame[name]).all())
+            self.assertGreaterEqual(quality_frame[name].min(), 0.0)
+            self.assertAlmostEqual(
+                results[f"max_validation_{name}"], quality_frame[name].max()
+            )
+        np.testing.assert_allclose(
+            quality_frame["dae_residual_rms"] ** 2,
+            (
+                12.0 * quality_frame["ode_residual_rms"] ** 2
+                + 25.0 * quality_frame["algebraic_residual_rms"] ** 2
+            )
+            / 37.0,
+            rtol=1e-12,
+            atol=1e-16,
         )
 
     def test_multicountry_trade_three_country_sequential_nn_solve(self):
@@ -491,6 +527,7 @@ class KernelSmokeTests(unittest.TestCase):
                 test_T=8.0,
                 test_points=9,
                 validation_points=13,
+                quality_T=10.0,
             ),
             nn_set=SequentialNNSettings(
                 width=16,
@@ -515,11 +552,25 @@ class KernelSmokeTests(unittest.TestCase):
             results["selection"],
             "minimum_identity_metric_parameter_step",
         )
+        self.assertEqual(results["quality_T"], 10.0)
+        self.assertEqual(results["quality_validation_point_count"], 9)
         self.assertLess(results["max_initial_residual"], 1e-12)
         self.assertLess(results["max_train_residual"], 1e-8)
         self.assertLess(results["max_validation_residual"], 1e-3)
+        self.assertGreaterEqual(
+            results["max_full_horizon_validation_residual"],
+            results["max_validation_residual"],
+        )
         self.assertLess(results["max_asset_clearing_residual"], 5e-5)
+        self.assertGreaterEqual(
+            results["max_full_horizon_asset_clearing_residual"],
+            results["max_asset_clearing_residual"],
+        )
         self.assertLess(results["max_rate_consistency_residual"], 1e-5)
+        self.assertGreaterEqual(
+            results["max_full_horizon_rate_consistency_residual"],
+            results["max_rate_consistency_residual"],
+        )
         self.assertTrue(np.isfinite(results["ex_post_discounted_assets"]))
         self.assertTrue(np.isfinite(results["ex_post_asset_tvc"]))
         self.assertTrue(np.isfinite(results["ex_post_capital_tvc"]))
@@ -539,9 +590,29 @@ class KernelSmokeTests(unittest.TestCase):
             results["max_country_2_3_trade_share_permutation_gap"],
             2e-4,
         )
+        quality_frame = frames["validation_df"].query("t <= 10.0")
         self.assertLess(
-            np.max(np.abs(frames["validation_df"]["consumption_basket_log_price"])),
-            1e-4,
+            np.max(np.abs(quality_frame["consumption_basket_log_price"])), 1e-4
+        )
+        for name in (
+            "ode_residual_rms",
+            "algebraic_residual_rms",
+            "dae_residual_rms",
+        ):
+            self.assertTrue(np.isfinite(quality_frame[name]).all())
+            self.assertGreaterEqual(quality_frame[name].min(), 0.0)
+            self.assertAlmostEqual(
+                results[f"max_validation_{name}"], quality_frame[name].max()
+            )
+        np.testing.assert_allclose(
+            quality_frame["dae_residual_rms"] ** 2,
+            (
+                12.0 * quality_frame["ode_residual_rms"] ** 2
+                + 25.0 * quality_frame["algebraic_residual_rms"] ** 2
+            )
+            / 37.0,
+            rtol=1e-12,
+            atol=1e-16,
         )
 
     def test_multicountry_trade_heterogeneous_static_equilibrium(self):

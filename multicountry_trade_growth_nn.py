@@ -17,7 +17,10 @@ from multicountry_trade_growth import (
     STATIC_BLOCK_NAMES,
     TradeGrowthParameters,
     consumption_basket_log_price,
+    multicountry_trade_dae_residual,
+    multicountry_trade_max_dae_residual,
     multicountry_trade_path_values,
+    multicountry_trade_pointwise_residual_norms,
     multicountry_trade_tvc_diagnostics,
     static_trade_equilibrium,
 )
@@ -49,6 +52,7 @@ class DataSettings:
     test_T: float = 80.0
     test_points: int = 161
     validation_points: int = 241
+    quality_T: float = 100.0
 
 
 @dataclass(frozen=True)
@@ -181,6 +185,8 @@ def multicountry_trade_growth_nn(
     train_data = make_train_grid(data_set).astype(dtype)
     if data_set.test_T > float(train_data[-1]):
         raise ValueError("test_T must not exceed the training horizon")
+    if data_set.quality_T <= 0.0:
+        raise ValueError("quality_T must be positive")
     test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     validation_data = jnp.linspace(
         0.0,
@@ -232,10 +238,7 @@ def multicountry_trade_growth_nn(
     graphdef, theta_0, fixed_state = nnx.split(model, nnx.Param, ...)
     static_reference_log = static_reference["log_static"]
 
-    dynamic_count = 4 * num_countries * n_train
-    static_count = len(STATIC_BLOCK_NAMES) * num_countries * n_train
-    numeraire_count = n_train
-    residual_count = dynamic_count + static_count + numeraire_count
+    residual_count = (12 * num_countries + 1) * n_train
 
     def residual_fn(theta):
         policy = nnx.merge(graphdef, theta, fixed_state)
@@ -261,23 +264,7 @@ def multicountry_trade_growth_nn(
             log_static=log_static,
             parameters=parameters,
         )
-        dynamic_residual = jnp.concatenate(
-            [
-                values["capital"].reshape(-1),
-                values["assets"].reshape(-1),
-                values["tobin_q"].reshape(-1),
-                values["marginal_wealth_euler"].reshape(-1),
-            ]
-        )
-        static_residual = values["static_residuals"].reshape(-1)
-        numeraire_residual = consumption_basket_log_price(log_static, parameters)
-        return jnp.concatenate(
-            [
-                dynamic_residual / jnp.sqrt(float(dynamic_count)),
-                static_residual / jnp.sqrt(float(static_count)),
-                numeraire_residual / jnp.sqrt(float(numeraire_count)),
-            ]
-        )
+        return multicountry_trade_dae_residual(values, log_static, parameters)
 
     solver = UnderdeterminedLevenbergMarquardt(
         residual_fn,
@@ -341,8 +328,12 @@ def multicountry_trade_growth_nn(
     train_eval, train_log_static = evaluate_grid(train_data)
     validation_eval, validation_log_static = evaluate_grid(validation_data)
     test_eval, test_log_static = evaluate_grid(test_data)
+    quality_T = min(data_set.quality_T, float(validation_data[-1]))
+    quality_count = int(
+        np.searchsorted(np.asarray(validation_data), quality_T, side="right")
+    )
+    quality_slice = slice(quality_count)
 
-    dynamic_names = ("capital", "assets", "tobin_q", "marginal_wealth_euler")
     train_coordinates = dynamic_coordinates(
         policy,
         train_data[:1],
@@ -357,42 +348,65 @@ def multicountry_trade_growth_nn(
         float(jnp.max(jnp.abs((train_coordinates["a"][0] - a_0_array) / output_scale))),
     )
     max_train_residual = max(
-        max(float(jnp.max(jnp.abs(train_eval[name]))) for name in dynamic_names),
-        float(jnp.max(jnp.abs(train_eval["static_residuals"]))),
         float(
-            jnp.max(jnp.abs(consumption_basket_log_price(train_log_static, parameters)))
+            multicountry_trade_max_dae_residual(
+                train_eval,
+                train_log_static,
+                parameters,
+            )
         ),
         max_initial_residual,
     )
-    max_validation_residual = max(
-        max(float(jnp.max(jnp.abs(validation_eval[name]))) for name in dynamic_names),
-        float(jnp.max(jnp.abs(validation_eval["static_residuals"]))),
-        float(
-            jnp.max(
-                jnp.abs(
-                    consumption_basket_log_price(
-                        validation_log_static,
-                        parameters,
-                    )
-                )
-            )
-        ),
+    max_validation_residual = float(
+        multicountry_trade_max_dae_residual(
+            validation_eval,
+            validation_log_static,
+            parameters,
+            quality_slice,
+        )
+    )
+    max_full_horizon_validation_residual = float(
+        multicountry_trade_max_dae_residual(
+            validation_eval,
+            validation_log_static,
+            parameters,
+        )
     )
     max_asset_clearing_residual = float(
+        jnp.max(jnp.abs(validation_eval["asset_clearing"][quality_slice]))
+    )
+    max_full_horizon_asset_clearing_residual = float(
         jnp.max(jnp.abs(validation_eval["asset_clearing"]))
     )
     max_rate_consistency_residual = float(
+        jnp.max(jnp.abs(validation_eval["interest_rate_country_gap"][quality_slice]))
+    )
+    max_full_horizon_rate_consistency_residual = float(
         jnp.max(jnp.abs(validation_eval["interest_rate_country_gap"]))
+    )
+    validation_residual_norms = multicountry_trade_pointwise_residual_norms(
+        validation_eval,
+        validation_log_static,
+        parameters,
     )
     finite_positive = bool(
         all(
-            jnp.all(jnp.isfinite(values[name])) and jnp.min(values[name]) > 0.0
-            for values in (train_eval, validation_eval, test_eval)
+            jnp.all(jnp.isfinite(values[name][selection]))
+            and jnp.min(values[name][selection]) > 0.0
+            for values, selection in (
+                (train_eval, slice(None)),
+                (validation_eval, quality_slice),
+                (test_eval, slice(None)),
+            )
             for name in ("k", "q", "marginal_wealth", "consumption", "investment")
         )
         and all(
-            jnp.all(jnp.isfinite(values[name]))
-            for values in (train_eval, validation_eval, test_eval)
+            jnp.all(jnp.isfinite(values[name][selection]))
+            for values, selection in (
+                (train_eval, slice(None)),
+                (validation_eval, quality_slice),
+                (test_eval, slice(None)),
+            )
             for name in ("a", "interest_rate", "current_account")
         )
     )
@@ -439,12 +453,29 @@ def multicountry_trade_growth_nn(
         "residual_dtype": str(jnp.dtype(dtype)),
         "dual_solve_dtype": "float64",
         "train_T": float(train_data[-1]),
+        "quality_T": quality_T,
+        "quality_validation_point_count": quality_count,
         "num_train_points": n_train,
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
+        "max_full_horizon_validation_residual": (max_full_horizon_validation_residual),
         "max_initial_residual": max_initial_residual,
         "max_asset_clearing_residual": max_asset_clearing_residual,
+        "max_full_horizon_asset_clearing_residual": (
+            max_full_horizon_asset_clearing_residual
+        ),
         "max_rate_consistency_residual": max_rate_consistency_residual,
+        "max_full_horizon_rate_consistency_residual": (
+            max_full_horizon_rate_consistency_residual
+        ),
+        **{
+            f"max_validation_{name}": float(jnp.max(values[quality_slice]))
+            for name, values in validation_residual_norms.items()
+        },
+        **{
+            f"max_full_horizon_{name}": float(jnp.max(values))
+            for name, values in validation_residual_norms.items()
+        },
         "terminal_residual_count": 0,
         "dae_residual_count": residual_count,
         "initial_residual_count": 0,
@@ -460,7 +491,12 @@ def multicountry_trade_growth_nn(
         "backend": jax.default_backend(),
         "device": str(jax.devices()[0]),
         "dtype": str(jnp.dtype(dtype)),
-        "minimum_interest_rate": float(jnp.min(validation_eval["interest_rate"])),
+        "minimum_interest_rate": float(
+            jnp.min(validation_eval["interest_rate"][quality_slice])
+        ),
+        "full_horizon_minimum_interest_rate": float(
+            jnp.min(validation_eval["interest_rate"])
+        ),
         "ex_post_discounted_assets_initial": endpoint_max("discounted_assets", 0),
         "ex_post_discounted_assets": endpoint_max("discounted_assets", -1),
         "ex_post_discounted_assets_decay_ratio": endpoint_decay_ratio(
@@ -527,7 +563,10 @@ def multicountry_trade_growth_nn(
         for label, name in symmetry_paths.items():
             results[f"max_country_2_3_{label}_gap"] = float(
                 jnp.max(
-                    jnp.abs(validation_eval[name][:, 1] - validation_eval[name][:, 2])
+                    jnp.abs(
+                        validation_eval[name][quality_slice, 1]
+                        - validation_eval[name][quality_slice, 2]
+                    )
                 )
             )
         permutation = jnp.asarray((0, 2, 1, *range(3, num_countries)))
@@ -537,7 +576,12 @@ def multicountry_trade_growth_nn(
             axis=-1,
         )
         results["max_country_2_3_trade_share_permutation_gap"] = float(
-            jnp.max(jnp.abs(validation_eval["trade_shares"] - permuted_trade_shares))
+            jnp.max(
+                jnp.abs(
+                    validation_eval["trade_shares"][quality_slice]
+                    - permuted_trade_shares[quality_slice]
+                )
+            )
         )
 
     if verbose:
@@ -565,6 +609,12 @@ def multicountry_trade_growth_nn(
         data["consumption_basket_log_price"] = np.asarray(
             consumption_basket_log_price(log_static, parameters)
         )
+        for name, residual_norm in multicountry_trade_pointwise_residual_norms(
+            values,
+            log_static,
+            parameters,
+        ).items():
+            data[name] = np.asarray(residual_norm)
         return pd.DataFrame(data)
 
     hyperparameters = {

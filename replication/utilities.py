@@ -15,6 +15,50 @@ QUANTILES = [0.1, 0.5, 0.9]
 # Shared kinked-production basin experiment: the k_0 grid crosses the
 # concave-convex threshold and spans both basins of attraction.
 BASIN_K0_GRID = np.linspace(0.5, 4.0, 15)
+RESIDUAL_NORM_COLUMNS = (
+    "ode_residual_rms",
+    "algebraic_residual_rms",
+    "dae_residual_rms",
+)
+
+
+def compare_residual_norm_frames(kernel_df, nn_df, quality_T):
+    kernel_quality = kernel_df.loc[kernel_df["t"] <= quality_T].reset_index(drop=True)
+    nn_quality = nn_df.loc[nn_df["t"] <= quality_T].reset_index(drop=True)
+    if not np.array_equal(kernel_quality["t"].to_numpy(), nn_quality["t"].to_numpy()):
+        raise ValueError("kernel and NN quality grids must contain identical dates")
+
+    comparison = pd.DataFrame({"t": kernel_quality["t"]})
+    summary = {"quality_T": quality_T, "quality_point_count": len(comparison)}
+    for name in RESIDUAL_NORM_COLUMNS:
+        kernel_values = kernel_quality[name].to_numpy()
+        nn_values = nn_quality[name].to_numpy()
+        pointwise_ratio = np.divide(
+            nn_values,
+            kernel_values,
+            out=np.full_like(nn_values, np.inf),
+            where=kernel_values > 0.0,
+        )
+        total = nn_values + kernel_values
+        symmetric_gap = np.divide(
+            2.0 * np.abs(nn_values - kernel_values),
+            total,
+            out=np.zeros_like(total),
+            where=total > 0.0,
+        )
+        comparison[f"kernel_{name}"] = kernel_values
+        comparison[f"nn_{name}"] = nn_values
+        comparison[f"nn_to_kernel_{name}_ratio"] = pointwise_ratio
+        comparison[f"symmetric_relative_{name}_gap"] = symmetric_gap
+
+        kernel_grid_rms = float(np.sqrt(np.mean(np.square(kernel_values))))
+        nn_grid_rms = float(np.sqrt(np.mean(np.square(nn_values))))
+        summary[f"kernel_quality_grid_{name}"] = kernel_grid_rms
+        summary[f"nn_quality_grid_{name}"] = nn_grid_rms
+        summary[f"nn_to_kernel_quality_grid_{name}_ratio"] = (
+            nn_grid_rms / kernel_grid_rms if kernel_grid_rms > 0.0 else np.inf
+        )
+    return summary, comparison
 
 
 def enable_compilation_cache(path=".jax_cache"):

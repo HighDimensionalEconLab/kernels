@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import jax
 import jsonargparse
 
 import asset_pricing_kernel
@@ -9,6 +10,9 @@ from replication.utilities import (
     save_experiment,
     write_summary,
 )
+
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
 
 enable_compilation_cache()
 

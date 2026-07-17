@@ -13,7 +13,6 @@ import time
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax import config
 from jax.flatten_util import ravel_pytree
 from nlls_gram import UnderdeterminedLevenbergMarquardt, nystrom_preconditioner
 
@@ -29,8 +28,8 @@ from neoclassical_growth_nn import (
     training_residual,
 )
 
-config.update("jax_enable_x64", True)
-config.update("jax_default_matmul_precision", "highest")
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
 
 MAX_STEPS = 400
 TRAIN_LOSS_THRESHOLD = 1e-15  # the model's certification bar

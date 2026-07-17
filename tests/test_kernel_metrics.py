@@ -10,7 +10,10 @@ from nlls_gram import (
     metric_from_diagonal,
 )
 
-from kernel_metrics import repeated_blockdiag_metric
+from kernel_metrics import metric_with_compute_dtype, repeated_blockdiag_metric
+
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
 
 
 class RepeatedBlockdiagMetricTests(unittest.TestCase):
@@ -74,6 +77,22 @@ class RepeatedBlockdiagMetricTests(unittest.TestCase):
         self.assertEqual(
             received_shapes,
             [(self.block_size, self.repeats * rhs_columns)],
+        )
+
+    def test_compute_dtype_preserves_caller_dtype(self):
+        factor = jnp.linalg.cholesky(
+            jnp.array([[2.0, 0.2], [0.2, 1.5]], dtype=jnp.float64)
+        )
+        metric = metric_with_compute_dtype(metric_from_cholesky(factor), jnp.float64)
+        value = jnp.array([1.0, -0.5], dtype=jnp.float32)
+
+        solved = metric.solve(value)
+
+        self.assertEqual(solved.dtype, jnp.float32)
+        np.testing.assert_allclose(
+            solved,
+            metric_from_cholesky(factor).solve(value.astype(jnp.float64)),
+            rtol=1e-6,
         )
 
     def test_partial_callback_and_shape_contracts(self):

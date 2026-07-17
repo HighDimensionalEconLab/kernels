@@ -9,13 +9,14 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 import unopy
-from jax import config
 
 from asset_pricing_benchmark import mu_f_array
 from kernels import integrated_kernel_matrices
 from rkhs import rkhs_norm_squared
 
-config.update("jax_enable_x64", True)
+if __name__ == "__main__":
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
 
 ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
 TRAIN_RESIDUAL_TOL = 1e-8

@@ -10,10 +10,15 @@ import math
 import sys
 import time
 
+import jax
+
 import asset_pricing_kernel as ap_uno
 import asset_pricing_kernel_nlls as ap_nlls
 import neoclassical_growth_kernel as gr_uno
 import neoclassical_growth_kernel_nlls as gr_nlls
+
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
 
 NU_TO_KERNEL = {0.5: "matern12", 1.5: "matern32", 2.5: "matern52", math.inf: "rbf"}
 

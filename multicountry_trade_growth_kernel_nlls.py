@@ -9,7 +9,6 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 import scipy.interpolate
-from jax import config
 from jax.flatten_util import ravel_pytree
 from nlls_gram import (
     LMStatus,
@@ -18,7 +17,7 @@ from nlls_gram import (
     metric_from_diagonal,
 )
 
-from kernel_metrics import repeated_blockdiag_metric
+from kernel_metrics import metric_with_compute_dtype, repeated_blockdiag_metric
 from kernels import integrated_kernel_matrices, normalize_kernel
 from multicountry_growth_kernel_nlls import make_train_grid
 from multicountry_trade_growth import (
@@ -30,7 +29,9 @@ from multicountry_trade_growth import (
     static_trade_equilibrium,
 )
 
-config.update("jax_enable_x64", True)
+if __name__ == "__main__":
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
 
 TRAIN_RESIDUAL_TOL = 1e-5
 VALIDATION_RESIDUAL_TOL = 5e-3
@@ -80,10 +81,14 @@ def multicountry_trade_growth_kernel_nlls(
     k_0: tuple[float, ...] | None = None,
     a_0: tuple[float, ...] | None = None,
     parameters: TradeGrowthParameters = TradeGrowthParameters(),
+    use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
     lm_set: NLLSGramSettings = NLLSGramSettings(),
 ):
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    dtype = jnp.float64 if use_float64 else jnp.float32
     num_countries = parameters.num_countries
     if k_0 is None:
         k_0 = (1.0,) * num_countries
@@ -98,18 +103,18 @@ def multicountry_trade_growth_kernel_nlls(
     if lm_set.linear_solver not in ("cholesky", "qr"):
         raise ValueError("linear_solver must be 'cholesky' or 'qr'")
 
-    train_data = make_train_grid(data_set)
+    train_data = make_train_grid(data_set).astype(dtype)
     if data_set.test_T > float(train_data[-1]):
         raise ValueError("test_T must not exceed the training horizon")
     if data_set.static_evaluation not in ("pchip", "resolve"):
         raise ValueError("static_evaluation must be 'pchip' or 'resolve'")
-    test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points)
+    test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     validation_data = jnp.linspace(
-        0.0, float(train_data[-1]), data_set.validation_points
+        0.0, float(train_data[-1]), data_set.validation_points, dtype=dtype
     )
     n_train = len(train_data)
     kernel = normalize_kernel(kernel_set.kernel)
-    k_0_array = jnp.asarray(k_0)
+    k_0_array = jnp.asarray(k_0, dtype=dtype)
     a_0_array = jnp.asarray(a_0, dtype=k_0_array.dtype)
     populations = jnp.asarray(parameters.populations, dtype=k_0_array.dtype)
     initial_asset_gap = jnp.sum(populations * a_0_array)
@@ -144,15 +149,20 @@ def multicountry_trade_growth_kernel_nlls(
     output_scale = static_reference["world_gdp"] / jnp.sum(populations)
     eps = lm_set.metric_eps
 
-    K, K_tilde = integrated_kernel_matrices(
-        train_data,
-        train_data,
+    metric_data = train_data.astype(jnp.float64)
+    K_metric, K_tilde_metric = integrated_kernel_matrices(
+        metric_data,
+        metric_data,
         kernel,
         kernel_set.sigma,
         kernel_set.ell,
     )
-    K = 0.5 * (K + K.T)
-    alpha_metric = metric_from_cholesky(jnp.linalg.cholesky(K + eps * jnp.eye(n_train)))
+    K_metric = 0.5 * (K_metric + K_metric.T)
+    K = K_metric.astype(dtype)
+    K_tilde = K_tilde_metric.astype(dtype)
+    alpha_metric = metric_from_cholesky(
+        jnp.linalg.cholesky(K_metric + eps * jnp.eye(n_train, dtype=jnp.float64))
+    )
 
     static_size = n_train * len(STATIC_BLOCK_NAMES) * num_countries
     algebraic_size = n_train + 2 * num_countries + static_size
@@ -238,18 +248,21 @@ def multicountry_trade_growth_kernel_nlls(
         )
 
     num_dynamic_functions = 4 * num_countries
-    metric = repeated_blockdiag_metric(
-        alpha_metric,
-        n_train,
-        num_dynamic_functions,
-        additional=(
-            metric_from_diagonal(jnp.full(algebraic_size, eps)),
-            algebraic_size,
+    metric = metric_with_compute_dtype(
+        repeated_blockdiag_metric(
+            alpha_metric,
+            n_train,
+            num_dynamic_functions,
+            additional=(
+                metric_from_diagonal(jnp.full(algebraic_size, eps, dtype=jnp.float64)),
+                algebraic_size,
+            ),
         ),
+        jnp.float64,
     )
     initial_algebraic = jnp.concatenate(
         [
-            jnp.zeros(n_train + 2 * num_countries),
+            jnp.zeros(n_train + 2 * num_countries, dtype=dtype),
             jnp.broadcast_to(
                 static_reference["log_static"],
                 (n_train, len(STATIC_BLOCK_NAMES), num_countries),
@@ -257,10 +270,10 @@ def multicountry_trade_growth_kernel_nlls(
         ]
     )
     theta_0 = (
-        jnp.zeros((num_countries, n_train)),
-        jnp.zeros((num_countries, n_train)),
-        jnp.zeros((num_countries, n_train)),
-        jnp.zeros((num_countries, n_train)),
+        jnp.zeros((num_countries, n_train), dtype=dtype),
+        jnp.zeros((num_countries, n_train), dtype=dtype),
+        jnp.zeros((num_countries, n_train), dtype=dtype),
+        jnp.zeros((num_countries, n_train), dtype=dtype),
         initial_algebraic,
     )
     solver = UnderdeterminedLevenbergMarquardt(
@@ -269,6 +282,7 @@ def multicountry_trade_growth_kernel_nlls(
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
+        dual_solve_dtype=(jnp.float64 if lm_set.linear_solver == "cholesky" else None),
         metric=metric,
     )
 
@@ -460,6 +474,8 @@ def multicountry_trade_growth_kernel_nlls(
         "installation_elasticity": parameters.installation_elasticity,
         "trade_elasticity": parameters.trade_elasticity,
         "num_countries": num_countries,
+        "residual_dtype": str(jnp.dtype(dtype)),
+        "metric_dtype": "float64",
         "kernel": kernel,
         "ell": kernel_set.ell,
         "sigma": kernel_set.sigma,

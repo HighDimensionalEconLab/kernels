@@ -6,10 +6,15 @@
 # face is SIGSEGV/SIGTRAP inside libjax_common.dylib. Not an nlls-gram
 # issue; see README.md for the root-cause analysis.
 # Run from the repo root: uv run python -m experiments.qr_horizon_followup
+import jax
+
 from neoclassical_growth_kernel_nlls import DataSettings as GrData
 from neoclassical_growth_kernel_nlls import KernelSettings as GrKernel
 from neoclassical_growth_kernel_nlls import NLLSGramSettings as GrSettings
 from neoclassical_growth_kernel_nlls import neoclassical_growth_kernel_nlls
+
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
 
 print(
     f"{'kernel':9} {'T':>4} {'n':>4} {'solver':9} {'ok':>3} {'reason':14} "

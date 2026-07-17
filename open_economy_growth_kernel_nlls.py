@@ -8,7 +8,6 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from jax import config
 from nlls_gram import (
     LMStatus,
     UnderdeterminedLevenbergMarquardt,
@@ -16,7 +15,7 @@ from nlls_gram import (
     metric_from_diagonal,
 )
 
-from kernel_metrics import repeated_blockdiag_metric
+from kernel_metrics import metric_with_compute_dtype, repeated_blockdiag_metric
 from kernels import integrated_kernel_matrices, normalize_kernel
 from open_economy_growth import (
     ModelParameters,
@@ -30,7 +29,9 @@ from open_economy_growth import (
 )
 from open_economy_growth_benchmark import open_economy_growth_benchmark
 
-config.update("jax_enable_x64", True)
+if __name__ == "__main__":
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
 
 TRAIN_RESIDUAL_TOL = 1e-5
 VALIDATION_RESIDUAL_TOL = 5e-3
@@ -79,10 +80,14 @@ def open_economy_growth_kernel_nlls(
     k_0: float = 1.0,
     a_0: float = 0.0,
     parameters: ModelParameters = ModelParameters(),
+    use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
     lm_set: NLLSGramSettings = NLLSGramSettings(),
 ):
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    dtype = jnp.float64 if use_float64 else jnp.float32
     if k_0 <= 0.0:
         raise ValueError("k_0 must be positive")
     if abs(parameters.interest_rate - parameters.rho) > 1e-12:
@@ -95,7 +100,9 @@ def open_economy_growth_kernel_nlls(
     kernel = normalize_kernel(kernel_set.kernel)
     if data_set.train_points_list is None:
         if data_set.sampling == "uniform":
-            train_data = jnp.linspace(0.0, data_set.train_T, data_set.train_points)
+            train_data = jnp.linspace(
+                0.0, data_set.train_T, data_set.train_points, dtype=dtype
+            )
         elif data_set.sampling == "front_loaded":
             dense_points = data_set.train_points - data_set.tail_points
             if (
@@ -107,17 +114,18 @@ def open_economy_growth_kernel_nlls(
                     "front_loaded sampling requires at least 2 dense points, "
                     "1 tail point, and 0 < dense_T < train_T"
                 )
-            dense_data = jnp.linspace(0.0, data_set.dense_T, dense_points)
+            dense_data = jnp.linspace(0.0, data_set.dense_T, dense_points, dtype=dtype)
             tail_data = jnp.linspace(
                 data_set.dense_T,
                 data_set.train_T,
                 data_set.tail_points + 1,
+                dtype=dtype,
             )[1:]
             train_data = jnp.concatenate([dense_data, tail_data])
         else:
             raise ValueError("sampling must be 'front_loaded' or 'uniform'")
     else:
-        train_data = jnp.sort(jnp.asarray(data_set.train_points_list))
+        train_data = jnp.sort(jnp.asarray(data_set.train_points_list, dtype=dtype))
     if len(train_data) < 3 or not bool(jnp.all(jnp.diff(train_data) > 0.0)):
         raise ValueError("training points must be strictly increasing")
     if float(train_data[0]) != 0.0:
@@ -127,9 +135,9 @@ def open_economy_growth_kernel_nlls(
     if data_set.benchmark_T < max(data_set.test_T, float(train_data[-1])):
         raise ValueError("benchmark_T must cover the train and test horizons")
 
-    test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points)
+    test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     validation_data = jnp.linspace(
-        0.0, float(train_data[-1]), data_set.validation_points
+        0.0, float(train_data[-1]), data_set.validation_points, dtype=dtype
     )
     benchmark_grid = np.linspace(0.0, data_set.benchmark_T, data_set.benchmark_points)
     n_train = len(train_data)
@@ -138,15 +146,20 @@ def open_economy_growth_kernel_nlls(
     consumption_scale = steady["g"]
     eps = lm_set.metric_eps
 
-    K, K_tilde = integrated_kernel_matrices(
-        train_data,
-        train_data,
+    metric_data = train_data.astype(jnp.float64)
+    K_metric, K_tilde_metric = integrated_kernel_matrices(
+        metric_data,
+        metric_data,
         kernel,
         kernel_set.sigma,
         kernel_set.ell,
     )
-    K = (K + K.T) / 2.0
-    alpha_metric = metric_from_cholesky(jnp.linalg.cholesky(K + eps * jnp.eye(n_train)))
+    K_metric = (K_metric + K_metric.T) / 2.0
+    K = K_metric.astype(dtype)
+    K_tilde = K_tilde_metric.astype(dtype)
+    alpha_metric = metric_from_cholesky(
+        jnp.linalg.cholesky(K_metric + eps * jnp.eye(n_train, dtype=jnp.float64))
+    )
 
     def path_values(theta, K_eval, K_tilde_eval):
         alpha_k, alpha_a, alpha_q, initial = theta
@@ -187,20 +200,26 @@ def open_economy_growth_kernel_nlls(
 
     # There are 3n DAE equations in 3n + 2 unknowns. No terminal equation is
     # appended: the metric supplies the two-dimensional selection.
-    metric = repeated_blockdiag_metric(
-        alpha_metric,
-        n_train,
-        3,
-        additional=(metric_from_diagonal(jnp.full(2, eps)), 2),
+    metric = metric_with_compute_dtype(
+        repeated_blockdiag_metric(
+            alpha_metric,
+            n_train,
+            3,
+            additional=(
+                metric_from_diagonal(jnp.full(2, eps, dtype=jnp.float64)),
+                2,
+            ),
+        ),
+        jnp.float64,
     )
 
     # The zero coordinate contains no saddle-path or present-value information:
     # it is flat in the derivative RKHS at the model's scale normalizations.
     theta_0 = (
-        jnp.zeros(n_train),
-        jnp.zeros(n_train),
-        jnp.zeros(n_train),
-        jnp.zeros(2),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(2, dtype=dtype),
     )
 
     solver = UnderdeterminedLevenbergMarquardt(
@@ -209,6 +228,7 @@ def open_economy_growth_kernel_nlls(
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
+        dual_solve_dtype=(jnp.float64 if lm_set.linear_solver == "cholesky" else None),
         metric=metric,
     )
 
@@ -380,6 +400,8 @@ def open_economy_growth_kernel_nlls(
         "k_0": k_0,
         "a_0": a_0,
         "a_0_over_output_ss": a_0 / float(output_scale),
+        "residual_dtype": str(jnp.dtype(dtype)),
+        "metric_dtype": "float64",
         "kernel": kernel,
         "ell": kernel_set.ell,
         "sigma": kernel_set.sigma,

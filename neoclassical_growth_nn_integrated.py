@@ -11,7 +11,6 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from flax import nnx
-from jax import config
 from jax.flatten_util import ravel_pytree
 from nlls_gram import (
     DrawNNXModule,
@@ -25,7 +24,9 @@ from neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from neural_networks import ACTIVATIONS, unit_softplus
 from random_fourier_features import KernelName, RFFFeatures
 
-config.update("jax_enable_x64", True)
+if __name__ == "__main__":
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
 
 DOMAIN_EPS = 1e-8
 
@@ -272,7 +273,7 @@ def neoclassical_growth_nn_integrated(
     b_2: float | None = None,
     sigma_crra: float = 1.0,
     seed: int = 0,
-    matmul_highest: bool = True,
+    use_float64: bool = True,
     data_set: DataSettings = DataSettings(),
     nn_set: GrowthDerivativeSettings = GrowthDerivativeSettings(),
     lm_set: NLLSGramSettings = NLLSGramSettings(),
@@ -280,9 +281,8 @@ def neoclassical_growth_nn_integrated(
     verbose: bool = True,
     measure_compilation: bool = True,
 ):
-    if matmul_highest:
-        config.update("jax_default_matmul_precision", "highest")
-
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError("enable jax_enable_x64 in the process entry point")
     kinked_parameter_count = sum(parameter is not None for parameter in (A, b_1, b_2))
     if kinked_parameter_count not in {0, 3}:
         raise ValueError("Set all of A, b_1, and b_2, or set none of them.")
@@ -291,7 +291,7 @@ def neoclassical_growth_nn_integrated(
     b_1_value = 1.0 if b_1 is None else float(b_1)
     b_2_value = 0.0 if b_2 is None else float(b_2)
 
-    dtype = jnp.float64
+    dtype = jnp.float64 if use_float64 else jnp.float32
     p = StructuralParameters.create(
         dtype,
         a=a,
@@ -354,6 +354,7 @@ def neoclassical_growth_nn_integrated(
         damping_increase=lm_set.damping_increase,
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
+        dual_solve_dtype=jnp.float64,
     )
 
     # solve()'s atol is on the residual norm; the settings threshold is on
@@ -457,6 +458,8 @@ def neoclassical_growth_nn_integrated(
         "b_2": b_2_value,
         "use_kinked_production": use_kinked_production,
         "seed": seed,
+        "residual_dtype": str(jnp.dtype(dtype)),
+        "dual_solve_dtype": "float64",
         "solver": "nlls-gram",
         "ansatz": "integrated_derivative",
         "train_loss": train_loss,

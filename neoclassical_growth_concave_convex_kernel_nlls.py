@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import jax
 import jsonargparse
 
 from neoclassical_growth_kernel_nlls import (
@@ -8,6 +9,10 @@ from neoclassical_growth_kernel_nlls import (
     NLLSGramSettings,
     neoclassical_growth_kernel_nlls,
 )
+
+if __name__ == "__main__":
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
 
 
 def neoclassical_growth_concave_convex_kernel_nlls(
@@ -18,6 +23,7 @@ def neoclassical_growth_concave_convex_kernel_nlls(
     b_1: float = 3.0,
     b_2: float = 2.5,
     k_0: float = 1.0,
+    use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(test_points=41),
     lm_set: NLLSGramSettings = NLLSGramSettings(),
@@ -31,6 +37,7 @@ def neoclassical_growth_concave_convex_kernel_nlls(
         A=A,
         b_1=b_1,
         b_2=b_2,
+        use_float64=use_float64,
         kernel_set=kernel_set,
         data_set=data_set,
         lm_set=lm_set,

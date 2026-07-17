@@ -4,6 +4,7 @@ import os
 
 os.environ["JAX_PLATFORMS"] = "cpu"
 
+import jax
 import jsonargparse
 
 import multicountry_trade_growth_kernel_nlls
@@ -13,6 +14,9 @@ from replication.utilities import (
     save_experiment,
     write_summary,
 )
+
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
 
 enable_compilation_cache()
 
@@ -34,15 +38,19 @@ THREE_COUNTRY_PARAMETERS = dict(
 )
 
 
-def run(output_dir: str = ".results"):
-    meta = dict(n_seeds=1, backend="cpu")
+def run(output_dir: str = ".results", use_float64: bool = True):
+    meta = dict(
+        n_seeds=1,
+        backend="cpu",
+        residual_dtype="float64" if use_float64 else "float32",
+    )
 
     def go(name, **experiment):
         print(f"{name} -> {output_dir}/")
         results_df, frames, hyperparameters = ensemble(
             SOLVER,
             n_seeds=1,
-            options=experiment,
+            options={"use_float64": use_float64, **experiment},
         )
         save_experiment(
             name,

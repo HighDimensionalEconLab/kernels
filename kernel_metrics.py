@@ -3,6 +3,28 @@ import jax.numpy as jnp
 from nlls_gram import Metric
 
 
+def metric_with_compute_dtype(metric: Metric, dtype) -> Metric:
+    dtype = jnp.dtype(dtype)
+
+    # The callback computes wide, then restores the solver's residual/parameter
+    # dtype so JVP tangents and loop-carried pytrees keep a stable contract.
+    def wrap(callback):
+        if callback is None:
+            return None
+
+        def apply(x):
+            return callback(x.astype(dtype)).astype(x.dtype)
+
+        return apply
+
+    return Metric(
+        solve=wrap(metric.solve),
+        norm=wrap(metric.norm),
+        inv_sqrt=wrap(metric.inv_sqrt),
+        inv_sqrt_transpose=wrap(metric.inv_sqrt_transpose),
+    )
+
+
 def repeated_blockdiag_metric(
     block_metric: Metric,
     block_size: int,

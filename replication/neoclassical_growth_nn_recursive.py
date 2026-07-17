@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import jax
 import jsonargparse
 import pandas as pd
 
@@ -12,6 +13,9 @@ from replication.utilities import (
     sweep,
     write_summary,
 )
+
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
 
 enable_compilation_cache()
 
@@ -37,10 +41,14 @@ def run(
     # Exploration default; scale up (training is ~1s/seed) once the
     # experiment set is frozen for the final replication run.
     n_seeds: int = 10,
+    use_float64: bool = True,
     verbose: bool = False,
 ):
-    common = dict(verbose=verbose)
-    meta = dict(n_seeds=n_seeds)
+    common = dict(use_float64=use_float64, verbose=verbose)
+    meta = dict(
+        n_seeds=n_seeds,
+        residual_dtype="float64" if use_float64 else "float32",
+    )
 
     print(f"baseline: {n_seeds} seeds -> {output_dir}/")
     results_df, frames, hyperparameters = ensemble(

@@ -4,6 +4,7 @@ import os
 
 os.environ["JAX_PLATFORMS"] = "cpu"
 
+import jax
 import jsonargparse
 
 import multicountry_trade_growth_nn
@@ -15,6 +16,9 @@ from replication.utilities import (
     write_summary,
 )
 
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
+
 enable_compilation_cache()
 
 PREFIX = "multicountry_trade_growth_nn"
@@ -24,9 +28,14 @@ SOLVER = multicountry_trade_growth_nn.multicountry_trade_growth_nn
 def run(
     output_dir: str = ".results",
     n_seeds: int = 3,
+    use_float64: bool = True,
     verbose: bool = False,
 ):
-    meta = dict(n_seeds=n_seeds, backend="cpu")
+    meta = dict(
+        n_seeds=n_seeds,
+        backend="cpu",
+        residual_dtype="float64" if use_float64 else "float32",
+    )
     print(f"three_country_initial_nfa: {n_seeds} seeds -> {output_dir}/")
     results_df, frames, hyperparameters = ensemble(
         SOLVER,
@@ -34,6 +43,7 @@ def run(
         options={
             "a_0": (-0.2, 0.1, 0.1),
             "parameters": THREE_COUNTRY_PARAMETERS,
+            "use_float64": use_float64,
             "verbose": verbose,
         },
     )

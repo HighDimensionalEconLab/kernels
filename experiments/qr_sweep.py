@@ -2,6 +2,8 @@
 # and tests exercise (both models x kernels x n). Findings in README.md; this
 # sweep motivated the growth model's auto-qr boundary (DENSE_QR_MIN_POINTS).
 # Run from the repo root: uv run python -m experiments.qr_sweep
+import jax
+
 from asset_pricing_kernel_nlls import DataSettings as APData
 from asset_pricing_kernel_nlls import KernelSettings as APKernel
 from asset_pricing_kernel_nlls import NLLSGramSettings as APSettings
@@ -10,6 +12,9 @@ from neoclassical_growth_kernel_nlls import DataSettings as GrData
 from neoclassical_growth_kernel_nlls import KernelSettings as GrKernel
 from neoclassical_growth_kernel_nlls import NLLSGramSettings as GrSettings
 from neoclassical_growth_kernel_nlls import neoclassical_growth_kernel_nlls
+
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
 
 AP_CASES = [
     ("matern12", 10.0, 40.0, 41),

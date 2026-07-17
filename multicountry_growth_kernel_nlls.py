@@ -8,7 +8,6 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from jax import config
 from nlls_gram import (
     LMStatus,
     UnderdeterminedLevenbergMarquardt,
@@ -16,7 +15,7 @@ from nlls_gram import (
     metric_from_diagonal,
 )
 
-from kernel_metrics import repeated_blockdiag_metric
+from kernel_metrics import metric_with_compute_dtype, repeated_blockdiag_metric
 from kernels import integrated_kernel_matrices, normalize_kernel
 from multicountry_growth import (
     MulticountryParameters,
@@ -29,7 +28,9 @@ from multicountry_growth import (
 )
 from multicountry_growth_benchmark import multicountry_growth_benchmark
 
-config.update("jax_enable_x64", True)
+if __name__ == "__main__":
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
 
 TRAIN_RESIDUAL_TOL = 1e-5
 VALIDATION_RESIDUAL_TOL = 5e-3
@@ -112,10 +113,14 @@ def multicountry_growth_kernel_nlls(
     k_0: tuple[float, ...] | None = None,
     a_0: tuple[float, ...] | None = None,
     parameters: MulticountryParameters = MulticountryParameters(),
+    use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
     lm_set: NLLSGramSettings = NLLSGramSettings(),
 ):
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    dtype = jnp.float64 if use_float64 else jnp.float32
     num_countries = parameters.num_countries
     if k_0 is None:
         k_0 = (1.0,) * num_countries
@@ -131,19 +136,19 @@ def multicountry_growth_kernel_nlls(
         raise ValueError("linear_solver must be 'cholesky' or 'qr'")
 
     kernel = normalize_kernel(kernel_set.kernel)
-    train_data = make_train_grid(data_set)
+    train_data = make_train_grid(data_set).astype(dtype)
     if data_set.test_T > float(train_data[-1]):
         raise ValueError("test_T must not exceed the training horizon")
     if data_set.benchmark_T < max(data_set.test_T, float(train_data[-1])):
         raise ValueError("benchmark_T must cover the train and test horizons")
-    test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points)
+    test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     validation_data = jnp.linspace(
-        0.0, float(train_data[-1]), data_set.validation_points
+        0.0, float(train_data[-1]), data_set.validation_points, dtype=dtype
     )
     benchmark_grid = np.linspace(0.0, data_set.benchmark_T, data_set.benchmark_points)
     n_train = len(train_data)
-    k_0_array = jnp.asarray(k_0)
-    a_0_array = jnp.asarray(a_0)
+    k_0_array = jnp.asarray(k_0, dtype=dtype)
+    a_0_array = jnp.asarray(a_0, dtype=dtype)
     populations = jnp.asarray(parameters.populations, dtype=k_0_array.dtype)
     output_scale = multicountry_output_scale(parameters, k_0_array.dtype)
     initial_asset_gap = jnp.sum(populations * a_0_array) / output_scale
@@ -159,15 +164,20 @@ def multicountry_growth_kernel_nlls(
     )
     eps = lm_set.metric_eps
 
-    K, K_tilde = integrated_kernel_matrices(
-        train_data,
-        train_data,
+    metric_data = train_data.astype(jnp.float64)
+    K_metric, K_tilde_metric = integrated_kernel_matrices(
+        metric_data,
+        metric_data,
         kernel,
         kernel_set.sigma,
         kernel_set.ell,
     )
-    K = (K + K.T) / 2.0
-    alpha_metric = metric_from_cholesky(jnp.linalg.cholesky(K + eps * jnp.eye(n_train)))
+    K_metric = (K_metric + K_metric.T) / 2.0
+    K = K_metric.astype(dtype)
+    K_tilde = K_tilde_metric.astype(dtype)
+    alpha_metric = metric_from_cholesky(
+        jnp.linalg.cholesky(K_metric + eps * jnp.eye(n_train, dtype=jnp.float64))
+    )
 
     def path_coordinates(theta, K_eval, K_tilde_eval, rate_coordinates=None):
         alpha_k, alpha_a, alpha_q, alpha_m, algebraic = theta
@@ -247,21 +257,26 @@ def multicountry_growth_kernel_nlls(
 
     num_dynamic_functions = 4 * num_countries
     num_algebraic_values = n_train + 2 * num_countries
-    metric = repeated_blockdiag_metric(
-        alpha_metric,
-        n_train,
-        num_dynamic_functions,
-        additional=(
-            metric_from_diagonal(jnp.full(num_algebraic_values, eps)),
-            num_algebraic_values,
+    metric = metric_with_compute_dtype(
+        repeated_blockdiag_metric(
+            alpha_metric,
+            n_train,
+            num_dynamic_functions,
+            additional=(
+                metric_from_diagonal(
+                    jnp.full(num_algebraic_values, eps, dtype=jnp.float64)
+                ),
+                num_algebraic_values,
+            ),
         ),
+        jnp.float64,
     )
     theta_0 = (
-        jnp.zeros((num_countries, n_train)),
-        jnp.zeros((num_countries, n_train)),
-        jnp.zeros((num_countries, n_train)),
-        jnp.zeros((num_countries, n_train)),
-        jnp.zeros(num_algebraic_values),
+        jnp.zeros((num_countries, n_train), dtype=dtype),
+        jnp.zeros((num_countries, n_train), dtype=dtype),
+        jnp.zeros((num_countries, n_train), dtype=dtype),
+        jnp.zeros((num_countries, n_train), dtype=dtype),
+        jnp.zeros(num_algebraic_values, dtype=dtype),
     )
     solver = UnderdeterminedLevenbergMarquardt(
         residual_fn,
@@ -269,6 +284,7 @@ def multicountry_growth_kernel_nlls(
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
+        dual_solve_dtype=(jnp.float64 if lm_set.linear_solver == "cholesky" else None),
         metric=metric,
     )
 
@@ -441,6 +457,8 @@ def multicountry_growth_kernel_nlls(
         "rho": parameters.rho,
         "installation_elasticity": parameters.installation_elasticity,
         "num_countries": num_countries,
+        "residual_dtype": str(jnp.dtype(dtype)),
+        "metric_dtype": "float64",
         "kernel": kernel,
         "ell": kernel_set.ell,
         "sigma": kernel_set.sigma,

@@ -1,5 +1,6 @@
 import unittest
 
+import jax
 import jax.numpy as jnp
 from flax import nnx
 
@@ -10,6 +11,9 @@ from random_fourier_features import (
     exact_kernel_matrix,
     normalize_kernel_name,
 )
+
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
 
 
 class RandomFourierFeatureTests(unittest.TestCase):

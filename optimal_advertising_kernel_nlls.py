@@ -8,7 +8,6 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from jax import config
 from nlls_gram import (
     LMStatus,
     UnderdeterminedLevenbergMarquardt,
@@ -16,10 +15,12 @@ from nlls_gram import (
     metric_from_diagonal,
 )
 
-from kernel_metrics import repeated_blockdiag_metric
+from kernel_metrics import metric_with_compute_dtype, repeated_blockdiag_metric
 from kernels import integrated_kernel_matrices, normalize_kernel
 
-config.update("jax_enable_x64", True)
+if __name__ == "__main__":
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
 
 TRAIN_RESIDUAL_TOL = 1e-8
 DOMAIN_EPS = 1e-8
@@ -64,31 +65,45 @@ def optimal_advertising_kernel_nlls(
     beta: float = 0.05,
     kappa: float = 0.5,
     x_0: float = 0.4,
+    use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
     lm_set: NLLSGramSettings = NLLSGramSettings(),
     verbose: bool = False,
 ):
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    dtype = jnp.float64 if use_float64 else jnp.float32
     kernel = normalize_kernel(kernel_set.kernel)
     ell, sigma = kernel_set.ell, kernel_set.sigma
     if data_set.train_points_list is None:
-        train_data = jnp.linspace(0.0, data_set.train_T, data_set.train_points)
+        train_data = jnp.linspace(
+            0.0, data_set.train_T, data_set.train_points, dtype=dtype
+        )
     else:
-        train_data = jnp.sort(jnp.asarray(data_set.train_points_list))
-    test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points)
+        train_data = jnp.sort(jnp.asarray(data_set.train_points_list, dtype=dtype))
+    test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     validation_data = jnp.linspace(
         0.0,
         data_set.train_T,
         max(data_set.test_points, data_set.validation_points),
+        dtype=dtype,
     )
     n_train = len(train_data)
     eps = lm_set.metric_eps
     if eps <= 0.0:
         raise ValueError("metric_eps must be positive")
 
-    K, K_tilde = integrated_kernel_matrices(train_data, train_data, kernel, sigma, ell)
-    K = (K + K.T) / 2
-    alpha_metric = metric_from_cholesky(jnp.linalg.cholesky(K + eps * jnp.eye(n_train)))
+    metric_data = train_data.astype(jnp.float64)
+    K_metric, K_tilde_metric = integrated_kernel_matrices(
+        metric_data, metric_data, kernel, sigma, ell
+    )
+    K_metric = (K_metric + K_metric.T) / 2
+    K = K_metric.astype(dtype)
+    K_tilde = K_tilde_metric.astype(dtype)
+    alpha_metric = metric_from_cholesky(
+        jnp.linalg.cholesky(K_metric + eps * jnp.eye(n_train, dtype=jnp.float64))
+    )
 
     gamma = (beta + rho_hat) / c
     control_power = (1.0 - kappa) / kappa
@@ -117,19 +132,25 @@ def optimal_advertising_kernel_nlls(
             residuals(path_values(theta, K, K_tilde))
         )
 
-    metric = repeated_blockdiag_metric(
-        alpha_metric,
-        n_train,
-        3,
-        additional=(metric_from_diagonal(jnp.full(2, eps)), 2),
+    metric = metric_with_compute_dtype(
+        repeated_blockdiag_metric(
+            alpha_metric,
+            n_train,
+            3,
+            additional=(
+                metric_from_diagonal(jnp.full(2, eps, dtype=jnp.float64)),
+                2,
+            ),
+        ),
+        jnp.float64,
     )
     u_0_guess = max(beta * x_0 / max(1.0 - x_0, DOMAIN_EPS), DOMAIN_EPS)
     mu_0_guess = max(gamma / (rho_hat + beta + u_0_guess), DOMAIN_EPS)
     theta_0 = (
-        jnp.zeros(n_train),
-        jnp.zeros(n_train),
-        jnp.zeros(n_train),
-        jnp.asarray([mu_0_guess, u_0_guess]),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.asarray([mu_0_guess, u_0_guess], dtype=dtype),
     )
     solver = UnderdeterminedLevenbergMarquardt(
         residual_fn,
@@ -137,6 +158,7 @@ def optimal_advertising_kernel_nlls(
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
+        dual_solve_dtype=(jnp.float64 if lm_set.linear_solver == "cholesky" else None),
         metric=metric,
     )
 
@@ -192,10 +214,14 @@ def optimal_advertising_kernel_nlls(
             for grid in (train_eval, validation_eval, test_eval)
         )
     )
+    train_residual_tolerance = max(
+        TRAIN_RESIDUAL_TOL,
+        8.0 * float(jnp.finfo(dtype).eps),
+    )
     rejection_reasons = []
     if not finite_valid:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > TRAIN_RESIDUAL_TOL:
+    if max_train_residual > train_residual_tolerance:
         rejection_reasons.append("train_residual")
     solution_accepted = not rejection_reasons
 
@@ -219,6 +245,8 @@ def optimal_advertising_kernel_nlls(
         "kappa": kappa,
         "x_0": x_0,
         "gamma": gamma,
+        "residual_dtype": str(jnp.dtype(dtype)),
+        "metric_dtype": "float64",
         "kernel": kernel,
         "ell": ell,
         "sigma": sigma,
@@ -230,6 +258,7 @@ def optimal_advertising_kernel_nlls(
         "u_0": float(u_0),
         **{f"rkhs_norm_{name}": float(value) for name, value in rkhs_norms.items()},
         "max_train_residual": max_train_residual,
+        "train_residual_tolerance": train_residual_tolerance,
         "max_validation_residual": max_validation_residual,
         "solve_time": elapsed,
         "wall_time": elapsed,

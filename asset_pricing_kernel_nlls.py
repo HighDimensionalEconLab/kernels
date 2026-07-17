@@ -8,7 +8,6 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from jax import config
 from nlls_gram import (
     LMStatus,
     UnderdeterminedLevenbergMarquardt,
@@ -21,13 +20,16 @@ from nlls_gram import (
 )
 
 from asset_pricing_benchmark import mu_f_array
+from kernel_metrics import metric_with_compute_dtype
 from kernels import (
     integrated_kernel_matrices,
     matern_kernel_matvec_pair,
     normalize_kernel,
 )
 
-config.update("jax_enable_x64", True)
+if __name__ == "__main__":
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
 
 TRAIN_RESIDUAL_TOL = 1e-8
 STATUS_TO_REASON = {
@@ -100,14 +102,6 @@ class NLLSGramSettings:
     # Cholesky factor or O(n) state-space scans, chosen to match).
     residuals_method: str = "auto"
     iterative_maxiter: int = 20  # CG inner budget per LM step (cg only)
-    # nlls-gram >= 1.7: None | "float64". Promotes only the dense dual
-    # (Gram) pipeline to float64 while the model stays in its own dtype. A
-    # value no-op under this repo's global float64 -- the knob to reach for
-    # on a float32/GPU move, where the unified metric's 1/eps spike puts
-    # the dual at condition ~1/eps (the flag's validated target; see
-    # experiments/dual_solve_dtype_float32.py). Dense cholesky paths only:
-    # construction raises under the cg solver.
-    dual_solve_dtype: str | None = None
     # The single shift of the unified metric M = blockdiag(K, 0) + eps I:
     # the kernel block is factored as K + eps I and the free p_0 carries
     # weight eps, so ||M^{-1}|| = 1/eps uniformly in n and the min-M-norm
@@ -127,20 +121,26 @@ def asset_pricing_kernel_nlls(
     c: float = 0.02,
     g: float = -0.2,
     x_0: float = 1.0,
+    use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
     lm_set: NLLSGramSettings = NLLSGramSettings(),
 ):
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    dtype = jnp.float64 if use_float64 else jnp.float32
     kernel = normalize_kernel(kernel_set.kernel)
     ell, sigma = kernel_set.ell, kernel_set.sigma
     if data_set.train_points_list is None:
-        train_data = jnp.linspace(0, data_set.train_T, data_set.train_points)
+        train_data = jnp.linspace(
+            0, data_set.train_T, data_set.train_points, dtype=dtype
+        )
     else:
         # The collocation problem is permutation-invariant, so sorting is
         # free -- and it makes the structured matrix_free path (which needs
         # increasing points) available for any point set without duplicates.
-        train_data = jnp.sort(jnp.array(data_set.train_points_list))
-    test_data = jnp.linspace(0, data_set.test_T, data_set.test_points)
+        train_data = jnp.sort(jnp.array(data_set.train_points_list, dtype=dtype))
+    test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
     n_train = len(train_data)
 
     # False only for duplicate points (the grid is sorted above).
@@ -178,9 +178,6 @@ def asset_pricing_kernel_nlls(
             'residuals_method="matrix_free" requires matern12 or matern32 on a '
             'train grid without duplicate points; use "dense" otherwise'
         )
-    if lm_set.dual_solve_dtype not in (None, "float64"):
-        raise ValueError(f"unknown dual_solve_dtype: {lm_set.dual_solve_dtype!r}")
-    dual_solve_dtype = jnp.float64 if lm_set.dual_solve_dtype == "float64" else None
     eps = lm_set.metric_eps
     if eps <= 0:
         raise ValueError("metric_eps must be positive (the p_0 block needs PD)")
@@ -208,25 +205,29 @@ def asset_pricing_kernel_nlls(
         # Exact O(n) state-space metric K + eps I with all four callbacks
         # (the shift is folded into the metric itself).
         alpha_metric = metric_from_state_space(
-            train_data,
+            train_data.astype(jnp.float64),
             *matern_state_space(
                 sigma, ell, {"matern12": 0.5, "matern32": 1.5, "matern52": 2.5}[kernel]
             ),
             nugget=eps,
         )
     else:
-        K, K_tilde = integrated_kernel_matrices(
-            train_data, train_data, kernel, sigma, ell
+        metric_data = train_data.astype(jnp.float64)
+        K_metric, K_tilde_metric = integrated_kernel_matrices(
+            metric_data, metric_data, kernel, sigma, ell
         )
-        K_jax = (K + K.T) / 2
-        K_tilde_jax = K_tilde
+        K_metric = (K_metric + K_metric.T) / 2
+        K_jax = K_metric.astype(dtype)
+        K_tilde_jax = K_tilde_metric.astype(dtype)
 
         def train_path_values(theta):
             return path_values(theta, K_jax, K_tilde_jax)
 
         alpha_metric = metric_from_cholesky(
-            jnp.linalg.cholesky(K_jax + eps * jnp.eye(n_train))
+            jnp.linalg.cholesky(K_metric + eps * jnp.eye(n_train, dtype=jnp.float64))
         )
+
+    alpha_metric = metric_with_compute_dtype(alpha_metric, jnp.float64)
 
     def residual_fn(theta):
         p, dp_dt = train_path_values(theta)
@@ -237,8 +238,14 @@ def asset_pricing_kernel_nlls(
     # metric M = blockdiag(K, 0) + eps I: the min-RKHS-norm selection (the
     # original a'Ka objective with p_0 free) up to an O(eps) selection shift
     # in all parameters.
-    metric = blockdiag_metric(
-        [(alpha_metric, n_train), (metric_from_diagonal(jnp.full(1, eps)), 1)]
+    metric = metric_with_compute_dtype(
+        blockdiag_metric(
+            [
+                (alpha_metric, n_train),
+                (metric_from_diagonal(jnp.full(1, eps, dtype=jnp.float64)), 1),
+            ]
+        ),
+        jnp.float64,
     )
 
     # The p_0 residual column -r*1 injects the exactly known rank-1 spike
@@ -263,10 +270,13 @@ def asset_pricing_kernel_nlls(
         damping_increase=lm_set.damping_increase,
         dual_preconditioner=dual_preconditioner,
         implicit_preconditioner=dual_preconditioner,
-        dual_solve_dtype=dual_solve_dtype,
+        dual_solve_dtype=jnp.float64 if linear_solver == "cholesky" else None,
         metric=metric,
     )
-    theta_0 = (jnp.zeros(n_train), jnp.asarray(lm_set.p0_init))
+    theta_0 = (
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.asarray(lm_set.p0_init, dtype=dtype),
+    )
 
     # The timed solve below reuses this solver instance, so its jit cache is
     # warm; max_steps/atol are dynamic and do not recompile.
@@ -327,11 +337,15 @@ def asset_pricing_kernel_nlls(
     # feasible (the IPOPT baseline's FEASIBLE_SMALL_STEP semantics) -- the
     # smooth kernels routinely end there because atol is unreachable for
     # their ill-conditioned Grams. stopping_reason still reports the code.
+    train_residual_tolerance = max(
+        TRAIN_RESIDUAL_TOL,
+        8.0 * float(jnp.finfo(dtype).eps),
+    )
     finite = bool(jnp.all(jnp.isfinite(p_test)) and jnp.all(jnp.isfinite(p_benchmark)))
     rejection_reasons = []
     if not finite:
         rejection_reasons.append("nonfinite")
-    if max_train_residual > TRAIN_RESIDUAL_TOL:
+    if max_train_residual > train_residual_tolerance:
         rejection_reasons.append("train_residual")
     if float(p_0) < 0.0:
         rejection_reasons.append("negative_p_0")
@@ -342,6 +356,8 @@ def asset_pricing_kernel_nlls(
         "c": c,
         "g": g,
         "x_0": x_0,
+        "residual_dtype": str(jnp.dtype(dtype)),
+        "metric_dtype": "float64",
         "kernel": kernel,
         "ell": ell,
         "sigma": sigma,
@@ -354,6 +370,7 @@ def asset_pricing_kernel_nlls(
         # Jitter-free alpha' K alpha (the metric norm includes the nugget).
         "rkhs_norm_p": float(alpha_metric.norm(alpha) ** 2 - eps * (alpha @ alpha)),
         "max_train_residual": max_train_residual,
+        "train_residual_tolerance": train_residual_tolerance,
         "max_test_residual": float(jnp.max(jnp.abs(test_residual))),
         # min/max error statistics exclude the pinned t = 0 point ([1:]).
         "p_rel_error_mean": float(p_rel_error.mean()),

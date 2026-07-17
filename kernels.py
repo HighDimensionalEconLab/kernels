@@ -3,13 +3,7 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
-from jax import config
 from jax.scipy.special import erf
-
-# Everything downstream assumes float64 Gram matrices; enabling x64 here (the
-# lowest-level module) keeps consumers from touching float32 kernels before
-# flipping the flag.
-config.update("jax_enable_x64", True)
 
 # Stationary kernels with length scale ell (the paper's l) and amplitude
 # sigma, selected by name; the legacy Matern smoothness values nu in

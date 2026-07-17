@@ -9,7 +9,6 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from flax import nnx
-from jax import config
 from jax.flatten_util import ravel_pytree
 from nlls_gram import LMStatus, UnderdeterminedLevenbergMarquardt
 
@@ -24,7 +23,9 @@ from multicountry_trade_growth import (
 )
 from neural_networks import ACTIVATIONS, unit_softplus
 
-config.update("jax_enable_x64", True)
+if __name__ == "__main__":
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
 
 TRAIN_RESIDUAL_TOL = 1e-5
 VALIDATION_RESIDUAL_TOL = 5e-3
@@ -152,13 +153,15 @@ def multicountry_trade_growth_nn(
     a_0: tuple[float, ...] | None = None,
     parameters: TradeGrowthParameters = TradeGrowthParameters(),
     seed: int = 0,
-    matmul_highest: bool = True,
+    use_float64: bool = True,
     data_set: DataSettings = DataSettings(),
     nn_set: SequentialNNSettings = SequentialNNSettings(),
     lm_set: NLLSGramSettings = NLLSGramSettings(),
     verbose: bool = True,
     measure_compilation: bool = True,
 ):
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError("enable jax_enable_x64 in the process entry point")
     num_countries = parameters.num_countries
     if k_0 is None:
         k_0 = (1.0,) * num_countries
@@ -174,10 +177,7 @@ def multicountry_trade_growth_nn(
         raise ValueError("NN input_scale and head_scale must be positive")
     if lm_set.residual_atol <= 0.0 or lm_set.max_steps <= 0:
         raise ValueError("solver tolerance and step budget must be positive")
-    if matmul_highest:
-        config.update("jax_default_matmul_precision", "highest")
-
-    dtype = jnp.float64
+    dtype = jnp.float64 if use_float64 else jnp.float32
     train_data = make_train_grid(data_set).astype(dtype)
     if data_set.test_T > float(train_data[-1]):
         raise ValueError("test_T must not exceed the training horizon")
@@ -287,6 +287,7 @@ def multicountry_trade_growth_nn(
         damping_increase=lm_set.damping_increase,
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
+        dual_solve_dtype=jnp.float64,
     )
     compile_time = np.nan
     if measure_compilation:
@@ -435,6 +436,8 @@ def multicountry_trade_growth_nn(
         "trade_elasticity": parameters.trade_elasticity,
         "num_countries": num_countries,
         "seed": seed,
+        "residual_dtype": str(jnp.dtype(dtype)),
+        "dual_solve_dtype": "float64",
         "train_T": float(train_data[-1]),
         "num_train_points": n_train,
         "max_train_residual": max_train_residual,

@@ -6,11 +6,8 @@ from typing import Literal
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax import config
 
 from kernels import normalize_kernel
-
-config.update("jax_enable_x64", True)
 
 KernelName = Literal["rbf", "matern12", "matern32"]
 

@@ -11,7 +11,6 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from flax import nnx
-from jax import config
 from jax.flatten_util import ravel_pytree
 from nlls_gram import (
     DrawNNXModule,
@@ -48,7 +47,9 @@ from neural_networks import ACTIVATIONS, unit_softplus
 # i'(k) uses forward-mode jax.jvp inside the residual while the LM solver
 # uses reverse mode over the parameters (reverse-over-forward).
 
-config.update("jax_enable_x64", True)
+if __name__ == "__main__":
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
 
 DOMAIN_EPS = 1e-8
 
@@ -331,7 +332,7 @@ def neoclassical_growth_nn_recursive_i(
     b_1: float | None = None,
     b_2: float | None = None,
     seed: int = 0,
-    matmul_highest: bool = True,
+    use_float64: bool = True,
     data_set: DataSettings = DataSettings(),
     nn_set: InvestmentPolicySettings = InvestmentPolicySettings(),
     lm_set: NLLSGramSettings = NLLSGramSettings(),
@@ -339,9 +340,8 @@ def neoclassical_growth_nn_recursive_i(
     verbose: bool = True,
     measure_compilation: bool = True,
 ):
-    if matmul_highest:
-        config.update("jax_default_matmul_precision", "highest")
-
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError("enable jax_enable_x64 in the process entry point")
     kinked_parameter_count = sum(parameter is not None for parameter in (A, b_1, b_2))
     if kinked_parameter_count not in {0, 3}:
         raise ValueError("Set all of A, b_1, and b_2, or set none of them.")
@@ -355,7 +355,7 @@ def neoclassical_growth_nn_recursive_i(
         else float("inf")
     )
 
-    dtype = jnp.float64
+    dtype = jnp.float64 if use_float64 else jnp.float32
     p = StructuralParameters.create(
         dtype,
         a=a,
@@ -421,6 +421,7 @@ def neoclassical_growth_nn_recursive_i(
         damping_increase=lm_set.damping_increase,
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
+        dual_solve_dtype=jnp.float64,
     )
 
     def tvc_certificate(theta):
@@ -547,6 +548,8 @@ def neoclassical_growth_nn_recursive_i(
         "b_2": b_2_value,
         "use_kinked_production": use_kinked_production,
         "seed": seed,
+        "residual_dtype": str(jnp.dtype(dtype)),
+        "dual_solve_dtype": "float64",
         "train_loss": train_loss,
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_resid))),
         "max_log_tvc_residual": max_log_tvc,

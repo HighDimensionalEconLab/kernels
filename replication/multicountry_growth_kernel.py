@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import jax
 import jsonargparse
 
 import multicountry_growth_kernel_nlls
@@ -11,13 +12,16 @@ from replication.utilities import (
     write_summary,
 )
 
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
+
 enable_compilation_cache()
 
 PREFIX = "multicountry_growth_kernel"
 SOLVER = multicountry_growth_kernel_nlls.multicountry_growth_kernel_nlls
 
 
-def run(output_dir: str = ".results"):
+def run(output_dir: str = ".results", use_float64: bool = True):
     parameters = MulticountryParameters()
     output_scale = float(multicountry_output_scale(parameters))
     three_country_parameters = MulticountryParameters(
@@ -27,14 +31,14 @@ def run(output_dir: str = ".results"):
     three_country_output_scale = float(
         multicountry_output_scale(three_country_parameters)
     )
-    meta = dict(n_seeds=1)
+    meta = dict(n_seeds=1, residual_dtype="float64" if use_float64 else "float32")
 
     def go(name, **experiment):
         print(f"{name} -> {output_dir}/")
         results_df, frames, hyperparameters = ensemble(
             SOLVER,
             n_seeds=1,
-            options=experiment,
+            options={"use_float64": use_float64, **experiment},
         )
         save_experiment(
             name,

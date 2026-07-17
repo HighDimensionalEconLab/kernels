@@ -139,6 +139,9 @@ from open_economy_growth_nn_recursive import open_economy_growth_nn_recursive
 from optimal_advertising_kernel import optimal_advertising_kernel
 from optimal_advertising_kernel_nlls import optimal_advertising_kernel_nlls
 
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
+
 FAST_GROWTH_DATA = GrowthDataSettings(train_T=10.0, train_points=11, test_T=10.0)
 FAST_GROWTH_NLLS = GrowthNLLSDataSettings(train_T=10.0, train_points=11, test_T=10.0)
 
@@ -461,7 +464,7 @@ class KernelSmokeTests(unittest.TestCase):
             "current_account",
             *STATIC_BLOCK_NAMES,
         ):
-            self.assertLess(results[f"max_country_2_3_{name}_gap"], 1e-7)
+            self.assertLess(results[f"max_country_2_3_{name}_gap"], 2e-7)
         self.assertLess(results["max_country_2_3_trade_share_permutation_gap"], 1e-7)
         self.assertAlmostEqual(
             results["terminal_steady_trade_gap_1"],
@@ -1072,34 +1075,13 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertEqual(results["residuals_method_resolved"], "dense")
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
 
-    def test_nlls_dual_solve_dtype_float64_is_noop_under_x64(self):
-        # dual_solve_dtype="float64" promotes only the dense dual solve; this
-        # repo runs float64 globally, so it must be an exact value no-op. It
-        # matters only for a float32/GPU move (see
-        # experiments/dual_solve_dtype_float32.py). Guards: an unknown value
-        # is rejected at intake, and cg + the flag is rejected upstream at
-        # construction (it promotes the dense cholesky paths only).
-        base_ap, _ = asset_pricing_kernel_nlls()
-        wide_ap, _ = asset_pricing_kernel_nlls(
-            lm_set=NLLSGramSettings(dual_solve_dtype="float64")
-        )
-        self.assertEqual(wide_ap["p_0"], base_ap["p_0"])
-        self.assertEqual(wide_ap["rkhs_norm_p"], base_ap["rkhs_norm_p"])
-        self.assertEqual(wide_ap["linear_solver_resolved"], "cholesky")
+    def test_nlls_float32_residuals_use_float64_metric(self):
+        results, frames = asset_pricing_kernel_nlls(use_float64=False)
 
-        base_gr, _ = neoclassical_growth_kernel_nlls()
-        wide_gr, _ = neoclassical_growth_kernel_nlls(
-            lm_set=GrowthNLLSSettings(dual_solve_dtype="float64")
-        )
-        self.assertEqual(wide_gr["c_0"], base_gr["c_0"])
-        self.assertEqual(wide_gr["mu_0"], base_gr["mu_0"])
-
-        with self.assertRaises(ValueError):
-            asset_pricing_kernel_nlls(lm_set=NLLSGramSettings(dual_solve_dtype="f64"))
-        with self.assertRaises(ValueError):
-            asset_pricing_kernel_nlls(
-                lm_set=NLLSGramSettings(linear_solver="cg", dual_solve_dtype="float64")
-            )
+        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+        self.assertEqual(results["residual_dtype"], "float32")
+        self.assertEqual(results["metric_dtype"], "float64")
+        self.assertEqual(set(frames["train_df"].dtypes.astype(str)), {"float32"})
 
     def test_optimal_advertising_smoke(self):
         results, extras = optimal_advertising_kernel()

@@ -211,8 +211,10 @@ Findings:
    floor keeps both f32 configurations running the full budget — use a
    dtype-appropriate atol in production.
 
-Verdict: whenever these models move to float32 (GPU especially),
-`dual_solve_dtype="float64"` (now surfaced in both kernel NLLS
-`NLLSGramSettings`) should be considered mandatory: it is the difference
-between rejected/NaN results and float64-grade accuracy, at half the cost
-of solving fully in float64 on consumer hardware.
+Verdict: whenever these models use float32 residuals (GPU especially), the
+RKHS metric and dense dual pipeline must remain in float64. The production
+solvers now enforce that split automatically: `use_float64=False` changes
+the residuals, states, and simulations, while metric construction and the
+dense dual solve stay in float64. This is the difference between rejected
+or NaN results and near-float64 accuracy at substantially lower cost than a
+fully float64 GPU solve.

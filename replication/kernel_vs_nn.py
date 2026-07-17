@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import jax
 import jsonargparse
 
 import neoclassical_growth_concave_convex_kernel
@@ -15,6 +16,9 @@ from replication.utilities import (
     sweep,
     write_summary,
 )
+
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
 
 enable_compilation_cache()
 
@@ -60,6 +64,7 @@ def run(
     # Exploration default; scale up (training is well under a second per
     # seed) once the experiment set is frozen for the final replication run.
     n_seeds: int = 10,
+    use_float64: bool = True,
     verbose: bool = False,
 ):
     basin_grid = [float(k_0) for k_0 in BASIN_K0_GRID]
@@ -91,7 +96,7 @@ def run(
         "data_set.train_points",
         POINT_COUNTS,
         n_seeds=n_seeds,
-        options={"verbose": verbose},
+        options={"use_float64": use_float64, "verbose": verbose},
     )
     go("nn_direct_points_sweep", results_df, {}, hyperparameters)
 
@@ -101,7 +106,7 @@ def run(
         "data_set.train_points",
         POINT_COUNTS,
         n_seeds=n_seeds,
-        options={"verbose": verbose},
+        options={"use_float64": use_float64, "verbose": verbose},
     )
     go("nn_integrated_mlp_points_sweep", results_df, {}, hyperparameters)
 
@@ -112,6 +117,7 @@ def run(
         POINT_COUNTS,
         n_seeds=n_seeds,
         options={
+            "use_float64": use_float64,
             "verbose": verbose,
             "nn_set": dict(
                 approximation="rff",
@@ -152,6 +158,7 @@ def run(
         # rejections, not budget sinks. Single attempt everywhere so
         # frac_accepted measures first-try robustness.
         options={
+            "use_float64": use_float64,
             "verbose": verbose,
             **BUTTERFLY,
             "stop_set": dict(max_steps=500),

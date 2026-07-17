@@ -1,6 +1,7 @@
 # Where does nlls-gram 1.7's dual_solve_dtype=float64 matter for a float32
-# model? This repo runs float64 globally, so the flag is a value no-op in
-# the models -- but the unified shifted metric M = blockdiag(K, 0) + eps I
+# model? Production model entry points now allow float32 residuals while
+# keeping the RKHS metric and dense dual pipeline in float64. The unified
+# shifted metric M = blockdiag(K, 0) + eps I
 # with eps = 1e-7 puts the dense dual at condition ~1/eps, which is exactly
 # the flag's validated target. This experiment rebuilds the asset-pricing
 # dense collocation solve with float32 data (matrices computed in float64,
@@ -21,7 +22,6 @@ import time
 
 import jax
 import jax.numpy as jnp
-from jax import config
 from nlls_gram import (
     UnderdeterminedLevenbergMarquardt,
     blockdiag_metric,
@@ -31,7 +31,8 @@ from nlls_gram import (
 
 from kernels import integrated_kernel_matrices
 
-config.update("jax_enable_x64", True)  # required by dual_solve_dtype
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
 
 R, C, G, X_0 = 0.1, 0.02, -0.2, 1.0
 EPS = 1e-7

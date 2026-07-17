@@ -9,7 +9,6 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from jax import config
 from nlls_gram import (
     LMStatus,
     UnderdeterminedLevenbergMarquardt,
@@ -19,7 +18,7 @@ from nlls_gram import (
     metric_from_state_space,
 )
 
-from kernel_metrics import repeated_blockdiag_metric
+from kernel_metrics import metric_with_compute_dtype, repeated_blockdiag_metric
 from kernels import (
     integrated_kernel_matrices,
     matern_kernel_matvec_pair,
@@ -27,7 +26,9 @@ from kernels import (
 )
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
 
-config.update("jax_enable_x64", True)
+if __name__ == "__main__":
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
 
 TRAIN_RESIDUAL_TOL = 1e-5
 VALIDATION_RESIDUAL_TOL = 5e-3
@@ -107,14 +108,6 @@ class NLLSGramSettings:
     # dense otherwise.
     residuals_method: str = "auto"
     iterative_maxiter: int = 100  # CG inner budget per LM step (cg only)
-    # nlls-gram >= 1.7: None | "float64". Promotes only the dense dual
-    # (Gram) pipeline to float64 while the model stays in its own dtype. A
-    # value no-op under this repo's global float64 -- the knob to reach for
-    # on a float32/GPU move, where the unified metric's 1/eps spike puts
-    # the dual at condition ~1/eps (the flag's validated target; see
-    # experiments/dual_solve_dtype_float32.py). Dense cholesky paths only:
-    # construction raises under the cg solver.
-    dual_solve_dtype: str | None = None
     # The single shift of the unified metric M = blockdiag(K, K, K, 0) +
     # eps I: every kernel block is factored as K + eps I and the free
     # (c_0, mu_0) carry weight eps, so ||M^{-1}|| = 1/eps uniformly in n and
@@ -137,11 +130,15 @@ def neoclassical_growth_kernel_nlls(
     A: float | None = None,
     b_1: float | None = None,
     b_2: float | None = None,
+    use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
     lm_set: NLLSGramSettings = NLLSGramSettings(),
     c_0_guess: float | None = None,  # overrides the flat steady-flow warm start
 ):
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    dtype = jnp.float64 if use_float64 else jnp.float32
     kinked_parameter_count = sum(parameter is not None for parameter in (A, b_1, b_2))
     if kinked_parameter_count not in {0, 3}:
         raise ValueError("Set all of A, b_1, and b_2, or set none of them.")
@@ -153,16 +150,20 @@ def neoclassical_growth_kernel_nlls(
     kernel = normalize_kernel(kernel_set.kernel)
     ell, sigma = kernel_set.ell, kernel_set.sigma
     if data_set.train_points_list is None:
-        train_data = jnp.linspace(0, data_set.train_T, data_set.train_points)
+        train_data = jnp.linspace(
+            0, data_set.train_T, data_set.train_points, dtype=dtype
+        )
     else:
         # The collocation problem is permutation-invariant, so sorting is
         # free -- and it makes the structured matrix_free path (which needs
         # increasing points) available for any point set without duplicates.
-        train_data = jnp.sort(jnp.array(data_set.train_points_list))
-    test_data = jnp.linspace(0, data_set.test_T, data_set.test_points)
+        train_data = jnp.sort(jnp.array(data_set.train_points_list, dtype=dtype))
+    test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
     validation_points = max(data_set.test_points, data_set.benchmark_points)
-    validation_data = jnp.linspace(0, data_set.train_T, validation_points)
-    benchmark_grid = jnp.linspace(0, data_set.benchmark_T, data_set.benchmark_points)
+    validation_data = jnp.linspace(0, data_set.train_T, validation_points, dtype=dtype)
+    benchmark_grid = jnp.linspace(
+        0, data_set.benchmark_T, data_set.benchmark_points, dtype=dtype
+    )
     n_train = len(train_data)
 
     # False only for duplicate points (the grid is sorted above).
@@ -192,9 +193,6 @@ def neoclassical_growth_kernel_nlls(
             'residuals_method="matrix_free" requires matern12 or matern32 on a '
             'train grid without duplicate points; use "dense" otherwise'
         )
-    if lm_set.dual_solve_dtype not in (None, "float64"):
-        raise ValueError(f"unknown dual_solve_dtype: {lm_set.dual_solve_dtype!r}")
-    dual_solve_dtype = jnp.float64 if lm_set.dual_solve_dtype == "float64" else None
     eps = lm_set.metric_eps
     if eps <= 0:
         raise ValueError("metric_eps must be positive (the (c_0, mu_0) block needs PD)")
@@ -246,25 +244,29 @@ def neoclassical_growth_kernel_nlls(
         # Exact O(n) state-space metric K + eps I with all four callbacks
         # (the shift is folded into the metric itself).
         alpha_metric = metric_from_state_space(
-            train_data,
+            train_data.astype(jnp.float64),
             *matern_state_space(
                 sigma, ell, {"matern12": 0.5, "matern32": 1.5, "matern52": 2.5}[kernel]
             ),
             nugget=eps,
         )
     else:
-        K, K_tilde = integrated_kernel_matrices(
-            train_data, train_data, kernel, sigma, ell
+        metric_data = train_data.astype(jnp.float64)
+        K_metric, K_tilde_metric = integrated_kernel_matrices(
+            metric_data, metric_data, kernel, sigma, ell
         )
-        K_jax = (K + K.T) / 2
-        K_tilde_jax = K_tilde
+        K_metric = (K_metric + K_metric.T) / 2
+        K_jax = K_metric.astype(dtype)
+        K_tilde_jax = K_tilde_metric.astype(dtype)
 
         def train_path_values(theta):
             return path_values(theta, K_jax, K_tilde_jax)
 
         alpha_metric = metric_from_cholesky(
-            jnp.linalg.cholesky(K_jax + eps * jnp.eye(n_train))
+            jnp.linalg.cholesky(K_metric + eps * jnp.eye(n_train, dtype=jnp.float64))
         )
+
+    alpha_metric = metric_with_compute_dtype(alpha_metric, jnp.float64)
 
     # The residual is scaled by 1/sqrt(3n) (the NN files' convention) so that
     # residual_atol is a scale-free per-point bound rather than tightening
@@ -282,21 +284,27 @@ def neoclassical_growth_kernel_nlls(
     # metric M = blockdiag(K, K, K, 0) + eps I selects the interpolant
     # minimizing the summed RKHS norms (the original objective) with free
     # initial values (c_0, mu_0), up to an O(eps) selection shift.
-    metric = repeated_blockdiag_metric(
-        alpha_metric,
-        n_train,
-        3,
-        additional=(metric_from_diagonal(jnp.full(2, eps)), 2),
+    metric = metric_with_compute_dtype(
+        repeated_blockdiag_metric(
+            alpha_metric,
+            n_train,
+            3,
+            additional=(
+                metric_from_diagonal(jnp.full(2, eps, dtype=jnp.float64)),
+                2,
+            ),
+        ),
+        jnp.float64,
     )
 
     c_flow_guess = max(production(k_0) - delta * k_0, DOMAIN_EPS)
     if c_0_guess is not None:
         c_flow_guess = max(float(c_0_guess), DOMAIN_EPS)
     theta_0 = (
-        jnp.zeros(n_train),
-        jnp.zeros(n_train),
-        jnp.zeros(n_train),
-        jnp.array([c_flow_guess, 1.0 / c_flow_guess]),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.array([c_flow_guess, 1.0 / c_flow_guess], dtype=dtype),
     )
 
     # Blockwise (K + eps I)-solve preconditioner for the CG dual system: the
@@ -333,7 +341,7 @@ def neoclassical_growth_kernel_nlls(
         damping_increase=lm_set.damping_increase,
         dual_preconditioner=dual_preconditioner,
         implicit_preconditioner=dual_preconditioner,
-        dual_solve_dtype=dual_solve_dtype,
+        dual_solve_dtype=jnp.float64 if linear_solver == "cholesky" else None,
         metric=metric,
     )
 
@@ -444,6 +452,8 @@ def neoclassical_growth_kernel_nlls(
         "b_1": b_1_value,
         "b_2": b_2_value,
         "use_kinked_production": use_kinked_production,
+        "residual_dtype": str(jnp.dtype(dtype)),
+        "metric_dtype": "float64",
         "kernel": kernel,
         "ell": ell,
         "sigma": sigma,

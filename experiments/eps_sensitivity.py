@@ -4,9 +4,14 @@
 # difference on the interpolation manifold, inside the O(dt^2) grid bias),
 # and smaller eps degrades the smoother kernels. Findings in README.md.
 # Run from the repo root: uv run python -m experiments.eps_sensitivity
+import jax
+
 from neoclassical_growth_kernel_nlls import KernelSettings as GrKernel
 from neoclassical_growth_kernel_nlls import NLLSGramSettings as GrSettings
 from neoclassical_growth_kernel_nlls import neoclassical_growth_kernel_nlls
+
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
 
 # k_rel_error_mean of the UNO/IPOPT solver on the same configurations
 # (measured 2026-07-09, see uno_vs_nlls.py).

@@ -11,7 +11,6 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from flax import nnx
-from jax import config
 from jax.flatten_util import ravel_pytree
 from nlls_gram import LMStatus, UnderdeterminedLevenbergMarquardt
 from tinydiffeq import (
@@ -44,7 +43,9 @@ from open_economy_growth_benchmark import open_economy_growth_benchmark
 # root, whereas a smooth bounded CA(k) cannot represent the singular explosive
 # asset branch as capital converges. No terminal, TVC, no-Ponzi, steady-state,
 # or benchmark information enters the residual or initialization.
-config.update("jax_enable_x64", True)
+if __name__ == "__main__":
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
 
 DOMAIN_EPS = 1e-8
 TRAIN_RESIDUAL_TOL = 1e-5
@@ -339,7 +340,7 @@ def open_economy_growth_nn_recursive(
     a_0: float = 0.0,
     parameters: ModelParameters = ModelParameters(),
     seed: int = 0,
-    matmul_highest: bool = True,
+    use_float64: bool = True,
     data_set: DataSettings = DataSettings(),
     nn_set: SequentialPolicySettings = SequentialPolicySettings(),
     lm_set: NLLSGramSettings = NLLSGramSettings(),
@@ -347,6 +348,8 @@ def open_economy_growth_nn_recursive(
     verbose: bool = True,
     measure_compilation: bool = True,
 ):
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError("enable jax_enable_x64 in the process entry point")
     if k_0 <= 0.0:
         raise ValueError("k_0 must be positive")
     if abs(parameters.interest_rate - parameters.rho) > 1e-12:
@@ -357,10 +360,7 @@ def open_economy_growth_nn_recursive(
         raise ValueError("benchmark_T must cover the test horizon")
     if stop_set.train_loss_threshold <= 0.0:
         raise ValueError("train_loss_threshold must be positive")
-    if matmul_highest:
-        config.update("jax_default_matmul_precision", "highest")
-
-    dtype = jnp.float64
+    dtype = jnp.float64 if use_float64 else jnp.float32
     k_0_jax = jnp.asarray(k_0, dtype=dtype)
     a_0_jax = jnp.asarray(a_0, dtype=dtype)
     initial_output = float(production(k_0_jax, 1.0, parameters))
@@ -411,6 +411,7 @@ def open_economy_growth_nn_recursive(
         damping_increase=lm_set.damping_increase,
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
+        dual_solve_dtype=jnp.float64,
     )
     atol = math.sqrt(stop_set.train_loss_threshold)
     compile_time = np.nan
@@ -567,6 +568,8 @@ def open_economy_growth_nn_recursive(
         "k_0": k_0,
         "a_0": a_0,
         "seed": seed,
+        "residual_dtype": str(jnp.dtype(dtype)),
+        "dual_solve_dtype": "float64",
         "solver": "nlls-gram",
         "ansatz": "sequential_investment_current_account_levels",
         "selection": "minimum_identity_metric_parameter_step",

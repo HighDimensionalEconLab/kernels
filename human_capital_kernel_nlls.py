@@ -8,7 +8,6 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from jax import config
 from nlls_gram import (
     LMStatus,
     UnderdeterminedLevenbergMarquardt,
@@ -18,10 +17,12 @@ from nlls_gram import (
 )
 
 from human_capital_kernel import human_capital_initial_conditions
-from kernel_metrics import repeated_blockdiag_metric
+from kernel_metrics import metric_with_compute_dtype, repeated_blockdiag_metric
 from kernels import integrated_kernel_matrices, normalize_kernel
 
-config.update("jax_enable_x64", True)
+if __name__ == "__main__":
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
 
 TRAIN_RESIDUAL_TOL = 1e-5
 STATUS_TO_REASON = {
@@ -67,36 +68,48 @@ def human_capital_kernel_nlls(
     rho_hat: float = 0.11,
     k_0: float = 1.5,
     lambda_p: float = 5e-3,
+    use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
     lm_set: NLLSGramSettings = NLLSGramSettings(),
     verbose: bool = False,
 ):
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    dtype = jnp.float64 if use_float64 else jnp.float32
     if lambda_p <= 0.0:
         raise ValueError("lambda_p must be positive")
     kernel = normalize_kernel(kernel_set.kernel)
     ell, sigma = kernel_set.ell, kernel_set.sigma
     if data_set.train_points_list is None:
-        train_data = jnp.linspace(0.0, data_set.train_T, data_set.train_points)
+        train_data = jnp.linspace(
+            0.0, data_set.train_T, data_set.train_points, dtype=dtype
+        )
     else:
-        train_data = jnp.sort(jnp.asarray(data_set.train_points_list))
-    test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points)
+        train_data = jnp.sort(jnp.asarray(data_set.train_points_list, dtype=dtype))
+    test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     validation_data = jnp.linspace(
         0.0,
         data_set.train_T,
         max(data_set.test_points, data_set.validation_points),
+        dtype=dtype,
     )
     n_train = len(train_data)
     eps = lm_set.metric_eps
     if eps <= 0.0:
         raise ValueError("metric_eps must be positive")
 
-    K, K_tilde = integrated_kernel_matrices(train_data, train_data, kernel, sigma, ell)
-    K = (K + K.T) / 2
-    identity = jnp.eye(n_train)
-    state_metric = metric_from_cholesky(jnp.linalg.cholesky(K + eps * identity))
+    metric_data = train_data.astype(jnp.float64)
+    K_metric, K_tilde_metric = integrated_kernel_matrices(
+        metric_data, metric_data, kernel, sigma, ell
+    )
+    K_metric = (K_metric + K_metric.T) / 2
+    K = K_metric.astype(dtype)
+    K_tilde = K_tilde_metric.astype(dtype)
+    identity = jnp.eye(n_train, dtype=jnp.float64)
+    state_metric = metric_from_cholesky(jnp.linalg.cholesky(K_metric + eps * identity))
     policy_metric = metric_from_cholesky(
-        jnp.linalg.cholesky(lambda_p * K + eps * identity)
+        jnp.linalg.cholesky(lambda_p * K_metric + eps * identity)
     )
 
     h_0_jax, c_0_init_jax, initial_residual, _ = human_capital_initial_conditions(
@@ -170,22 +183,25 @@ def human_capital_kernel_nlls(
 
     state_pair_metric = repeated_blockdiag_metric(state_metric, n_train, 2)
     policy_triplet_metric = repeated_blockdiag_metric(policy_metric, n_train, 3)
-    metric = blockdiag_metric(
-        [
-            (state_pair_metric, 2 * n_train),
-            (policy_triplet_metric, 3 * n_train),
-            (state_pair_metric, 2 * n_train),
-            (metric_from_diagonal(jnp.full(5, eps)), 5),
-        ]
+    metric = metric_with_compute_dtype(
+        blockdiag_metric(
+            [
+                (state_pair_metric, 2 * n_train),
+                (policy_triplet_metric, 3 * n_train),
+                (state_pair_metric, 2 * n_train),
+                (metric_from_diagonal(jnp.full(5, eps, dtype=jnp.float64)), 5),
+            ]
+        ),
+        jnp.float64,
     )
     theta_0 = (
-        jnp.zeros(n_train),
-        jnp.zeros(n_train),
-        jnp.zeros(n_train),
-        jnp.zeros(n_train),
-        jnp.zeros(n_train),
-        jnp.zeros(n_train),
-        jnp.zeros(n_train),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(n_train, dtype=dtype),
         jnp.asarray(
             [
                 delta_k * k_0,
@@ -193,7 +209,8 @@ def human_capital_kernel_nlls(
                 c_0_init,
                 1.0 / c_0_init,
                 1.0 / c_0_init,
-            ]
+            ],
+            dtype=dtype,
         ),
     )
     solver = UnderdeterminedLevenbergMarquardt(
@@ -202,6 +219,7 @@ def human_capital_kernel_nlls(
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
+        dual_solve_dtype=(jnp.float64 if lm_set.linear_solver == "cholesky" else None),
         metric=metric,
     )
 
@@ -322,6 +340,8 @@ def human_capital_kernel_nlls(
         "k_0": k_0,
         "h_0": h_0,
         "lambda_p": lambda_p,
+        "residual_dtype": str(jnp.dtype(dtype)),
+        "metric_dtype": "float64",
         "kernel": kernel,
         "ell": ell,
         "sigma": sigma,

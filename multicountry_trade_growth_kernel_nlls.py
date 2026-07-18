@@ -17,6 +17,7 @@ from nlls_gram import (
     LMStatus,
     PreconditionerFactory,
     RecycleConfig,
+    WhitenedPreconditioner,
     metric_from_cholesky,
     metric_from_diagonal,
     metric_with_compute_dtype,
@@ -41,6 +42,7 @@ from trade_growth_preconditioners import (
     residual_time_permutation,
     trade_growth_preconditioner_apply,
 )
+from trade_growth_whitened import build_schur_preconditioner
 
 if __name__ == "__main__":
     jax.config.update("jax_enable_x64", True)
@@ -95,14 +97,26 @@ class NLLSGramSettings:
     recycle_rank: int = 24
     recycle_window: int | None = None
     cg_maxiter_min: int = 60
-    cg_maxiter_max: int = 400
-    cg_tol_loose: float = 1e-2
+    cg_maxiter_max: int = 250
+    cg_tol_loose: float = 3e-2
     cg_tol_tight: float = 1e-7
     cg_atol: float = 0.0
     cg_geodesic: bool = False
     cg_min_damping: float = 0.0
     implicit_maxiter: int = 400
     implicit_tol: float = 1e-8
+    # Two-phase endgame (linear_solver="cg" only): the phase-1 CG solve floors at
+    # the dual cond^2 limit (~1e-6 residual) with the underdetermined selection
+    # (asset_clearing) stuck ~1e-3. A whitened-LSMR phase with a parameter-space
+    # Schur preconditioner -- built once at the plateau iterate with pinned
+    # damping -- restores the selection. Off by default; cholesky/qr and the
+    # single-phase cg path are unchanged.
+    two_phase_endgame: bool = False
+    phase2_damping: float = 1e-6
+    phase2_max_steps: int = 3
+    phase2_mode: str = "dense"
+    phase2_maxiter: int = 2000
+    phase2_tol: float = 1e-13
 
 
 def multicountry_trade_growth_kernel_nlls(
@@ -130,6 +144,8 @@ def multicountry_trade_growth_kernel_nlls(
         raise ValueError("metric_eps must be positive")
     if lm_set.linear_solver not in ("cholesky", "qr", "cg"):
         raise ValueError("linear_solver must be 'cholesky', 'qr', or 'cg'")
+    if lm_set.phase2_mode not in ("dense", "blockfunc"):
+        raise ValueError("phase2_mode must be 'dense' or 'blockfunc'")
 
     train_data = make_train_grid(data_set).astype(dtype)
     if data_set.test_T > float(train_data[-1]):
@@ -403,6 +419,53 @@ def multicountry_trade_growth_kernel_nlls(
                 callback=cg_callback,
                 user_state=initial_user_state(max_steps),
             )
+
+        def run_phase_two(x_plateau):
+            # Build the parameter-space Schur R once at the plateau iterate with a
+            # pinned damping, then a right-preconditioned whitened-LSMR solve.
+            build_start = time.perf_counter()
+            schur = build_schur_preconditioner(
+                x_plateau,
+                K,
+                K_tilde,
+                reference_state,
+                parameters,
+                eps,
+                lm_set.phase2_damping,
+                mode=lm_set.phase2_mode,
+            )
+            jax.block_until_ready(schur)
+            build_time = time.perf_counter() - build_start
+            whitened = WhitenedPreconditioner(
+                lambda v, damping: schur.solve(v),
+                lambda w, damping: schur.solve_transpose(w),
+            )
+            phase2_solver = LevenbergMarquardt(
+                residual_fn,
+                linear_solver="lsmr",
+                init_damping=lm_set.phase2_damping,
+                damping_decrease=1.0,
+                damping_increase=1.0,
+                iterative_tol=lm_set.phase2_tol,
+                iterative_atol=lm_set.phase2_tol,
+                iterative_maxiter=lm_set.phase2_maxiter,
+                whitened_preconditioner=whitened,
+                metric=metric,
+                geodesic_acceleration=False,
+            )
+            warmup = phase2_solver.solve(
+                x_plateau, max_steps=1, atol=lm_set.residual_atol
+            )
+            jax.block_until_ready(warmup)
+            solve_start = time.perf_counter()
+            phase2 = phase2_solver.solve(
+                x_plateau,
+                max_steps=lm_set.phase2_max_steps,
+                atol=lm_set.residual_atol,
+            )
+            jax.block_until_ready(phase2)
+            phase2_time = time.perf_counter() - solve_start
+            return phase2, build_time, phase2_time
     else:
         solver = LevenbergMarquardt(
             residual_fn,
@@ -425,21 +488,34 @@ def multicountry_trade_growth_kernel_nlls(
     compile_time = time.perf_counter() - compile_start
 
     solve_start = time.perf_counter()
-    result = run_solve(lm_set.max_steps)
-    jax.block_until_ready(result)
+    phase1_result = run_solve(lm_set.max_steps)
+    jax.block_until_ready(phase1_result)
     solve_time = time.perf_counter() - solve_start
-    theta = result.x
-    final_loss = float(result.info.loss)
-    final_steps = int(result.steps)
-    final_status = int(result.status)
     if lm_set.linear_solver == "cg":
-        total_inner_iterations = int(result.user_state["total_inner_iterations"])
+        total_inner_iterations = int(phase1_result.user_state["total_inner_iterations"])
         iterations_trajectory = np.asarray(
-            result.user_state["iterations_trajectory"][:final_steps]
+            phase1_result.user_state["iterations_trajectory"][
+                : int(phase1_result.steps)
+            ]
         ).tolist()
     else:
         total_inner_iterations = None
         iterations_trajectory = None
+
+    two_phase = lm_set.linear_solver == "cg" and lm_set.two_phase_endgame
+    if two_phase:
+        result, phase2_build_time, phase2_solve_time = run_phase_two(phase1_result.x)
+        phase2_steps = int(result.steps)
+    else:
+        result = phase1_result
+        phase2_build_time = None
+        phase2_solve_time = None
+        phase2_steps = None
+    theta = result.x
+    final_loss = float(result.info.loss)
+    final_steps = int(phase1_result.steps)
+    final_status = int(result.status)
+    total_wall = solve_time + (phase2_build_time or 0.0) + (phase2_solve_time or 0.0)
     if data_set.rank_audit:
         theta_flat, unravel_theta = ravel_pytree(theta)
         dae_jacobian = np.asarray(
@@ -726,10 +802,15 @@ def multicountry_trade_growth_kernel_nlls(
         ),
         "rkhs_norm_total": float(rkhs_norm_total),
         "solve_time": solve_time,
-        "wall_time": solve_time,
+        "wall_time": total_wall,
         "compile_time": compile_time,
         "solver": "nlls-gram",
         "linear_solver_resolved": lm_set.linear_solver,
+        "two_phase_endgame": two_phase,
+        "phase1_solve_time": solve_time,
+        "phase2_build_time": phase2_build_time,
+        "phase2_solve_time": phase2_solve_time,
+        "phase2_steps": phase2_steps,
         "total_inner_iterations": total_inner_iterations,
         "inner_iterations_trajectory": iterations_trajectory,
         "recycle_rank": lm_set.recycle_rank if lm_set.linear_solver == "cg" else None,

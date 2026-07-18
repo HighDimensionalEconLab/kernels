@@ -52,6 +52,15 @@ def gaussian_kernel(t_i, t_j, sigma, ell):
     return sigma**2 * jnp.exp(-(d**2) / (2 * ell**2))
 
 
+def rbf_state_features(q, centers, sigma, ell):
+    difference = q[..., None] - centers
+    return sigma**2 * jnp.exp(-(difference**2) / (2 * ell**2))
+
+
+def rbf_state_gram(centers, sigma, ell):
+    return rbf_state_features(centers[:, None], centers, sigma, ell).squeeze(1)
+
+
 # Each half-integer Matern kernel is sigma^2 pi(a d) e^{-a d} with pi a
 # degree-p polynomial and a the decay rate below; its antiderivative is
 # h(d) = int_0^d k = (sigma^2/a) [c - e^{-a d} eta(a d)] with eta a degree-p

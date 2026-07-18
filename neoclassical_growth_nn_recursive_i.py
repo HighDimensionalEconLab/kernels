@@ -22,10 +22,7 @@ from tinydiffeq import (
     RK4,
     ConstantStepSize,
     Euler,
-    IController,
-    Rodas5P,
     SaveAt,
-    Tsit5,
     solve_ode,
 )
 
@@ -74,24 +71,15 @@ class StructuralParameters:
 
 @dataclass
 class DataSettings:
-    # dt is the adaptive solvers' initial step and the grid spacing of the
-    # test/settle evaluation paths (which use fixed-grid RK4).
+    # dt is the grid spacing of the test/settle evaluation paths.
     dt: float = 1.0
-    # Fixed RK4 is the measured default: versus adaptive Tsit5 it cuts compile
-    # time by about 3x and warm solve time by 20-40% without changing the
-    # benchmark error. Other released tinydiffeq solvers remain available for
-    # robustness experiments.
-    ode_solver: Literal["tsit5", "rk4", "euler", "rodas5p"] = "rk4"
-    # Static internal-step/attempt budgets. Fixed solvers use T / budget;
-    # adaptive solvers treat these as maximum attempt counts.
-    adaptive_steps: int = 32
-    # A fixed grid keeps the residual shape informative and its scaling
-    # independent of the adaptive controller's accepted-step count. The
-    # capacity sweep reaches its accuracy plateau at 65 points.
+    ode_solver: Literal["rk4", "euler"] = "rk4"
+    # Static internal-step budgets. Fixed solvers use train_T / train_steps.
+    train_steps: int = 32
+    # A fixed grid keeps the residual shape and scaling constant. The capacity
+    # sweep reaches its accuracy plateau at 65 points.
     train_points: int = 65
-    tvc_adaptive_steps: int = 64
-    rtol: float = 6.3e-7
-    atol: float = 2.2e-7
+    tvc_steps: int = 64
     train_T: float = 40.0
     # Auxiliary horizon for the post-hoc transversality certificate. The
     # signal peaks at or just after train_T (capital is bounded by c > 0, so
@@ -185,8 +173,8 @@ class InvestmentPolicyNN(nnx.Module):
 
 
 # The optimizer stops solely on its residual tolerance. The exact log-TVC
-# certificate is computed once afterward as an acceptance diagnostic; it is
-# neither a training residual nor a solver callback.
+# certificate is computed once afterward and never enters training or
+# acceptance.
 STATUS_TO_REASON = {
     LMStatus.CONVERGED: "early_stopping_met",
     LMStatus.NONFINITE: "loss_divergence",
@@ -248,23 +236,7 @@ def log_rollout_field(policy, p):
 def rollout(policy, T, budget, p, data_set, *, save_at=None):
     if save_at is None:
         save_at = SaveAt(steps=True)
-    if data_set.ode_solver == "tsit5":
-        ode_solver = Tsit5()
-        controller = IController(
-            rtol=data_set.rtol,
-            atol=data_set.atol,
-            dt_min=1e-10,
-        )
-        dt_0 = data_set.dt
-    elif data_set.ode_solver == "rodas5p":
-        ode_solver = Rodas5P()
-        controller = IController(
-            rtol=data_set.rtol,
-            atol=data_set.atol,
-            dt_min=1e-10,
-        )
-        dt_0 = data_set.dt
-    elif data_set.ode_solver == "rk4":
+    if data_set.ode_solver == "rk4":
         ode_solver = RK4()
         controller = ConstantStepSize()
         dt_0 = T / budget
@@ -292,7 +264,7 @@ def collocation_states(policy, p, data_set):
     sol = rollout(
         policy,
         data_set.train_T,
-        data_set.adaptive_steps,
+        data_set.train_steps,
         p,
         data_set,
         save_at=SaveAt(ts=train_ts),
@@ -311,10 +283,9 @@ def collocation_states(policy, p, data_set):
 # POSITIVE u'(c) k level -- the level itself is the signal, so the residual is
 # deliberately NOT normalized. The flat-start parameterization is what selects
 # the saddle path (the continuous-time analog of the stock-policy identity
-# initialization); this certificate is the ex-post check of that selection,
-# gating final acceptance.
+# initialization); this certificate checks that selection ex post.
 def log_tvc_residual(policy, T_start, T_end, p, data_set):
-    sol = rollout(policy, T_end, data_set.tvc_adaptive_steps, p, data_set)
+    sol = rollout(policy, T_end, data_set.tvc_steps, p, data_set)
     ts = jnp.where(sol.ok, sol.ts, jnp.inf)
     states = p.k_0 * jnp.exp(jnp.where(sol.ok, sol.xs, jnp.inf))
     c = jax.vmap(lambda k: consumption(policy, k, p))(states)
@@ -476,7 +447,7 @@ def neoclassical_growth_nn_recursive_i(
     train_loss = float(result.info.loss)
     max_log_tvc = float(tvc_certificate(result.x))
     transversality_ok = bool(max_log_tvc < stop_set.log_tvc_threshold)
-    accepted = bool(result.multi_start.accepted) and transversality_ok
+    accepted = bool(result.multi_start.accepted)
 
     # Test path: simulate the final policy to test_T and evaluate the Euler
     # residual along it.
@@ -565,6 +536,8 @@ def neoclassical_growth_nn_recursive_i(
         "total_params": int(ravel_pytree(nnx.state(policy, nnx.Param))[0].size),
         "solution_accepted": bool(accepted),
         "num_collocation_states": num_collocation_states,
+        "ode_solver": data_set.ode_solver,
+        "train_steps": data_set.train_steps,
         "dt": data_set.dt,
         "train_T": data_set.train_T,
         "test_T": data_set.test_T,

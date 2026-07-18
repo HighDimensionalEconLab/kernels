@@ -19,7 +19,7 @@ command:
   - ${args}
 parameters:
   # --- wrapper config (consumed by wandb_sweep_wrapper.py) ---
-  sweep_settings.script:               {value: neoclassical_growth_nn_recursive_i.py}
+  sweep_settings.script:               {value: neoclassical_growth_nn_recursive_i_adaptive.py}
   sweep_settings.sort_criteria:        {value: train_time_success}
   sweep_settings.num_seeds:            {value: 11}
   sweep_settings.starting_seed:        {value: 0}
@@ -32,7 +32,7 @@ parameters:
   stop_set.max_steps:                  {value: 500}
   stop_set.num_attempts:               {value: 1}
   stop_set.train_loss_threshold:       {value: 1e-14}
-  data_set.tvc_adaptive_steps:         {value: 96}   # covers the tightest swept rtol
+  data_set.tvc_steps:                  {value: 96}   # covers the tightest swept rtol
   # --- MLP axes ---
   nn_set.width:                 {values: [8, 16, 32, 64, 128]}
   nn_set.depth:                 {values: [2, 3, 4, 5]}

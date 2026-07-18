@@ -5,6 +5,7 @@ import jsonargparse
 import pandas as pd
 
 import neoclassical_growth_nn_recursive_i
+import neoclassical_growth_nn_recursive_i_adaptive
 from replication.utilities import (
     BASIN_K0_GRID,
     enable_compilation_cache,
@@ -22,6 +23,7 @@ enable_compilation_cache()
 PREFIX = "neoclassical_growth_nn_recursive"
 
 SOLVER = neoclassical_growth_nn_recursive_i.neoclassical_growth_nn_recursive_i
+ADAPTIVE_SOLVER = neoclassical_growth_nn_recursive_i_adaptive.neoclassical_growth_nn_recursive_i_adaptive
 
 BUTTERFLY = dict(A=0.5, b_1=3.0, b_2=2.5)
 
@@ -67,9 +69,9 @@ def run(
     print(f"tolerance_sweep: {n_seeds} seeds -> {output_dir}/")
     rows = []
     sweep_hyperparameters = None
-    for tolerance, adaptive_steps, tvc_adaptive_steps in TOLERANCES:
+    for tolerance, adaptive_steps, tvc_steps in TOLERANCES:
         results_df, _, run_hyperparameters = ensemble(
-            SOLVER,
+            ADAPTIVE_SOLVER,
             n_seeds,
             options={
                 **common,
@@ -79,7 +81,7 @@ def run(
                     rtol=tolerance,
                     atol=tolerance,
                     adaptive_steps=adaptive_steps,
-                    tvc_adaptive_steps=tvc_adaptive_steps,
+                    tvc_steps=tvc_steps,
                 ),
             },
         )

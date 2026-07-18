@@ -104,11 +104,23 @@ dataclasses.
   net approximates positive gross investment `i(k)` from the normalized input
   `log(k/k_0)`. Drift and consumption are implied by the resource constraint.
   Training integrates log capital and samples the differentiated-through
-  rollout on a fixed 65-point collocation grid. The default 32-by-3 GELU policy
-  has 2,209 parameters; wider networks reached the same measured accuracy at
-  higher cost. No transversality penalty or callback enters training: the exact
-  log-transversality certificate is evaluated once after the solve and gates
-  final acceptance.
+  rollout on a fixed 65-point collocation grid using only fixed-step RK4 or
+  Euler. The default 32-by-3 GELU policy has 2,209 parameters; wider networks
+  reached the same measured accuracy at higher cost. The exact
+  log-transversality certificate is an ex-post diagnostic only.
+- `neoclassical_growth_nn_recursive_i_adaptive.py` — accepted-step recursive
+  NN: the same investment network and economics, but only adaptive Tsit5 or
+  Rodas5P is available. Every active residual row is an accepted internal
+  integrator state under the current policy; rejected attempts and padding are
+  masked. AD differentiates how NN parameter perturbations move those states.
+- `neoclassical_growth_kernel_recursive_adaptive.py` — recursive state-space
+  kernel: one RBF expansion approximates homothetic investment on `log(k/z)`.
+  Only adaptive Tsit5 or Rodas5P is available. Accepted internal steps choose
+  the collocation states, while rejected steps and padded buffer rows are
+  excluded by a mask. The full `(log(z), log(k))` state and policy derivatives
+  remain differentiable, and the moving float64 RKHS metric is recomputed from
+  the accepted states. The default horizon is `t <= 100`, with an ex-post
+  transversality check through `t = 200`.
 - `open_economy_growth_nn_recursive.py` — recursive open-economy NN: a shared
   state-space policy maps `log(k/k_0)` to positive investment expenditure and
   the signed current account. It rolls forward capital and NFA, derives Tobin's
@@ -157,10 +169,10 @@ dataclasses.
 - `replication/multicountry_trade_growth_comparison.py` — matched CPU comparison
   storing pointwise ODE, algebraic, and full-DAE residual RMS norms and NN-to-kernel
   norm ratios over the common year-100 quality grid.
-- The differentiable rollout integrators (fixed RK4 by measured default, with
-  Tsit5, Euler, and Rodas5P available; fixed RK4 for test/settle paths) come from
-  [tinydiffeq](https://github.com/HighDimensionalEconLab/tinydiffeq),
-  and are forward- and reverse-mode differentiable through the states.
+- The fixed-grid recursive NN exposes only RK4 and Euler; its adaptive
+  counterpart exposes only Tsit5 and Rodas5P. All come from
+  [tinydiffeq](https://github.com/HighDimensionalEconLab/tinydiffeq) and are
+  forward- and reverse-mode differentiable through the states.
 
 Every solver exposes a `jsonargparse` CLI:
 
@@ -168,7 +180,8 @@ Every solver exposes a `jsonargparse` CLI:
 uv run python neoclassical_growth_kernel.py --kernel_set.ell 5.0
 uv run python neoclassical_growth_kernel.py --data_set.train_points 21
 uv run python asset_pricing_kernel.py --x_0 1.0
-uv run python neoclassical_growth_nn_recursive_i.py --seed 3 --data_set.rtol 1e-8
+uv run python neoclassical_growth_nn_recursive_i.py --seed 3 --data_set.train_steps 32
+uv run python neoclassical_growth_nn_recursive_i_adaptive.py --seed 3 --data_set.rtol 1e-8
 uv run python open_economy_growth_nn_recursive.py --seed 0 --a_0 -0.5
 uv run python multicountry_growth_kernel_nlls.py --a_0 '[-0.5, 0.5]'
 ```

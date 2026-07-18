@@ -113,7 +113,7 @@ class NLLSGramSettings:
     # single-phase cg path are unchanged.
     two_phase_endgame: bool = False
     phase2_damping: float = 1e-6
-    phase2_max_steps: int = 3
+    phase2_max_steps: int = 6
     phase2_mode: str = "dense"
     phase2_maxiter: int = 2000
     phase2_tol: float = 1e-13
@@ -421,6 +421,15 @@ def multicountry_trade_growth_kernel_nlls(
             )
 
         def run_phase_two(x_plateau):
+            # AD contract for the two-phase solve: derivatives of the final
+            # solution wrt differentiable inputs come from the implicit rule at
+            # the PHASE-2 converged point only. nlls-gram's solve() custom JVP
+            # drops x0/lm_state tangents by construction, and phase 1's own
+            # implicit rule would be invalid at its plateau (not a converged
+            # root) -- the stop_gradient makes that boundary explicit and keeps
+            # the preconditioner builds (which never move the converged root)
+            # out of the differentiation path.
+            x_plateau = jax.lax.stop_gradient(x_plateau)
             # Build the parameter-space Schur R once at the plateau iterate with a
             # pinned damping, then a right-preconditioned whitened-LSMR solve.
             build_start = time.perf_counter()
@@ -440,6 +449,22 @@ def multicountry_trade_growth_kernel_nlls(
                 lambda v, damping: schur.solve(v),
                 lambda w, damping: schur.solve_transpose(w),
             )
+            # Matrix-free implicit path for differentiating through phase 2 at
+            # scale (the auto rule for lsmr is the dense implicit solve, which
+            # does not scale): the undamped time-block hook built at the
+            # plateau serves as implicit_preconditioner -- preconditioner
+            # accuracy only affects the tangent solve's convergence, never the
+            # derivative's target.
+            time_block = build_trade_growth_time_block_preconditioner(
+                x_plateau,
+                K,
+                K_tilde,
+                reference_state,
+                parameters,
+                eps,
+                time_permutation,
+                native_permutation,
+            )
             phase2_solver = LevenbergMarquardt(
                 residual_fn,
                 linear_solver="lsmr",
@@ -450,6 +475,10 @@ def multicountry_trade_growth_kernel_nlls(
                 iterative_atol=lm_set.phase2_tol,
                 iterative_maxiter=lm_set.phase2_maxiter,
                 whitened_preconditioner=whitened,
+                implicit_solver="cg",
+                implicit_preconditioner=time_block.implicit_preconditioner,
+                implicit_tol=lm_set.implicit_tol,
+                implicit_maxiter=lm_set.implicit_maxiter,
                 metric=metric,
                 geodesic_acceleration=False,
             )

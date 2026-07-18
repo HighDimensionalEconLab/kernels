@@ -99,27 +99,33 @@ from neoclassical_growth_nn import (
 from neoclassical_growth_nn import (
     neoclassical_growth_nn,
 )
-from neoclassical_growth_nn_integrated import (
-    DataSettings as IntegratedNNDataSettings,
-)
-from neoclassical_growth_nn_integrated import (
-    GrowthDerivativeSettings as IntegratedNNSettings,
-)
-from neoclassical_growth_nn_integrated import (
-    StoppingCriteria as IntegratedNNStoppingCriteria,
-)
-from neoclassical_growth_nn_integrated import (
-    neoclassical_growth_nn_integrated,
-)
-from neoclassical_growth_nn_recursive_i import (
-    DataSettings as RecursiveIDataSettings,
-)
-from neoclassical_growth_nn_recursive_i import (
-    StoppingCriteria as RecursiveIStoppingCriteria,
-)
-from neoclassical_growth_nn_recursive_i import (
-    neoclassical_growth_nn_recursive_i,
-)
+
+try:
+    from neoclassical_growth_nn_integrated import (
+        DataSettings as IntegratedNNDataSettings,
+    )
+    from neoclassical_growth_nn_integrated import (
+        GrowthDerivativeSettings as IntegratedNNSettings,
+    )
+    from neoclassical_growth_nn_integrated import (
+        StoppingCriteria as IntegratedNNStoppingCriteria,
+    )
+    from neoclassical_growth_nn_integrated import (
+        neoclassical_growth_nn_integrated,
+    )
+    from neoclassical_growth_nn_recursive_i import (
+        DataSettings as RecursiveIDataSettings,
+    )
+    from neoclassical_growth_nn_recursive_i import (
+        StoppingCriteria as RecursiveIStoppingCriteria,
+    )
+    from neoclassical_growth_nn_recursive_i import (
+        neoclassical_growth_nn_recursive_i,
+    )
+
+    NN_DAE_DRIVERS_AVAILABLE = True
+except ImportError:
+    NN_DAE_DRIVERS_AVAILABLE = False
 from open_economy_growth import (
     ModelParameters as OpenEconomyParameters,
 )
@@ -134,11 +140,17 @@ from open_economy_growth_kernel_nlls import (
     DataSettings as OpenEconomyDataSettings,
 )
 from open_economy_growth_kernel_nlls import open_economy_growth_kernel_nlls
-from open_economy_growth_nn_recursive import (
-    DataSettings as OpenEconomyNNDataSettings,
-)
-from open_economy_growth_nn_recursive import evaluate_path as evaluate_open_economy_nn
-from open_economy_growth_nn_recursive import open_economy_growth_nn_recursive
+
+try:
+    from open_economy_growth_nn_recursive import (
+        DataSettings as OpenEconomyNNDataSettings,
+    )
+    from open_economy_growth_nn_recursive import (
+        evaluate_path as evaluate_open_economy_nn,
+    )
+    from open_economy_growth_nn_recursive import open_economy_growth_nn_recursive
+except ImportError:
+    NN_DAE_DRIVERS_AVAILABLE = False
 from optimal_advertising_kernel import optimal_advertising_kernel
 from optimal_advertising_kernel_nlls import optimal_advertising_kernel_nlls
 
@@ -786,6 +798,9 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertFalse(short_horizon["benchmark_match"])
         self.assertGreater(short_horizon["ex_post_asset_tvc"], 0.1)
 
+    @unittest.skipUnless(
+        NN_DAE_DRIVERS_AVAILABLE, "tinydiffeq-dependent drivers unavailable"
+    )
     def test_open_economy_growth_nn_recursive_smoke(self):
         parameters = OpenEconomyParameters()
         data_set = OpenEconomyNNDataSettings(
@@ -1306,6 +1321,9 @@ class NNSmokeTests(unittest.TestCase):
         self.assertTrue((frames["test_df"]["k"] > 0.0).all())
         self.assertIn("nn_set", frames["hyperparameters"])
 
+    @unittest.skipUnless(
+        NN_DAE_DRIVERS_AVAILABLE, "tinydiffeq-dependent drivers unavailable"
+    )
     def test_neoclassical_growth_nn_integrated_rff_smoke(self):
         results, frames = neoclassical_growth_nn_integrated(
             verbose=False,
@@ -1336,6 +1354,9 @@ class NNSmokeTests(unittest.TestCase):
         self.assertTrue(results["solution_accepted"], results["stopping_reason"])
         self.assertLess(results["test_mean_abs_k_rel_error"], 5e-2)
 
+    @unittest.skipUnless(
+        NN_DAE_DRIVERS_AVAILABLE, "tinydiffeq-dependent drivers unavailable"
+    )
     def test_recursive_i_smoke(self):
         results, extras = neoclassical_growth_nn_recursive_i(
             verbose=False,

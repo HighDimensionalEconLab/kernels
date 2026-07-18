@@ -180,8 +180,7 @@ def policy_values(policy, k, a, parameters):
     output = production(k, 1.0, parameters)
     mpk = marginal_product(k, 1.0, parameters)
     capital_drift = k * (
-        parameters.installation_efficiency
-        * investment_rate**installation_elasticity
+        parameters.installation_efficiency * investment_rate**installation_elasticity
         - parameters.delta
     )
     log_q_derivative = (1.0 - installation_elasticity) * (
@@ -196,16 +195,10 @@ def policy_values(policy, k, a, parameters):
         * investment_rate**installation_elasticity
         - mpk / tobin_q
     )
-    consumption = (
-        parameters.interest_rate * a
-        + output
-        - investment
-        - current_account
-    )
+    consumption = parameters.interest_rate * a + output - investment - current_account
     consumption_drift = (
-        (mpk - investment_derivative - current_account_derivative) * capital_drift
-        + parameters.interest_rate * current_account
-    )
+        mpk - investment_derivative - current_account_derivative
+    ) * capital_drift + parameters.interest_rate * current_account
     return {
         "k": k,
         "a": a,
@@ -221,9 +214,9 @@ def policy_values(policy, k, a, parameters):
 
 
 def path_values(policy, states, parameters):
-    return jax.vmap(lambda state: policy_values(policy, state[0], state[1], parameters))(
-        states
-    )
+    return jax.vmap(
+        lambda state: policy_values(policy, state[0], state[1], parameters)
+    )(states)
 
 
 def rollout_field(policy, k_0, parameters):

@@ -44,9 +44,7 @@ def multicountry_growth_benchmark(
     scale = float(np.sum(populations * output_ss) / np.sum(populations))
 
     def steady(log_relative_weight):
-        consumption_weights = np.array(
-            [1.0, np.exp(log_relative_weight / gamma)]
-        )
+        consumption_weights = np.array([1.0, np.exp(log_relative_weight / gamma)])
         investment_ss = delta * k_ss
         resources_ss = output_ss - investment_ss
         aggregate_resources = float(np.sum(populations * resources_ss))
@@ -66,9 +64,9 @@ def multicountry_growth_benchmark(
         }
 
     def allocations(k, tobin_q, log_relative_weight):
-        consumption_weights = np.array(
-            [1.0, np.exp(log_relative_weight / gamma)]
-        )[:, None]
+        consumption_weights = np.array([1.0, np.exp(log_relative_weight / gamma)])[
+            :, None
+        ]
         investment_rate = (efficiency * elasticity * tobin_q) ** (
             1.0 / (1.0 - elasticity)
         )
@@ -77,14 +75,10 @@ def multicountry_growth_benchmark(
         mpk = alpha * productivities[:, None] * k ** (alpha - 1.0)
         resources = output - investment
         aggregate_resources = np.sum(populations[:, None] * resources, axis=0)
-        weight_sum = float(
-            np.sum(populations * consumption_weights[:, 0])
-        )
+        weight_sum = float(np.sum(populations * consumption_weights[:, 0]))
         consumption = consumption_weights * aggregate_resources[None, :] / weight_sum
         marginal_wealth = (weight_sum / aggregate_resources) ** gamma
-        capital_drift = k * (
-            efficiency * investment_rate**elasticity - delta
-        )
+        capital_drift = k * (efficiency * investment_rate**elasticity - delta)
         q_intercept = (
             delta
             - (1.0 - elasticity) * efficiency * investment_rate**elasticity
@@ -95,17 +89,12 @@ def multicountry_growth_benchmark(
         )
         rate_numerator = (
             np.sum(
-                populations[:, None]
-                * (mpk - investment_rate)
-                * capital_drift,
+                populations[:, None] * (mpk - investment_rate) * capital_drift,
                 axis=0,
             )
             + rho * aggregate_resources / gamma
             - np.sum(
-                populations[:, None]
-                * investment
-                * q_intercept
-                / (1.0 - elasticity),
+                populations[:, None] * investment * q_intercept / (1.0 - elasticity),
                 axis=0,
             )
         )
@@ -188,9 +177,7 @@ def multicountry_growth_benchmark(
             sort=lambda real, imaginary: real < -1e-8,
         )
         if stable_count != 2:
-            raise RuntimeError(
-                f"expected two stable roots, found {stable_count}"
-            )
+            raise RuntimeError(f"expected two stable roots, found {stable_count}")
         return vectors[:, stable_count:]
 
     h_0 = np.log(k_0 / k_ss)
@@ -203,9 +190,7 @@ def multicountry_growth_benchmark(
         resources_ss = float(output_ss[0] - delta * k_ss[0])
         c_1_guess = resources_ss + rho * float(a_0[0])
         ratio_guess = 2.0 * resources_ss / c_1_guess - 1.0
-        log_weight_guess = (
-            gamma * np.log(ratio_guess) if ratio_guess > 0.0 else 0.0
-        )
+        log_weight_guess = gamma * np.log(ratio_guess) if ratio_guess > 0.0 else 0.0
     else:
         log_weight_guess = 0.0
     a_ss_guess = steady(log_weight_guess)["a"][0]
@@ -247,12 +232,12 @@ def multicountry_growth_benchmark(
     state_ss = steady_transformed(log_relative_weight)
     weight_step = 1e-6 * max(1.0, abs(log_relative_weight))
     weight_column = (
-        transformed_values(
-            state_ss[:, None], log_relative_weight + weight_step
-        )[0][:, 0]
-        - transformed_values(
-            state_ss[:, None], log_relative_weight - weight_step
-        )[0][:, 0]
+        transformed_values(state_ss[:, None], log_relative_weight + weight_step)[0][
+            :, 0
+        ]
+        - transformed_values(state_ss[:, None], log_relative_weight - weight_step)[0][
+            :, 0
+        ]
     ) / (2.0 * weight_step)
     full_jacobian = np.block(
         [
@@ -286,9 +271,7 @@ def multicountry_growth_benchmark(
         q_rates = (
             state_drift[2:4]
             - delta
-            + (1.0 - elasticity)
-            * efficiency
-            * values["investment_rate"] ** elasticity
+            + (1.0 - elasticity) * efficiency * values["investment_rate"] ** elasticity
             + values["mpk"] / tobin_q
         )
         return {
@@ -305,15 +288,11 @@ def multicountry_growth_benchmark(
             "marginal_wealth": values["marginal_wealth"],
             "omitted_budget_gap": (asset_drifts[1] - budget_drifts[1]) / scale,
             "resource_gap": np.sum(
-                populations[:, None]
-                * (values["resources"] - values["consumption"]),
+                populations[:, None] * (values["resources"] - values["consumption"]),
                 axis=0,
             )
             / scale,
-            "asset_clearing_gap": np.sum(
-                populations[:, None] * assets, axis=0
-            )
-            / scale,
+            "asset_clearing_gap": np.sum(populations[:, None] * assets, axis=0) / scale,
             "interest_rate_index_gap": values["interest_rate"]
             - (rho + gamma * values["resource_drift"] / values["aggregate_resources"]),
             "interest_rate_q_gap": q_rates - values["interest_rate"][None, :],
@@ -326,9 +305,7 @@ def multicountry_growth_benchmark(
         "boundary_residual_max": float(
             np.max(
                 np.abs(
-                    boundary_condition(
-                        solution.y[:, 0], solution.y[:, -1], solution.p
-                    )
+                    boundary_condition(solution.y[:, 0], solution.y[:, -1], solution.p)
                 )
             )
         ),
@@ -336,9 +313,7 @@ def multicountry_growth_benchmark(
         "stable_roots": int(np.sum(eigenvalues.real < -1e-8)),
         "unstable_roots": int(np.sum(eigenvalues.real > 1e-8)),
         "center_roots": int(np.sum(np.abs(eigenvalues.real) <= 1e-8)),
-        "minimum_rate_denominator": float(
-            np.min(evaluate(t_grid)["rate_denominator"])
-        ),
+        "minimum_rate_denominator": float(np.min(evaluate(t_grid)["rate_denominator"])),
         "bvp_nodes": int(solution.x.size),
     }
     return evaluate, diagnostics

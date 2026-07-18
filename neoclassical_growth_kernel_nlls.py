@@ -16,9 +16,10 @@ from nlls_gram import (
     metric_from_cholesky,
     metric_from_diagonal,
     metric_from_state_space,
+    metric_with_compute_dtype,
+    repeated_blockdiag_metric,
 )
 
-from kernel_metrics import metric_with_compute_dtype, repeated_blockdiag_metric
 from kernels import (
     integrated_kernel_matrices,
     matern_kernel_matvec_pair,

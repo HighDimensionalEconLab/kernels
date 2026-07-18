@@ -13,9 +13,10 @@ from nlls_gram import (
     UnderdeterminedLevenbergMarquardt,
     metric_from_cholesky,
     metric_from_diagonal,
+    metric_with_compute_dtype,
+    repeated_blockdiag_metric,
 )
 
-from kernel_metrics import metric_with_compute_dtype, repeated_blockdiag_metric
 from kernels import integrated_kernel_matrices, normalize_kernel
 from open_economy_growth import (
     ModelParameters,

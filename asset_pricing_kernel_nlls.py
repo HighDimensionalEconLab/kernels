@@ -16,11 +16,11 @@ from nlls_gram import (
     metric_from_cholesky,
     metric_from_diagonal,
     metric_from_state_space,
+    metric_with_compute_dtype,
     sherman_morrison_preconditioner,
 )
 
 from asset_pricing_benchmark import mu_f_array
-from kernel_metrics import metric_with_compute_dtype
 from kernels import (
     integrated_kernel_matrices,
     matern_kernel_matvec_pair,

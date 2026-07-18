@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import time
 from dataclasses import asdict, dataclass
 
@@ -12,7 +13,10 @@ import scipy.interpolate
 from jax.flatten_util import ravel_pytree
 from nlls_gram import (
     LevenbergMarquardt,
+    LMSolveAction,
     LMStatus,
+    PreconditionerFactory,
+    RecycleConfig,
     metric_from_cholesky,
     metric_from_diagonal,
     metric_with_compute_dtype,
@@ -31,6 +35,11 @@ from multicountry_trade_growth import (
     multicountry_trade_pointwise_residual_norms,
     multicountry_trade_tvc_diagnostics,
     static_trade_equilibrium,
+)
+from trade_growth_preconditioners import (
+    build_trade_growth_time_block_preconditioner,
+    residual_time_permutation,
+    trade_growth_preconditioner_apply,
 )
 
 if __name__ == "__main__":
@@ -80,6 +89,20 @@ class NLLSGramSettings:
     residual_atol: float = 2e-8
     linear_solver: str = "cholesky"
     metric_eps: float = 1e-7
+    # Matrix-free CG path (linear_solver="cg"): time-block preconditioner +
+    # Krylov recycling + a forcing-style inner-budget schedule (loose early,
+    # tightening near convergence). Ignored on the cholesky/qr paths.
+    recycle_rank: int = 24
+    recycle_window: int | None = None
+    cg_maxiter_min: int = 60
+    cg_maxiter_max: int = 400
+    cg_tol_loose: float = 1e-2
+    cg_tol_tight: float = 1e-7
+    cg_atol: float = 0.0
+    cg_geodesic: bool = False
+    cg_min_damping: float = 0.0
+    implicit_maxiter: int = 400
+    implicit_tol: float = 1e-8
 
 
 def multicountry_trade_growth_kernel_nlls(
@@ -105,8 +128,8 @@ def multicountry_trade_growth_kernel_nlls(
         raise ValueError("a_0 must contain one value per country")
     if lm_set.metric_eps <= 0.0:
         raise ValueError("metric_eps must be positive")
-    if lm_set.linear_solver not in ("cholesky", "qr"):
-        raise ValueError("linear_solver must be 'cholesky' or 'qr'")
+    if lm_set.linear_solver not in ("cholesky", "qr", "cg"):
+        raise ValueError("linear_solver must be 'cholesky', 'qr', or 'cg'")
 
     train_data = make_train_grid(data_set).astype(dtype)
     if data_set.test_T > float(train_data[-1]):
@@ -264,30 +287,159 @@ def multicountry_trade_growth_kernel_nlls(
         jnp.zeros((num_countries, n_train), dtype=dtype),
         initial_algebraic,
     )
-    solver = LevenbergMarquardt(
-        residual_fn,
-        linear_solver=lm_set.linear_solver,
-        init_damping=lm_set.init_damping,
-        damping_decrease=lm_set.damping_decrease,
-        damping_increase=lm_set.damping_increase,
-        dual_solve_dtype=(jnp.float64 if lm_set.linear_solver == "cholesky" else None),
-        metric=metric,
-    )
+    if lm_set.linear_solver == "cg":
+        reference_state = {
+            "k_0_array": k_0_array,
+            "a_0_array": a_0_array,
+            "q_reference": q_reference,
+            "marginal_wealth_reference": marginal_wealth_reference,
+            "output_scale": output_scale,
+            "log_static_reference": static_reference["log_static"],
+        }
+        time_permutation, native_permutation = residual_time_permutation(
+            num_countries, n_train
+        )
+
+        # theta-adaptive preconditioner: rebuilt from the live iterate each step
+        # (a preconditioner frozen at theta_0 breaks the inner CG down once the
+        # operator drifts). Model-structured build from the pytree iterate.
+        def prepare_preconditioner(x, args, p):
+            return build_trade_growth_time_block_preconditioner(
+                x,
+                K,
+                K_tilde,
+                reference_state,
+                parameters,
+                eps,
+                time_permutation,
+                native_permutation,
+            )
+
+        factory = PreconditionerFactory(
+            prepare_preconditioner, trade_growth_preconditioner_apply
+        )
+        recycle = (
+            RecycleConfig(rank=lm_set.recycle_rank, window=lm_set.recycle_window)
+            if lm_set.recycle_rank > 0
+            else None
+        )
+        recycle_on = recycle is not None
+        target_loss = lm_set.residual_atol**2
+
+        def cg_callback(context):
+            state = context.user_state
+            loss = context.info.loss
+            loss_0 = jnp.where(context.step == 0, loss, state["loss_0"])
+            log_target = jnp.log(jnp.asarray(target_loss + 1e-300, dtype))
+            span = jnp.maximum(jnp.log(loss_0) - log_target, 1.0)
+            frac = jnp.clip((jnp.log(loss) - log_target) / span, 0.0, 1.0)
+            tol = (
+                lm_set.cg_tol_tight
+                * (lm_set.cg_tol_loose / lm_set.cg_tol_tight) ** frac
+            )
+            budget = lm_set.cg_maxiter_min + (1.0 - frac) * (
+                lm_set.cg_maxiter_max - lm_set.cg_maxiter_min
+            )
+            step_iterations = (
+                context.lm_state.recycle.iterations
+                if recycle_on
+                else jnp.asarray(0, dtype=jnp.int32)
+            )
+            new_state = {
+                "loss_0": loss_0,
+                "total_inner_iterations": state["total_inner_iterations"]
+                + step_iterations,
+                "iterations_trajectory": state["iterations_trajectory"]
+                .at[context.step]
+                .set(step_iterations),
+            }
+            new_hyper = dataclasses.replace(
+                context.lm_state.hyper,
+                iterative_tol=jnp.asarray(tol, dtype),
+                iterative_maxiter=jnp.round(budget).astype(jnp.int32),
+            )
+            # optional damping floor: keep the dual operator out of the
+            # small-lambda regime the C3 preconditioner cannot condition.
+            floored_damping = jnp.maximum(
+                context.lm_state.damping,
+                jnp.asarray(lm_set.cg_min_damping, dtype),
+            )
+            return LMSolveAction(
+                lm_state=dataclasses.replace(
+                    context.lm_state, hyper=new_hyper, damping=floored_damping
+                ),
+                user_state=new_state,
+            )
+
+        def initial_user_state(steps):
+            return {
+                "loss_0": jnp.asarray(1.0, dtype),
+                "total_inner_iterations": jnp.asarray(0, dtype=jnp.int32),
+                "iterations_trajectory": jnp.zeros(steps + 1, dtype=jnp.int32),
+            }
+
+        solver = LevenbergMarquardt(
+            residual_fn,
+            linear_solver="cg",
+            init_damping=lm_set.init_damping,
+            damping_decrease=lm_set.damping_decrease,
+            damping_increase=lm_set.damping_increase,
+            iterative_tol=lm_set.cg_tol_loose,
+            iterative_atol=lm_set.cg_atol,
+            iterative_maxiter=lm_set.cg_maxiter_max,
+            preconditioner_factory=factory,
+            implicit_tol=lm_set.implicit_tol,
+            implicit_maxiter=lm_set.implicit_maxiter,
+            metric=metric,
+            recycle=recycle,
+            geodesic_acceleration=lm_set.cg_geodesic,
+        )
+
+        def run_solve(max_steps):
+            return solver.solve(
+                theta_0,
+                max_steps=max_steps,
+                atol=lm_set.residual_atol,
+                callback=cg_callback,
+                user_state=initial_user_state(max_steps),
+            )
+    else:
+        solver = LevenbergMarquardt(
+            residual_fn,
+            linear_solver=lm_set.linear_solver,
+            init_damping=lm_set.init_damping,
+            damping_decrease=lm_set.damping_decrease,
+            damping_increase=lm_set.damping_increase,
+            dual_solve_dtype=(
+                jnp.float64 if lm_set.linear_solver == "cholesky" else None
+            ),
+            metric=metric,
+        )
+
+        def run_solve(max_steps):
+            return solver.solve(theta_0, max_steps=max_steps, atol=lm_set.residual_atol)
 
     compile_start = time.perf_counter()
-    compile_result = solver.solve(theta_0, max_steps=1, atol=lm_set.residual_atol)
+    compile_result = run_solve(1)
     jax.block_until_ready(compile_result)
     compile_time = time.perf_counter() - compile_start
 
     solve_start = time.perf_counter()
-    result = solver.solve(
-        theta_0,
-        max_steps=lm_set.max_steps,
-        atol=lm_set.residual_atol,
-    )
+    result = run_solve(lm_set.max_steps)
     jax.block_until_ready(result)
     solve_time = time.perf_counter() - solve_start
     theta = result.x
+    final_loss = float(result.info.loss)
+    final_steps = int(result.steps)
+    final_status = int(result.status)
+    if lm_set.linear_solver == "cg":
+        total_inner_iterations = int(result.user_state["total_inner_iterations"])
+        iterations_trajectory = np.asarray(
+            result.user_state["iterations_trajectory"][:final_steps]
+        ).tolist()
+    else:
+        total_inner_iterations = None
+        iterations_trajectory = None
     if data_set.rank_audit:
         theta_flat, unravel_theta = ravel_pytree(theta)
         dae_jacobian = np.asarray(
@@ -578,10 +730,13 @@ def multicountry_trade_growth_kernel_nlls(
         "compile_time": compile_time,
         "solver": "nlls-gram",
         "linear_solver_resolved": lm_set.linear_solver,
+        "total_inner_iterations": total_inner_iterations,
+        "inner_iterations_trajectory": iterations_trajectory,
+        "recycle_rank": lm_set.recycle_rank if lm_set.linear_solver == "cg" else None,
         "metric_eps": eps,
-        "train_loss": float(result.info.loss),
-        "steps": int(result.steps),
-        "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
+        "train_loss": final_loss,
+        "steps": final_steps,
+        "stopping_reason": STATUS_TO_REASON.get(final_status, "unknown"),
         "solution_accepted": not rejection_reasons,
         "rejection_reason": (
             "accepted" if not rejection_reasons else ",".join(rejection_reasons)

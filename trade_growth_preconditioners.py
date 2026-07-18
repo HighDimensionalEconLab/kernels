@@ -274,12 +274,37 @@ def assemble_time_diagonal_blocks(
     return reduced_block, full_block, offset_u, q1, q2, q3
 
 
-def apply_reduced_inverse(eigenvectors, eigenvalues, blocks, damping):
-    """Per-time-block ``(A_tt(0) + damping I)^{-1}`` on time-major ``(n_t, B, k)``."""
+def capacitance_in_eigenbasis(offset_u_eig, inverse_eigenvalues, eps):
+    """``S(lambda) = eps I + U' A(lambda)^{-1} U`` from the eigenbasis offset columns.
 
-    coefficients = jnp.einsum("tab,tak->tbk", eigenvectors, blocks)
-    coefficients = coefficients / (eigenvalues + damping)[:, :, None]
-    return jnp.einsum("tab,tbk->tak", eigenvectors, coefficients)
+    ``offset_u_eig = V' U`` (per block) and ``inverse_eigenvalues = 1/(Lambda+lambda)``
+    are all that is needed -- no per-block ``A^{-1} U`` matmul with ``V``.
+    """
+
+    rank = offset_u_eig.shape[2]
+    weighted = offset_u_eig * inverse_eigenvalues[:, :, None]
+    capacitance = eps * jnp.eye(rank, dtype=offset_u_eig.dtype) + jnp.einsum(
+        "tbk,tbl->kl", offset_u_eig, weighted
+    )
+    return 0.5 * (capacitance + capacitance.T)
+
+
+def woodbury_apply_eigenbasis(
+    eigenvectors, offset_u_eig, inverse_eigenvalues, capacitance_chol, v_blocks
+):
+    """Apply ``(A + (1/eps) U U')^{-1}`` block-wise, fully in the eigenbasis.
+
+    ``coeff_y = inv * (V'v - (V'U) S^{-1} (V'U)' inv V'v)``; two ``B x B`` matvecs
+    (``V'v`` and the final ``V coeff_y``) plus the rank-2N capacitance solve.
+    """
+
+    coefficients = jnp.einsum("tab,ta->tb", eigenvectors, v_blocks)
+    offset_residual = jnp.einsum(
+        "tbk,tb->k", offset_u_eig, inverse_eigenvalues * coefficients
+    )
+    correction = jsp_linalg.cho_solve((capacitance_chol, True), offset_residual)
+    corrected = coefficients - jnp.einsum("tbk,k->tb", offset_u_eig, correction)
+    return jnp.einsum("tab,tb->ta", eigenvectors, inverse_eigenvalues * corrected)
 
 
 @dataclass(frozen=True)
@@ -288,14 +313,14 @@ class TradeGrowthTimeBlockPreconditioner:
 
     ``dual_preconditioner(v, damping)`` and ``implicit_preconditioner(v)`` apply the
     exact ``(A(damping) + (1/eps) U U')^{-1}`` via the frozen block eigendecomposition
-    plus a 2N x 2N Woodbury capacitance solve. All fields are arrays, so the object
-    is a jit-safe closure carrier; ``num_countries``/``num_train_points`` come from
-    array shapes at trace time.
+    plus a 2N x 2N Woodbury capacitance solve, entirely in the block eigenbasis
+    (``offset_u_eig = V' U`` precomputed). All fields are arrays, so the object is a
+    jit-safe pytree; ``num_countries``/``num_train_points`` come from array shapes.
     """
 
     eigenvectors: jax.Array
     eigenvalues: jax.Array
-    offset_u: jax.Array
+    offset_u_eig: jax.Array
     time_permutation: jax.Array
     native_permutation: jax.Array
     eps: float
@@ -309,28 +334,23 @@ class TradeGrowthTimeBlockPreconditioner:
     def num_train_points(self):
         return self.eigenvectors.shape[0]
 
-    @property
-    def offset_rank(self):
-        return self.offset_u.shape[2]
-
     def dual_preconditioner(self, v, damping):
         eps = jnp.asarray(self.eps, dtype=v.dtype)
         n_t = self.num_train_points
         block = self.block_size
-        v_blocks = v[self.time_permutation].reshape(n_t, block, 1)
-        y = apply_reduced_inverse(
-            self.eigenvectors, self.eigenvalues, v_blocks, damping
+        inverse_eigenvalues = 1.0 / (self.eigenvalues + damping)
+        capacitance = capacitance_in_eigenbasis(
+            self.offset_u_eig, inverse_eigenvalues, eps
         )
-        ainv_u = apply_reduced_inverse(
-            self.eigenvectors, self.eigenvalues, self.offset_u, damping
+        capacitance_chol = jnp.linalg.cholesky(capacitance)
+        v_blocks = v[self.time_permutation].reshape(n_t, block)
+        y = woodbury_apply_eigenbasis(
+            self.eigenvectors,
+            self.offset_u_eig,
+            inverse_eigenvalues,
+            capacitance_chol,
+            v_blocks,
         )
-        capacitance = eps * jnp.eye(self.offset_rank, dtype=v.dtype) + jnp.einsum(
-            "tbk,tbl->kl", self.offset_u, ainv_u
-        )
-        capacitance = 0.5 * (capacitance + capacitance.T)
-        offset_y = jnp.einsum("tbk,tbo->k", self.offset_u, y)
-        correction = jsp_linalg.cho_solve(jsp_linalg.cho_factor(capacitance), offset_y)
-        y = y - jnp.einsum("tbk,k->tb", ainv_u, correction)[:, :, None]
         return y.reshape(-1)[self.native_permutation]
 
     def implicit_preconditioner(self, v):
@@ -338,24 +358,29 @@ class TradeGrowthTimeBlockPreconditioner:
             v, jnp.asarray(self.implicit_damping, dtype=v.dtype)
         )
 
-    def assemble_dense_time_blocks(self, full_block, damping):
-        """Time-major dense diagonal blocks ``D_tt + damping I`` for validation."""
-
-        eye = jnp.eye(self.block_size, dtype=full_block.dtype)
-        return full_block + damping * eye
-
 
 jax.tree_util.register_dataclass(
     TradeGrowthTimeBlockPreconditioner,
     data_fields=[
         "eigenvectors",
         "eigenvalues",
-        "offset_u",
+        "offset_u_eig",
         "time_permutation",
         "native_permutation",
     ],
     meta_fields=["eps", "implicit_damping"],
 )
+
+
+def trade_growth_preconditioner_apply(state, v, damping):
+    """``nlls_gram.PreconditionerFactory`` apply: ``state`` is the preconditioner
+    (a ``TradeGrowthTimeBlockPreconditioner``); dispatches to its Woodbury apply.
+
+    Module-level so the ``(prepare, apply)`` factory pair is value-hashable and
+    shares one compiled solve loop.
+    """
+
+    return state.dual_preconditioner(v, damping)
 
 
 def build_trade_growth_time_block_preconditioner(
@@ -383,10 +408,11 @@ def build_trade_growth_time_block_preconditioner(
         theta, K, K_tilde, reference_state, parameters, eps
     )
     eigenvalues, eigenvectors = jnp.linalg.eigh(reduced_block)
+    offset_u_eig = jnp.einsum("tab,tak->tbk", eigenvectors, offset_u)
     preconditioner = TradeGrowthTimeBlockPreconditioner(
         eigenvectors=eigenvectors,
         eigenvalues=eigenvalues,
-        offset_u=offset_u,
+        offset_u_eig=offset_u_eig,
         time_permutation=jnp.asarray(time_permutation, dtype=jnp.int32),
         native_permutation=jnp.asarray(native_permutation, dtype=jnp.int32),
         eps=float(eps),
@@ -442,42 +468,39 @@ class TradeGrowthTimeBlockAlgorithm:
             pieces["eps"],
         )
         eigenvalues, eigenvectors = jnp.linalg.eigh(reduced_block)
+        offset_u_eig = jnp.einsum("tab,tak->tbk", eigenvectors, offset_u)
         damping = jnp.asarray(case.damping, dtype=reduced_block.dtype)
         eps = jnp.asarray(pieces["eps"], dtype=reduced_block.dtype)
-        ainv_u = apply_reduced_inverse(eigenvectors, eigenvalues, offset_u, damping)
-        rank = offset_u.shape[2]
-        capacitance = eps * jnp.eye(rank, dtype=reduced_block.dtype) + jnp.einsum(
-            "tbk,tbl->kl", offset_u, ainv_u
-        )
-        capacitance = 0.5 * (capacitance + capacitance.T)
+        # fixed damping within a solve: specialize the lambda-dependent pieces once.
+        inverse_eigenvalues = 1.0 / (eigenvalues + damping)
+        capacitance = capacitance_in_eigenbasis(offset_u_eig, inverse_eigenvalues, eps)
         return {
             "eigenvectors": eigenvectors,
-            "eigenvalues": eigenvalues,
-            "offset_u": offset_u,
-            "ainv_u": ainv_u,
+            "offset_u_eig": offset_u_eig,
+            "inverse_eigenvalues": inverse_eigenvalues,
             "capacitance_chol": jnp.linalg.cholesky(capacitance),
             "time_permutation": pieces["time_permutation"],
             "native_permutation": pieces["native_permutation"],
-            "damping": damping,
         }
 
     def solve(self, case, prepared, rhs, settings):
         eigenvectors = prepared["eigenvectors"]
-        eigenvalues = prepared["eigenvalues"]
-        offset_u = prepared["offset_u"]
-        ainv_u = prepared["ainv_u"]
+        offset_u_eig = prepared["offset_u_eig"]
+        inverse_eigenvalues = prepared["inverse_eigenvalues"]
         capacitance_chol = prepared["capacitance_chol"]
         time_permutation = prepared["time_permutation"]
         native_permutation = prepared["native_permutation"]
-        damping = prepared["damping"]
         n_t, block = eigenvectors.shape[0], eigenvectors.shape[1]
 
         def msolve(r):
-            r_blocks = r[time_permutation].reshape(n_t, block, 1)
-            y = apply_reduced_inverse(eigenvectors, eigenvalues, r_blocks, damping)
-            offset_y = jnp.einsum("tbk,tbo->k", offset_u, y)
-            correction = jsp_linalg.cho_solve((capacitance_chol, True), offset_y)
-            y = y - jnp.einsum("tbk,k->tb", ainv_u, correction)[:, :, None]
+            r_blocks = r[time_permutation].reshape(n_t, block)
+            y = woodbury_apply_eigenbasis(
+                eigenvectors,
+                offset_u_eig,
+                inverse_eigenvalues,
+                capacitance_chol,
+                r_blocks,
+            )
             return y.reshape(-1)[native_permutation]
 
         matvec = case.dual_matvec_with(case.damping)

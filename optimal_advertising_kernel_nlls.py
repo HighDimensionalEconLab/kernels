@@ -9,8 +9,8 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from nlls_gram import (
+    LevenbergMarquardt,
     LMStatus,
-    UnderdeterminedLevenbergMarquardt,
     metric_from_cholesky,
     metric_from_diagonal,
     metric_with_compute_dtype,
@@ -153,7 +153,7 @@ def optimal_advertising_kernel_nlls(
         jnp.zeros(n_train, dtype=dtype),
         jnp.asarray([mu_0_guess, u_0_guess], dtype=dtype),
     )
-    solver = UnderdeterminedLevenbergMarquardt(
+    solver = LevenbergMarquardt(
         residual_fn,
         linear_solver=lm_set.linear_solver,
         init_damping=lm_set.init_damping,

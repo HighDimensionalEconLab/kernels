@@ -9,8 +9,8 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from nlls_gram import (
+    LevenbergMarquardt,
     LMStatus,
-    UnderdeterminedLevenbergMarquardt,
     metric_from_cholesky,
     metric_from_diagonal,
     metric_with_compute_dtype,
@@ -223,7 +223,7 @@ def open_economy_growth_kernel_nlls(
         jnp.zeros(2, dtype=dtype),
     )
 
-    solver = UnderdeterminedLevenbergMarquardt(
+    solver = LevenbergMarquardt(
         residual_fn,
         linear_solver=lm_set.linear_solver,
         init_damping=lm_set.init_damping,

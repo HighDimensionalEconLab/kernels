@@ -13,9 +13,9 @@ from flax import nnx
 from jax.flatten_util import ravel_pytree
 from nlls_gram import (
     DrawNNXModule,
+    LevenbergMarquardt,
     LMStatus,
     MultiStart,
-    UnderdeterminedLevenbergMarquardt,
 )
 
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
@@ -330,7 +330,7 @@ def neoclassical_growth_nn(
     def residual_fn(theta, data):
         return training_residual(nnx.merge(graphdef, theta), data, p)
 
-    solver = UnderdeterminedLevenbergMarquardt(
+    solver = LevenbergMarquardt(
         residual_fn,
         linear_solver="cholesky",
         init_damping=lm_set.init_damping,

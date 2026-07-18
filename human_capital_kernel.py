@@ -9,7 +9,7 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 import unopy
-from nlls_gram import UnderdeterminedLevenbergMarquardt
+from nlls_gram import LevenbergMarquardt
 
 from kernels import integrated_kernel_matrices
 from rkhs import rkhs_norm_squared
@@ -88,9 +88,7 @@ def human_capital_initial_conditions(
         "log_h": jnp.log(k_0_jax),
         "log_c": jnp.log(c_guess),
     }
-    solver = UnderdeterminedLevenbergMarquardt(
-        human_capital_initial_residual, init_damping=1e-4
-    )
+    solver = LevenbergMarquardt(human_capital_initial_residual, init_damping=1e-4)
     result = solver.solve(params, batch, max_steps=iterations)
 
     h_0 = jnp.exp(result.x["log_h"])

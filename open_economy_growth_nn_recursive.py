@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from flax import nnx
 from jax.flatten_util import ravel_pytree
-from nlls_gram import LMStatus, UnderdeterminedLevenbergMarquardt
+from nlls_gram import LevenbergMarquardt, LMStatus
 from tinydiffeq import (
     RK4,
     ConstantStepSize,
@@ -396,7 +396,7 @@ def open_economy_growth_nn_recursive(
         )
         return residual / jnp.sqrt(residual.size)
 
-    solver = UnderdeterminedLevenbergMarquardt(
+    solver = LevenbergMarquardt(
         residual_fn,
         linear_solver="cholesky",
         init_damping=lm_set.init_damping,

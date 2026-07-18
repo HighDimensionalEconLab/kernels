@@ -14,9 +14,9 @@ from flax import nnx
 from jax.flatten_util import ravel_pytree
 from nlls_gram import (
     DrawNNXModule,
+    LevenbergMarquardt,
     LMStatus,
     MultiStart,
-    UnderdeterminedLevenbergMarquardt,
 )
 from tinydiffeq import cumulative_trapezoid
 
@@ -346,7 +346,7 @@ def neoclassical_growth_nn_integrated(
             nnx.merge(graphdef, theta, fixed_state), data, p, integration_substeps
         )
 
-    solver = UnderdeterminedLevenbergMarquardt(
+    solver = LevenbergMarquardt(
         residual_fn,
         linear_solver="cholesky",
         init_damping=lm_set.init_damping,

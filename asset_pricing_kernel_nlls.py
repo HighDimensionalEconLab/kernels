@@ -9,8 +9,8 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from nlls_gram import (
+    LevenbergMarquardt,
     LMStatus,
-    UnderdeterminedLevenbergMarquardt,
     blockdiag_metric,
     matern_state_space,
     metric_from_cholesky,
@@ -261,7 +261,7 @@ def asset_pricing_kernel_nlls(
             alpha_metric.solve, jnp.ones(n_train), r**2 / eps
         )
 
-    solver = UnderdeterminedLevenbergMarquardt(
+    solver = LevenbergMarquardt(
         residual_fn,
         linear_solver=linear_solver,
         iterative_maxiter=lm_set.iterative_maxiter,

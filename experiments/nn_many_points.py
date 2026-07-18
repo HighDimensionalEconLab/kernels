@@ -14,7 +14,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.flatten_util import ravel_pytree
-from nlls_gram import UnderdeterminedLevenbergMarquardt, nystrom_preconditioner
+from nlls_gram import LevenbergMarquardt, nystrom_preconditioner
 
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from neoclassical_growth_nn import (
@@ -95,7 +95,7 @@ def run(n_points, solver_name, rank=None, width=32, depth=3):
         implicit_preconditioner = pre  # single-arg call applies the undamped inverse
 
     lm = NLLSGramSettings()
-    solver = UnderdeterminedLevenbergMarquardt(
+    solver = LevenbergMarquardt(
         residual_fn,
         linear_solver=solver_name,
         iterative_maxiter=CG_MAXITER,
@@ -202,7 +202,7 @@ def run_refreshed(n_points, rank=256, width=128, depth=4, chunk=25, total=100):
         pre = nystrom_preconditioner(
             dual_matvec, m, min(rank, m), jax.random.PRNGKey(0)
         )
-        solver = UnderdeterminedLevenbergMarquardt(
+        solver = LevenbergMarquardt(
             residual_fn,
             linear_solver="cg",
             iterative_maxiter=CG_MAXITER,

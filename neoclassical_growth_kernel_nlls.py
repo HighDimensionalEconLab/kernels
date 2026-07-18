@@ -10,8 +10,8 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from nlls_gram import (
+    LevenbergMarquardt,
     LMStatus,
-    UnderdeterminedLevenbergMarquardt,
     matern_state_space,
     metric_from_cholesky,
     metric_from_diagonal,
@@ -333,7 +333,7 @@ def neoclassical_growth_kernel_nlls(
                 ]
             )
 
-    solver = UnderdeterminedLevenbergMarquardt(
+    solver = LevenbergMarquardt(
         residual_fn,
         linear_solver=linear_solver,
         iterative_maxiter=lm_set.iterative_maxiter,

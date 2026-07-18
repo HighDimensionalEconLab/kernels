@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from flax import nnx
 from jax.flatten_util import ravel_pytree
-from nlls_gram import LMStatus, UnderdeterminedLevenbergMarquardt
+from nlls_gram import LevenbergMarquardt, LMStatus
 
 from multicountry_growth_kernel_nlls import make_train_grid
 from multicountry_trade_growth import (
@@ -266,7 +266,7 @@ def multicountry_trade_growth_nn(
         )
         return multicountry_trade_dae_residual(values, log_static, parameters)
 
-    solver = UnderdeterminedLevenbergMarquardt(
+    solver = LevenbergMarquardt(
         residual_fn,
         linear_solver="cholesky",
         init_damping=lm_set.init_damping,

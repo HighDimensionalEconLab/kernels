@@ -8,7 +8,7 @@ import jax.scipy as jsp
 import numpy as np
 from jax.flatten_util import ravel_pytree
 from nlls_gram import (
-    UnderdeterminedLevenbergMarquardt,
+    LevenbergMarquardt,
     metric_from_cholesky,
     metric_from_diagonal,
     metric_with_compute_dtype,
@@ -66,7 +66,7 @@ class DifferentiableTradeGrowthParameters:
 
 @dataclass(frozen=True)
 class MulticountryTradeComparativeStatics:
-    solver: UnderdeterminedLevenbergMarquardt
+    solver: LevenbergMarquardt
     theta_0: tuple[jax.Array, ...]
     structural_parameters: dict[str, jax.Array]
     statistic_names: tuple[str, ...]
@@ -467,7 +467,7 @@ def build_multicountry_trade_comparative_statics(
         jnp.zeros((num_countries, n_train), dtype=dtype),
         initial_algebraic,
     )
-    solver = UnderdeterminedLevenbergMarquardt(
+    solver = LevenbergMarquardt(
         residual_fn,
         linear_solver=lm_set.linear_solver,
         init_damping=lm_set.init_damping,

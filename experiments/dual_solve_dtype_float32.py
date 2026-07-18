@@ -23,7 +23,7 @@ import time
 import jax
 import jax.numpy as jnp
 from nlls_gram import (
-    UnderdeterminedLevenbergMarquardt,
+    LevenbergMarquardt,
     blockdiag_metric,
     metric_from_cholesky,
     metric_from_diagonal,
@@ -70,7 +70,7 @@ def build(dtype, dual_solve_dtype=None):
             (metric_from_diagonal(jnp.full(1, eps, dtype)), 1),
         ]
     )
-    solver = UnderdeterminedLevenbergMarquardt(
+    solver = LevenbergMarquardt(
         residual_fn,
         linear_solver="cholesky",
         init_damping=1e-8,

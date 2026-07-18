@@ -7,7 +7,7 @@ import pathlib
 import time
 import timeit
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import jax
 import jax.numpy as jnp
@@ -81,7 +81,7 @@ class LinearizedLLSCase:
     metric_norm: Callable
     jacobian_matvec: Callable
     jacobian_transpose_matvec: Callable
-    dual_matvec: Callable
+    dual_matvec_base: Callable
     recover_step: Callable
 
     @property
@@ -102,9 +102,21 @@ class LinearizedLLSCase:
     def to_native_order(self, value):
         return value[self.residual_native_permutation]
 
-    def dense_dual_matrix(self):
+    def dual_matvec_with(self, damping):
+        damping_value = jnp.asarray(damping, dtype=self.residual.dtype)
+
+        def matvec(value):
+            return self.dual_matvec_base(value) + damping_value * value
+
+        return matvec
+
+    def dual_matvec(self, value):
+        return self.dual_matvec_with(self.damping)(value)
+
+    def dense_dual_matrix(self, damping=None):
+        active_damping = self.damping if damping is None else damping
         basis = jnp.eye(self.residual_size, dtype=self.residual.dtype)
-        return self.dual_matvec(basis)
+        return self.dual_matvec_with(active_damping)(basis)
 
     def dense_jacobian(self):
         basis = jnp.eye(self.residual_size, dtype=self.residual.dtype)
@@ -183,12 +195,8 @@ def random_trade_growth_inputs(settings: RandomCaseSettings):
         intermediate_productivities=host_tuple(intermediate_productivities),
         consumption_productivities=host_tuple(consumption_productivities),
         investment_productivities=host_tuple(investment_productivities),
-        consumption_value_added_shares=host_tuple(
-            consumption_value_added_shares
-        ),
-        intermediate_value_added_shares=host_tuple(
-            intermediate_value_added_shares
-        ),
+        consumption_value_added_shares=host_tuple(consumption_value_added_shares),
+        intermediate_value_added_shares=host_tuple(intermediate_value_added_shares),
         investment_value_added_shares=host_tuple(investment_value_added_shares),
         trade_costs=tuple(host_tuple(row) for row in np.asarray(trade_costs)),
     )
@@ -206,7 +214,9 @@ def residual_time_permutations(num_countries: int, num_train_points: int):
                 + time_index * num_countries
             )
             time_major.extend(range(start, start + num_countries))
-        static_start = dynamic_size + time_index * len(STATIC_BLOCK_NAMES) * num_countries
+        static_start = (
+            dynamic_size + time_index * len(STATIC_BLOCK_NAMES) * num_countries
+        )
         time_major.extend(
             range(
                 static_start,
@@ -296,9 +306,9 @@ def build_linearized_lls_case(settings: RandomCaseSettings):
     metric_norm = nonlinear_problem.solver.metric_norm
     damping = jnp.asarray(settings.damping, dtype=residual.dtype)
 
-    def dual_matvec(value):
+    def dual_matvec_base(value):
         transposed = jacobian_transpose_matvec(value)
-        return jacobian_matvec(metric_solve(transposed)) + damping * value
+        return jacobian_matvec(metric_solve(transposed))
 
     def recover_step(dual_solution):
         return -metric_solve(jacobian_transpose_matvec(dual_solution))
@@ -311,9 +321,7 @@ def build_linearized_lls_case(settings: RandomCaseSettings):
     q_offset_start = rate_start + num_train_points
     marginal_wealth_offset_start = q_offset_start + num_countries
     static_start = marginal_wealth_offset_start + num_countries
-    time_major, native = residual_time_permutations(
-        num_countries, num_train_points
-    )
+    time_major, native = residual_time_permutations(num_countries, num_train_points)
     name = (
         f"N{num_countries}_nt{num_train_points}_seed{settings.seed}"
         f"_lm{settings.linearization_steps}"
@@ -344,7 +352,7 @@ def build_linearized_lls_case(settings: RandomCaseSettings):
         metric_norm=metric_norm,
         jacobian_matvec=jacobian_matvec,
         jacobian_transpose_matvec=jacobian_transpose_matvec,
-        dual_matvec=dual_matvec,
+        dual_matvec_base=dual_matvec_base,
         recover_step=recover_step,
     )
 
@@ -357,7 +365,8 @@ def dense_cholesky(case, rhs, _):
     return solution, jnp.asarray(1, dtype=jnp.int32), finite
 
 
-def pcg_identity(case, rhs, settings):
+def cg_identity(case, rhs, settings):
+    matvec = case.dual_matvec_with(case.damping)
     rhs_norm = jnp.linalg.norm(rhs)
     tolerance = jnp.maximum(
         jnp.asarray(settings.iterative_atol, dtype=rhs.dtype),
@@ -389,7 +398,7 @@ def pcg_identity(case, rhs, settings):
 
     def iteration_step(state):
         iteration, solution, residual, direction, inner, _, finite = state
-        operator_direction = case.dual_matvec(direction)
+        operator_direction = matvec(direction)
         denominator = direction @ operator_direction
         valid = (
             finite
@@ -456,16 +465,14 @@ class PreparedDenseCholesky:
 
     def solve(self, case, factor, rhs, settings):
         intermediate = jsp.linalg.solve_triangular(factor, rhs, lower=True)
-        solution = jsp.linalg.solve_triangular(
-            factor.T, intermediate, lower=False
-        )
+        solution = jsp.linalg.solve_triangular(factor.T, intermediate, lower=False)
         finite = jnp.all(jnp.isfinite(solution))
         return solution, jnp.asarray(1, dtype=jnp.int32), finite
 
 
 BUILTIN_ALGORITHMS = {
     "dense_cholesky": PreparedDenseCholesky(),
-    "pcg_identity": FunctionAlgorithm(pcg_identity),
+    "cg_identity": FunctionAlgorithm(cg_identity),
 }
 
 
@@ -488,14 +495,76 @@ def resolve_algorithm(spec: str):
 
 
 def dense_reference(case: LinearizedLLSCase):
-    solve = jax.jit(
-        lambda rhs: dense_cholesky(case, rhs, LinearSolveSettings())[0]
-    )
+    matrix = case.dense_dual_matrix()
+    jax.block_until_ready(matrix)
+    # at damping=0 the undamped dual J P J' can be singular / indefinite;
+    # guard the Cholesky reference and fall back to a least-squares solve.
+    min_eigenvalue = float(jnp.linalg.eigvalsh(matrix)[0])
+    definite = min_eigenvalue > 0.0
     start = time.perf_counter()
-    solution = solve(case.residual)
+    if definite:
+        factor = jsp.linalg.cho_factor(matrix)
+        solution = jsp.linalg.cho_solve(factor, case.residual)
+    else:
+        solution = jnp.linalg.lstsq(matrix, case.residual)[0]
     jax.block_until_ready(solution)
     elapsed = time.perf_counter() - start
-    return solution, case.recover_step(solution), elapsed
+    if not definite:
+        print(
+            f"  dense reference {case.name} at damping={float(case.damping):.1e} "
+            f"is indefinite/singular (min eigenvalue {min_eigenvalue:.2e}); "
+            f"using least-squares solve",
+            flush=True,
+        )
+    return solution, case.recover_step(solution), elapsed, min_eigenvalue
+
+
+def write_matrix_dump(case, dampings, dump_dir, max_residuals):
+    dump_path = pathlib.Path(dump_dir)
+    if case.residual_size > max_residuals:
+        print(
+            f"  skipping matrix dump {case.name}: residual size "
+            f"{case.residual_size} exceeds matrix_dump_max_residuals="
+            f"{max_residuals}",
+            flush=True,
+        )
+        return None
+    dump_path.mkdir(parents=True, exist_ok=True)
+    damping_values = np.asarray([float(d) for d in dampings], dtype=np.float64)
+    dual_matrices = np.stack(
+        [np.asarray(case.dense_dual_matrix(damping=d)) for d in damping_values]
+    )
+    layout = case.unknown_layout
+    file_path = dump_path / f"{case.name}_matrices.npz"
+    np.savez_compressed(
+        file_path,
+        dampings=damping_values,
+        dual_matrices=dual_matrices,
+        jacobian=np.asarray(case.dense_jacobian()),
+        residual=np.asarray(case.residual),
+        time_permutation=np.asarray(case.residual_time_permutation),
+        native_permutation=np.asarray(case.residual_native_permutation),
+        residual_time_block_size=np.asarray(case.residual_time_block_size),
+        num_countries=np.asarray(case.settings.num_countries),
+        num_train_points=np.asarray(case.settings.train_points),
+        seed=np.asarray(case.settings.seed),
+        linearization_steps=np.asarray(case.settings.linearization_steps),
+        metric_eps=np.asarray(case.settings.metric_eps),
+        dynamic_block_size=np.asarray(layout.dynamic_block_size),
+        dynamic_function_count=np.asarray(layout.dynamic_function_count),
+        rate_start=np.asarray(layout.rate_start),
+        q_offset_start=np.asarray(layout.q_offset_start),
+        marginal_wealth_offset_start=np.asarray(layout.marginal_wealth_offset_start),
+        static_start=np.asarray(layout.static_start),
+        total_size=np.asarray(layout.total_size),
+    )
+    print(
+        f"  wrote matrix dump {file_path} "
+        f"(dual {tuple(dual_matrices.shape)}, "
+        f"jacobian {case.residual_size}x{case.parameter_size})",
+        flush=True,
+    )
+    return file_path
 
 
 def benchmark_algorithm(
@@ -553,8 +622,10 @@ def benchmark_algorithm(
     if reference is None:
         relative_dual_error = None
         relative_step_error = None
+        reference_min_eigenvalue = None
     else:
-        reference_dual, reference_step, _ = reference
+        reference_dual, reference_step = reference[0], reference[1]
+        reference_min_eigenvalue = float(reference[3])
         dual_scale = jnp.maximum(
             jnp.linalg.norm(reference_dual),
             jnp.finfo(reference_dual.dtype).tiny,
@@ -566,9 +637,7 @@ def benchmark_algorithm(
         relative_dual_error = float(
             jnp.linalg.norm(dual_solution - reference_dual) / dual_scale
         )
-        relative_step_error = float(
-            jnp.linalg.norm(step - reference_step) / step_scale
-        )
+        relative_step_error = float(jnp.linalg.norm(step - reference_step) / step_scale)
     jax.block_until_ready(
         (
             relative_linear_residual,
@@ -606,6 +675,7 @@ def benchmark_algorithm(
         "metric_step_norm": float(metric_step_norm),
         "relative_dual_error": relative_dual_error,
         "relative_step_error": relative_step_error,
+        "reference_min_eigenvalue": reference_min_eigenvalue,
         "reference_available": reference is not None,
         "backend": jax.default_backend(),
         "dtype": str(case.residual.dtype),
@@ -616,19 +686,22 @@ def run(
     country_counts: tuple[int, ...] = (2, 3),
     train_point_counts: tuple[int, ...] = (5,),
     seeds: tuple[int, ...] = (0,),
-    algorithms: tuple[str, ...] = ("dense_cholesky", "pcg_identity"),
+    algorithms: tuple[str, ...] = ("dense_cholesky", "cg_identity"),
     train_T: float = 20.0,
     heterogeneity: float = 0.06,
     initial_capital_dispersion: float = 0.12,
     aggregate_asset_scale: float = 0.10,
     metric_eps: float = 1e-7,
     damping: float = 1e-6,
+    dampings: tuple[float, ...] | None = None,
     linearization_steps: int = 0,
     iterative_tol: float = 1e-10,
     iterative_atol: float = 0.0,
     iterative_maxiter: int = 500,
     timing_repeats: int = 3,
     dense_reference_max_residuals: int = 3000,
+    matrix_dump_dir: str | None = None,
+    matrix_dump_max_residuals: int = 3000,
     output_path: str | None = None,
 ):
     solve_settings = LinearSolveSettings(
@@ -636,6 +709,7 @@ def run(
         iterative_atol=iterative_atol,
         iterative_maxiter=iterative_maxiter,
     )
+    damping_sweep = tuple(dampings) if dampings is not None else (damping,)
     results = []
     for num_countries in country_counts:
         for train_points in train_point_counts:
@@ -656,36 +730,50 @@ def run(
                 case = build_linearized_lls_case(case_settings)
                 jax.block_until_ready(case.residual)
                 build_seconds = time.perf_counter() - build_start
-                reference = None
-                if case.residual_size <= dense_reference_max_residuals:
-                    reference = dense_reference(case)
-                for algorithm_spec in algorithms:
-                    if (
-                        algorithm_spec == "dense_cholesky"
-                        and case.residual_size > dense_reference_max_residuals
-                    ):
-                        continue
-                    result = benchmark_algorithm(
+                if matrix_dump_dir is not None:
+                    write_matrix_dump(
                         case,
-                        algorithm_spec,
-                        solve_settings,
-                        reference=reference,
-                        timing_repeats=timing_repeats,
+                        damping_sweep,
+                        matrix_dump_dir,
+                        matrix_dump_max_residuals,
                     )
-                    result["case_build_seconds"] = build_seconds
-                    result["reference_compile_seconds"] = (
-                        None if reference is None else reference[2]
+                for damping_value in damping_sweep:
+                    damped_case = replace(
+                        case,
+                        damping=jnp.asarray(damping_value, dtype=case.residual.dtype),
                     )
-                    results.append(result)
-                    print(
-                        f"{case.name:24} {algorithm_spec:24} "
-                        f"m={case.residual_size:5d} n={case.parameter_size:5d} "
-                        f"iters={result['iterations']:4d} "
-                        f"relres={result['relative_linear_residual']:.2e} "
-                        f"step_err={result['relative_step_error']} "
-                        f"solve={result['median_seconds']:.4f}s",
-                        flush=True,
-                    )
+                    reference = None
+                    if damped_case.residual_size <= dense_reference_max_residuals:
+                        reference = dense_reference(damped_case)
+                    for algorithm_spec in algorithms:
+                        if (
+                            algorithm_spec == "dense_cholesky"
+                            and damped_case.residual_size
+                            > dense_reference_max_residuals
+                        ):
+                            continue
+                        result = benchmark_algorithm(
+                            damped_case,
+                            algorithm_spec,
+                            solve_settings,
+                            reference=reference,
+                            timing_repeats=timing_repeats,
+                        )
+                        result["case_build_seconds"] = build_seconds
+                        result["reference_compile_seconds"] = (
+                            None if reference is None else reference[2]
+                        )
+                        results.append(result)
+                        print(
+                            f"{damped_case.name:20} {algorithm_spec:16} "
+                            f"lam={float(damped_case.damping):.1e} "
+                            f"m={damped_case.residual_size:5d} "
+                            f"iters={result['iterations']:4d} "
+                            f"relres={result['relative_linear_residual']:.2e} "
+                            f"step_err={result['relative_step_error']} "
+                            f"solve={result['median_seconds']:.4f}s",
+                            flush=True,
+                        )
     if output_path is not None:
         path = pathlib.Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)

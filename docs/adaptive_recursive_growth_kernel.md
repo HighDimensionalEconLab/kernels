@@ -64,6 +64,8 @@ large steps. The controller only limits step-size growth to a factor of three
 per accepted step. This avoids an uninformative cold-start Jacobian when the
 initial stationary trial policy has essentially zero primal integration error,
 without forcing redundant points into the long-run tail.
+The automatic training-attempt ceilings are 64 for Tsit5 and 128 for Rodas5P;
+an explicit `adaptive_steps` value overrides either default.
 
 During an LM step, the basis centers and Cholesky factor are fixed solver data,
 but the current policy is integrated inside the residual. The accepted states

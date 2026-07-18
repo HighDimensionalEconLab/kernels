@@ -17,6 +17,7 @@ uv run python -m replication.optimal_advertising_kernel --output_dir "$output_di
 uv run python -m replication.human_capital_kernel --output_dir "$output_dir"
 uv run python -m replication.neoclassical_growth_nn_recursive --output_dir "$output_dir"
 uv run python -m replication.kernel_vs_nn --output_dir "$output_dir"
+uv run python -m replication.neoclassical_growth_method_comparison --output_dir "$output_dir"
 
 echo "==> figures -> $output_dir/"
 uv run python -m replication.neoclassical_growth_kernel_figures --output_dir "$output_dir"

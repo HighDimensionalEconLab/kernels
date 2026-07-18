@@ -68,7 +68,7 @@ class DataSettings:
     ode_solver: Literal["tsit5", "rodas5p"] = "tsit5"
     # At most adaptive_steps attempts; accepted advances plus the initial state
     # form the active prefix, while rejected attempts are omitted.
-    adaptive_steps: int = 64
+    adaptive_steps: int | None = None
     dt: float = 0.25
     # A gradual cold-start ramp keeps the differentiated rollout informative;
     # it does not cap the large timesteps selected near the steady state.
@@ -225,6 +225,12 @@ def ode_components(data_set):
     raise ValueError(f"unknown ode_solver: {data_set.ode_solver!r}")
 
 
+def training_attempt_budget(data_set):
+    if data_set.adaptive_steps is not None:
+        return data_set.adaptive_steps
+    return 64 if data_set.ode_solver == "tsit5" else 128
+
+
 def rollout(beta, args, p, kernel_set, data_set, T, budget, save_at):
     ode_solver, controller = ode_components(data_set)
     initial_state = jnp.log(jnp.stack([p.z_0, p.k_0]))
@@ -315,7 +321,8 @@ def neoclassical_growth_kernel_recursive_adaptive(
     )
 
     initial_log_state = jnp.log(jnp.asarray([z_0, k_0], dtype=metric_dtype))
-    capacity = data_set.adaptive_steps + 1
+    train_attempt_budget = training_attempt_budget(data_set)
+    capacity = train_attempt_budget + 1
     provisional_centers = jnp.broadcast_to(initial_log_state, (capacity, 2))
     provisional_active = jnp.arange(capacity) == 0
     _, provisional_cholesky = gram_factor(
@@ -335,7 +342,7 @@ def neoclassical_growth_kernel_recursive_adaptive(
         kernel_set,
         data_set,
         data_set.train_T,
-        data_set.adaptive_steps,
+        train_attempt_budget,
         SaveAt(steps=True),
     )
     if not bool(initial_solution.ok):
@@ -358,7 +365,7 @@ def neoclassical_growth_kernel_recursive_adaptive(
             kernel_set,
             data_set,
             data_set.train_T,
-            data_set.adaptive_steps,
+            train_attempt_budget,
             SaveAt(steps=True),
         )
         log_states = jnp.where(solution.ok, solution.xs, jnp.inf)
@@ -399,7 +406,7 @@ def neoclassical_growth_kernel_recursive_adaptive(
             kernel_set,
             data_set,
             data_set.train_T,
-            data_set.adaptive_steps,
+            train_attempt_budget,
             SaveAt(steps=True),
         )
         proposed = solution.xs.astype(metric_dtype)
@@ -606,7 +613,7 @@ def neoclassical_growth_kernel_recursive_adaptive(
         kernel_set,
         data_set,
         data_set.train_T,
-        data_set.adaptive_steps,
+        train_attempt_budget,
         SaveAt(steps=True),
     )
     final_active = final_center_solution.accepted
@@ -737,7 +744,7 @@ def neoclassical_growth_kernel_recursive_adaptive(
         "total_params": int(result.x.size),
         "num_collocation_states": int(jnp.sum(result.args.active)),
         "collocation_capacity": capacity,
-        "integrator_attempt_budget": data_set.adaptive_steps,
+        "integrator_attempt_budget": train_attempt_budget,
         "min_accepted_time_step": min_accepted_time_step,
         "max_accepted_time_step": max_accepted_time_step,
         "min_collocation_states": int(result.user_state["min_num_points"]),

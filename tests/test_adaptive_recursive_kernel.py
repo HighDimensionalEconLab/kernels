@@ -16,6 +16,7 @@ from neoclassical_growth_kernel_recursive_adaptive import (
     neoclassical_growth_kernel_recursive_adaptive,
     ode_components,
     rollout,
+    training_attempt_budget,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -96,6 +97,11 @@ class AdaptiveRecursiveKernelTests(unittest.TestCase):
         self.assertGreater(float(jnp.max(jnp.abs(tangent))), 1e-3)
 
     def test_fixed_solver_is_not_available(self):
+        self.assertEqual(training_attempt_budget(DataSettings()), 64)
+        self.assertEqual(
+            training_attempt_budget(DataSettings(ode_solver="rodas5p")),
+            128,
+        )
         with self.assertRaisesRegex(ValueError, "unknown ode_solver"):
             ode_components(DataSettings(ode_solver="rk4"))
 

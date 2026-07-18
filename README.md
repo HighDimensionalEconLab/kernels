@@ -66,6 +66,7 @@ Paper artifacts produced in `.results/`:
 | `neoclassical_human_capital.pdf` | `human_capital_kernel` |
 | `kernel_vs_nn_errors.pdf`, `kernel_vs_nn_basin.pdf` | `kernel_vs_nn` |
 | `neoclassical_growth_recursive_policy.pdf`, `neoclassical_growth_recursive_butterfly.pdf` | `neoclassical_growth_nn_recursive` |
+| `neoclassical_growth_method_comparison_appendix.md`, `neoclassical_growth_method_comparison_appendix.tex` | `neoclassical_growth_method_comparison` |
 | `all_results.json` | `collect_json` |
 
 Note: the paper's `phase_diagram_mu_k.pdf` (referenced only by an appendix that
@@ -169,6 +170,11 @@ dataclasses.
 - `replication/multicountry_trade_growth_comparison.py` — matched CPU comparison
   storing pointwise ODE, algebraic, and full-DAE residual RMS norms and NN-to-kernel
   norm ratios over the common year-100 quality grid.
+- `replication/neoclassical_growth_method_comparison.py` — deterministic CPU
+  comparison of the sequence-space kernel and NN, fixed-RK4 recursive NN, and
+  Adaptive Tsit5 recursive NN and kernel. It regenerates Parquet data plus
+  Markdown and LaTeX appendix tables; all quality statistics use only
+  `t <= 100`, and the transversality check is ex post through `t = 200`.
 - The fixed-grid recursive NN exposes only RK4 and Euler; its adaptive
   counterpart exposes only Tsit5 and Rodas5P. All come from
   [tinydiffeq](https://github.com/HighDimensionalEconLab/tinydiffeq) and are

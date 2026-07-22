@@ -74,6 +74,7 @@ class SolverSettings:
     damping_increase: float = 4.0
     max_steps: int = 80
     residual_atol: float = 2e-8
+    linear_solver: str = "auto"
     metric_eps: float = 1e-7
 
 
@@ -278,6 +279,7 @@ def multicountry_growth_kernel(
     )
     solver = LevenbergMarquardt(
         residual_fn,
+        linear_solver=lm_set.linear_solver,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
@@ -494,7 +496,7 @@ def multicountry_growth_kernel(
         "solve_time": solve_time,
         "wall_time": solve_time,
         "solver": "nlls-gram",
-        "linear_solver": "auto",
+        "linear_solver": lm_set.linear_solver,
         "metric_eps": eps,
         "train_loss": float(result.info.loss),
         "steps": int(result.steps),

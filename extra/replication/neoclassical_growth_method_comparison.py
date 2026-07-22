@@ -1,0 +1,342 @@
+from __future__ import annotations
+
+import os
+import pathlib
+
+os.environ["JAX_PLATFORMS"] = "cpu"
+
+import jax
+import jax.numpy as jnp
+import jsonargparse
+import numpy as np
+import pandas as pd
+
+import extra.neoclassical_growth_kernel_recursive_adaptive as neoclassical_growth_kernel_recursive_adaptive
+import extra.neoclassical_growth_nn_recursive_adaptive as neoclassical_growth_nn_recursive_adaptive
+import neoclassical_growth_kernel
+import neoclassical_growth_nn
+from replication.utilities import (
+    enable_compilation_cache,
+    save_experiment,
+    write_summary,
+)
+
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
+
+enable_compilation_cache()
+
+PREFIX = "neoclassical_growth_method_comparison"
+QUALITY_T = 100.0
+TVC_T = 200.0
+TEST_POINTS = 401
+BENCHMARK_POINTS = 800
+TIMING_REPETITIONS = 5
+
+
+def path_tvc(k, c, t, rho_hat=0.11, sigma_crra=1.0):
+    """Evaluate a solved path's TVC; never use it in training or acceptance."""
+    log_tvc = -rho_hat * t - sigma_crra * jnp.log(c) + jnp.log(k)
+    finite = bool(jnp.all(jnp.isfinite(log_tvc)))
+    maximum = float(jnp.max(log_tvc))
+    terminal = float(log_tvc[-1])
+    tail_change = float(log_tvc[-1] - log_tvc[0])
+    return {
+        "max_log_tvc_residual": maximum,
+        "terminal_log_tvc_residual": terminal,
+        "log_tvc_tail_change": tail_change,
+        "transversality_ok": bool(finite and maximum < 0.0 and tail_change < 0.0),
+    }
+
+
+def sequence_kernel_tvc(model):
+    t = jnp.linspace(QUALITY_T, TVC_T, 101, dtype=jnp.float64)
+    k, c = model(t)
+    return path_tvc(k, c, t)
+
+
+def sequence_nn_tvc(model):
+    t = jnp.linspace(QUALITY_T, TVC_T, 101, dtype=jnp.float64)
+    values = jax.vmap(model)(t)
+    return path_tvc(values[:, 0], values[:, 1], t)
+
+
+def comparison_row(
+    method,
+    approximation_space,
+    point_rule,
+    results,
+    *,
+    collocation_points,
+    parameter_count,
+    solve_time_key,
+    capital_error_key,
+    consumption_error_key,
+    tvc=None,
+):
+    tvc = results if tvc is None else tvc
+    max_log_tvc = float(tvc["max_log_tvc_residual"])
+    row = {
+        "method": method,
+        "approximation_space": approximation_space,
+        "point_rule": point_rule,
+        "quality_T": QUALITY_T,
+        "collocation_points": int(collocation_points),
+        "parameter_count": int(parameter_count),
+        "post_compile_seconds": float(results[solve_time_key]),
+        "lm_steps": int(results["steps"]),
+        "capital_mean_relative_error": float(results[capital_error_key]),
+        "consumption_mean_relative_error": float(results[consumption_error_key]),
+        "euler_mean_absolute_residual": float(results["test_euler_mean_abs"]),
+        "max_log_tvc_residual": max_log_tvc,
+        "terminal_log_tvc_residual": float(
+            tvc.get("terminal_log_tvc_residual", max_log_tvc)
+        ),
+        "log_tvc_tail_change": float(tvc.get("log_tvc_tail_change", float("nan"))),
+        "transversality_ok": bool(tvc["transversality_ok"]),
+        "solution_accepted": bool(results["solution_accepted"]),
+    }
+    if not row["solution_accepted"]:
+        raise RuntimeError(f"{method} did not pass its finite-horizon acceptance gates")
+    return row
+
+
+def repeated_solve(solve, time_key):
+    outputs = [solve() for _ in range(TIMING_REPETITIONS)]
+    results, extra = outputs[-1]
+    results[time_key] = float(
+        np.median([candidate[0][time_key] for candidate in outputs])
+    )
+    return results, extra
+
+
+def write_appendix_tables(results_df, output_dir):
+    """Write Markdown and LaTeX views from the saved comparison rows."""
+    out = pathlib.Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    rows = list(results_df.to_dict(orient="records"))
+    for row in rows:
+        row["tvc_label"] = "Pass" if row["transversality_ok"] else "Fail"
+
+    header = (
+        "| Method | Points | Parameters | Post-compile solve (s) | "
+        "Mean capital rel. error | Mean consumption rel. error | "
+        "Euler MAE | Ex-post TVC |\n"
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | :---: |"
+    )
+    markdown_rows = [
+        "| {method} | {collocation_points:d} | {parameter_count:d} | "
+        "{post_compile_seconds:.3f} | {capital_mean_relative_error:.3e} | "
+        "{consumption_mean_relative_error:.3e} | "
+        "{euler_mean_absolute_residual:.3e} | {tvc_label} |".format(**row)
+        for row in rows
+    ]
+    note = (
+        "\n\nAll errors and residuals are evaluated on a 401-point grid over "
+        "$t \\in [0,100]$. Timings are cached CPU float64 solves. "
+        "The TVC is checked only ex post through $t=200$."
+    )
+    (out / f"{PREFIX}_appendix.md").write_text(
+        "\n".join([header, *markdown_rows]) + note + "\n"
+    )
+
+    latex_rows = [
+        "{method} & {collocation_points:d} & {parameter_count:d} & "
+        "{post_compile_seconds:.3f} & {capital_mean_relative_error:.3e} & "
+        "{consumption_mean_relative_error:.3e} & "
+        "{euler_mean_absolute_residual:.3e} & {tvc_label} \\\\".format(**row)
+        for row in rows
+    ]
+    latex = "\n".join(
+        [
+            "% Generated by replication/neoclassical_growth_method_comparison.py",
+            r"\begin{table}",
+            r"\centering",
+            r"\caption{Neoclassical-growth solution methods. Quality statistics use "
+            r"a 401-point grid on $t \in [0,100]$; timings are medians of five "
+            r"cached CPU float64 solves. The TVC is evaluated only ex post "
+            r"through $t=200$.}",
+            r"\label{tab:neoclassical-growth-method-comparison}",
+            r"\begin{tabular}{lrrrrrrc}",
+            r"\toprule",
+            r"Method & Points & Params. & Time (s) & Mean $|e_k|$ & Mean $|e_c|$ "
+            r"& Euler MAE & TVC \\",
+            r"\midrule",
+            *latex_rows,
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"\end{table}",
+            "",
+        ]
+    )
+    (out / f"{PREFIX}_appendix.tex").write_text(latex)
+
+
+def run(
+    output_dir: str = ".results",
+    use_float64: bool = True,
+    verbose: bool = False,
+):
+    seed = 0
+    common = dict(use_float64=use_float64, verbose=verbose)
+    rows = []
+    hyperparameters = {
+        "quality_grid": {"T": QUALITY_T, "points": TEST_POINTS},
+        "ex_post_tvc_T": TVC_T,
+        "timing": "median of five cached solves",
+        "methods": {},
+    }
+
+    print("sequence-space kernel")
+    sequence_kernel_results, sequence_kernel_extra = repeated_solve(
+        lambda: neoclassical_growth_kernel.neoclassical_growth_kernel(
+            use_float64=use_float64,
+            data_set=neoclassical_growth_kernel.DataSettings(
+                train_T=QUALITY_T,
+                train_points=101,
+                test_T=QUALITY_T,
+                test_points=TEST_POINTS,
+                benchmark_T=TVC_T,
+                benchmark_points=BENCHMARK_POINTS,
+            ),
+        ),
+        "solve_time",
+    )
+    sequence_kernel_tvc_results = sequence_kernel_tvc(sequence_kernel_extra["model"])
+    rows.append(
+        comparison_row(
+            "Sequence-space kernel",
+            "time",
+            "Uniform time grid",
+            sequence_kernel_results,
+            collocation_points=sequence_kernel_results["num_train_points"],
+            parameter_count=3 * sequence_kernel_results["num_train_points"] + 2,
+            solve_time_key="solve_time",
+            capital_error_key="k_rel_error_mean",
+            consumption_error_key="c_rel_error_mean",
+            tvc=sequence_kernel_tvc_results,
+        )
+    )
+    hyperparameters["methods"]["sequence_space_kernel"] = sequence_kernel_extra[
+        "hyperparameters"
+    ]
+
+    print("sequence-space NN")
+    sequence_nn_results, sequence_nn_extra = repeated_solve(
+        lambda: neoclassical_growth_nn.neoclassical_growth_nn(
+            seed=seed,
+            **common,
+            data_set=neoclassical_growth_nn.DataSettings(
+                train_T=QUALITY_T,
+                train_points=101,
+                test_T=QUALITY_T,
+                test_points=TEST_POINTS,
+                test_tvc_T=TVC_T,
+                benchmark_T=TVC_T,
+                benchmark_points=BENCHMARK_POINTS,
+            ),
+        ),
+        "train_time",
+    )
+    sequence_nn_tvc_results = sequence_nn_tvc(sequence_nn_extra["model"])
+    rows.append(
+        comparison_row(
+            "Sequence-space NN",
+            "time",
+            "Uniform time grid",
+            sequence_nn_results,
+            collocation_points=sequence_nn_results["num_train_points"],
+            parameter_count=sequence_nn_results["total_params"],
+            solve_time_key="train_time",
+            capital_error_key="test_mean_abs_k_rel_error",
+            consumption_error_key="test_mean_abs_c_rel_error",
+            tvc=sequence_nn_tvc_results,
+        )
+    )
+    hyperparameters["methods"]["sequence_space_nn"] = sequence_nn_extra[
+        "hyperparameters"
+    ]
+
+    print("recursive NN, Adaptive Tsit5")
+    adaptive_nn_results, adaptive_nn_extra = repeated_solve(
+        lambda: (
+            neoclassical_growth_nn_recursive_adaptive.neoclassical_growth_nn_recursive_adaptive(
+                seed=seed,
+                **common,
+                data_set=neoclassical_growth_nn_recursive_adaptive.DataSettings(
+                    ode_solver="tsit5"
+                ),
+            )
+        ),
+        "train_time",
+    )
+    rows.append(
+        comparison_row(
+            "Recursive NN, Adaptive Tsit5",
+            "state",
+            "Adaptive Tsit5",
+            adaptive_nn_results,
+            collocation_points=adaptive_nn_results["num_collocation_states"],
+            parameter_count=adaptive_nn_results["total_params"],
+            solve_time_key="train_time",
+            capital_error_key="test_mean_abs_k_rel_error",
+            consumption_error_key="test_mean_abs_c_rel_error",
+        )
+    )
+    hyperparameters["methods"]["recursive_nn_adaptive_tsit5"] = adaptive_nn_extra[
+        "hyperparameters"
+    ]
+
+    print("recursive kernel, Adaptive Tsit5")
+    adaptive_kernel_results, adaptive_kernel_extra = repeated_solve(
+        lambda: (
+            neoclassical_growth_kernel_recursive_adaptive.neoclassical_growth_kernel_recursive_adaptive(
+                use_float64=use_float64,
+                verbose=verbose,
+                data_set=neoclassical_growth_kernel_recursive_adaptive.DataSettings(
+                    ode_solver="tsit5"
+                ),
+            )
+        ),
+        "train_time",
+    )
+    rows.append(
+        comparison_row(
+            "Recursive kernel, Adaptive Tsit5",
+            "state",
+            "Adaptive Tsit5",
+            adaptive_kernel_results,
+            collocation_points=adaptive_kernel_results["num_collocation_states"],
+            parameter_count=adaptive_kernel_results["total_params"],
+            solve_time_key="train_time",
+            capital_error_key="test_mean_abs_k_rel_error",
+            consumption_error_key="test_mean_abs_c_rel_error",
+        )
+    )
+    hyperparameters["methods"]["recursive_kernel_adaptive_tsit5"] = (
+        adaptive_kernel_extra["hyperparameters"]
+    )
+
+    results_df = pd.DataFrame(rows)
+    save_experiment(
+        "baseline",
+        results_df,
+        {},
+        output_dir,
+        {
+            "backend": jax.default_backend(),
+            "device": jax.devices()[0].device_kind,
+            "residual_dtype": "float64" if use_float64 else "float32",
+            "metric_dtype": "float64",
+            "seed": seed,
+        },
+        prefix=PREFIX,
+        hyperparameters=hyperparameters,
+    )
+    write_appendix_tables(results_df, output_dir)
+    write_summary(output_dir, PREFIX)
+    print(results_df.to_string(index=False))
+
+
+if __name__ == "__main__":
+    jsonargparse.CLI(run)

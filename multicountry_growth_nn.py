@@ -1,0 +1,662 @@
+from __future__ import annotations
+
+import math
+import time
+from dataclasses import asdict, dataclass
+
+import jax
+import jax.numpy as jnp
+import jsonargparse
+import numpy as np
+import pandas as pd
+from flax import nnx, struct
+from jax.flatten_util import ravel_pytree
+from nlls_gram import DrawNNXModule, LevenbergMarquardt, LMStatus, MultiStart
+
+from multicountry_growth import (
+    MulticountryParameters,
+    multicountry_output_scale,
+    multicountry_path_values,
+    multicountry_reference_marginal_wealth,
+    multicountry_steady_state,
+    multicountry_tail_diagnostics,
+    multicountry_tvc_diagnostics,
+)
+from multicountry_growth_benchmark import multicountry_growth_benchmark
+from multicountry_growth_kernel import make_train_grid
+from utilities import ACTIVATIONS, unit_softplus
+
+if __name__ == "__main__":
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
+
+TRAIN_RESIDUAL_TOL = 1e-5
+VALIDATION_RESIDUAL_TOL = 5e-3
+ACCOUNTING_RESIDUAL_TOL = 5e-5
+INITIAL_CLEARING_TOL = 1e-10
+BENCHMARK_MATCH_TOL = 2e-3
+STATUS_TO_REASON = {
+    LMStatus.CONVERGED: "early_stopping_met",
+    LMStatus.NONFINITE: "loss_divergence",
+    LMStatus.MAX_STEPS: "max_steps",
+}
+
+
+@dataclass(frozen=True)
+class DataSettings:
+    train_T: float = 160.0
+    train_points: int = 96
+    train_points_list: list[float] | None = None
+    sampling: str = "front_loaded"
+    dense_T: float = 40.0
+    tail_points: int = 15
+    test_T: float = 50.0
+    test_points: int = 201
+    validation_points: int = 401
+    benchmark_T: float = 200.0
+    benchmark_points: int = 241
+
+
+@dataclass(frozen=True)
+class SequentialNNSettings:
+    width: int = 32
+    depth: int = 3
+    hidden_activation: str = "tanh"
+    input_scale: float = 40.0
+    head_scale: float = 1e-3
+
+
+@dataclass(frozen=True)
+class SolverSettings:
+    init_damping: float = 1e-5
+    damping_decrease: float = 0.5
+    damping_increase: float = 2.0
+    geodesic_acceleration: bool = True
+    geodesic_acceptance_ratio: float = 0.8
+    linear_solver: str = "auto"
+
+
+@dataclass(frozen=True)
+class StoppingCriteria:
+    max_steps: int = 250
+    train_loss_threshold: float = 1e-12
+    num_attempts: int = 3
+
+
+@struct.dataclass
+class ResidualArgs:
+    graphdef: nnx.GraphDef
+    train_data: jax.Array
+    k_0: jax.Array
+    a_0: jax.Array
+    q_reference: jax.Array
+    marginal_wealth_reference: jax.Array
+    output_scale: jax.Array
+    parameters: MulticountryParameters = struct.field(pytree_node=False)
+
+
+class MulticountryGrowthNN(nnx.Module):
+    def __init__(
+        self,
+        num_countries: int,
+        settings: SequentialNNSettings,
+        *,
+        dtype,
+        rngs: nnx.Rngs,
+    ):
+        self.num_countries = num_countries
+        self.hidden_activation = ACTIVATIONS[settings.hidden_activation]
+        self.input_scale = settings.input_scale
+        self.layers = nnx.List(
+            [nnx.Linear(1, settings.width, dtype=dtype, param_dtype=dtype, rngs=rngs)]
+        )
+        for _ in range(settings.depth - 1):
+            self.layers.append(
+                nnx.Linear(
+                    settings.width,
+                    settings.width,
+                    dtype=dtype,
+                    param_dtype=dtype,
+                    rngs=rngs,
+                )
+            )
+        self.head = nnx.Linear(
+            settings.width,
+            4 * num_countries,
+            kernel_init=nnx.initializers.normal(settings.head_scale),
+            dtype=dtype,
+            param_dtype=dtype,
+            rngs=rngs,
+        )
+
+    def __call__(self, t):
+        h = jnp.atleast_1d(t / self.input_scale)
+        for layer in self.layers:
+            h = self.hidden_activation(layer(h))
+        return self.head(h)
+
+
+def policy_coordinates(
+    policy,
+    points,
+    k_0,
+    a_0,
+    q_reference,
+    marginal_wealth_reference,
+    output_scale,
+    parameters,
+):
+    def decoded_path(t):
+        raw = policy(t).reshape(4, policy.num_countries)
+        time_coordinate = t / policy.input_scale
+        return (
+            k_0 * jnp.exp(time_coordinate * raw[0]),
+            a_0 + output_scale * time_coordinate * raw[1],
+            q_reference * unit_softplus(raw[2]),
+            marginal_wealth_reference * unit_softplus(raw[3]),
+        )
+
+    values, derivatives = jax.vmap(
+        lambda t: jax.jvp(decoded_path, (t,), (jnp.ones_like(t),))
+    )(points)
+    k, a, tobin_q, marginal_wealth = values
+    dk_dt, da_dt, dq_dt, dm_dt = derivatives
+    dlog_marginal_wealth_dt = dm_dt / marginal_wealth
+    interest_rate = parameters.rho - jnp.mean(dlog_marginal_wealth_dt, axis=1)
+    return {
+        "k": k,
+        "a": a,
+        "tobin_q": tobin_q,
+        "marginal_wealth": marginal_wealth,
+        "interest_rate": interest_rate,
+        "dlog_k_dt": dk_dt / k,
+        "da_dt": da_dt,
+        "dlog_q_dt": dq_dt / tobin_q,
+        "dlog_marginal_wealth_dt": dlog_marginal_wealth_dt,
+    }
+
+
+def evaluate_policy(
+    policy,
+    points,
+    k_0,
+    a_0,
+    q_reference,
+    marginal_wealth_reference,
+    output_scale,
+    parameters,
+):
+    coordinates = policy_coordinates(
+        policy,
+        points,
+        k_0,
+        a_0,
+        q_reference,
+        marginal_wealth_reference,
+        output_scale,
+        parameters,
+    )
+    return multicountry_path_values(**coordinates, parameters=parameters)
+
+
+def residual_fn(theta, args):
+    policy = nnx.merge(args.graphdef, theta)
+    values = evaluate_policy(
+        policy,
+        args.train_data,
+        args.k_0,
+        args.a_0,
+        args.q_reference,
+        args.marginal_wealth_reference,
+        args.output_scale,
+        args.parameters,
+    )
+    global_constraints = jnp.concatenate(
+        [
+            values["resource"][:1],
+            values["resource_drift"][:1],
+            values["asset_clearing"][1:],
+        ]
+    )
+    residual = jnp.concatenate(
+        [
+            values["capital"].reshape(-1),
+            values["assets"].reshape(-1),
+            values["tobin_q"].reshape(-1),
+            values["marginal_wealth_euler"].reshape(-1),
+            global_constraints,
+        ]
+    )
+    return residual / jnp.sqrt(residual.size)
+
+
+def multicountry_growth_nn(
+    k_0: tuple[float, ...] | None = None,
+    a_0: tuple[float, ...] | None = None,
+    parameters: MulticountryParameters = MulticountryParameters(),
+    seed: int = 0,
+    use_float64: bool = True,
+    data_set: DataSettings = DataSettings(),
+    nn_set: SequentialNNSettings = SequentialNNSettings(),
+    lm_set: SolverSettings = SolverSettings(),
+    stop_set: StoppingCriteria = StoppingCriteria(),
+    verbose: bool = True,
+):
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    dtype = jnp.float64 if use_float64 else jnp.float32
+    num_countries = parameters.num_countries
+    if k_0 is None:
+        k_0 = (1.0,) * num_countries
+    if a_0 is None:
+        a_0 = (0.0,) * num_countries
+    if len(k_0) != num_countries or any(value <= 0.0 for value in k_0):
+        raise ValueError("k_0 must contain one positive capital stock per country")
+    if len(a_0) != num_countries:
+        raise ValueError("a_0 must contain one NFA position per country")
+    if nn_set.width <= 0 or nn_set.depth <= 0:
+        raise ValueError("NN width and depth must be positive")
+    if nn_set.input_scale <= 0.0 or nn_set.head_scale <= 0.0:
+        raise ValueError("NN scales must be positive")
+    if stop_set.train_loss_threshold <= 0.0 or stop_set.num_attempts < 1:
+        raise ValueError("stopping threshold and attempt count must be positive")
+
+    train_data = make_train_grid(data_set).astype(dtype)
+    if data_set.test_T > float(train_data[-1]):
+        raise ValueError("test_T must not exceed the training horizon")
+    if data_set.benchmark_T < max(data_set.test_T, float(train_data[-1])):
+        raise ValueError("benchmark_T must cover the train and test horizons")
+    test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
+    validation_data = jnp.linspace(
+        0.0,
+        float(train_data[-1]),
+        data_set.validation_points,
+        dtype=dtype,
+    )
+    benchmark_grid = np.linspace(
+        0.0,
+        data_set.benchmark_T,
+        data_set.benchmark_points,
+    )
+    n_train = len(train_data)
+    k_0_array = jnp.asarray(k_0, dtype=dtype)
+    a_0_array = jnp.asarray(a_0, dtype=dtype)
+    populations = jnp.asarray(parameters.populations, dtype=dtype)
+    output_scale = multicountry_output_scale(parameters, dtype)
+    initial_asset_gap = jnp.sum(populations * a_0_array) / output_scale
+    if abs(float(initial_asset_gap)) > INITIAL_CLEARING_TOL:
+        raise ValueError("population-weighted initial NFA positions must sum to zero")
+    q_reference = jnp.full(
+        num_countries,
+        1.0 / parameters.installation_elasticity,
+        dtype=dtype,
+    )
+    marginal_wealth_reference = multicountry_reference_marginal_wealth(
+        parameters,
+        dtype,
+    )
+
+    graphdef, _ = nnx.split(
+        MulticountryGrowthNN(
+            num_countries,
+            nn_set,
+            dtype=dtype,
+            rngs=nnx.Rngs(0),
+        ),
+        nnx.Param,
+    )
+    init_key, multi_start_key = jax.random.split(jax.random.key(seed))
+    model = MulticountryGrowthNN(
+        num_countries,
+        nn_set,
+        dtype=dtype,
+        rngs=nnx.Rngs(init_key),
+    )
+    _, theta_0 = nnx.split(model, nnx.Param)
+    residual_args = ResidualArgs(
+        graphdef=graphdef,
+        train_data=train_data,
+        k_0=k_0_array,
+        a_0=a_0_array,
+        q_reference=q_reference,
+        marginal_wealth_reference=marginal_wealth_reference,
+        output_scale=output_scale,
+        parameters=parameters,
+    )
+    solver = LevenbergMarquardt(
+        residual_fn,
+        init_damping=lm_set.init_damping,
+        damping_decrease=lm_set.damping_decrease,
+        damping_increase=lm_set.damping_increase,
+        geodesic_acceleration=lm_set.geodesic_acceleration,
+        geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
+        linear_solver=lm_set.linear_solver,
+        linear_solve_dtype=jnp.float64,
+    )
+    draw = DrawNNXModule(
+        MulticountryGrowthNN,
+        num_countries,
+        nn_set,
+        dtype=dtype,
+    )
+    train_start = time.perf_counter()
+    result = solver.solve(
+        theta_0,
+        residual_args,
+        max_steps=stop_set.max_steps,
+        atol=math.sqrt(stop_set.train_loss_threshold),
+        max_steps_is_success=False,
+        multi_start=MultiStart(
+            key=multi_start_key,
+            num_starts=stop_set.num_attempts,
+            draw=draw,
+        ),
+    )
+    jax.block_until_ready(result)
+    train_time = time.perf_counter() - train_start
+    policy = nnx.merge(graphdef, result.x)
+
+    def evaluate_grid(points):
+        return evaluate_policy(
+            policy,
+            points,
+            k_0_array,
+            a_0_array,
+            q_reference,
+            marginal_wealth_reference,
+            output_scale,
+            parameters,
+        )
+
+    train_eval = evaluate_grid(train_data)
+    validation_eval = evaluate_grid(validation_data)
+    test_eval = evaluate_grid(test_data)
+    jax.block_until_ready((train_eval, validation_eval, test_eval))
+    residual_names = (
+        "capital",
+        "assets",
+        "tobin_q",
+        "marginal_wealth_euler",
+    )
+    train_global_constraints = jnp.concatenate(
+        [
+            train_eval["resource"][:1],
+            train_eval["resource_drift"][:1],
+            train_eval["asset_clearing"][1:],
+        ]
+    )
+    max_train_residual = max(
+        max(float(jnp.max(jnp.abs(train_eval[name]))) for name in residual_names),
+        float(jnp.max(jnp.abs(train_global_constraints))),
+    )
+    max_validation_residual = max(
+        float(jnp.max(jnp.abs(validation_eval[name])))
+        for name in (*residual_names, "resource")
+    )
+    max_asset_clearing_residual = float(
+        jnp.max(jnp.abs(validation_eval["asset_clearing"]))
+    )
+    max_rate_consistency_residual = float(
+        jnp.max(jnp.abs(validation_eval["interest_rate_country_gap"]))
+    )
+    finite_positive = bool(
+        all(
+            jnp.all(jnp.isfinite(values[name])) and jnp.min(values[name]) > 0.0
+            for values in (train_eval, validation_eval, test_eval)
+            for name in ("k", "q", "c", "x", "marginal_wealth")
+        )
+        and all(
+            jnp.all(jnp.isfinite(values[name]))
+            for values in (train_eval, validation_eval, test_eval)
+            for name in ("a", "current_account", "interest_rate")
+        )
+    )
+    diagnostic_reasons = []
+    if not finite_positive:
+        diagnostic_reasons.append("nonfinite_or_nonpositive")
+    if max_train_residual > TRAIN_RESIDUAL_TOL:
+        diagnostic_reasons.append("train_residual")
+    if max_validation_residual > VALIDATION_RESIDUAL_TOL:
+        diagnostic_reasons.append("validation_residual")
+    if max_asset_clearing_residual > ACCOUNTING_RESIDUAL_TOL:
+        diagnostic_reasons.append("asset_clearing")
+    if max_rate_consistency_residual > ACCOUNTING_RESIDUAL_TOL:
+        diagnostic_reasons.append("rate_consistency")
+    solution_accepted = bool(result.multi_start.accepted)
+    equation_diagnostics_pass = not diagnostic_reasons
+
+    benchmark_available = num_countries == 2
+    benchmark_values = None
+    benchmark_diagnostics = None
+    if benchmark_available:
+        benchmark, benchmark_diagnostics = multicountry_growth_benchmark(
+            k_0,
+            (a_0[0],),
+            benchmark_grid,
+            parameters=parameters,
+        )
+        benchmark_values = benchmark(np.asarray(test_data))
+        k_relative_error = jnp.abs(
+            test_eval["k"] - jnp.asarray(benchmark_values["k"])
+        ) / jnp.asarray(benchmark_values["k"])
+        q_relative_error = jnp.abs(
+            test_eval["q"] - jnp.asarray(benchmark_values["q"])
+        ) / jnp.asarray(benchmark_values["q"])
+        c_relative_error = jnp.abs(
+            test_eval["c"] - jnp.asarray(benchmark_values["c"])
+        ) / jnp.asarray(benchmark_values["c"])
+        x_relative_error = jnp.abs(
+            test_eval["x"] - jnp.asarray(benchmark_values["x"])
+        ) / jnp.asarray(benchmark_values["x"])
+        a_scaled_error = (
+            jnp.abs(test_eval["a"] - jnp.asarray(benchmark_values["a"])) / output_scale
+        )
+        interest_rate_scaled_error = (
+            jnp.abs(
+                test_eval["interest_rate"]
+                - jnp.asarray(benchmark_values["interest_rate"])
+            )
+            / parameters.rho
+        )
+        max_benchmark_error = max(
+            float(jnp.max(k_relative_error)),
+            float(jnp.max(q_relative_error)),
+            float(jnp.max(c_relative_error)),
+            float(jnp.max(x_relative_error)),
+            float(jnp.max(a_scaled_error)),
+            float(jnp.max(interest_rate_scaled_error)),
+        )
+        benchmark_match = max_benchmark_error <= BENCHMARK_MATCH_TOL
+    else:
+        k_relative_error = jnp.asarray(jnp.nan)
+        q_relative_error = jnp.asarray(jnp.nan)
+        c_relative_error = jnp.asarray(jnp.nan)
+        x_relative_error = jnp.asarray(jnp.nan)
+        a_scaled_error = jnp.asarray(jnp.nan)
+        interest_rate_scaled_error = jnp.asarray(jnp.nan)
+        max_benchmark_error = float("nan")
+        benchmark_match = False
+
+    resolved_steady = multicountry_steady_state(
+        validation_eval["marginal_wealth"][-1],
+        parameters,
+    )
+    tail = multicountry_tail_diagnostics(validation_eval, parameters)
+    tvc = multicountry_tvc_diagnostics(validation_data, validation_eval, parameters)
+    relative_weights = test_eval["relative_welfare_weights"][0]
+    log_relative_weights = jnp.log(relative_weights)
+    theta_initial, _ = ravel_pytree(theta_0)
+    theta_final, _ = ravel_pytree(result.x)
+    residual_count = (4 * num_countries + 1) * n_train + 1
+    results = {
+        **asdict(parameters),
+        "num_countries": num_countries,
+        "seed": seed,
+        "residual_dtype": str(jnp.dtype(dtype)),
+        "linear_solve_dtype": "float64",
+        "solver": "nlls-gram",
+        "linear_solver": lm_set.linear_solver,
+        "ansatz": "reduced_sequential_time_level_nn",
+        "selection": "minimum_identity_metric_parameter_step",
+        "metric": "identity_parameter_metric",
+        "initialization": "steady_reference_near_zero_head",
+        "global_closure": "explicit_assets_and_index_consistent_clearing",
+        "terminal_residual_count": 0,
+        "benchmark_training_residual_count": 0,
+        "tvc_training_residual_count": 0,
+        "dae_residual_count": residual_count,
+        "dynamic_network_output_count": 4 * num_countries,
+        "calculated_algebraic_value_count": 2 * num_countries + 1,
+        "unknown_count": int(theta_final.size),
+        "total_params": int(theta_final.size),
+        "parameter_norm_initial": float(jnp.linalg.norm(theta_initial)),
+        "parameter_norm_final": float(jnp.linalg.norm(theta_final)),
+        "parameter_step_norm": float(jnp.linalg.norm(theta_final - theta_initial)),
+        "nn_width": nn_set.width,
+        "nn_depth": nn_set.depth,
+        "train_T": float(train_data[-1]),
+        "num_train_points": n_train,
+        "test_T": data_set.test_T,
+        "train_loss": float(result.info.loss),
+        "max_train_residual": max_train_residual,
+        "max_validation_residual": max_validation_residual,
+        "max_asset_clearing_residual": max_asset_clearing_residual,
+        "max_rate_consistency_residual": max_rate_consistency_residual,
+        "initial_resource_residual": float(train_eval["resource"][0]),
+        "initial_resource_drift_residual": float(train_eval["resource_drift"][0]),
+        "benchmark_available": benchmark_available,
+        "benchmark_match": benchmark_match,
+        "max_benchmark_error": max_benchmark_error,
+        "k_relative_error_max": float(jnp.max(k_relative_error)),
+        "q_relative_error_max": float(jnp.max(q_relative_error)),
+        "c_relative_error_max": float(jnp.max(c_relative_error)),
+        "x_relative_error_max": float(jnp.max(x_relative_error)),
+        "a_scaled_error_max": float(jnp.max(a_scaled_error)),
+        "interest_rate_scaled_error_max": float(jnp.max(interest_rate_scaled_error)),
+        "ex_post_k_log_gap": float(jnp.max(tail["k_log_gap"])),
+        "ex_post_q_log_gap": float(jnp.max(tail["q_log_gap"])),
+        "ex_post_asset_scaled_gap": float(jnp.max(tail["asset_scaled_gap"])),
+        "ex_post_interest_rate_gap": float(tail["interest_rate_gap"]),
+        "ex_post_discounted_assets": float(jnp.max(tvc["discounted_assets"])),
+        "ex_post_asset_tvc": float(jnp.max(tvc["asset_tvc"])),
+        "ex_post_capital_tvc": float(jnp.max(tvc["capital_tvc"])),
+        "steps": int(result.steps),
+        "attempt": int(result.multi_start.attempt) + 1,
+        "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
+        "train_time": train_time,
+        "train_time_success": train_time if solution_accepted else np.nan,
+        "wall_time": train_time,
+        "solution_accepted": solution_accepted,
+        "rejection_reason": (
+            "accepted"
+            if solution_accepted
+            else STATUS_TO_REASON.get(int(result.status), "training_failure")
+        ),
+        "equation_diagnostics_pass": equation_diagnostics_pass,
+        "equation_diagnostic_reason": (
+            "passed" if equation_diagnostics_pass else ",".join(diagnostic_reasons)
+        ),
+    }
+    for country in range(num_countries):
+        suffix = country + 1
+        results.update(
+            {
+                f"population_{suffix}": parameters.populations[country],
+                f"productivity_{suffix}": parameters.productivities[country],
+                f"k_0_{suffix}": k_0[country],
+                f"a_0_{suffix}": a_0[country],
+                f"a_0_{suffix}_over_output_ss": a_0[country] / float(output_scale),
+                f"relative_weight_{suffix}": float(relative_weights[country]),
+                f"log_relative_weight_{suffix}": float(log_relative_weights[country]),
+                f"terminal_a_{suffix}": float(validation_eval["a"][-1, country]),
+                f"long_run_a_{suffix}": float(resolved_steady["a"][country]),
+            }
+        )
+    if benchmark_available:
+        results.update(
+            {
+                "log_relative_weight": float(log_relative_weights[1]),
+                "relative_weight": float(relative_weights[1]),
+                "benchmark_log_relative_weight": benchmark_diagnostics[
+                    "log_relative_weight"
+                ],
+                "benchmark_boundary_residual": benchmark_diagnostics[
+                    "boundary_residual_max"
+                ],
+                "stable_roots": benchmark_diagnostics["stable_roots"],
+                "unstable_roots": benchmark_diagnostics["unstable_roots"],
+                "center_roots": benchmark_diagnostics["center_roots"],
+                "minimum_rate_denominator": benchmark_diagnostics[
+                    "minimum_rate_denominator"
+                ],
+            }
+        )
+
+    def frame(values, points):
+        data = {
+            "t": np.asarray(points),
+            "interest_rate": np.asarray(values["interest_rate"]),
+            "resource_residual": np.asarray(values["resource"]),
+            "resource_drift_residual": np.asarray(values["resource_drift"]),
+            "asset_clearing_residual": np.asarray(values["asset_clearing"]),
+            "interest_rate_country_gap": np.asarray(
+                jnp.max(jnp.abs(values["interest_rate_country_gap"]), axis=1)
+            ),
+        }
+        for country in range(num_countries):
+            suffix = country + 1
+            for name in (
+                "k",
+                "a",
+                "q",
+                "c",
+                "x",
+                "output",
+                "resources",
+                "current_account",
+                "capital",
+                "assets",
+                "tobin_q",
+                "marginal_wealth",
+                "marginal_wealth_euler",
+                "relative_welfare_weights",
+            ):
+                data[f"{name}_{suffix}"] = np.asarray(values[name][:, country])
+        return pd.DataFrame(data)
+
+    train_df = frame(train_eval, train_data)
+    validation_df = frame(validation_eval, validation_data)
+    test_df = frame(test_eval, test_data)
+    if benchmark_available:
+        for country in range(num_countries):
+            suffix = country + 1
+            for name in ("k", "a", "q", "c", "x", "output", "current_account"):
+                test_df[f"{name}_{suffix}_benchmark"] = benchmark_values[name][
+                    :, country
+                ]
+        test_df["interest_rate_benchmark"] = benchmark_values["interest_rate"]
+
+    hyperparameters = {
+        "parameters": asdict(parameters),
+        "data_set": asdict(data_set),
+        "nn_set": asdict(nn_set),
+        "lm_set": asdict(lm_set),
+        "stop_set": asdict(stop_set),
+        "initial_conditions": {"k_0": list(k_0), "a_0": list(a_0)},
+    }
+    if verbose:
+        print("\nFinal results:")
+        for name, value in results.items():
+            print(f"  {name}: {value}")
+
+    return results, {
+        "model": policy,
+        "train_df": train_df,
+        "validation_df": validation_df,
+        "test_df": test_df,
+        "hyperparameters": hyperparameters,
+    }
+
+
+if __name__ == "__main__":
+    jsonargparse.CLI(multicountry_growth_nn)

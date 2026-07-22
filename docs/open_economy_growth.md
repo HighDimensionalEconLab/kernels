@@ -643,9 +643,9 @@ surplus services the associated interest bill.
 ## NLLS-gram and integrated-kernel mapping
 
 The implementation should follow the integrated-path design in
-[neoclassical_growth_kernel_nlls.py](../neoclassical_growth_kernel_nlls.py) and the
+[neoclassical_growth_kernel.py](../neoclassical_growth_kernel.py) and the
 multi-state residual organization in
-[human_capital_kernel_nlls.py](../human_capital_kernel_nlls.py).
+[human_capital_kernel.py](../human_capital_kernel.py).
 
 ### Path parameterization
 
@@ -762,7 +762,7 @@ that their cost can dominate.
 ### Sequential state-space neural mapping
 
 The NN implementation follows the best-performing recursive formulation in
-[neoclassical_growth_nn_recursive_i.py](../neoclassical_growth_nn_recursive_i.py): it
+[neoclassical_growth_nn_recursive.py](../neoclassical_growth_nn_recursive.py): it
 learns level policies over the endogenous state rather than paths over time or time
 derivatives. A 32-by-3 GELU trunk maps \(\log(k/k_0)\) to two outputs. The first is
 positive investment expenditure through `unit_softplus`; the second is the signed
@@ -917,8 +917,10 @@ The example is ready only when all of the following hold.
 
 ### Performance
 
-- Report compile time separately from warm solve time.
-- Reuse compiled solves across the NFA and shock grids.
+- Enable the persistent JAX compilation cache before the first solve.
+- Report deterministic timings as medians of five cached solves and NN timings as
+  accepted-seed medians from 100 initializations.
+- Reuse compiled solves across seeds and the NFA and shock grids.
 - Compare dense Cholesky, dense QR, and eligible structured/matrix-free paths at the same
   collocation points.
 - Record NLLS steps, accepted/rejected steps, residual evaluations, and peak problem size.
@@ -933,7 +935,7 @@ Implemented:
 
 - open_economy_growth.py for pure equations, parameters, steady state, and diagnostics;
 - open_economy_growth_benchmark.py for solve_bvp and semi-analytic checks;
-- open_economy_growth_kernel_nlls.py for the integrated-kernel solve;
+- open_economy_growth_kernel.py for the integrated-kernel solve;
 - open_economy_growth_nn_recursive.py for the sequential state-space NN solve;
 - replication/open_economy_growth_kernel.py for cached kernel runs;
 - replication/open_economy_growth_kernel_figures.py for kernel transition plots;
@@ -973,8 +975,13 @@ permanent external-position effect.
 
 Implemented in [multicountry_growth.py](../multicountry_growth.py),
 [multicountry_growth_benchmark.py](../multicountry_growth_benchmark.py), and
-[multicountry_growth_kernel_nlls.py](../multicountry_growth_kernel_nlls.py), with cached
-experiments and figures under `replication/multicountry_growth_kernel*.py`.
+[multicountry_growth_kernel.py](../multicountry_growth_kernel.py). The fully
+unreduced optional RKHS DAE is in
+[extra/multicountry_growth_kernel_dae.py](../extra/multicountry_growth_kernel_dae.py).
+Cached paper experiments for the reduced sequential NN are in
+[multicountry_growth_nn.py](../multicountry_growth_nn.py) and
+`replication/multicountry_growth_nn.py`; figures for the compact kernel
+formulation remain under `replication/multicountry_growth_kernel*.py`.
 
 Replace the fixed interest rate with an endogenous world rate \(r(t)\). To make country
 size explicit, define \(k_i,a_i,c_i,x_i\) per worker and let fixed population be \(L_i\).
@@ -1108,6 +1115,81 @@ consistency and world clearing. No terminal projection, lifetime budget, TVC, no
 condition, debt target, or steady-state target enters the residual, initialization,
 stopping rule, or acceptance rule.
 
+#### Reduced sequential NN
+
+[`multicountry_growth_nn.py`](../multicountry_growth_nn.py) uses the same reduced
+economic equations and global index-consistent rows as the compact kernel solver. A
+time-input MLP learns only the four country path blocks
+
+\[
+(\log k_i,a_i,\log q_i,\log m_i).
+\]
+
+The capital and asset parameterizations impose their supplied initial values exactly.
+Consumption and investment are calculated inside each residual evaluation from (27)
+and the investment FOC, and the common rate is calculated from the mean
+marginal-wealth growth rate. The remaining country marginal-wealth equations require
+every country to imply that same rate. Thus the NN has no separate consumption,
+investment, or rate output heads.
+
+The training residual contains the same \((4N+1)n+1\) equations as the reduced kernel
+formulation. It is scaled by the square root of that count, so the reported loss is the
+mean squared equation residual. The NN is selected only by its architecture,
+initialization, and the identity metric on its parameters. Neither the independent BVP
+nor any terminal, TVC, no-Ponzi, debt, or steady-state target enters training or solver
+acceptance; all remain ex-post diagnostics.
+
+#### Fully unreduced RKHS DAE
+
+The compact solver above substitutes the two pointwise country FOCs and represents the
+common rate by algebraic values at the collocation nodes. The separate
+[`extra/multicountry_growth_kernel_dae.py`](../extra/multicountry_growth_kernel_dae.py)
+keeps all three as kernel functions. In addition to the four dynamic paths per country,
+it has positive paths for consumption, the investment rate \(s_i=x_i/k_i\), and
+the common interest rate. The country algebraic residuals remain explicit:
+
+\[
+m_i c_i^\gamma-1=0,
+\qquad
+\chi\lambda q_i s_i^{\lambda-1}-1=0.
+\]
+
+Thus neither \(c_i=m_i^{-1/\gamma}\) nor \(s_i=(\chi\lambda q_i)^{1/(1-\lambda)}\)
+is substituted into the solved equations. The global rows use the same nonredundant
+index-consistent construction as above, but differentiate the independent control
+paths directly:
+
+\[
+\dot G
+=\sum_iL_i\left[
+ (f_{k,i}k_i-x_i)\frac{\dot k_i}{k_i}
+ -x_i\frac{\dot s_i}{s_i}
+ -c_i\frac{\dot c_i}{c_i}
+\right].
+\]
+
+With \(n\) collocation points, this formulation has \(6N+1\) RKHS paths and
+\(4N+1\) free initial offsets for \((q_i,m_i,c_i,s_i,r)\). Its residual count is
+
+\[
+4Nn+2Nn+(n+1)=(6N+1)n+1,
+\]
+
+while its unknown count is \((6N+1)n+4N+1\). The metric is
+
+\[
+\operatorname{blockdiag}
+\left(\underbrace{K,\ldots,K}_{6N+1\text{ times}},0_{4N+1}\right)
++\epsilon I.
+\]
+
+In particular, the country algebraic paths and common rate receive the same kernel
+metric as the dynamic paths; only their finite initial offsets receive no additional
+kernel block. The unknown-residual difference is \(4N\). The released NLLS solver uses
+its default linear-solver selection and stops on the scaled training loss. The shooting
+solution, dense-grid equation checks, and transversality quantities remain ex-post
+diagnostics and do not enter the solve or its acceptance rule.
+
 The independent BVP remains a deliberately separate two-country validator. It may use
 index reduction and relative weights internally because it is not the system being
 scaled or the source of kernel selection. The production DAE and its notation contain no
@@ -1127,7 +1209,7 @@ The final model keeps the same dynamic shell but replaces one-good production wi
 implicit static trade equilibrium at each time.
 
 The mechanics are implemented separately in
-[multicountry_trade_growth.py](../multicountry_trade_growth.py). The existing
+[`trade_growth/model.py`](../trade_growth/model.py). The existing
 [multicountry_growth.py](../multicountry_growth.py) and its kernel solver remain the
 standalone one-good example; the trade extension does not mutate or specialize them.
 

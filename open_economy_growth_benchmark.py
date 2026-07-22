@@ -3,7 +3,11 @@ from __future__ import annotations
 import numpy as np
 from scipy.integrate import quad, solve_bvp, solve_ivp
 
-from open_economy_growth import ModelParameters
+from open_economy_growth import (
+    ModelParameters,
+    consumption_annuity_rate,
+    consumption_growth_rate,
+)
 
 
 def open_economy_growth_benchmark(
@@ -35,6 +39,10 @@ def open_economy_growth_benchmark(
     interest_rate = parameters.interest_rate
     installation_elasticity = parameters.installation_elasticity
     installation_efficiency = parameters.installation_efficiency
+    consumption_growth = consumption_growth_rate(parameters)
+    annuity_rate = consumption_annuity_rate(parameters)
+    if annuity_rate <= 0.0:
+        raise ValueError("r_star - consumption growth must be positive")
 
     q_ss = 1.0 / installation_elasticity
     marginal_product_ss = delta + interest_rate / installation_elasticity
@@ -111,19 +119,21 @@ def open_economy_growth_benchmark(
     tail_resources = g_ss / interest_rate + resource_loading * h_terminal / (
         interest_rate - stable_root
     )
-    c = interest_rate * (
+    c_0 = annuity_rate * (
         a_0
         + discounted_resources
         + np.exp(-interest_rate * terminal_time) * tail_resources
     )
-    if c <= 0.0:
-        raise ValueError("initial assets and transition resources imply nonpositive c")
+    if c_0 <= 0.0:
+        raise ValueError(
+            "initial assets and transition resources imply nonpositive c_0"
+        )
 
-    a_terminal = (c - g_ss) / interest_rate - resource_loading * h_terminal / (
-        interest_rate - stable_root
-    )
+    c_terminal = c_0 * np.exp(consumption_growth * terminal_time)
+    a_terminal = c_terminal / annuity_rate - tail_resources
 
     def asset_ode(t, asset):
+        c = c_0 * np.exp(consumption_growth * t)
         return interest_rate * asset + float(domestic_resources(t)) - c
 
     asset_solution = solve_ivp(
@@ -150,31 +160,27 @@ def open_economy_growth_benchmark(
         s = investment_rate(tobin_q)
         x = k * s
         output = z * k**alpha
+        c = c_0 * np.exp(consumption_growth * points)
         current_account = interest_rate * a + output - c - x
         return {
             "t": points,
             "k": k,
             "a": a,
             "q": tobin_q,
-            "c": np.full_like(points, c),
+            "c": c,
             "x": x,
             "output": output,
             "current_account": current_account,
         }
 
     diagnostics = {
-        "c": c,
+        "c_0": c_0,
+        "consumption_growth": consumption_growth,
         "a_terminal": a_terminal,
         "a_0_gap": a_0_gap,
         "stable_residual": float(np.log(q_terminal / q_ss) - stable_slope * h_terminal),
         "present_value_residual": float(
-            c
-            - interest_rate * a_terminal
-            - g_ss
-            - interest_rate
-            * resource_loading
-            * h_terminal
-            / (interest_rate - stable_root)
+            c_terminal - annuity_rate * (a_terminal + tail_resources)
         ),
         "bvp_nodes": int(solution.x.size),
     }

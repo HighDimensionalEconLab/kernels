@@ -11,6 +11,7 @@ import pandas as pd
 from mpl_toolkits.axes_grid1.inset_locator import mark_inset, zoomed_inset_axes
 
 QUANTILES = [0.1, 0.5, 0.9]
+DETERMINISTIC_TIMING_REPETITIONS = 5
 
 # Shared kinked-production basin experiment: the k_0 grid crosses the
 # concave-convex threshold and spans both basins of attraction.
@@ -87,10 +88,14 @@ def ensemble(func, n_seeds, start_seed=0, options=None):
     options = options or {}
     parser = jsonargparse.ArgumentParser(exit_on_error=False)
     parser.add_function_arguments(func)
-    # Deterministic solvers (no seed argument) collapse to a single run;
-    # summary_stats then collapses every column to a scalar.
     stochastic = "seed" in inspect.signature(func).parameters
-    seeds = range(start_seed, start_seed + n_seeds) if stochastic else [start_seed]
+    if stochastic and n_seeds < 1:
+        raise ValueError("n_seeds must be positive")
+    seeds = (
+        range(start_seed, start_seed + n_seeds)
+        if stochastic
+        else range(DETERMINISTIC_TIMING_REPETITIONS)
+    )
 
     rows = []
     frames: dict[str, list[pd.DataFrame]] = {}
@@ -106,9 +111,25 @@ def ensemble(func, n_seeds, start_seed=0, options=None):
             hyperparameters = extra.pop("hyperparameters")
         for key, value in extra.items():
             if isinstance(value, pd.DataFrame):
-                frames.setdefault(key, []).append(value.assign(seed=seed))
-
+                if stochastic:
+                    frames.setdefault(key, []).append(value.assign(seed=seed))
+                elif seed == 0:
+                    frames.setdefault(key, []).append(value)
     results_df = pd.DataFrame(rows)
+    if not stochastic:
+        timing_columns = [
+            name
+            for name in results_df.select_dtypes("number")
+            if name.endswith(("_time", "_seconds"))
+        ]
+        timing_df = results_df[timing_columns].copy()
+        timing_df.insert(0, "timing_run", np.arange(len(timing_df)))
+        frames["timing_df"] = [timing_df]
+        representative = results_df.iloc[0].copy()
+        for name in timing_columns:
+            representative[name] = results_df[name].median()
+        representative["timing_repetitions"] = DETERMINISTIC_TIMING_REPETITIONS
+        results_df = pd.DataFrame([representative])
     frames_df = {key: pd.concat(dfs, ignore_index=True) for key, dfs in frames.items()}
     return results_df, frames_df, hyperparameters
 
@@ -213,7 +234,7 @@ def save_experiment(
     (out / f"{stem}.json").write_text(json.dumps(scalars, indent=2))
 
 
-def write_summary(output_dir, prefix):
+def write_summary(output_dir, prefix, experiments=None):
     out = pathlib.Path(output_dir)
     summary = {}
     for jf in sorted(out.glob(f"{prefix}_*.json")):
@@ -222,6 +243,8 @@ def write_summary(output_dir, prefix):
         ):
             continue
         d = json.loads(jf.read_text())
+        if experiments is not None and d["experiment"] not in experiments:
+            continue
         summary[d["experiment"]] = d
     (out / f"{prefix}_summary.json").write_text(json.dumps(summary, indent=2))
 

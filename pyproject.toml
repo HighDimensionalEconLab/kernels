@@ -5,15 +5,15 @@ description = "Replication Code for Solving Models of Economic Dynamics with Rid
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "flax>=0.12.7",
-    "jax>=0.7.2",
+    "flax>=0.12.8",
+    "jax>=0.11.0",
     "jsonargparse>=4.41.0",
     "matplotlib>=3.10.6",
-    "nlls-gram>=2.2.0",
+    "nlls-gram>=2.4.0",
     "pandas>=2.3.2",
     "pyarrow>=24.0.0",
     "scipy>=1.18.0",
-    "tinydiffeq>=2.1.0",
+    "tinydiffeq>=2.2.0",
     "unopy>=0.4.10",
 ]
 

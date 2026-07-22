@@ -23,22 +23,18 @@ SOLVER = open_economy_growth_nn_recursive.open_economy_growth_nn_recursive
 
 def run(
     output_dir: str = ".results",
-    n_seeds: int = 3,
+    n_seeds: int = 100,
     use_float64: bool = True,
     verbose: bool = False,
 ):
     parameters = ModelParameters()
     output_ss = float(steady_state(parameters)["output"])
-    meta = dict(
-        n_seeds=n_seeds,
-        residual_dtype="float64" if use_float64 else "float32",
-    )
 
-    def go(name, **experiment):
-        print(f"{name}: {n_seeds} seeds -> {output_dir}/")
+    def go(name, experiment_n_seeds, **experiment):
+        print(f"{name}: {experiment_n_seeds} seeds -> {output_dir}/")
         results_df, frames, hyperparameters = ensemble(
             SOLVER,
-            n_seeds=n_seeds,
+            n_seeds=experiment_n_seeds,
             options={
                 "use_float64": use_float64,
                 "verbose": verbose,
@@ -50,24 +46,22 @@ def run(
             results_df,
             frames,
             output_dir,
-            meta,
+            {
+                "n_seeds": experiment_n_seeds,
+                "residual_dtype": "float64" if use_float64 else "float32",
+            },
             prefix=PREFIX,
             hyperparameters=hyperparameters,
         )
 
-    go("baseline")
-    go("initial_debt", a_0=-0.5 * output_ss)
-    go("initial_assets", a_0=0.5 * output_ss)
-    go("above_steady_state", k_0=7.0)
-    go(
-        "short_diagnostic",
-        data_set=dict(
-            diagnostic_T=50.0,
-            diagnostic_points=51,
-            diagnostic_steps=50,
-        ),
+    go("baseline", n_seeds)
+    go("initial_debt", 1, a_0=-0.5 * output_ss)
+    go("initial_assets", 1, a_0=0.5 * output_ss)
+    write_summary(
+        output_dir,
+        PREFIX,
+        experiments={"baseline", "initial_debt", "initial_assets"},
     )
-    write_summary(output_dir, PREFIX)
 
 
 if __name__ == "__main__":

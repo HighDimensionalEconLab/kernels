@@ -122,6 +122,13 @@ NU_RHO_COLUMNS = [
     "c_rel_error_min",
 ]
 
+KERNEL_NU = {
+    "matern12": 0.5,
+    "matern32": 1.5,
+    "matern52": 2.5,
+    "rbf": "inf",
+}
+
 
 def write_nu_rho_table(out):
     # Same layout as the original pandas to_latex output (booktabs, %.1e cells);
@@ -162,6 +169,7 @@ def neoclassical_growth_kernel(out):
             "c_rel_error_min": sci(med(j["c_rel_error_min"])),
             "max_train_residual": sci(med(j["max_train_residual"]), 2),
             "wall_time": sig(med(j["wall_time"]), 2),
+            "timing_repetitions": int(med(j["timing_repetitions"])),
         }
 
     sparse = load(out, f"{prefix}_sparse")
@@ -199,18 +207,20 @@ def neoclassical_growth_kernel(out):
     robustness_table = {}
     for name, _, ell in NU_RHO_ROWS:
         j = load(out, f"{prefix}_{name}")
-        nu = med(j["nu"])
+        experiment_hp = load(out, f"{prefix}_{name}_hyperparameters")
+        kernel_name = experiment_hp["kernel_set"]["kernel"]
         robustness_table[name if name != "baseline" else "nu05_ell10"] = {
-            "nu": "inf"
-            if nu is None or (isinstance(nu, float) and math.isinf(nu))
-            else nu,
+            "kernel": kernel_name,
+            "nu": KERNEL_NU[kernel_name],
             "ell": ell,
             **errors(j),
         }
 
+    baseline_kernel = hp["kernel_set"]["kernel"]
     return {
         "kernel": {
-            "nu": hp["kernel_set"]["nu"],
+            "name": baseline_kernel,
+            "nu": KERNEL_NU[baseline_kernel],
             "ell": hp["kernel_set"]["ell"],
             "sigma": hp["kernel_set"]["sigma"],
         },
@@ -293,6 +303,7 @@ def asset_pricing_kernel(out):
                 "p_rel_error_min": sci(med(j["p_rel_error_min"])),
                 "max_train_residual": sci(med(j["max_train_residual"]), 2),
                 "wall_time": sig(med(j["wall_time"]), 2),
+                "timing_repetitions": int(med(j["timing_repetitions"])),
             }
         },
         # Corrected no-bubble fundamental (QE eq. 19/20 replacement):
@@ -305,10 +316,57 @@ def asset_pricing_kernel(out):
     }
 
 
+def asset_pricing_nn(out):
+    prefix = "asset_pricing_nn"
+    j = load(out, f"{prefix}_baseline")
+    hp = load(out, f"{prefix}_baseline_hyperparameters")
+    frame = pd.read_parquet(out / f"{prefix}_baseline_results.parquet")
+    accepted = frame[frame["solution_accepted"]]
+    if accepted.empty:
+        raise RuntimeError("asset-pricing NN has no accepted seeds")
+    return {
+        "parameters": hp["parameters"],
+        "data": hp["data_set"],
+        "architecture": {
+            "width": hp["nn_set"]["width"],
+            "depth": hp["nn_set"]["depth"],
+            "hidden_activation": hp["nn_set"]["hidden_activation"],
+            "total_params": int(accepted["total_params"].median()),
+        },
+        "n_seeds": int(j["n_seeds"]),
+        "frac_accepted": sig(j["frac_accepted"]),
+        "selection": "minimum_identity_metric_parameter_step",
+        "training_information": {
+            "terminal_residual_count": 0,
+            "tvc_residual_count": 0,
+            "benchmark_residual_count": 0,
+        },
+        "experiments": {
+            "baseline": {
+                "p_0_median": sig(float(accepted["p_0"].median()), 6),
+                "p_rel_error_mean_median": sci(
+                    float(accepted["p_rel_error_mean"].median())
+                ),
+                "p_rel_error_max_median": sci(
+                    float(accepted["p_rel_error_max"].median())
+                ),
+                "max_abs_bubble_coefficient_median": sci(
+                    float(accepted["max_abs_bubble_coefficient"].median())
+                ),
+                "max_train_residual_median": sci(
+                    float(accepted["max_train_residual"].median())
+                ),
+                "train_time_median": sig(float(accepted["train_time"].median())),
+            }
+        },
+    }
+
+
 def optimal_advertising_kernel(out):
     prefix = "optimal_advertising_kernel"
     j = load(out, f"{prefix}_baseline")
     hp = load(out, f"{prefix}_baseline_hyperparameters")
+    kernel_name = hp["kernel_set"]["kernel"]
     return {
         "parameters": {
             "rho_hat": hp["parameters"]["rho_hat"],
@@ -320,7 +378,8 @@ def optimal_advertising_kernel(out):
         },
         # ell differs from the headline ell = 10 used elsewhere.
         "kernel": {
-            "nu": hp["kernel_set"]["nu"],
+            "name": kernel_name,
+            "nu": KERNEL_NU[kernel_name],
             "ell": hp["kernel_set"]["ell"],
             "sigma": hp["kernel_set"]["sigma"],
         },
@@ -329,6 +388,7 @@ def optimal_advertising_kernel(out):
         "u_0": sig(med(j["u_0"]), 4),
         "max_train_residual": sci(med(j["max_train_residual"]), 2),
         "wall_time": sig(med(j["wall_time"]), 2),
+        "timing_repetitions": int(med(j["timing_repetitions"])),
     }
 
 
@@ -361,6 +421,7 @@ def human_capital_kernel(out):
         "max_validation_residual": sci(med(j["max_validation_residual"]), 2),
         "max_test_feasibility": sci(med(j["max_test_feasibility"]), 2),
         "wall_time": sig(med(j["wall_time"]), 2),
+        "timing_repetitions": int(med(j["timing_repetitions"])),
     }
 
 
@@ -374,23 +435,9 @@ def neoclassical_growth_nn_recursive(out):
     accepted = baseline_df[baseline_df["solution_accepted"]]
     hp = load(out, f"{prefix}_baseline_hyperparameters")
 
-    tolerance_df = pd.read_parquet(out / f"{prefix}_tolerance_sweep_results.parquet")
-    tolerance_sweep = {}
-    for rtol, group in tolerance_df.groupby("rtol"):
-        group_accepted = group[group["solution_accepted"]]
-        tolerance_sweep[f"{rtol:g}"] = {
-            "frac_accepted": sig(float(group["solution_accepted"].mean())),
-            "test_mean_abs_k_rel_error_median": sci(
-                float(group_accepted["test_mean_abs_k_rel_error"].median())
-            ),
-        }
-
-    bf_hp = load(out, f"{prefix}_butterfly_basin_hyperparameters")
-    bf = load(out, f"{prefix}_butterfly_basin")
-    bf_df = pd.read_parquet(out / f"{prefix}_butterfly_basin_results.parquet")
-    frac_by_k0 = bf_df.groupby("k_0")["basin_correct"].mean()
-
     return {
+        "parameters": hp["parameters"],
+        "data": hp["data_set"],
         "architecture": {
             "width": hp["nn_set"]["width"],
             "depth": hp["nn_set"]["depth"],
@@ -424,145 +471,360 @@ def neoclassical_growth_nn_recursive(out):
                 "num_collocation_states": int(
                     med(baseline_json["num_collocation_states"])
                 ),
-                "rtol": hp["data_set"]["rtol"],
+                "ode_solver": hp["data_set"]["ode_solver"],
+                "train_steps": hp["data_set"]["train_steps"],
                 "k_ss": sig(med(baseline_json["k_ss"]), 4),
-            },
-            "tolerance_sweep": tolerance_sweep,
-        },
-        "butterfly": {
-            "parameters": {
-                "A": bf_hp["parameters"]["A"],
-                "b_1": bf_hp["parameters"]["b_1"],
-                "b_2": bf_hp["parameters"]["b_2"],
-            },
-            "steady_states": {
-                "k_thr": sig(med(bf["k_thr"]), 6),
-                "k_ss_low": sig(med(bf["k_ss_low"]), 4),
-                "k_ss_high": sig(med(bf["k_ss_high"]), 4),
-            },
-            "k_0_grid": {
-                "min": sig(float(bf_df["k_0"].min())),
-                "max": sig(float(bf_df["k_0"].max())),
-                "n": int(bf_df["k_0"].nunique()),
-            },
-            "frac_basin_correct": sig(float(bf_df["basin_correct"].mean())),
-            "frac_false_positive": sig(float(bf_df["false_positive"].mean())),
-            "frac_correct_by_k_0": {
-                f"{k_0:g}": sig(float(value)) for k_0, value in frac_by_k0.items()
-            },
+            }
         },
     }
 
 
-def kernel_vs_nn(out):
-    prefix = "kernel_vs_nn"
+def open_economy_growth_kernel(out):
+    prefix = "open_economy_growth_kernel"
+    hp = load(out, f"{prefix}_baseline_hyperparameters")
+    baseline = load(out, f"{prefix}_baseline")
 
-    def per_count(name, points_column, error_column):
-        df = pd.read_parquet(out / f"{prefix}_{name}_results.parquet")
-        block = {}
-        for count, group in df.groupby(points_column):
-            accepted = group[group["solution_accepted"]]
-            entry = {"frac_accepted": sig(float(group["solution_accepted"].mean()))}
-            if len(accepted):
-                entry["k_rel_error_median"] = sci(
-                    float(accepted[error_column].median())
-                )
-            block[str(int(count))] = entry
-        return block
-
-    def basin(prefix_name, name):
-        df = pd.read_parquet(out / f"{prefix_name}_{name}_results.parquet")
-        frac_by_k0 = df.groupby("k_0")["basin_correct"].mean()
+    def experiment(name):
+        j = load(out, f"{prefix}_{name}")
         return {
-            "frac_basin_correct": sig(float(df["basin_correct"].mean())),
-            "frac_correct_by_k_0": {
-                f"{k_0:g}": sig(float(value)) for k_0, value in frac_by_k0.items()
-            },
+            "solution_accepted": bool(j["frac_accepted"] == 1.0),
+            "r_star": sig(med(j["r_star_resolved"]), 5),
+            "k_0": sig(med(j["k_0"]), 5),
+            "a_0": sig(med(j["a_0"]), 5),
+            "num_train_points": int(med(j["num_train_points"])),
+            "train_T": sig(med(j["train_T"]), 5),
+            "max_train_residual": sci(med(j["max_train_residual"])),
+            "max_validation_residual": sci(med(j["max_validation_residual"])),
+            "max_benchmark_error": sci(med(j["max_benchmark_error"])),
+            "ex_post_present_value_gap": sci(med(j["ex_post_present_value_gap"])),
+            "ex_post_asset_tvc": sci(med(j["ex_post_asset_tvc"])),
+            "ex_post_capital_tvc": sci(med(j["ex_post_capital_tvc"])),
+            "wall_time_median": sig(med(j["wall_time"])),
+            "timing_repetitions": int(med(j["timing_repetitions"])),
         }
 
-    # Timing table: like compared with like. Kernel cost is wall_time (includes
-    # Gram construction / quadrature; the UNO cpu_time excludes it) at 41 train
-    # points; NN cost is train_time (gradient descent only) at 41 points with
-    # compile_time reported separately (persistent-cache warm).
-    kernel_df = pd.read_parquet(out / f"{prefix}_kernel_points_sweep_results.parquet")
-    kernel_41 = kernel_df[kernel_df["train_points"] == 41].iloc[0]
-
-    def nn_timing(name):
-        df = pd.read_parquet(out / f"{prefix}_{name}_results.parquet")
-        at_41 = df[(df["train_points"] == 41) & df["solution_accepted"]]
-        return {
-            "train_time_median": sig(float(at_41["train_time"].median())),
-            "compile_time_median": sig(float(at_41["compile_time"].median())),
-        }
-
-    def recursive_timing():
-        # Accepted-only medians, matching nn_timing's like-for-like basis.
-        df = pd.read_parquet(
-            out / "neoclassical_growth_nn_recursive_baseline_results.parquet"
-        )
-        accepted = df[df["solution_accepted"]]
-        return {
-            "train_time_median": sig(float(accepted["train_time"].median())),
-            "compile_time_median": sig(float(accepted["compile_time"].median())),
-        }
-
-    hp_nn = load(out, f"{prefix}_nn_direct_points_sweep_hyperparameters")
-    j_direct = load(out, f"{prefix}_nn_direct_points_sweep")
     return {
-        "n_seeds": int(j_direct["n_seeds"]),
-        "architecture": {
-            "width": hp_nn["nn_set"]["width"],
-            "depth": hp_nn["nn_set"]["depth"],
-            "hidden_activation": hp_nn["nn_set"]["hidden_activation"],
+        "parameters": hp["parameters"],
+        "kernel": hp["kernel_set"],
+        "selection": "minimum_shifted_rkhs_metric",
+        "training_information": {
+            "terminal_residual_count": 0,
+            "differential_residual_count": int(
+                med(baseline["differential_residual_count"])
+            ),
+            "algebraic_residual_count": int(med(baseline["algebraic_residual_count"])),
+            "dae_residual_count": int(med(baseline["dae_residual_count"])),
+            "unknown_count": int(med(baseline["unknown_count"])),
         },
-        "stopping": {
-            "train_loss_threshold": hp_nn["stop_set"]["train_loss_threshold"],
-            "max_steps": hp_nn["stop_set"]["max_steps"],
-        },
-        "points_sweep": {
-            "kernel": per_count(
-                "kernel_points_sweep", "train_points", "k_rel_error_mean"
-            ),
-            "nn_direct": per_count(
-                "nn_direct_points_sweep", "train_points", "test_mean_abs_k_rel_error"
-            ),
-            "nn_integrated_mlp": per_count(
-                "nn_integrated_mlp_points_sweep",
-                "train_points",
-                "test_mean_abs_k_rel_error",
-            ),
-            "nn_integrated_rff": per_count(
-                "nn_integrated_rff_points_sweep",
-                "train_points",
-                "test_mean_abs_k_rel_error",
-            ),
-        },
-        "basin": {
-            "kernel": basin(prefix, "basin_kernel"),
-            "nn_direct": basin(prefix, "basin_nn_direct"),
-            "nn_recursive": basin(
-                "neoclassical_growth_nn_recursive", "butterfly_basin"
-            ),
-        },
-        "timing": {
-            "definitions": (
-                "kernel_wall_time includes Gram construction and the NLP solve; "
-                "NN train_time is optimizer time only, with jit compile_time "
-                "reported separately (warm persistent cache). All at 41 "
-                "training points; the recursive solver uses its baseline run."
-            ),
-            "kernel_wall_time": sig(float(kernel_41["wall_time"]), 2),
-            "kernel_solve_time": sig(float(kernel_41["solve_time"]), 2),
-            "nn_direct": nn_timing("nn_direct_points_sweep"),
-            "nn_integrated_mlp": nn_timing("nn_integrated_mlp_points_sweep"),
-            "nn_integrated_rff": nn_timing("nn_integrated_rff_points_sweep"),
-            "nn_recursive": recursive_timing(),
+        "experiments": {
+            name: experiment(name)
+            for name in (
+                "baseline",
+                "r_star_005",
+                "initial_debt",
+                "initial_assets",
+            )
         },
     }
+
+
+def open_economy_growth_nn_recursive(out):
+    prefix = "open_economy_growth_nn_recursive"
+    hp = load(out, f"{prefix}_baseline_hyperparameters")
+
+    def experiment(name):
+        j = load(out, f"{prefix}_{name}")
+        frame = pd.read_parquet(out / f"{prefix}_{name}_results.parquet")
+        accepted = frame[frame["solution_accepted"]]
+        if accepted.empty:
+            return {"frac_accepted": sig(j["frac_accepted"])}
+        return {
+            "frac_accepted": sig(j["frac_accepted"]),
+            "k_0": sig(float(accepted["k_0"].median()), 5),
+            "a_0": sig(float(accepted["a_0"].median()), 5),
+            "max_train_residual_median": sci(
+                float(accepted["max_train_residual"].median())
+            ),
+            "max_validation_residual_median": sci(
+                float(accepted["max_validation_residual"].median())
+            ),
+            "max_benchmark_error_median": sci(
+                float(accepted["max_benchmark_error"].median())
+            ),
+            "ex_post_present_value_gap_median": sci(
+                float(accepted["ex_post_present_value_gap"].median())
+            ),
+            "ex_post_asset_tvc_median": sci(
+                float(accepted["ex_post_asset_tvc"].median())
+            ),
+            "ex_post_capital_tvc_median": sci(
+                float(accepted["ex_post_capital_tvc"].median())
+            ),
+            "train_time_median": sig(float(accepted["train_time"].median())),
+        }
+
+    return {
+        "parameters": hp["parameters"],
+        "architecture": {
+            "width": hp["nn_set"]["width"],
+            "depth": hp["nn_set"]["depth"],
+            "hidden_activation": hp["nn_set"]["hidden_activation"],
+            "total_params": int(med(load(out, f"{prefix}_baseline")["total_params"])),
+        },
+        "selection": "minimum_identity_metric_parameter_step",
+        "training_information": {"terminal_residual_count": 0},
+        "n_seeds": int(load(out, f"{prefix}_baseline")["n_seeds"]),
+        "experiments": {
+            name: experiment(name)
+            for name in (
+                "baseline",
+                "initial_debt",
+                "initial_assets",
+            )
+        },
+    }
+
+
+def multicountry_growth_kernel(out):
+    prefix = "multicountry_growth_kernel"
+
+    def experiment(name):
+        j = load(out, f"{prefix}_{name}")
+        hp = load(out, f"{prefix}_{name}_hyperparameters")
+        return {
+            "num_countries": len(hp["parameters"]["populations"]),
+            "initial_conditions": hp["initial_conditions"],
+            "solution_accepted": bool(j["frac_accepted"] == 1.0),
+            "num_train_points": int(med(j["num_train_points"])),
+            "train_T": sig(med(j["train_T"]), 5),
+            "max_train_residual": sci(med(j["max_train_residual"])),
+            "max_validation_residual": sci(med(j["max_validation_residual"])),
+            "max_asset_clearing_residual": sci(med(j["max_asset_clearing_residual"])),
+            "max_rate_consistency_residual": sci(
+                med(j["max_rate_consistency_residual"])
+            ),
+            "max_benchmark_error": sci(med(j["max_benchmark_error"])),
+            "ex_post_asset_tvc": sci(med(j["ex_post_asset_tvc"])),
+            "ex_post_capital_tvc": sci(med(j["ex_post_capital_tvc"])),
+            "wall_time_median": sig(med(j["wall_time"])),
+            "timing_repetitions": int(med(j["timing_repetitions"])),
+        }
+
+    baseline_hp = load(out, f"{prefix}_baseline_hyperparameters")
+    return {
+        "parameters": baseline_hp["parameters"],
+        "kernel": baseline_hp["kernel_set"],
+        "selection": "minimum_shifted_rkhs_metric",
+        "training_information": {"terminal_residual_count": 0},
+        "experiments": {
+            name: experiment(name)
+            for name in (
+                "baseline",
+                "initial_debt",
+                "initial_assets",
+                "asymmetric_capital",
+                "three_countries",
+                "heterogeneous_countries",
+            )
+        },
+    }
+
+
+def multicountry_growth_nn(out):
+    prefix = "multicountry_growth_nn"
+    experiments = {}
+    experiment_data = {}
+    for name in ("baseline", "large_countries"):
+        summary = load(out, f"{prefix}_{name}")
+        hp = load(out, f"{prefix}_{name}_hyperparameters")
+        frame = pd.read_parquet(out / f"{prefix}_{name}_results.parquet")
+        accepted = frame[frame["solution_accepted"]]
+        if accepted.empty:
+            raise RuntimeError(f"multicountry_growth_nn {name} has no accepted seeds")
+        total_params = int(accepted["total_params"].median())
+        residual_count = int(accepted["dae_residual_count"].median())
+        experiments[name] = {
+            "scenario": summary["scenario"],
+            "num_countries": len(hp["parameters"]["populations"]),
+            "parameters": hp["parameters"],
+            "initial_conditions": hp["initial_conditions"],
+            "architecture": {
+                "width": hp["nn_set"]["width"],
+                "depth": hp["nn_set"]["depth"],
+                "hidden_activation": hp["nn_set"]["hidden_activation"],
+                "total_params": total_params,
+                "dynamic_output_count": int(
+                    accepted["dynamic_network_output_count"].median()
+                ),
+            },
+            "residual_count": residual_count,
+            "parameter_surplus": total_params - residual_count,
+            "n_seeds": int(summary["n_seeds"]),
+            "fraction_accepted": sig(summary["frac_accepted"]),
+            "fraction_equation_diagnostics_passed": sig(
+                float(accepted["equation_diagnostics_pass"].mean())
+            ),
+            "train_time_median": sig(float(accepted["train_time"].median())),
+            "max_train_residual_median": sci(
+                float(accepted["max_train_residual"].median())
+            ),
+            "max_validation_residual_median": sci(
+                float(accepted["max_validation_residual"].median())
+            ),
+            "max_asset_clearing_residual_median": sci(
+                float(accepted["max_asset_clearing_residual"].median())
+            ),
+            "max_rate_consistency_residual_median": sci(
+                float(accepted["max_rate_consistency_residual"].median())
+            ),
+        }
+        experiment_data[name] = (summary, hp, accepted)
+
+    baseline_summary, baseline_hp, baseline_accepted = experiment_data["baseline"]
+    experiments["baseline"].update(
+        {
+            "max_benchmark_error_median": sci(
+                float(baseline_accepted["max_benchmark_error"].median())
+            ),
+            "log_relative_weight_error_median": sci(
+                float(
+                    (
+                        baseline_accepted["log_relative_weight"]
+                        - baseline_accepted["benchmark_log_relative_weight"]
+                    )
+                    .abs()
+                    .median()
+                )
+            ),
+        }
+    )
+    return {
+        "parameters": baseline_hp["parameters"],
+        "architecture": experiments["baseline"]["architecture"],
+        "selection": "minimum_identity_metric_parameter_step",
+        "training_information": {
+            "terminal_residual_count": 0,
+            "benchmark_training_residual_count": 0,
+            "tvc_training_residual_count": 0,
+        },
+        "n_seeds": int(baseline_summary["n_seeds"]),
+        "experiments": experiments,
+    }
+
+
+def performance_comparisons(out):
+    def accepted(prefix):
+        frame = pd.read_parquet(out / f"{prefix}_baseline_results.parquet")
+        accepted_frame = frame[frame["solution_accepted"]]
+        if accepted_frame.empty:
+            raise RuntimeError(f"{prefix} baseline has no accepted solutions")
+        return accepted_frame
+
+    asset_kernel = load(out, "asset_pricing_kernel_baseline")
+    asset_nn = accepted("asset_pricing_nn")
+    asset_kernel_time = med(asset_kernel["wall_time"])
+    asset_nn_time = float(asset_nn["train_time"].median())
+    asset_kernel_error = med(asset_kernel["p_rel_error_mean"])
+    asset_nn_error = float(asset_nn["p_rel_error_mean"].median())
+
+    growth_kernel = load(out, "neoclassical_growth_kernel_baseline")
+    growth_nn = accepted("neoclassical_growth_nn_recursive")
+    growth_kernel_time = med(growth_kernel["wall_time"])
+    growth_nn_time = float(growth_nn["train_time"].median())
+    growth_kernel_error = max(
+        med(growth_kernel["k_rel_error_mean"]),
+        med(growth_kernel["c_rel_error_mean"]),
+    )
+    growth_nn_error = max(
+        float(growth_nn["test_mean_abs_k_rel_error"].median()),
+        float(growth_nn["test_mean_abs_c_rel_error"].median()),
+    )
+
+    open_kernel = load(out, "open_economy_growth_kernel_baseline")
+    open_nn = accepted("open_economy_growth_nn_recursive")
+    open_kernel_time = med(open_kernel["wall_time"])
+    open_nn_time = float(open_nn["train_time"].median())
+    open_kernel_error = med(open_kernel["max_benchmark_error"])
+    open_nn_error = float(open_nn["max_benchmark_error"].median())
+
+    multicountry_kernel = load(out, "multicountry_growth_kernel_initial_debt")
+    multicountry_nn_frame = accepted("multicountry_growth_nn")
+    multicountry_kernel_time = med(multicountry_kernel["wall_time"])
+    multicountry_nn_time = float(multicountry_nn_frame["train_time"].median())
+    multicountry_kernel_error = med(multicountry_kernel["max_benchmark_error"])
+    multicountry_nn_error = float(multicountry_nn_frame["max_benchmark_error"].median())
+
+    def comparison(kernel_time, nn_time, kernel_error, nn_error):
+        return {
+            "kernel_solve_time_median": sig(kernel_time),
+            "nn_solve_time_median": sig(nn_time),
+            "nn_to_kernel_time_ratio": sig(nn_time / kernel_time),
+            "kernel_error": sci(kernel_error),
+            "nn_error_median": sci(nn_error),
+            "nn_to_kernel_error_ratio": sig(nn_error / kernel_error),
+        }
+
+    return {
+        "timing_contract": {
+            "kernel": "median of five cached deterministic solves",
+            "nn": "median across accepted seeds from 100 initializations",
+        },
+        "asset_pricing": comparison(
+            asset_kernel_time,
+            asset_nn_time,
+            asset_kernel_error,
+            asset_nn_error,
+        ),
+        "neoclassical_growth": comparison(
+            growth_kernel_time,
+            growth_nn_time,
+            growth_kernel_error,
+            growth_nn_error,
+        ),
+        "open_economy_growth": comparison(
+            open_kernel_time,
+            open_nn_time,
+            open_kernel_error,
+            open_nn_error,
+        ),
+        "multicountry_growth": comparison(
+            multicountry_kernel_time,
+            multicountry_nn_time,
+            multicountry_kernel_error,
+            multicountry_nn_error,
+        ),
+    }
+
+
+def validate_replication_contract(out):
+    nn_prefixes = (
+        "asset_pricing_nn",
+        "neoclassical_growth_nn_recursive",
+        "open_economy_growth_nn_recursive",
+        "multicountry_growth_nn",
+    )
+    for prefix in nn_prefixes:
+        summary = load(out, f"{prefix}_baseline")
+        if summary["n_seeds"] != 100:
+            raise RuntimeError(f"{prefix} must use 100 seeds, got {summary['n_seeds']}")
+
+    kernel_prefixes = (
+        "neoclassical_growth_kernel",
+        "asset_pricing_kernel",
+        "optimal_advertising_kernel",
+        "human_capital_kernel",
+        "open_economy_growth_kernel",
+        "multicountry_growth_kernel",
+    )
+    for prefix in kernel_prefixes:
+        timing = pd.read_parquet(out / f"{prefix}_baseline_timing_df.parquet")
+        if len(timing) != 5:
+            raise RuntimeError(f"{prefix} must retain five timing runs")
 
 
 def collect(output_dir: str = ".results"):
     out = pathlib.Path(output_dir)
+    validate_replication_contract(out)
     write_nu_rho_table(out)
     payload = clean(
         {
@@ -572,8 +834,9 @@ def collect(output_dir: str = ".results"):
                     "paper: each value is selected and rounded to copy/paste "
                     "form here (replication/collect_json.py) and must never be "
                     "recomputed or re-rounded downstream. Cross-seed statistics "
-                    "are medians (suffix _median); error magnitudes below 0.001 "
-                    "are LaTeX math-mode strings from sci()."
+                    "are medians (suffix _median); deterministic wall_time values "
+                    "are medians of five cached solves; error magnitudes below "
+                    "0.001 are LaTeX math-mode strings from sci()."
                 ),
                 "generated": datetime.datetime.now()
                 .astimezone()
@@ -587,10 +850,15 @@ def collect(output_dir: str = ".results"):
                 neoclassical_growth_concave_convex_kernel(out)
             ),
             "asset_pricing_kernel": asset_pricing_kernel(out),
+            "asset_pricing_nn": asset_pricing_nn(out),
             "optimal_advertising_kernel": optimal_advertising_kernel(out),
             "human_capital_kernel": human_capital_kernel(out),
             "neoclassical_growth_nn_recursive": neoclassical_growth_nn_recursive(out),
-            "kernel_vs_nn": kernel_vs_nn(out),
+            "open_economy_growth_kernel": open_economy_growth_kernel(out),
+            "open_economy_growth_nn_recursive": open_economy_growth_nn_recursive(out),
+            "multicountry_growth_kernel": multicountry_growth_kernel(out),
+            "multicountry_growth_nn": multicountry_growth_nn(out),
+            "performance_comparisons": performance_comparisons(out),
         }
     )
     # allow_nan=False guarantees the output is strict JSON (any NaN raises here).

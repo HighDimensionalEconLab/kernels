@@ -8,23 +8,33 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-import unopy
+from nlls_gram import (
+    LevenbergMarquardt,
+    LMStatus,
+    blockdiag_metric,
+    metric_from_cholesky,
+    metric_from_diagonal,
+    metric_with_compute_dtype,
+)
 
 from asset_pricing_benchmark import mu_f_array
-from kernels import integrated_kernel_matrices
-from rkhs import rkhs_norm_squared
+from kernels import integrated_kernel_matrices, normalize_kernel
 
 if __name__ == "__main__":
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
 
-ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
 TRAIN_RESIDUAL_TOL = 1e-8
+STATUS_TO_REASON = {
+    LMStatus.CONVERGED: "converged",
+    LMStatus.NONFINITE: "nonfinite",
+    LMStatus.MAX_STEPS: "max_steps",
+}
 
 
 @dataclass(frozen=True)
 class KernelSettings:
-    nu: float = 0.5  # math.inf selects the Gaussian/RBF kernel
+    kernel: str = "matern12"  # matern12 | matern32 | matern52 | rbf
     ell: float = 10.0
     sigma: float = 1.0
 
@@ -38,11 +48,29 @@ class DataSettings:
     test_points: int = 100
 
 
+# The affine residual rewards near-Gauss-Newton steps, so a tiny init_damping
+# converges in 2 LM steps (a factor ~10 faster than the IPOPT baseline); the
+# damping decrease/increase factors never bind and stay at library defaults.
 @dataclass(frozen=True)
 class SolverSettings:
-    preset: str = "ipopt"
-    max_iterations: int | None = None
-    time_limit: float | None = None
+    init_damping: float = 1e-8
+    damping_decrease: float = 0.5
+    damping_increase: float = 4.0
+    max_steps: int = 100
+    residual_atol: float = 1e-11  # unscaled residual norm; bounds max|residual|
+    p0_init: float = 0.0
+    # The single shift of the unified metric M = blockdiag(K, 0) + eps I:
+    # the kernel block is factored as K + eps I and the free p_0 carries
+    # weight eps, so ||M^{-1}|| = 1/eps uniformly in n and the min-M-norm
+    # interpolant is O(eps) from the pure RKHS-seminorm solution with p_0
+    # free. A selection-side regularization only: residuals are unaffected,
+    # and every solver/representation combination uses the same eps so their
+    # selections agree. The default balances the ends of the measured working
+    # range: larger shifts visibly bias the near-singular smooth Grams (rbf),
+    # while below ~1e-8
+    # the (c^2/eps)-weighted dual spike outruns the inner CG budgets. Tuning:
+    # https://highdimensionaleconlab.github.io/nlls_gram/tuning_guide/#the-metric
+    metric_eps: float = 1e-7
 
 
 def asset_pricing_kernel(
@@ -50,187 +78,157 @@ def asset_pricing_kernel(
     c: float = 0.02,
     g: float = -0.2,
     x_0: float = 1.0,
+    use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
-    solver_set: SolverSettings = SolverSettings(),
-    verbose: bool = False,
+    lm_set: SolverSettings = SolverSettings(),
 ):
-    nu, ell, sigma = kernel_set.nu, kernel_set.ell, kernel_set.sigma
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    dtype = jnp.float64 if use_float64 else jnp.float32
+    kernel = normalize_kernel(kernel_set.kernel)
+    ell, sigma = kernel_set.ell, kernel_set.sigma
     if data_set.train_points_list is None:
-        train_data = jnp.linspace(0, data_set.train_T, data_set.train_points)
+        train_data = jnp.linspace(
+            0, data_set.train_T, data_set.train_points, dtype=dtype
+        )
     else:
-        train_data = jnp.array(data_set.train_points_list)
-    test_data = jnp.linspace(0, data_set.test_T, data_set.test_points)
-
+        train_data = jnp.sort(jnp.array(data_set.train_points_list, dtype=dtype))
+    test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
     n_train = len(train_data)
-    K, K_tilde = integrated_kernel_matrices(train_data, train_data, nu, sigma, ell)
-    K = np.asarray((K + K.T) / 2)
-    K_tilde = np.asarray(K_tilde)
-    K_jax = jnp.asarray(K)
-    K_tilde_jax = jnp.asarray(K_tilde)
+
+    eps = lm_set.metric_eps
+    if eps <= 0:
+        raise ValueError("metric_eps must be positive (the p_0 block needs PD)")
 
     def dividends(t):
         return (x_0 + c / g) * jnp.exp(g * t) - c / g
 
     x_train = dividends(train_data)
 
-    n_variables = n_train + 1
-    n_constraints = n_train
-    p_0_guess = float(mu_f_array(jnp.array([0.0]), c, g, r, x_0)[0])
-    x_initial = np.zeros(n_variables, dtype=np.float64)
-    x_initial[n_train] = max(p_0_guess, 0.0)
+    # theta is the tuple (alpha, p_0), which flattens to [alpha (n_train),
+    # p_0 (1)] -- the block order of the metric below.
+    def path_values(theta, K_eval, K_tilde_eval):
+        alpha, p_0 = theta
+        return p_0 + K_tilde_eval @ alpha, K_eval @ alpha
 
-    def unpack(z):
-        alpha = z[:n_train]
-        p_0 = z[n_train]
-        return alpha, p_0
+    metric_data = train_data.astype(jnp.float64)
+    K_metric, K_tilde_metric = integrated_kernel_matrices(
+        metric_data, metric_data, kernel, sigma, ell
+    )
+    K_metric = (K_metric + K_metric.T) / 2
+    K_jax = K_metric.astype(dtype)
+    K_tilde_jax = K_tilde_metric.astype(dtype)
 
-    def path_values(z, K_eval, K_tilde_eval):
-        alpha, p_0 = unpack(z)
-        p = p_0 + K_tilde_eval @ alpha
-        dp_dt = K_eval @ alpha
-        return p, dp_dt
+    def train_path_values(theta):
+        return path_values(theta, K_jax, K_tilde_jax)
 
-    def objective(z):
-        alpha, _ = unpack(z)
-        return alpha @ K_jax @ alpha
+    alpha_metric = metric_from_cholesky(
+        jnp.linalg.cholesky(K_metric + eps * jnp.eye(n_train, dtype=jnp.float64))
+    )
 
-    def constraints(z):
-        p, dp_dt = path_values(z, K_jax, K_tilde_jax)
+    alpha_metric = metric_with_compute_dtype(alpha_metric, jnp.float64)
+
+    def residual_fn(theta):
+        p, dp_dt = train_path_values(theta)
         return dp_dt - (r * p - x_train)
 
-    def lagrangian(z, objective_multiplier, multipliers):
-        return objective_multiplier * objective(z) + jnp.dot(
-            multipliers, constraints(z)
-        )
-
-    objective_value = jax.jit(objective)
-    objective_gradient = jax.jit(jax.grad(objective))
-    constraint_values = jax.jit(constraints)
-    constraint_jacobian = jax.jit(jax.jacfwd(constraints))
-    lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
-
-    x_initial_jax = jnp.asarray(x_initial)
-    zero_multipliers = jnp.zeros(n_constraints, dtype=jnp.float64)
-    jax.block_until_ready(objective_value(x_initial_jax))
-    jax.block_until_ready(objective_gradient(x_initial_jax))
-    jax.block_until_ready(constraint_values(x_initial_jax))
-    jax.block_until_ready(constraint_jacobian(x_initial_jax))
-    jax.block_until_ready(lagrangian_hessian(x_initial_jax, 1.0, zero_multipliers))
-
-    variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
-    variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
-    variable_lower_bounds[n_train] = 0.0
-    constraint_lower_bounds = np.zeros(n_constraints, dtype=np.float64)
-    constraint_upper_bounds = np.zeros(n_constraints, dtype=np.float64)
-
-    model = unopy.Model(
-        unopy.PROBLEM_QUADRATIC,
-        n_variables,
-        variable_lower_bounds,
-        variable_upper_bounds,
-        unopy.ZERO_BASED_INDEXING,
+    # The residual is affine in theta, so LM from theta_0 = 0 converges to the
+    # exact interpolant minimizing theta' M theta with the unified shifted
+    # metric M = blockdiag(K, 0) + eps I: the min-RKHS-norm selection (the
+    # original a'Ka objective with p_0 free) up to an O(eps) selection shift
+    # in all parameters.
+    metric = metric_with_compute_dtype(
+        blockdiag_metric(
+            [
+                (alpha_metric, n_train),
+                (metric_from_diagonal(jnp.full(1, eps, dtype=jnp.float64)), 1),
+            ]
+        ),
+        jnp.float64,
     )
 
-    def objective_callback(z):
-        return float(objective_value(jnp.asarray(z)))
-
-    def objective_gradient_callback(z, gradient):
-        gradient[:] = np.asarray(objective_gradient(jnp.asarray(z)))
-
-    model.set_objective(unopy.MINIMIZE, objective_callback, objective_gradient_callback)
-
-    jacobian_rows = np.repeat(np.arange(n_constraints, dtype=np.int32), n_variables)
-    jacobian_columns = np.tile(np.arange(n_variables, dtype=np.int32), n_constraints)
-
-    def constraints_callback(z, constraint_output):
-        constraint_output[:] = np.asarray(constraint_values(jnp.asarray(z)))
-
-    def jacobian_callback(z, jacobian_output):
-        jacobian_output[:] = np.asarray(constraint_jacobian(jnp.asarray(z))).reshape(-1)
-
-    model.set_constraints(
-        n_constraints,
-        constraints_callback,
-        constraint_lower_bounds,
-        constraint_upper_bounds,
-        len(jacobian_rows),
-        jacobian_rows,
-        jacobian_columns,
-        jacobian_callback,
+    solver = LevenbergMarquardt(
+        residual_fn,
+        init_damping=lm_set.init_damping,
+        damping_decrease=lm_set.damping_decrease,
+        damping_increase=lm_set.damping_increase,
+        linear_solve_dtype=jnp.float64,
+        metric=metric,
     )
-
-    hessian_rows, hessian_columns = np.tril_indices(n_variables)
-    hessian_rows = hessian_rows.astype(np.int32)
-    hessian_columns = hessian_columns.astype(np.int32)
-
-    def hessian_callback(z, objective_multiplier, multipliers, hessian_output):
-        hessian = np.asarray(
-            lagrangian_hessian(
-                jnp.asarray(z),
-                float(objective_multiplier),
-                jnp.asarray(multipliers),
-            )
-        )
-        hessian_output[:] = hessian[hessian_rows, hessian_columns]
-
-    model.set_lagrangian_hessian(
-        len(hessian_rows),
-        unopy.LOWER_TRIANGLE,
-        hessian_rows,
-        hessian_columns,
-        hessian_callback,
+    theta_0 = (
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.asarray(lm_set.p0_init, dtype=dtype),
     )
-    model.set_lagrangian_sign_convention(unopy.MULTIPLIER_POSITIVE)
-    model.set_initial_primal_iterate(x_initial)
-
-    solver = unopy.UnoSolver()
-    solver.set_preset(solver_set.preset)
-    if not verbose:
-        solver.set_option("logger", "SILENT")
-        solver.set_option("print_solution", False)
-    if solver_set.max_iterations is not None:
-        solver.set_option("max_iterations", solver_set.max_iterations)
-    if solver_set.time_limit is not None:
-        solver.set_option("time_limit", solver_set.time_limit)
 
     start = time.perf_counter()
-    result = solver.optimize(model)
+    result = solver.solve(
+        theta_0,
+        max_steps=lm_set.max_steps,
+        atol=lm_set.residual_atol,
+        max_steps_is_success=False,
+    )
+    jax.block_until_ready(result)
     elapsed = time.perf_counter() - start
 
-    z = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))
-    alpha, p_0 = unpack(z)
-    train_residual = constraints(z)
+    theta = result.x
+    alpha, p_0 = theta
+    steps = int(result.steps)
+    status = int(result.status)
+    p_train, dp_train = train_path_values(theta)
+    train_residual = dp_train - (r * p_train - x_train)
     max_train_residual = float(jnp.max(jnp.abs(train_residual)))
 
     @jax.jit
     def kernel_solution(test_points_data):
         K_test, K_tilde_test = integrated_kernel_matrices(
-            test_points_data, train_data, nu, sigma, ell
+            test_points_data, train_data, kernel, sigma, ell
         )
-        p_test, dp_test = path_values(z, K_test, K_tilde_test)
-        return p_test, dp_test
+        return path_values(theta, K_test, K_tilde_test)
 
     p_test, dp_test = kernel_solution(test_data)
     test_residual = dp_test - (r * p_test - dividends(test_data))
     p_benchmark = mu_f_array(test_data, c, g, r, x_0)
     p_rel_error = jnp.abs(p_benchmark - p_test) / p_benchmark
 
-    solve_time = result.cpu_time
-    if solve_time is None:
-        solve_time = elapsed
-    solver_status = str(result.optimization_status).split(".")[-1]
-    solution_status = str(result.solution_status).split(".")[-1]
+    # Analytic finite-horizon bias of the dense-grid limit of the min-norm
+    # selection (Matern-1/2 only): the continuum criterion ||p'||^2_H over
+    # [0, T] selects p*(t) + zeta_T e^{rt} with
+    # zeta_T = -<p*', r e^{r.}>_H / ||r e^{r.}||^2_H, elementary exponential
+    # integrals under the H-norm (1/2s^2)[ell int f'^2 + (1/ell) int f^2
+    # + f(0)^2 + f(T)^2]. The p_0 bias is zeta_T; the bias at time t is
+    # zeta_T e^{rt}. At ell = 1/r it collapses to -(A/r) e^{(g-r)T}. The
+    # remaining p_0 error is the O(dt^2) grid-spacing selection bias.
+    if kernel == "matern12":
+        T = float(train_data[-1])
+        A = g * (x_0 + c / g) / (r - g)  # p*'(t) = A e^{g t}
+        E, F = np.exp((g + r) * T), np.exp(2 * r * T)
+        I_1, I_2 = (E - 1) / (g + r), (F - 1) / (2 * r)
+        horizon_bias_p0 = float(
+            -(A / r)
+            * ((ell * g * r + 1 / ell) * I_1 + 1 + E)
+            / ((ell * r * r + 1 / ell) * I_2 + 1 + F)
+        )
+    else:
+        horizon_bias_p0 = float("nan")
+
+    # Acceptance certifies the solution, not the stopping code: a solve that
+    # stalls at its float64 residual floor below TRAIN_RESIDUAL_TOL is
+    # feasible (the IPOPT baseline's FEASIBLE_SMALL_STEP semantics) -- the
+    # smooth kernels routinely end there because atol is unreachable for
+    # their ill-conditioned Grams. stopping_reason still reports the code.
+    train_residual_tolerance = max(
+        TRAIN_RESIDUAL_TOL,
+        8.0 * float(jnp.finfo(dtype).eps),
+    )
     finite = bool(jnp.all(jnp.isfinite(p_test)) and jnp.all(jnp.isfinite(p_benchmark)))
     rejection_reasons = []
-    if solver_status != "SUCCESS":
-        rejection_reasons.append("solver_status")
-    if solution_status not in ACCEPTED_SOLUTION_STATUSES:
-        rejection_reasons.append("solution_status")
     if not finite:
         rejection_reasons.append("nonfinite")
-    if max_train_residual > TRAIN_RESIDUAL_TOL:
+    if max_train_residual > train_residual_tolerance:
         rejection_reasons.append("train_residual")
+    if float(p_0) < 0.0:
+        rejection_reasons.append("negative_p_0")
     solution_accepted = not rejection_reasons
 
     results = {
@@ -238,7 +236,9 @@ def asset_pricing_kernel(
         "c": c,
         "g": g,
         "x_0": x_0,
-        "nu": nu,
+        "residual_dtype": str(jnp.dtype(dtype)),
+        "metric_dtype": "float64",
+        "kernel": kernel,
         "ell": ell,
         "sigma": sigma,
         "train_T": float(train_data[-1]),
@@ -246,30 +246,34 @@ def asset_pricing_kernel(
         "test_T": data_set.test_T,
         "test_points": data_set.test_points,
         "p_0": float(p_0),
-        "rkhs_norm_p": rkhs_norm_squared(alpha, K),
+        "horizon_bias_p0": horizon_bias_p0,
+        # Jitter-free alpha' K alpha (the metric norm includes the nugget).
+        "rkhs_norm_p": float(alpha_metric.norm(alpha) ** 2 - eps * (alpha @ alpha)),
         "max_train_residual": max_train_residual,
+        "train_residual_tolerance": train_residual_tolerance,
         "max_test_residual": float(jnp.max(jnp.abs(test_residual))),
         # min/max error statistics exclude the pinned t = 0 point ([1:]).
         "p_rel_error_mean": float(p_rel_error.mean()),
         "p_rel_error_max": float(p_rel_error[1:].max()),
         "p_rel_error_min": float(p_rel_error[1:].min()),
-        "solve_time": solve_time,
+        "solve_time": elapsed,
         "wall_time": elapsed,
-        "solver_status": solver_status,
-        "solution_status": solution_status,
-        "stationarity": result.solution_stationarity,
-        "primal_feasibility": result.solution_primal_feasibility,
+        "solver": "nlls-gram",
+        "linear_solver": "auto",
+        "metric_eps": eps,
+        "train_loss": float(result.info.loss),
+        "steps": steps,
+        "stopping_reason": STATUS_TO_REASON.get(status, "unknown"),
         "solution_accepted": solution_accepted,
         "rejection_reason": "accepted"
         if solution_accepted
         else ",".join(rejection_reasons),
     }
     print(
-        f"solve_time(s) = {solve_time}, "
+        f"solve_time(s) = {elapsed}, "
         f"E(|rel_error(p)|) = {results['p_rel_error_mean']:.3e}"
     )
 
-    p_train, dp_train = path_values(z, K_jax, K_tilde_jax)
     train_df = pd.DataFrame(
         {
             "t": np.asarray(train_data),
@@ -289,7 +293,7 @@ def asset_pricing_kernel(
     hyperparameters = {
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
-        "solver_set": asdict(solver_set),
+        "lm_set": asdict(lm_set),
         "parameters": {"r": r, "c": c, "g": g},
         "initial_conditions": {"x_0": x_0},
     }

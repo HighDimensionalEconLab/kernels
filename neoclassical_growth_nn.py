@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from flax import nnx
+from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import (
     DrawNNXModule,
@@ -19,7 +19,7 @@ from nlls_gram import (
 )
 
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
-from neural_networks import ACTIVATIONS, unit_softplus
+from utilities import ACTIVATIONS, unit_softplus
 
 if __name__ == "__main__":
     jax.config.update("jax_enable_x64", True)
@@ -28,7 +28,7 @@ if __name__ == "__main__":
 DOMAIN_EPS = 1e-8
 
 
-@dataclass(frozen=True)
+@struct.dataclass
 class StructuralParameters:
     a: jax.Array
     delta: jax.Array
@@ -79,7 +79,7 @@ class StoppingCriteria:
 # same 8/8 acceptance; geodesic acceleration is required (off fails to reach
 # the loss threshold at any swept damping).
 @dataclass(frozen=True)
-class NLLSGramSettings:
+class SolverSettings:
     init_damping: float = 1e-5
     damping_decrease: float = 0.5
     damping_increase: float = 2.0
@@ -95,6 +95,12 @@ class GrowthPolicySettings:
     hidden_bias: bool = True
     output_bias: bool = True
     input_scale: float = 40.0
+
+
+@struct.dataclass
+class ResidualArgs:
+    graphdef: nnx.GraphDef
+    t: jax.Array
 
 
 class GrowthPolicyNN(nnx.Module):
@@ -219,6 +225,10 @@ def training_residual(model, data, p):
     return residual / jnp.sqrt(residual.size)
 
 
+def residual_fn(theta, args, p):
+    return training_residual(nnx.merge(args.graphdef, theta), {"t": args.t}, p)
+
+
 def snapshot(data, model, p):
     values = jax.device_get(policy_values(model, data["t"], p))
     columns = {key: np.asarray(value) for key, value in values.items()}
@@ -250,10 +260,9 @@ def neoclassical_growth_nn(
     use_float64: bool = True,
     data_set: DataSettings = DataSettings(),
     nn_set: GrowthPolicySettings = GrowthPolicySettings(),
-    lm_set: NLLSGramSettings = NLLSGramSettings(),
+    lm_set: SolverSettings = SolverSettings(),
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
-    measure_compilation: bool = True,
 ):
     if not jax.config.jax_enable_x64:
         raise RuntimeError("enable jax_enable_x64 in the process entry point")
@@ -326,19 +335,16 @@ def neoclassical_growth_nn(
         rngs=nnx.Rngs(init_key),
     )
     _, theta_0 = nnx.split(model, nnx.Param)
-
-    def residual_fn(theta, data):
-        return training_residual(nnx.merge(graphdef, theta), data, p)
+    residual_args = ResidualArgs(graphdef=graphdef, t=t_train)
 
     solver = LevenbergMarquardt(
         residual_fn,
-        linear_solver="cholesky",
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
-        dual_solve_dtype=jnp.float64,
+        linear_solve_dtype=jnp.float64,
     )
 
     # solve()'s atol is on the residual norm; the settings threshold is on
@@ -354,28 +360,11 @@ def neoclassical_growth_nn(
         dtype=dtype,
     )
 
-    compile_time = np.nan
-    if measure_compilation:
-        compile_start = time.perf_counter()
-        jax.block_until_ready(
-            solver.solve(
-                theta_0,
-                train_data,
-                max_steps=1,
-                atol=atol,
-                multi_start=MultiStart(
-                    key=jax.random.key(0),
-                    num_starts=stop_set.num_attempts,
-                    draw=draw,
-                ),
-            ).x
-        )
-        compile_time = time.perf_counter() - compile_start
-
     start_time = time.perf_counter()
     result = solver.solve(
         theta_0,
-        train_data,
+        residual_args,
+        p=p,
         max_steps=stop_set.max_steps,
         atol=atol,
         multi_start=MultiStart(
@@ -383,8 +372,9 @@ def neoclassical_growth_nn(
             num_starts=stop_set.num_attempts,
             draw=draw,
         ),
+        max_steps_is_success=False,
     )
-    jax.block_until_ready(result.x)
+    jax.block_until_ready(result)
     train_time = time.perf_counter() - start_time
     model = nnx.merge(graphdef, result.x)
     steps = int(result.steps)
@@ -399,7 +389,6 @@ def neoclassical_growth_nn(
     tvc_values = policy_values(model, jnp.atleast_1d(tvc_t), p)
     log_tvc = float(tvc_values["log_tvc"][0])
     transversality_ok = bool(log_tvc < stop_set.log_tvc_threshold)
-    accepted = accepted and transversality_ok
 
     train_resource_mean_abs = float(train_df["resource"].abs().mean())
     train_euler_mean_abs = float(train_df["euler"].abs().mean())
@@ -424,7 +413,7 @@ def neoclassical_growth_nn(
         "use_kinked_production": use_kinked_production,
         "seed": seed,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "dual_solve_dtype": "float64",
+        "linear_solve_dtype": "float64",
         "solver": "nlls-gram",
         "train_loss": train_loss,
         "train_resource_mean_abs": train_resource_mean_abs,
@@ -440,7 +429,6 @@ def neoclassical_growth_nn(
         "stopping_reason": stopping_reason,
         "train_time": train_time,
         "train_time_success": train_time if accepted else np.nan,
-        "compile_time": compile_time,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
         "nn_width": policy_settings.width,
         "nn_depth": policy_settings.depth,

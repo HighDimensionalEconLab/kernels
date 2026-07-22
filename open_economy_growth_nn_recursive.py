@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import asdict, dataclass, replace
+from functools import partial
 from typing import Literal
 
 import jax
@@ -10,7 +11,7 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from flax import nnx
+from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import LevenbergMarquardt, LMStatus
 from tinydiffeq import (
@@ -24,7 +25,6 @@ from tinydiffeq import (
     solve_ode,
 )
 
-from neural_networks import ACTIVATIONS, unit_softplus
 from open_economy_growth import (
     ModelParameters,
     marginal_product,
@@ -35,6 +35,7 @@ from open_economy_growth import (
     tvc_diagnostics,
 )
 from open_economy_growth_benchmark import open_economy_growth_benchmark
+from utilities import ACTIVATIONS, unit_softplus
 
 # Sequential/state-space formulation. The neural policy supplies positive
 # investment expenditure x(k) and the signed current account CA(k). Capital and
@@ -88,7 +89,7 @@ class StoppingCriteria:
 
 
 @dataclass(frozen=True)
-class NLLSGramSettings:
+class SolverSettings:
     init_damping: float = 3.26e-5
     damping_decrease: float = 0.482
     damping_increase: float = 2.71
@@ -106,6 +107,48 @@ class SequentialPolicySettings:
     k_0_ref: float = 1.0
 
 
+@struct.dataclass
+class ResidualArgs:
+    graphdef: nnx.GraphDef
+    fixed_state: nnx.State
+    train_t: jax.Array
+    data_set: DataSettings = struct.field(pytree_node=False)
+
+
+@struct.dataclass
+class DynamicModelParameters:
+    alpha: jax.Array
+    gamma: jax.Array
+    delta: jax.Array
+    rho: jax.Array
+    installation_elasticity: jax.Array
+    interest_rate: jax.Array
+    installation_efficiency: jax.Array
+
+    @classmethod
+    def from_model(cls, parameters, dtype):
+        return cls(
+            alpha=jnp.asarray(parameters.alpha, dtype=dtype),
+            gamma=jnp.asarray(parameters.gamma, dtype=dtype),
+            delta=jnp.asarray(parameters.delta, dtype=dtype),
+            rho=jnp.asarray(parameters.rho, dtype=dtype),
+            installation_elasticity=jnp.asarray(
+                parameters.installation_elasticity, dtype=dtype
+            ),
+            interest_rate=jnp.asarray(parameters.interest_rate, dtype=dtype),
+            installation_efficiency=jnp.asarray(
+                parameters.installation_efficiency, dtype=dtype
+            ),
+        )
+
+
+@struct.dataclass
+class ResidualParameters:
+    k_0: jax.Array
+    a_0: jax.Array
+    model: DynamicModelParameters
+
+
 class SequentialPolicyNN(nnx.Module):
     def __init__(
         self,
@@ -115,9 +158,11 @@ class SequentialPolicyNN(nnx.Module):
         rngs: nnx.Rngs,
     ):
         self.hidden_activation = ACTIVATIONS[settings.hidden_activation]
-        self.flow_scale = settings.flow_scale
-        self.investment_anchor = settings.investment_anchor
-        self.k_0_ref = settings.k_0_ref
+        self.flow_scale = nnx.Variable(jnp.asarray(settings.flow_scale, dtype=dtype))
+        self.investment_anchor = nnx.Variable(
+            jnp.asarray(settings.investment_anchor, dtype=dtype)
+        )
+        self.k_0_ref = nnx.Variable(jnp.asarray(settings.k_0_ref, dtype=dtype))
         self.layers = nnx.List(
             [nnx.Linear(1, settings.width, dtype=dtype, param_dtype=dtype, rngs=rngs)]
         )
@@ -141,14 +186,14 @@ class SequentialPolicyNN(nnx.Module):
         )
 
     def __call__(self, k):
-        h = jnp.atleast_1d(jnp.log(k / self.k_0_ref))
+        h = jnp.atleast_1d(jnp.log(k / self.k_0_ref[...]))
         for layer in self.layers:
             h = self.hidden_activation(layer(h))
         raw = self.head(h)
-        investment = self.investment_anchor * unit_softplus(
-            (self.flow_scale / self.investment_anchor) * raw[0]
+        investment = self.investment_anchor[...] * unit_softplus(
+            (self.flow_scale[...] / self.investment_anchor[...]) * raw[0]
         )
-        current_account = self.flow_scale * raw[1]
+        current_account = self.flow_scale[...] * raw[1]
         return jnp.stack([investment, current_account])
 
 
@@ -199,6 +244,7 @@ def policy_values(policy, k, a, parameters):
     consumption_drift = (
         mpk - investment_derivative - current_account_derivative
     ) * capital_drift + parameters.interest_rate * current_account
+    consumption_growth = (parameters.interest_rate - parameters.rho) / parameters.gamma
     return {
         "k": k,
         "a": a,
@@ -209,7 +255,8 @@ def policy_values(policy, k, a, parameters):
         "current_account": current_account,
         "capital_drift": capital_drift,
         "q_euler": log_q_drift - q_equation,
-        "c_euler": consumption_drift / policy.flow_scale,
+        "c_euler": (consumption_drift - consumption_growth * consumption)
+        / policy.flow_scale[...],
     }
 
 
@@ -219,24 +266,22 @@ def path_values(policy, states, parameters):
     )(states)
 
 
-def rollout_field(policy, k_0, parameters):
-    def state_drift(state):
-        k = k_0 * jnp.exp(state[0])
-        investment, current_account = policy(k)
-        investment_rate = investment / k
-        capital_drift = k * (
-            parameters.installation_efficiency
-            * investment_rate**parameters.installation_elasticity
-            - parameters.delta
-        )
-        return jnp.stack(
-            [
-                capital_drift / k,
-                current_account / policy.flow_scale,
-            ]
-        )
-
-    return state_drift
+def rollout_field(state, _, parameters, p):
+    policy, k_0 = p
+    k = k_0 * jnp.exp(state[0])
+    investment, current_account = policy(k)
+    investment_rate = investment / k
+    capital_drift = k * (
+        parameters.installation_efficiency
+        * investment_rate**parameters.installation_elasticity
+        - parameters.delta
+    )
+    return jnp.stack(
+        [
+            capital_drift / k,
+            current_account / policy.flow_scale[...],
+        ]
+    )
 
 
 def rollout(
@@ -244,7 +289,6 @@ def rollout(
     T,
     budget,
     k_0,
-    a_0,
     parameters,
     data_set,
     *,
@@ -279,7 +323,7 @@ def rollout(
     else:
         raise ValueError(f"unknown ode_solver: {ode_solver_name!r}")
     return solve_ode(
-        rollout_field(policy, k_0, parameters),
+        rollout_field,
         ode_solver,
         0.0,
         T,
@@ -288,6 +332,8 @@ def rollout(
         controller=controller,
         max_steps=budget,
         save_at=save_at,
+        args=parameters,
+        p=(policy, k_0),
     )
 
 
@@ -298,34 +344,80 @@ def states_from_solution(solution, k_0, a_0, flow_scale):
     return jnp.where(solution.ok, states, jnp.inf)
 
 
-def collocation_states(policy, train_t, k_0, a_0, parameters, data_set):
-    solution = rollout(
+@partial(jax.jit, static_argnames=("data_set",))
+def collocation_rollout(policy, train_t, k_0, parameters, data_set):
+    return rollout(
         policy,
         data_set.train_T,
         data_set.rollout_steps,
         k_0,
-        a_0,
         parameters,
         data_set,
         save_at=SaveAt(ts=train_t),
     )
-    return states_from_solution(solution, k_0, a_0, policy.flow_scale)
+
+
+def collocation_states(policy, train_t, k_0, a_0, parameters, data_set):
+    solution = collocation_rollout(
+        policy,
+        train_t,
+        k_0,
+        parameters,
+        data_set,
+    )
+    return states_from_solution(solution, k_0, a_0, policy.flow_scale[...])
+
+
+def residual_fn(theta, args, p):
+    policy = nnx.merge(args.graphdef, theta, args.fixed_state)
+    states = collocation_states(
+        policy,
+        args.train_t,
+        p.k_0,
+        p.a_0,
+        p.model,
+        args.data_set,
+    )
+    values = path_values(policy, states, p.model)
+    consumption_positivity = jnp.minimum(
+        values["c"] / policy.flow_scale[...] - DOMAIN_EPS,
+        0.0,
+    )
+    residual = jnp.concatenate(
+        [values["q_euler"], values["c_euler"], consumption_positivity]
+    )
+    return residual / jnp.sqrt(residual.size)
+
+
+@partial(jax.jit, static_argnames=("budget",))
+def evaluate_path_jit(policy, times, budget, k_0, a_0, parameters):
+    solution = solve_ode(
+        rollout_field,
+        RK4(),
+        0.0,
+        times[-1],
+        jnp.zeros(2, dtype=jnp.asarray(k_0).dtype),
+        dt_0=times[-1] / budget,
+        max_steps=budget,
+        save_at=SaveAt(ts=times),
+        args=parameters,
+        p=(policy, k_0),
+    )
+    states = states_from_solution(solution, k_0, a_0, policy.flow_scale[...])
+    return {"t": times, **path_values(policy, states, parameters)}
 
 
 def evaluate_path(policy, times, budget, k_0, a_0, parameters, data_set):
-    solution = rollout(
+    dtype = jnp.asarray(k_0).dtype
+    dynamic_parameters = DynamicModelParameters.from_model(parameters, dtype)
+    return evaluate_path_jit(
         policy,
-        float(times[-1]),
+        times,
         budget,
         k_0,
         a_0,
-        parameters,
-        data_set,
-        save_at=SaveAt(ts=times),
-        ode_solver_name="rk4",
+        dynamic_parameters,
     )
-    states = states_from_solution(solution, k_0, a_0, policy.flow_scale)
-    return {"t": times, **path_values(policy, states, parameters)}
 
 
 def open_economy_growth_nn_recursive(
@@ -336,17 +428,14 @@ def open_economy_growth_nn_recursive(
     use_float64: bool = True,
     data_set: DataSettings = DataSettings(),
     nn_set: SequentialPolicySettings = SequentialPolicySettings(),
-    lm_set: NLLSGramSettings = NLLSGramSettings(),
+    lm_set: SolverSettings = SolverSettings(),
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
-    measure_compilation: bool = True,
 ):
     if not jax.config.jax_enable_x64:
         raise RuntimeError("enable jax_enable_x64 in the process entry point")
     if k_0 <= 0.0:
         raise ValueError("k_0 must be positive")
-    if abs(parameters.interest_rate - parameters.rho) > 1e-12:
-        raise ValueError("the recursive baseline requires world_interest_rate == rho")
     if data_set.diagnostic_T < max(data_set.train_T, data_set.test_T):
         raise ValueError("diagnostic_T must cover the train and test horizons")
     if data_set.benchmark_T < data_set.test_T:
@@ -356,6 +445,7 @@ def open_economy_growth_nn_recursive(
     dtype = jnp.float64 if use_float64 else jnp.float32
     k_0_jax = jnp.asarray(k_0, dtype=dtype)
     a_0_jax = jnp.asarray(a_0, dtype=dtype)
+    dynamic_parameters = DynamicModelParameters.from_model(parameters, dtype)
     initial_output = float(production(k_0_jax, 1.0, parameters))
     flow_scale = max(initial_output, DOMAIN_EPS)
     nn_set = replace(
@@ -375,48 +465,38 @@ def open_economy_growth_nn_recursive(
     init_key = jax.random.key(seed)
     model = SequentialPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(init_key))
     graphdef, theta_0, fixed_state = nnx.split(model, nnx.Param, ...)
-
-    def residual_fn(theta):
-        policy = nnx.merge(graphdef, theta, fixed_state)
-        states = collocation_states(
-            policy,
-            train_t,
-            k_0_jax,
-            a_0_jax,
-            parameters,
-            data_set,
-        )
-        values = path_values(policy, states, parameters)
-        consumption_positivity = jnp.minimum(
-            values["c"] / policy.flow_scale - DOMAIN_EPS,
-            0.0,
-        )
-        residual = jnp.concatenate(
-            [values["q_euler"], values["c_euler"], consumption_positivity]
-        )
-        return residual / jnp.sqrt(residual.size)
+    residual_args = ResidualArgs(
+        graphdef=graphdef,
+        fixed_state=fixed_state,
+        train_t=train_t,
+        data_set=data_set,
+    )
+    residual_parameters = ResidualParameters(
+        k_0=k_0_jax,
+        a_0=a_0_jax,
+        model=dynamic_parameters,
+    )
 
     solver = LevenbergMarquardt(
         residual_fn,
-        linear_solver="cholesky",
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
-        dual_solve_dtype=jnp.float64,
+        linear_solve_dtype=jnp.float64,
     )
     atol = math.sqrt(stop_set.train_loss_threshold)
-    compile_time = np.nan
-    if measure_compilation:
-        compile_start = time.perf_counter()
-        compile_result = solver.solve(theta_0, max_steps=1, atol=atol)
-        jax.block_until_ready(compile_result.x)
-        compile_time = time.perf_counter() - compile_start
-
     train_start = time.perf_counter()
-    result = solver.solve(theta_0, max_steps=stop_set.max_steps, atol=atol)
-    jax.block_until_ready(result.x)
+    result = solver.solve(
+        theta_0,
+        residual_args,
+        p=residual_parameters,
+        max_steps=stop_set.max_steps,
+        atol=atol,
+        max_steps_is_success=False,
+    )
+    jax.block_until_ready(result)
     train_time = time.perf_counter() - train_start
     policy = nnx.merge(graphdef, result.x, fixed_state)
 
@@ -448,6 +528,7 @@ def open_economy_growth_nn_recursive(
         parameters,
         data_set,
     )
+    jax.block_until_ready((train_eval, test_eval, diagnostic_eval))
 
     residual_names = ("q_euler", "c_euler")
     max_train_residual = max(
@@ -530,7 +611,7 @@ def open_economy_growth_nn_recursive(
         diagnostic_eval["t"],
         diagnostic_eval["k"],
         diagnostic_eval["q"],
-        diagnostic_eval["c"][0],
+        diagnostic_eval["c"],
         a_0_jax,
         parameters,
     )
@@ -548,6 +629,7 @@ def open_economy_growth_nn_recursive(
         dtype=dtype,
     )
     policy_flows = jax.vmap(policy)(policy_k)
+    jax.block_until_ready(policy_flows)
     policy_x = policy_flows[:, 0]
     policy_ca = policy_flows[:, 1]
     policy_s = policy_x / policy_k
@@ -557,12 +639,12 @@ def open_economy_growth_nn_recursive(
 
     results = {
         **asdict(parameters),
-        "world_interest_rate_resolved": parameters.interest_rate,
+        "r_star_resolved": parameters.interest_rate,
         "k_0": k_0,
         "a_0": a_0,
         "seed": seed,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "dual_solve_dtype": "float64",
+        "linear_solve_dtype": "float64",
         "solver": "nlls-gram",
         "ansatz": "sequential_investment_current_account_levels",
         "selection": "minimum_identity_metric_parameter_step",
@@ -596,7 +678,6 @@ def open_economy_growth_nn_recursive(
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
         "train_time": train_time,
         "train_time_success": train_time if solution_accepted else np.nan,
-        "compile_time": compile_time,
         "total_params": int(theta_final.size),
         "unknown_count": int(theta_final.size),
         "parameter_norm_initial": float(jnp.linalg.norm(theta_initial)),
@@ -662,6 +743,7 @@ def open_economy_growth_nn_recursive(
         "stop_set": asdict(stop_set),
         "initial_conditions": {"k_0": k_0, "a_0": a_0},
     }
+    jax.block_until_ready(nnx.state(policy))
     return results, {
         "model": policy,
         "train_df": train_df,

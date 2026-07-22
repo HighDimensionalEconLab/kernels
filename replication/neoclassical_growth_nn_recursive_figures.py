@@ -65,35 +65,6 @@ def run(output_dir: str = ".results"):
     plt.close()
     print(f"wrote {path}")
 
-    # --- butterfly basin outcomes over the k_0 grid ----------------------------
-    results = pd.read_parquet(out / f"{PREFIX}_butterfly_basin_results.parquet")
-    style(figsize=(15, 7), fontsize=14, ticksize=14)
-    plt.figure(figsize=(15, 7))
-    ax = plt.gca()
-    frac = results.groupby("k_0")["basin_correct"].mean()
-    ax.plot(
-        frac.index,
-        frac.to_numpy(),
-        marker="o",
-        color="C0",
-        label=r"Recursive NN $i(k)$",
-    )
-    ax.axvline(
-        x=float(results["k_thr"].iloc[0]),
-        color="k",
-        linestyle=":",
-        label=r"Threshold $\bar{k}$",
-    )
-    ax.set_xlabel("Initial capital: $k_0$")
-    ax.set_ylabel("Fraction of seeds settling in the correct basin")
-    ax.set_ylim(-0.05, 1.05)
-    ax.legend()
-    plt.tight_layout()
-    path = out / "neoclassical_growth_recursive_butterfly.pdf"
-    plt.savefig(path, format="pdf")
-    plt.close()
-    print(f"wrote {path}")
-
 
 if __name__ == "__main__":
     jsonargparse.CLI(run)

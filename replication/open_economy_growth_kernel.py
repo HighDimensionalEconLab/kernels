@@ -43,6 +43,7 @@ def run(output_dir: str = ".results", use_float64: bool = True):
         )
 
     go("baseline")
+    go("r_star_005", parameters=dict(r_star=0.05))
     go("initial_debt", a_0=-0.5 * output_ss)
     go("initial_assets", a_0=0.5 * output_ss)
     go(

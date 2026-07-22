@@ -482,11 +482,13 @@ def neoclassical_growth_nn_recursive(out):
 def open_economy_growth_kernel(out):
     prefix = "open_economy_growth_kernel"
     hp = load(out, f"{prefix}_baseline_hyperparameters")
+    baseline = load(out, f"{prefix}_baseline")
 
     def experiment(name):
         j = load(out, f"{prefix}_{name}")
         return {
             "solution_accepted": bool(j["frac_accepted"] == 1.0),
+            "r_star": sig(med(j["r_star_resolved"]), 5),
             "k_0": sig(med(j["k_0"]), 5),
             "a_0": sig(med(j["a_0"]), 5),
             "num_train_points": int(med(j["num_train_points"])),
@@ -505,11 +507,20 @@ def open_economy_growth_kernel(out):
         "parameters": hp["parameters"],
         "kernel": hp["kernel_set"],
         "selection": "minimum_shifted_rkhs_metric",
-        "training_information": {"terminal_residual_count": 0},
+        "training_information": {
+            "terminal_residual_count": 0,
+            "differential_residual_count": int(
+                med(baseline["differential_residual_count"])
+            ),
+            "algebraic_residual_count": int(med(baseline["algebraic_residual_count"])),
+            "dae_residual_count": int(med(baseline["dae_residual_count"])),
+            "unknown_count": int(med(baseline["unknown_count"])),
+        },
         "experiments": {
             name: experiment(name)
             for name in (
                 "baseline",
+                "r_star_005",
                 "initial_debt",
                 "initial_assets",
                 "horizon_200",

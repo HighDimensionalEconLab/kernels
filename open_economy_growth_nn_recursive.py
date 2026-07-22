@@ -118,7 +118,9 @@ class ResidualArgs:
 @struct.dataclass
 class DynamicModelParameters:
     alpha: jax.Array
+    gamma: jax.Array
     delta: jax.Array
+    rho: jax.Array
     installation_elasticity: jax.Array
     interest_rate: jax.Array
     installation_efficiency: jax.Array
@@ -127,7 +129,9 @@ class DynamicModelParameters:
     def from_model(cls, parameters, dtype):
         return cls(
             alpha=jnp.asarray(parameters.alpha, dtype=dtype),
+            gamma=jnp.asarray(parameters.gamma, dtype=dtype),
             delta=jnp.asarray(parameters.delta, dtype=dtype),
+            rho=jnp.asarray(parameters.rho, dtype=dtype),
             installation_elasticity=jnp.asarray(
                 parameters.installation_elasticity, dtype=dtype
             ),
@@ -240,6 +244,7 @@ def policy_values(policy, k, a, parameters):
     consumption_drift = (
         mpk - investment_derivative - current_account_derivative
     ) * capital_drift + parameters.interest_rate * current_account
+    consumption_growth = (parameters.interest_rate - parameters.rho) / parameters.gamma
     return {
         "k": k,
         "a": a,
@@ -250,7 +255,8 @@ def policy_values(policy, k, a, parameters):
         "current_account": current_account,
         "capital_drift": capital_drift,
         "q_euler": log_q_drift - q_equation,
-        "c_euler": consumption_drift / policy.flow_scale[...],
+        "c_euler": (consumption_drift - consumption_growth * consumption)
+        / policy.flow_scale[...],
     }
 
 
@@ -430,8 +436,6 @@ def open_economy_growth_nn_recursive(
         raise RuntimeError("enable jax_enable_x64 in the process entry point")
     if k_0 <= 0.0:
         raise ValueError("k_0 must be positive")
-    if abs(parameters.interest_rate - parameters.rho) > 1e-12:
-        raise ValueError("the recursive baseline requires world_interest_rate == rho")
     if data_set.diagnostic_T < max(data_set.train_T, data_set.test_T):
         raise ValueError("diagnostic_T must cover the train and test horizons")
     if data_set.benchmark_T < data_set.test_T:
@@ -607,7 +611,7 @@ def open_economy_growth_nn_recursive(
         diagnostic_eval["t"],
         diagnostic_eval["k"],
         diagnostic_eval["q"],
-        diagnostic_eval["c"][0],
+        diagnostic_eval["c"],
         a_0_jax,
         parameters,
     )
@@ -635,7 +639,7 @@ def open_economy_growth_nn_recursive(
 
     results = {
         **asdict(parameters),
-        "world_interest_rate_resolved": parameters.interest_rate,
+        "r_star_resolved": parameters.interest_rate,
         "k_0": k_0,
         "a_0": a_0,
         "seed": seed,

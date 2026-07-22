@@ -71,9 +71,8 @@ class SolverSettings:
     init_damping: float = 1e-8
     damping_decrease: float = 0.1
     damping_increase: float = 4.0
-    max_steps: int = 50
+    max_steps: int = 100
     residual_atol: float = 2e-8
-    linear_solver: str = "qr"
     metric_eps: float = 1e-7
 
 
@@ -91,12 +90,8 @@ def open_economy_growth_kernel(
     dtype = jnp.float64 if use_float64 else jnp.float32
     if k_0 <= 0.0:
         raise ValueError("k_0 must be positive")
-    if abs(parameters.interest_rate - parameters.rho) > 1e-12:
-        raise ValueError("Stage 1 requires world_interest_rate == rho")
     if lm_set.metric_eps <= 0.0:
         raise ValueError("metric_eps must be positive")
-    if lm_set.linear_solver not in ("gram_cholesky", "qr"):
-        raise ValueError("linear_solver must be 'gram_cholesky' or 'qr'")
 
     kernel = normalize_kernel(kernel_set.kernel)
     if data_set.train_points_list is None:
@@ -162,33 +157,66 @@ def open_economy_growth_kernel(
         jnp.linalg.cholesky(K_metric + eps * jnp.eye(n_train, dtype=jnp.float64))
     )
 
+    # theta = (alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q,
+    #          (c_offset, mu_offset, q_offset)), matching the metric blocks.
     def path_values(theta, K_eval, K_tilde_eval):
-        alpha_k, alpha_a, alpha_q, initial = theta
-        q_offset, c_offset = initial
+        alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, initial = theta
+        c_offset, mu_offset, q_offset = initial
+        log_mu = (
+            -parameters.gamma * jnp.log(consumption_scale)
+            + mu_offset
+            + K_tilde_eval @ alpha_mu
+        )
+        log_c = jnp.log(consumption_scale) + c_offset + K_tilde_eval @ alpha_c
         log_k = jnp.log(k_0) + K_tilde_eval @ alpha_k
         a = a_0 + output_scale * (K_tilde_eval @ alpha_a)
         log_q = jnp.log(steady["q"]) + q_offset + K_tilde_eval @ alpha_q
+        marginal_wealth = jnp.exp(log_mu)
+        c = jnp.exp(log_c)
         k = jnp.exp(log_k)
         tobin_q = jnp.exp(log_q)
-        c = consumption_scale * jnp.exp(c_offset)
+        dlog_marginal_wealth_dt = K_eval @ alpha_mu
         dlog_k_dt = K_eval @ alpha_k
         da_dt = output_scale * (K_eval @ alpha_a)
         dlog_q_dt = K_eval @ alpha_q
-        return k, a, tobin_q, c, dlog_k_dt, da_dt, dlog_q_dt
+        return (
+            k,
+            a,
+            tobin_q,
+            c,
+            marginal_wealth,
+            dlog_k_dt,
+            da_dt,
+            dlog_q_dt,
+            dlog_marginal_wealth_dt,
+        )
 
-    residual_scale = 1.0 / jnp.sqrt(3.0 * n_train)
+    residual_scale = 1.0 / jnp.sqrt(5.0 * n_train)
 
     def residual_fn(theta):
-        k, a, tobin_q, c, dlog_k_dt, da_dt, dlog_q_dt = path_values(theta, K, K_tilde)
+        values = path_values(theta, K, K_tilde)
+        (
+            k,
+            a,
+            tobin_q,
+            c,
+            marginal_wealth,
+            dlog_k_dt,
+            da_dt,
+            dlog_q_dt,
+            dlog_marginal_wealth_dt,
+        ) = values
         residuals = path_residuals(
             k,
             a,
             tobin_q,
             c,
+            marginal_wealth,
             jnp.ones_like(k),
             dlog_k_dt,
             da_dt,
             dlog_q_dt,
+            dlog_marginal_wealth_dt,
             parameters,
         )
         return residual_scale * jnp.concatenate(
@@ -196,19 +224,21 @@ def open_economy_growth_kernel(
                 residuals["capital"],
                 residuals["assets"],
                 residuals["tobin_q"],
+                residuals["marginal_wealth"],
+                residuals["consumption_foc"],
             ]
         )
 
-    # There are 3n DAE equations in 3n + 2 unknowns. No terminal equation is
-    # appended: the metric supplies the two-dimensional selection.
+    # There are 5n DAE equations in 5n + 3 unknowns. No terminal equation is
+    # appended: the metric supplies the three-dimensional selection.
     metric = metric_with_compute_dtype(
         repeated_blockdiag_metric(
             alpha_metric,
             n_train,
-            3,
+            5,
             additional=(
-                metric_from_diagonal(jnp.full(2, eps, dtype=jnp.float64)),
-                2,
+                metric_from_diagonal(jnp.full(3, eps, dtype=jnp.float64)),
+                3,
             ),
         ),
         jnp.float64,
@@ -220,12 +250,13 @@ def open_economy_growth_kernel(
         jnp.zeros(n_train, dtype=dtype),
         jnp.zeros(n_train, dtype=dtype),
         jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(2, dtype=dtype),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(3, dtype=dtype),
     )
 
     solver = LevenbergMarquardt(
         residual_fn,
-        linear_solver=lm_set.linear_solver,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
@@ -252,19 +283,29 @@ def open_economy_growth_kernel(
             kernel_set.sigma,
             kernel_set.ell,
         )
-        k, a, tobin_q, c, dlog_k_dt, da_dt, dlog_q_dt = path_values(
-            theta, K_eval, K_tilde_eval
-        )
+        (
+            k,
+            a,
+            tobin_q,
+            c,
+            marginal_wealth,
+            dlog_k_dt,
+            da_dt,
+            dlog_q_dt,
+            dlog_marginal_wealth_dt,
+        ) = path_values(theta, K_eval, K_tilde_eval)
         z = jnp.ones_like(k)
         residuals = path_residuals(
             k,
             a,
             tobin_q,
             c,
+            marginal_wealth,
             z,
             dlog_k_dt,
             da_dt,
             dlog_q_dt,
+            dlog_marginal_wealth_dt,
             parameters,
         )
         x = investment_expenditure(k, tobin_q, parameters)
@@ -275,7 +316,8 @@ def open_economy_growth_kernel(
             "k": k,
             "a": a,
             "q": tobin_q,
-            "c": jnp.full_like(k, c),
+            "c": c,
+            "mu": marginal_wealth,
             "x": x,
             "output": output,
             "current_account": current_account,
@@ -292,7 +334,13 @@ def open_economy_growth_kernel(
         train_eval["c"][-1],
         parameters,
     )
-    residual_names = ("capital", "assets", "tobin_q")
+    residual_names = (
+        "capital",
+        "assets",
+        "tobin_q",
+        "marginal_wealth",
+        "consumption_foc",
+    )
     max_train_residual = max(
         float(jnp.max(jnp.abs(train_eval[name]))) for name in residual_names
     )
@@ -330,7 +378,7 @@ def open_economy_growth_kernel(
         all(
             jnp.all(jnp.isfinite(grid[name])) and jnp.min(grid[name]) > 0.0
             for grid in (train_eval, validation_eval, test_eval)
-            for name in ("k", "q", "c", "x")
+            for name in ("k", "q", "c", "mu", "x")
         )
         and all(
             jnp.all(jnp.isfinite(grid["a"]))
@@ -342,7 +390,7 @@ def open_economy_growth_kernel(
         validation_eval["t"],
         validation_eval["k"],
         validation_eval["q"],
-        c,
+        validation_eval["c"],
         a_0,
         parameters,
     )
@@ -350,12 +398,14 @@ def open_economy_growth_kernel(
         train_eval["k"][-1],
         train_eval["a"][-1],
         train_eval["q"][-1],
-        c,
+        train_eval["c"][-1],
         train_eval["t"][-1],
         parameters,
     )
 
     rejection_reasons = []
+    if int(result.status) != LMStatus.CONVERGED:
+        rejection_reasons.append("solver_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
     if max_train_residual > TRAIN_RESIDUAL_TOL:
@@ -365,18 +415,25 @@ def open_economy_growth_kernel(
     solution_accepted = not rejection_reasons
     benchmark_match = max_benchmark_error <= BENCHMARK_MATCH_TOL
 
-    alpha_k, alpha_a, alpha_q, initial = theta
-    q_offset, c_offset = initial
+    alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, initial = theta
+    c_offset, mu_offset, q_offset = initial
+    rkhs_norm_mu = alpha_metric.norm(alpha_mu) ** 2 - eps * (alpha_mu @ alpha_mu)
+    rkhs_norm_c = alpha_metric.norm(alpha_c) ** 2 - eps * (alpha_c @ alpha_c)
     rkhs_norm_k = alpha_metric.norm(alpha_k) ** 2 - eps * (alpha_k @ alpha_k)
     rkhs_norm_a = alpha_metric.norm(alpha_a) ** 2 - eps * (alpha_a @ alpha_a)
     rkhs_norm_q = alpha_metric.norm(alpha_q) ** 2 - eps * (alpha_q @ alpha_q)
-    rkhs_norm_total = rkhs_norm_k + rkhs_norm_a + rkhs_norm_q
+    rkhs_norm_total = (
+        rkhs_norm_mu + rkhs_norm_c + rkhs_norm_k + rkhs_norm_a + rkhs_norm_q
+    )
     shifted_metric_norm_squared = rkhs_norm_total + eps * (
-        alpha_k @ alpha_k
+        alpha_mu @ alpha_mu
+        + alpha_c @ alpha_c
+        + alpha_k @ alpha_k
         + alpha_a @ alpha_a
         + alpha_q @ alpha_q
-        + q_offset**2
         + c_offset**2
+        + mu_offset**2
+        + q_offset**2
     )
 
     @jax.jit
@@ -388,12 +445,12 @@ def open_economy_growth_kernel(
             kernel_set.sigma,
             kernel_set.ell,
         )
-        k, a, tobin_q, c_value, *_ = path_values(theta, K_eval, K_tilde_eval)
-        return k, a, tobin_q, jnp.full_like(k, c_value)
+        k, a, tobin_q, c, *_ = path_values(theta, K_eval, K_tilde_eval)
+        return k, a, tobin_q, c
 
     results = {
         **asdict(parameters),
-        "world_interest_rate_resolved": parameters.interest_rate,
+        "r_star_resolved": parameters.interest_rate,
         "k_0": k_0,
         "a_0": a_0,
         "a_0_over_output_ss": a_0 / float(output_scale),
@@ -417,8 +474,14 @@ def open_economy_growth_kernel(
         "max_benchmark_error": max_benchmark_error,
         "benchmark_match": benchmark_match,
         "terminal_residual_count": 0,
-        "dae_residual_count": 3 * n_train,
-        "unknown_count": 3 * n_train + 2,
+        "differential_residual_count": 4 * n_train,
+        "algebraic_residual_count": n_train,
+        "dae_residual_count": 5 * n_train,
+        "unknown_count": 5 * n_train + 3,
+        "dynamic_rkhs_function_count": 4,
+        "algebraic_rkhs_function_count": 1,
+        "free_initial_value_count": 3,
+        "metric_selection_dimension": 3,
         "selection": "minimum_shifted_rkhs_metric",
         "initialization": "zero_coordinate",
         "k_relative_error_max": float(jnp.max(k_relative_error)),
@@ -433,6 +496,17 @@ def open_economy_growth_kernel(
         "ex_post_asset_tvc": float(tvc["asset_tvc"]),
         "ex_post_capital_tvc": float(tvc["capital_tvc"]),
         "benchmark_a_0_gap": abs(float(benchmark_diagnostics["a_0_gap"])),
+        "max_marginal_wealth_residual": float(
+            jnp.max(jnp.abs(train_eval["marginal_wealth"]))
+        ),
+        "max_consumption_foc_residual": float(
+            jnp.max(jnp.abs(train_eval["consumption_foc"]))
+        ),
+        "max_consumption_variation": float(
+            jnp.max(jnp.abs(train_eval["c"] - train_eval["c"][0]))
+        ),
+        "rkhs_norm_mu": float(rkhs_norm_mu),
+        "rkhs_norm_c": float(rkhs_norm_c),
         "rkhs_norm_k": float(rkhs_norm_k),
         "rkhs_norm_a": float(rkhs_norm_a),
         "rkhs_norm_q": float(rkhs_norm_q),
@@ -441,7 +515,7 @@ def open_economy_growth_kernel(
         "solve_time": solve_time,
         "wall_time": solve_time,
         "solver": "nlls-gram",
-        "linear_solver_resolved": lm_set.linear_solver,
+        "linear_solver": "auto",
         "metric_eps": eps,
         "train_loss": float(result.info.loss),
         "steps": int(result.steps),
@@ -451,6 +525,7 @@ def open_economy_growth_kernel(
             "accepted" if solution_accepted else ",".join(rejection_reasons)
         ),
         "c_offset": float(c_offset),
+        "mu_offset": float(mu_offset),
     }
 
     frame_names = (
@@ -459,12 +534,15 @@ def open_economy_growth_kernel(
         "a",
         "q",
         "c",
+        "mu",
         "x",
         "output",
         "current_account",
         "capital",
         "assets",
         "tobin_q",
+        "marginal_wealth",
+        "consumption_foc",
     )
     train_df = pd.DataFrame(
         {name: np.asarray(train_eval[name]) for name in frame_names}

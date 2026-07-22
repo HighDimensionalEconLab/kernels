@@ -277,12 +277,26 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertGreater(values["x"].min(), 0.0)
 
     def test_open_economy_growth_kernel_smoke(self):
-        results, extras = open_economy_growth_kernel()
+        baseline_parameters = OpenEconomyParameters()
+        parameters = OpenEconomyParameters(r_star=baseline_parameters.rho)
+        results, extras = open_economy_growth_kernel(parameters=parameters)
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+        self.assertEqual(results["stopping_reason"], "converged")
         self.assertTrue(results["benchmark_match"])
         self.assertEqual(results["terminal_residual_count"], 0)
-        self.assertEqual(results["dae_residual_count"], 3 * results["num_train_points"])
-        self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 2)
+        self.assertEqual(
+            results["differential_residual_count"],
+            4 * results["num_train_points"],
+        )
+        self.assertEqual(
+            results["algebraic_residual_count"], results["num_train_points"]
+        )
+        self.assertEqual(results["dae_residual_count"], 5 * results["num_train_points"])
+        self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 3)
+        self.assertEqual(results["dynamic_rkhs_function_count"], 4)
+        self.assertEqual(results["algebraic_rkhs_function_count"], 1)
+        self.assertEqual(results["free_initial_value_count"], 3)
+        self.assertEqual(results["metric_selection_dimension"], 3)
         self.assertEqual(results["selection"], "minimum_shifted_rkhs_metric")
         self.assertEqual(results["initialization"], "zero_coordinate")
         self.assertLess(results["max_train_residual"], 1e-5)
@@ -294,7 +308,11 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertLess(results["ex_post_capital_tvc"], 1e-2)
         self.assertAlmostEqual(
             results["rkhs_norm_total"],
-            results["rkhs_norm_k"] + results["rkhs_norm_a"] + results["rkhs_norm_q"],
+            results["rkhs_norm_k"]
+            + results["rkhs_norm_a"]
+            + results["rkhs_norm_q"]
+            + results["rkhs_norm_c"]
+            + results["rkhs_norm_mu"],
             places=10,
         )
         self.assertGreaterEqual(
@@ -302,7 +320,10 @@ class KernelSmokeTests(unittest.TestCase):
         )
         self.assertTrue((extras["test_df"]["k"] > 0.0).all())
         self.assertTrue((extras["test_df"]["q"] > 0.0).all())
+        self.assertTrue((extras["test_df"]["c"] > 0.0).all())
         self.assertTrue((extras["test_df"]["x"] > 0.0).all())
+        self.assertLess(extras["train_df"]["marginal_wealth"].abs().max(), 1e-6)
+        self.assertLess(extras["train_df"]["consumption_foc"].abs().max(), 1e-6)
 
         short_horizon, _ = open_economy_growth_kernel(
             data_set=OpenEconomyDataSettings(
@@ -312,9 +333,39 @@ class KernelSmokeTests(unittest.TestCase):
                 benchmark_T=120.0,
             )
         )
-        self.assertTrue(short_horizon["solution_accepted"])
+        self.assertFalse(short_horizon["solution_accepted"])
+        self.assertIn("solver_status", short_horizon["rejection_reason"])
         self.assertFalse(short_horizon["benchmark_match"])
         self.assertGreater(short_horizon["ex_post_asset_tvc"], 0.1)
+
+    def test_open_economy_growth_kernel_nonstationary_consumption(self):
+        parameters = OpenEconomyParameters(r_star=0.05)
+        results, extras = open_economy_growth_kernel(parameters=parameters)
+        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+        self.assertEqual(results["stopping_reason"], "converged")
+        self.assertEqual(results["terminal_residual_count"], 0)
+        self.assertEqual(
+            results["differential_residual_count"],
+            4 * results["num_train_points"],
+        )
+        self.assertEqual(
+            results["algebraic_residual_count"], results["num_train_points"]
+        )
+        self.assertEqual(results["dae_residual_count"], 5 * results["num_train_points"])
+        self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 3)
+        self.assertLess(results["max_train_residual"], 1e-5)
+        self.assertLess(results["max_validation_residual"], 5e-3)
+        self.assertLess(results["c_relative_error_max"], 2e-4)
+        self.assertLess(results["max_benchmark_error"], 2e-2)
+
+        path = extras["train_df"]
+        realized_growth = math.log(path["c"].iloc[-1] / path["c"].iloc[0]) / (
+            path["t"].iloc[-1] - path["t"].iloc[0]
+        )
+        expected_growth = (parameters.interest_rate - parameters.rho) / parameters.gamma
+        self.assertAlmostEqual(realized_growth, expected_growth, places=5)
+        self.assertLess(path["marginal_wealth"].abs().max(), 1e-6)
+        self.assertLess(path["consumption_foc"].abs().max(), 1e-6)
 
     def test_open_economy_growth_nn_recursive_smoke(self):
         parameters = OpenEconomyParameters()

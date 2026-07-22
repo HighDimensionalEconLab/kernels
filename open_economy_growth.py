@@ -13,7 +13,7 @@ class ModelParameters:
     delta: float = -math.log(0.94)
     rho: float = -math.log(0.96)
     installation_elasticity: float = 0.76
-    world_interest_rate: float | None = None
+    r_star: float | None = None
 
     def __post_init__(self):
         if not 0.0 < self.alpha < 1.0:
@@ -27,13 +27,13 @@ class ModelParameters:
         if not 0.0 < self.installation_elasticity < 1.0:
             raise ValueError("installation_elasticity must lie in (0, 1)")
         if self.interest_rate <= 0.0:
-            raise ValueError("world_interest_rate must be positive")
+            raise ValueError("r_star must be positive")
 
     @property
     def interest_rate(self):
-        if self.world_interest_rate is None:
+        if self.r_star is None:
             return self.rho
-        return self.world_interest_rate
+        return self.r_star
 
     @property
     def installation_efficiency(self):
@@ -97,6 +97,14 @@ def marginal_wealth_drift(marginal_wealth, parameters):
     return (parameters.rho - parameters.interest_rate) * marginal_wealth
 
 
+def consumption_growth_rate(parameters):
+    return (parameters.interest_rate - parameters.rho) / parameters.gamma
+
+
+def consumption_annuity_rate(parameters):
+    return parameters.interest_rate - consumption_growth_rate(parameters)
+
+
 def steady_state(parameters):
     installation_elasticity = parameters.installation_elasticity
     investment_rate = parameters.delta
@@ -150,7 +158,19 @@ def stable_tail_terms(parameters):
     }
 
 
-def path_residuals(k, a, tobin_q, c, z, dlog_k_dt, da_dt, dlog_q_dt, parameters):
+def path_residuals(
+    k,
+    a,
+    tobin_q,
+    c,
+    marginal_wealth,
+    z,
+    dlog_k_dt,
+    da_dt,
+    dlog_q_dt,
+    dlog_marginal_wealth_dt,
+    parameters,
+):
     investment_rate = investment_rate_from_tobin_q(tobin_q, parameters)
     return {
         "capital": dlog_k_dt
@@ -162,6 +182,9 @@ def path_residuals(k, a, tobin_q, c, z, dlog_k_dt, da_dt, dlog_q_dt, parameters)
         "assets": (da_dt - current_account(k, a, tobin_q, c, z, parameters))
         / steady_state(parameters)["output"],
         "tobin_q": dlog_q_dt - tobin_q_drift(k, tobin_q, z, parameters) / tobin_q,
+        "marginal_wealth": dlog_marginal_wealth_dt
+        - marginal_wealth_drift(marginal_wealth, parameters) / marginal_wealth,
+        "consumption_foc": marginal_wealth * c**parameters.gamma - 1.0,
     }
 
 
@@ -171,14 +194,11 @@ def tail_diagnostics(k, a, tobin_q, c, parameters):
     h = jnp.log(k / steady["k"])
     v = jnp.log(tobin_q / steady["q"])
     stable = v - tail["stable_slope"] * h
+    tail_resources = steady["g"] / parameters.interest_rate + tail[
+        "resource_loading"
+    ] * h / (parameters.interest_rate - tail["stable_root"])
     present_value = (
-        c
-        - parameters.interest_rate * a
-        - steady["g"]
-        - parameters.interest_rate
-        * tail["resource_loading"]
-        * h
-        / (parameters.interest_rate - tail["stable_root"])
+        c - consumption_annuity_rate(parameters) * (a + tail_resources)
     ) / steady["output"]
     return {"stable": stable, "present_value": present_value}
 
@@ -193,12 +213,15 @@ def present_value_gap(t, k, tobin_q, c, a_0, parameters):
     continuation = steady["g"] / parameters.interest_rate + tail[
         "resource_loading"
     ] * h_terminal / (parameters.interest_rate - tail["stable_root"])
-    wealth = (
+    resource_wealth = (
         a_0
         + jnp.trapezoid(discount * domestic_resources, t)
         + discount[-1] * continuation
     )
-    return c - parameters.interest_rate * wealth
+    consumption_wealth = jnp.trapezoid(discount * c, t) + discount[-1] * c[
+        -1
+    ] / consumption_annuity_rate(parameters)
+    return consumption_annuity_rate(parameters) * (consumption_wealth - resource_wealth)
 
 
 def tvc_diagnostics(k, a, tobin_q, c, t, parameters):

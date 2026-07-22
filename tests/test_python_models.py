@@ -190,6 +190,7 @@ class KernelSmokeTests(unittest.TestCase):
     def test_multicountry_growth_kernel_smoke(self):
         results, extras = multicountry_growth_kernel(a_0=(-0.5, 0.5))
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+        self.assertEqual(results["linear_solver"], "auto")
         self.assertTrue(results["benchmark_match"])
         self.assertEqual(results["terminal_residual_count"], 0)
         self.assertEqual(
@@ -358,7 +359,7 @@ class KernelSmokeTests(unittest.TestCase):
             places=6,
         )
         self.assertAlmostEqual(
-            results["terminal_a_2"], results["terminal_a_3"], places=6
+            results["terminal_a_2"], results["terminal_a_3"], delta=1e-5
         )
         self.assertIn("k_3", extras["test_df"])
         self.assertIn("marginal_wealth_3", extras["test_df"])

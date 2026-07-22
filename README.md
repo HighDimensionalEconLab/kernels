@@ -18,9 +18,9 @@ uv sync
 
 The numerical stack requires Python 3.13, `nlls-gram>=2.4.0`, and
 `tinydiffeq>=2.2.0`. Small kernel and NN examples use `nlls-gram`'s automatic
-linear-solver choice. The larger open-economy, multicountry, and trade-growth
-examples retain an explicit solver setting where comparing dense and iterative
-paths is useful.
+linear-solver choice, as do the open-economy and one-good multicountry models.
+The specialized trade-growth project retains explicit solver settings where
+comparing dense and iterative paths is useful.
 
 ## Main replication
 

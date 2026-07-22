@@ -74,7 +74,7 @@ class SolverSettings:
     damping_decrease: float = 0.1
     damping_increase: float = 4.0
     max_steps: int = 100
-    train_loss_threshold: float = 1e-14
+    train_loss_threshold: float = 1e-12
     metric_eps: float = 1e-7
 
 

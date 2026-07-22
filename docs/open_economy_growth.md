@@ -975,8 +975,11 @@ permanent external-position effect.
 
 Implemented in [multicountry_growth.py](../multicountry_growth.py),
 [multicountry_growth_benchmark.py](../multicountry_growth_benchmark.py), and
-[multicountry_growth_kernel.py](../multicountry_growth_kernel.py), with cached
-experiments and figures under `replication/multicountry_growth_kernel*.py`.
+[multicountry_growth_kernel.py](../multicountry_growth_kernel.py). The fully
+unreduced RKHS DAE is in
+[multicountry_growth_kernel_dae.py](../multicountry_growth_kernel_dae.py). Cached paper
+experiments and figures for the compact formulation remain under
+`replication/multicountry_growth_kernel*.py`.
 
 Replace the fixed interest rate with an endogenous world rate \(r(t)\). To make country
 size explicit, define \(k_i,a_i,c_i,x_i\) per worker and let fixed population be \(L_i\).
@@ -1109,6 +1112,57 @@ the same four dynamic functions for every country. The unknown-residual differen
 consistency and world clearing. No terminal projection, lifetime budget, TVC, no-Ponzi
 condition, debt target, or steady-state target enters the residual, initialization,
 stopping rule, or acceptance rule.
+
+#### Fully unreduced RKHS DAE
+
+The compact solver above substitutes the two pointwise country FOCs and represents the
+common rate by algebraic values at the collocation nodes. The separate
+[`multicountry_growth_kernel_dae.py`](../multicountry_growth_kernel_dae.py) keeps all
+three as kernel functions. In addition to the four dynamic paths per country, it has
+positive paths for consumption, the investment rate \(s_i=x_i/k_i\), and the common
+interest rate. The country algebraic residuals remain explicit:
+
+\[
+m_i c_i^\gamma-1=0,
+\qquad
+\chi\lambda q_i s_i^{\lambda-1}-1=0.
+\]
+
+Thus neither \(c_i=m_i^{-1/\gamma}\) nor \(s_i=(\chi\lambda q_i)^{1/(1-\lambda)}\)
+is substituted into the solved equations. The global rows use the same nonredundant
+index-consistent construction as above, but differentiate the independent control
+paths directly:
+
+\[
+\dot G
+=\sum_iL_i\left[
+ (f_{k,i}k_i-x_i)\frac{\dot k_i}{k_i}
+ -x_i\frac{\dot s_i}{s_i}
+ -c_i\frac{\dot c_i}{c_i}
+\right].
+\]
+
+With \(n\) collocation points, this formulation has \(6N+1\) RKHS paths and
+\(4N+1\) free initial offsets for \((q_i,m_i,c_i,s_i,r)\). Its residual count is
+
+\[
+4Nn+2Nn+(n+1)=(6N+1)n+1,
+\]
+
+while its unknown count is \((6N+1)n+4N+1\). The metric is
+
+\[
+\operatorname{blockdiag}
+\left(\underbrace{K,\ldots,K}_{6N+1\text{ times}},0_{4N+1}\right)
++\epsilon I.
+\]
+
+In particular, the country algebraic paths and common rate receive the same kernel
+metric as the dynamic paths; only their finite initial offsets receive no additional
+kernel block. The unknown-residual difference is \(4N\). The released NLLS solver uses
+its default linear-solver selection and stops on the scaled training loss. The shooting
+solution, dense-grid equation checks, and transversality quantities remain ex-post
+diagnostics and do not enter the solve or its acceptance rule.
 
 The independent BVP remains a deliberately separate two-country validator. It may use
 index reduction and relative weights internally because it is not the system being

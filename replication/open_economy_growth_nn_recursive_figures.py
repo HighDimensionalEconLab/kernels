@@ -24,7 +24,7 @@ PANELS = (
 )
 
 
-def run(output_dir: str = ".results", seed: int = 0):
+def run(output_dir: str = ".results"):
     out = pathlib.Path(output_dir)
     frames = {
         name: pd.read_parquet(out / f"{PREFIX}_{name}_test_df.parquet")
@@ -36,7 +36,7 @@ def run(output_dir: str = ".results", seed: int = 0):
     for axis, (column, ylabel) in zip(axes.flat, PANELS, strict=True):
         for name, label, color in SCENARIOS:
             frame = frames[name]
-            frame = frame.loc[frame["seed"] == seed]
+            frame = frame.loc[frame["seed"] == 0]
             axis.plot(frame["t"], frame[column], color=color, label=label)
             axis.plot(
                 frame["t"],

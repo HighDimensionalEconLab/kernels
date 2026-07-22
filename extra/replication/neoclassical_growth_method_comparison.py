@@ -174,10 +174,10 @@ def write_appendix_tables(results_df, output_dir):
 
 def run(
     output_dir: str = ".results",
-    seed: int = 0,
     use_float64: bool = True,
     verbose: bool = False,
 ):
+    seed = 0
     common = dict(use_float64=use_float64, verbose=verbose)
     rows = []
     hyperparameters = {

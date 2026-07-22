@@ -26,6 +26,8 @@ from multicountry_growth import (
     multicountry_reference_marginal_wealth,
     multicountry_steady_state,
 )
+from multicountry_growth_kernel import DataSettings as MulticountryDataSettings
+from multicountry_growth_kernel import SolverSettings as MulticountrySolverSettings
 from multicountry_growth_kernel import multicountry_growth_kernel
 from multicountry_growth_nn import multicountry_growth_nn
 from neoclassical_growth_concave_convex_kernel import (
@@ -160,6 +162,8 @@ class KernelSmokeTests(unittest.TestCase):
         results, extras = multicountry_growth_kernel(a_0=(-0.5, 0.5))
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertEqual(results["linear_solver"], "auto")
+        self.assertEqual(results["iterative_preconditioner"], "none")
+        self.assertIsNone(results["lsmr_algebraic_scale"])
         self.assertTrue(results["benchmark_match"])
         self.assertEqual(results["terminal_residual_count"], 0)
         self.assertEqual(
@@ -216,6 +220,50 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertTrue((extras["test_df"]["c_2"] > 0.0).all())
         self.assertLess(extras["test_df"]["asset_clearing_residual"].abs().max(), 5e-5)
 
+    def test_multicountry_growth_lsmr_configuration(self):
+        parameters = MulticountryParameters(
+            populations=(1.0, 1.0, 1.0),
+            productivities=(1.0, 1.0, 1.0),
+        )
+        data_set = MulticountryDataSettings(
+            train_T=40.0,
+            train_points=24,
+            dense_T=20.0,
+            tail_points=5,
+            test_T=20.0,
+            test_points=21,
+            validation_points=31,
+            benchmark_T=50.0,
+            benchmark_points=51,
+        )
+        lm_set = MulticountrySolverSettings(
+            max_steps=2,
+            linear_solver="lsmr",
+            iterative_tol=1e-8,
+            iterative_maxiter=10,
+            geodesic_acceleration=False,
+        )
+        results, _ = multicountry_growth_kernel(
+            a_0=(-0.5, 0.25, 0.25),
+            parameters=parameters,
+            data_set=data_set,
+            lm_set=lm_set,
+        )
+        self.assertEqual(results["linear_solver"], "lsmr")
+        self.assertEqual(results["iterative_preconditioner"], "spectral_balance")
+        self.assertEqual(results["residual_atol"], lm_set.residual_atol)
+        self.assertEqual(results["iterative_tol"], 1e-8)
+        self.assertEqual(results["iterative_maxiter"], 10)
+        self.assertGreater(results["lsmr_algebraic_scale"], 0.0)
+        self.assertFalse(results["solution_accepted"])
+        self.assertIn("solver_status", results["rejection_reason"])
+
+        with self.assertRaisesRegex(ValueError, "linear_solver must be one of"):
+            multicountry_growth_kernel(
+                parameters=parameters,
+                lm_set=MulticountrySolverSettings(linear_solver="normal_cg"),
+            )
+
     def test_multicountry_growth_nn_smoke(self):
         results, extras = multicountry_growth_nn(
             a_0=(-0.5, 0.5),
@@ -231,6 +279,8 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertEqual(results["stopping_reason"], "early_stopping_met")
         self.assertEqual(results["attempt"], 1)
         self.assertEqual(results["linear_solver"], "auto")
+        self.assertEqual(results["nn_width"], 32)
+        self.assertEqual(results["nn_depth"], 3)
         self.assertEqual(results["terminal_residual_count"], 0)
         self.assertEqual(results["benchmark_training_residual_count"], 0)
         self.assertEqual(results["tvc_training_residual_count"], 0)

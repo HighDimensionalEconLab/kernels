@@ -632,60 +632,83 @@ def multicountry_growth_kernel(out):
 
 def multicountry_growth_nn(out):
     prefix = "multicountry_growth_nn"
-    summary = load(out, f"{prefix}_baseline")
-    hp = load(out, f"{prefix}_baseline_hyperparameters")
-    frame = pd.read_parquet(out / f"{prefix}_baseline_results.parquet")
-    accepted = frame[frame["solution_accepted"]]
-    if accepted.empty:
-        raise RuntimeError("multicountry_growth_nn baseline has no accepted solutions")
-    return {
-        "parameters": hp["parameters"],
-        "architecture": {
-            "width": hp["nn_set"]["width"],
-            "depth": hp["nn_set"]["depth"],
-            "hidden_activation": hp["nn_set"]["hidden_activation"],
-            "total_params": int(accepted["total_params"].median()),
-            "dynamic_output_count": int(
-                accepted["dynamic_network_output_count"].median()
+    experiments = {}
+    experiment_data = {}
+    for name in ("baseline", "large_countries"):
+        summary = load(out, f"{prefix}_{name}")
+        hp = load(out, f"{prefix}_{name}_hyperparameters")
+        frame = pd.read_parquet(out / f"{prefix}_{name}_results.parquet")
+        accepted = frame[frame["solution_accepted"]]
+        if accepted.empty:
+            raise RuntimeError(f"multicountry_growth_nn {name} has no accepted seeds")
+        total_params = int(accepted["total_params"].median())
+        residual_count = int(accepted["dae_residual_count"].median())
+        experiments[name] = {
+            "scenario": summary["scenario"],
+            "num_countries": len(hp["parameters"]["populations"]),
+            "parameters": hp["parameters"],
+            "initial_conditions": hp["initial_conditions"],
+            "architecture": {
+                "width": hp["nn_set"]["width"],
+                "depth": hp["nn_set"]["depth"],
+                "hidden_activation": hp["nn_set"]["hidden_activation"],
+                "total_params": total_params,
+                "dynamic_output_count": int(
+                    accepted["dynamic_network_output_count"].median()
+                ),
+            },
+            "residual_count": residual_count,
+            "parameter_surplus": total_params - residual_count,
+            "n_seeds": int(summary["n_seeds"]),
+            "fraction_accepted": sig(summary["frac_accepted"]),
+            "fraction_equation_diagnostics_passed": sig(
+                float(accepted["equation_diagnostics_pass"].mean())
             ),
-        },
+            "train_time_median": sig(float(accepted["train_time"].median())),
+            "max_train_residual_median": sci(
+                float(accepted["max_train_residual"].median())
+            ),
+            "max_validation_residual_median": sci(
+                float(accepted["max_validation_residual"].median())
+            ),
+            "max_asset_clearing_residual_median": sci(
+                float(accepted["max_asset_clearing_residual"].median())
+            ),
+            "max_rate_consistency_residual_median": sci(
+                float(accepted["max_rate_consistency_residual"].median())
+            ),
+        }
+        experiment_data[name] = (summary, hp, accepted)
+
+    baseline_summary, baseline_hp, baseline_accepted = experiment_data["baseline"]
+    experiments["baseline"].update(
+        {
+            "max_benchmark_error_median": sci(
+                float(baseline_accepted["max_benchmark_error"].median())
+            ),
+            "log_relative_weight_error_median": sci(
+                float(
+                    (
+                        baseline_accepted["log_relative_weight"]
+                        - baseline_accepted["benchmark_log_relative_weight"]
+                    )
+                    .abs()
+                    .median()
+                )
+            ),
+        }
+    )
+    return {
+        "parameters": baseline_hp["parameters"],
+        "architecture": experiments["baseline"]["architecture"],
         "selection": "minimum_identity_metric_parameter_step",
         "training_information": {
             "terminal_residual_count": 0,
             "benchmark_training_residual_count": 0,
             "tvc_training_residual_count": 0,
         },
-        "n_seeds": int(summary["n_seeds"]),
-        "experiments": {
-            "baseline": {
-                "scenario": summary["scenario"],
-                "initial_conditions": hp["initial_conditions"],
-                "fraction_accepted": sig(summary["frac_accepted"]),
-                "fraction_equation_diagnostics_passed": sig(
-                    float(accepted["equation_diagnostics_pass"].mean())
-                ),
-                "train_time_median": sig(float(accepted["train_time"].median())),
-                "max_train_residual_median": sci(
-                    float(accepted["max_train_residual"].median())
-                ),
-                "max_validation_residual_median": sci(
-                    float(accepted["max_validation_residual"].median())
-                ),
-                "max_benchmark_error_median": sci(
-                    float(accepted["max_benchmark_error"].median())
-                ),
-                "log_relative_weight_error_median": sci(
-                    float(
-                        (
-                            accepted["log_relative_weight"]
-                            - accepted["benchmark_log_relative_weight"]
-                        )
-                        .abs()
-                        .median()
-                    )
-                ),
-            }
-        },
+        "n_seeds": int(baseline_summary["n_seeds"]),
+        "experiments": experiments,
     }
 
 

@@ -24,7 +24,6 @@ SOLVER = open_economy_growth_nn_recursive.open_economy_growth_nn_recursive
 def run(
     output_dir: str = ".results",
     n_seeds: int = 100,
-    scenario_n_seeds: int = 1,
     use_float64: bool = True,
     verbose: bool = False,
 ):
@@ -56,8 +55,8 @@ def run(
         )
 
     go("baseline", n_seeds)
-    go("initial_debt", scenario_n_seeds, a_0=-0.5 * output_ss)
-    go("initial_assets", scenario_n_seeds, a_0=0.5 * output_ss)
+    go("initial_debt", 1, a_0=-0.5 * output_ss)
+    go("initial_assets", 1, a_0=0.5 * output_ss)
     write_summary(
         output_dir,
         PREFIX,

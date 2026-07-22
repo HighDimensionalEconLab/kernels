@@ -22,13 +22,9 @@ enable_compilation_cache()
 PREFIX = "neoclassical_growth_concave_convex_kernel"
 
 
-def run(
-    output_dir: str = ".results",
-    k_0_min: float = 0.5,
-    k_0_max: float = 4.0,
-    n_points: int = 70,  # QE caption: 70 initial conditions, all converging
-):
-    grid = np.linspace(k_0_min, k_0_max, n_points)
+def run(output_dir: str = ".results"):
+    n_points = 70
+    grid = np.linspace(0.5, 4.0, n_points)
     print(f"threshold sweep: {n_points} initial conditions -> {output_dir}/")
     results_df, frames, hyperparameters = sweep(
         neoclassical_growth_concave_convex_kernel.neoclassical_growth_concave_convex_kernel,

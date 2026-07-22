@@ -18,9 +18,9 @@ uv sync
 
 The numerical stack requires Python 3.13, `nlls-gram>=2.4.0`, and
 `tinydiffeq>=2.2.0`. Small kernel and NN examples use `nlls-gram`'s automatic
-linear-solver choice, as do the open-economy and one-good multicountry models.
-The specialized trade-growth project retains explicit solver settings where
-comparing dense and iterative paths is useful.
+linear-solver choice. The reduced one-good multicountry kernel also exposes a
+matrix-free LSMR path for large country counts; the specialized trade-growth
+project retains its own explicit solver settings.
 
 ## Main replication
 
@@ -48,11 +48,12 @@ The core pipeline covers:
 
 Each driver in `replication/` writes Parquet data and summary JSON. Figure
 drivers read those saved results, and `replication/collect_json.py` assembles
-the authoritative paper-number file. Core NN baselines use 100 seeds; the two
-open-economy paths included only for the transition figure use one displayed
-seed each. A deterministic kernel specification is solved five times with the
-persistent JAX cache enabled; its JSON reports median solve time and its five
-raw timings are retained in Parquet.
+the authoritative paper-number file. Core NN baselines use 100 seeds; the
+multicountry NN replication also pins a 10-country width-32/depth-4 experiment
+without changing the solver defaults. The two open-economy paths included only
+for the transition figure use one displayed seed each. A deterministic kernel
+specification is solved five times with the persistent JAX cache enabled; its
+JSON reports median solve time and its five raw timings are retained in Parquet.
 
 ## Canonical solvers
 
@@ -75,7 +76,10 @@ All kernel filenames now refer to the NLLS formulation. Where algebraic DAE
 blocks are retained, the kernel metric acts on their RKHS paths as well as the
 dynamic paths and selects among the underdetermined solutions. The small
 systems use dense kernel matrices, a float64 metric solve, and the library's
-default linear solver.
+default linear solver. For the reduced multicountry model,
+`lm_set.linear_solver=lsmr` switches to a matrix-free solve and applies a
+spectral right scaling that balances the dynamic and algebraic coordinates
+without changing the converged least-squares subproblem.
 
 The main NN modules are deliberately limited:
 
@@ -96,8 +100,18 @@ Every solver returns `(results, extras)`, writes nothing itself, and exposes a
 uv run python neoclassical_growth_kernel.py --kernel_set.ell 5.0
 uv run python neoclassical_growth_nn_recursive.py --seed 3 --data_set.train_steps 48
 uv run python multicountry_growth_kernel.py --a_0 '[-0.5, 0.5]'
+uv run python multicountry_growth_kernel.py \
+  --a_0 '[-0.5, 0.25, 0.25]' \
+  --parameters.populations '[1.0, 1.0, 1.0]' \
+  --parameters.productivities '[1.0, 1.0, 1.0]' \
+  --lm_set.linear_solver lsmr \
+  --lm_set.residual_atol 7.5e-7 \
+  --lm_set.geodesic_acceleration false
 uv run python multicountry_growth_nn.py --a_0 '[-0.5, 0.5]' --seed 0
 ```
+
+The verified 50-country LSMR configuration additionally uses
+`lm_set.iterative_tol=1e-13` and `lm_set.iterative_maxiter=6000`.
 
 or import directly:
 

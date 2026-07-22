@@ -11,6 +11,7 @@ import pandas as pd
 from nlls_gram import (
     LevenbergMarquardt,
     LMStatus,
+    WhitenedPreconditioner,
     metric_from_cholesky,
     metric_from_diagonal,
     metric_with_compute_dtype,
@@ -75,7 +76,19 @@ class SolverSettings:
     max_steps: int = 80
     residual_atol: float = 2e-8
     linear_solver: str = "auto"
+    iterative_tol: float = 1e-12
+    iterative_maxiter: int = 4000
+    geodesic_acceleration: bool = True
     metric_eps: float = 1e-7
+
+
+@dataclass(frozen=True)
+class LSMRAlgebraicScale:
+    dynamic_size: int
+    scale: float
+
+    def __call__(self, vector, _damping):
+        return vector.at[self.dynamic_size :].multiply(self.scale)
 
 
 def make_train_grid(data_set):
@@ -133,6 +146,11 @@ def multicountry_growth_kernel(
         raise ValueError("a_0 must contain one NFA position per country")
     if lm_set.metric_eps <= 0.0:
         raise ValueError("metric_eps must be positive")
+    if lm_set.iterative_tol < 0.0 or lm_set.iterative_maxiter <= 0:
+        raise ValueError("iterative_tol must be nonnegative and maxiter positive")
+    supported_linear_solvers = ("auto", "lsmr")
+    if lm_set.linear_solver not in supported_linear_solvers:
+        raise ValueError(f"linear_solver must be one of {supported_linear_solvers}")
 
     kernel = normalize_kernel(kernel_set.kernel)
     train_data = make_train_grid(data_set).astype(dtype)
@@ -277,6 +295,27 @@ def multicountry_growth_kernel(
         jnp.zeros((num_countries, n_train), dtype=dtype),
         jnp.zeros(num_algebraic_values, dtype=dtype),
     )
+    iterative_options = {}
+    lsmr_algebraic_scale = None
+    if lm_set.linear_solver == "lsmr":
+        iterative_options = {
+            "iterative_tol": lm_set.iterative_tol,
+            "iterative_maxiter": lm_set.iterative_maxiter,
+        }
+        # In whitened coordinates, the dynamic derivative block has spectral
+        # scale sqrt(lambda_max(K)), while the algebraic block has scale
+        # 1 / sqrt(eps). This right scaling balances the two without changing
+        # the converged damped least-squares subproblem.
+        lsmr_algebraic_scale = float(jnp.sqrt(eps * jnp.linalg.eigvalsh(K_metric)[-1]))
+        scale = LSMRAlgebraicScale(
+            dynamic_size=num_dynamic_functions * n_train,
+            scale=lsmr_algebraic_scale,
+        )
+        iterative_options["whitened_preconditioner"] = WhitenedPreconditioner(
+            scale,
+            scale,
+        )
+
     solver = LevenbergMarquardt(
         residual_fn,
         linear_solver=lm_set.linear_solver,
@@ -285,6 +324,8 @@ def multicountry_growth_kernel(
         damping_increase=lm_set.damping_increase,
         linear_solve_dtype=jnp.float64,
         metric=metric,
+        geodesic_acceleration=lm_set.geodesic_acceleration,
+        **iterative_options,
     )
 
     solve_start = time.perf_counter()
@@ -359,6 +400,8 @@ def multicountry_growth_kernel(
         )
     )
     rejection_reasons = []
+    if int(result.status) != LMStatus.CONVERGED:
+        rejection_reasons.append("solver_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
     if max_train_residual > TRAIN_RESIDUAL_TOL:
@@ -497,6 +540,14 @@ def multicountry_growth_kernel(
         "wall_time": solve_time,
         "solver": "nlls-gram",
         "linear_solver": lm_set.linear_solver,
+        "residual_atol": lm_set.residual_atol,
+        "iterative_tol": lm_set.iterative_tol,
+        "iterative_maxiter": lm_set.iterative_maxiter,
+        "iterative_preconditioner": (
+            "spectral_balance" if lm_set.linear_solver == "lsmr" else "none"
+        ),
+        "lsmr_algebraic_scale": lsmr_algebraic_scale,
+        "geodesic_acceleration": lm_set.geodesic_acceleration,
         "metric_eps": eps,
         "train_loss": float(result.info.loss),
         "steps": int(result.steps),

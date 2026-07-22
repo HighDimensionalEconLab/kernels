@@ -28,9 +28,9 @@ PREFIX = "multicountry_trade_growth_comparison"
 
 def run(
     output_dir: str = ".results",
-    seed: int = 0,
     use_float64: bool = True,
 ):
+    seed = 0
     parameters = symmetric_trade_growth_parameters(3)
     kernel_results, kernel_frames = (
         trade_growth_kernel.multicountry_trade_growth_kernel(

@@ -9,6 +9,11 @@ The original UNO implementations are named `*_kernel_uno.py`, with matching
 drivers under `extra/replication/`. Their output prefixes include `_uno`, so
 they do not overwrite the canonical NLLS results.
 
+`multicountry_growth_kernel_dae.py` is the fully unreduced one-good
+multicountry DAE. It keeps RKHS paths for country consumption and investment
+and for the common interest rate, whereas the canonical top-level kernel and
+NN use the reduced formulation.
+
 `neoclassical_growth_kernel_recursive_adaptive.py` is the adaptive state-space
 kernel experiment. It moves its RKHS centers to the accepted integrator states
 and transfers the represented policy when that basis changes.
@@ -39,6 +44,7 @@ root, for example:
 
 ```bash
 uv run python -m extra.replication.kernel_vs_nn --output_dir .results-extra
+uv run python -m extra.multicountry_growth_kernel_dae --a_0 '[-0.5, 0.5]'
 uv run python -m extra.replication.neoclassical_growth_method_comparison \
   --output_dir .results-extra
 uv run python -m extra.replication.neoclassical_growth_nn_recursive_adaptive \

@@ -21,12 +21,14 @@ from nlls_gram import (
 from kernels import integrated_kernel_matrices, normalize_kernel
 from multicountry_growth import (
     MulticountryParameters,
-    multicountry_dae_path_values,
+    marginal_product,
     multicountry_output_scale,
     multicountry_reference_marginal_wealth,
     multicountry_steady_state,
     multicountry_tail_diagnostics,
     multicountry_tvc_diagnostics,
+    production,
+    relative_welfare_weights,
 )
 from multicountry_growth_benchmark import multicountry_growth_benchmark
 
@@ -44,6 +46,95 @@ STATUS_TO_REASON = {
     LMStatus.NONFINITE: "nonfinite",
     LMStatus.MAX_STEPS: "max_steps",
 }
+
+
+def multicountry_dae_path_values(
+    k,
+    a,
+    tobin_q,
+    marginal_wealth,
+    consumption,
+    investment_rate,
+    interest_rate,
+    dlog_k_dt,
+    da_dt,
+    dlog_q_dt,
+    dlog_marginal_wealth_dt,
+    dlog_consumption_dt,
+    dlog_investment_rate_dt,
+    parameters,
+):
+    productivities = jnp.asarray(parameters.productivities, dtype=k.dtype)
+    populations = jnp.asarray(parameters.populations, dtype=k.dtype)
+    flow_scale = multicountry_output_scale(parameters, k.dtype)
+    rate = interest_rate[:, None]
+    investment = k * investment_rate
+    output = production(k, productivities, parameters)
+    mpk = marginal_product(k, productivities, parameters)
+    resources = output - investment
+    capital_drift = k * (
+        parameters.installation_efficiency
+        * investment_rate**parameters.installation_elasticity
+        - parameters.delta
+    )
+    budget_drift = rate * a + resources - consumption
+    q_drift = (
+        tobin_q
+        * (
+            rate
+            + parameters.delta
+            - (1.0 - parameters.installation_elasticity)
+            * parameters.installation_efficiency
+            * investment_rate**parameters.installation_elasticity
+        )
+        - mpk
+    )
+    resource = (
+        jnp.sum(
+            populations * (resources - consumption),
+            axis=-1,
+        )
+        / flow_scale
+    )
+    resource_drift = (
+        jnp.sum(
+            populations
+            * (
+                (mpk * k - investment) * dlog_k_dt
+                - investment * dlog_investment_rate_dt
+                - consumption * dlog_consumption_dt
+            ),
+            axis=-1,
+        )
+        / flow_scale
+    )
+    return {
+        "k": k,
+        "a": a,
+        "q": tobin_q,
+        "c": consumption,
+        "s": investment_rate,
+        "x": investment,
+        "output": output,
+        "resources": resources,
+        "current_account": da_dt,
+        "interest_rate": interest_rate,
+        "marginal_wealth": marginal_wealth,
+        "relative_welfare_weights": relative_welfare_weights(marginal_wealth),
+        "capital": dlog_k_dt - capital_drift / k,
+        "assets": (da_dt - budget_drift) / flow_scale,
+        "tobin_q": dlog_q_dt - q_drift / tobin_q,
+        "marginal_wealth_euler": dlog_marginal_wealth_dt - (parameters.rho - rate),
+        "consumption_foc": marginal_wealth * consumption**parameters.gamma - 1.0,
+        "investment_foc": parameters.installation_efficiency
+        * parameters.installation_elasticity
+        * tobin_q
+        * investment_rate ** (parameters.installation_elasticity - 1.0)
+        - 1.0,
+        "resource": resource,
+        "resource_drift": resource_drift,
+        "asset_clearing": jnp.sum(populations * a, axis=-1) / flow_scale,
+    }
 
 
 @dataclass(frozen=True)

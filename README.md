@@ -70,8 +70,6 @@ The main kernel modules are:
 - `open_economy_growth_kernel.py`: the one-country open-economy DAE.
 - `multicountry_growth_kernel.py`: the reduced one-good multicountry kernel
   formulation, with the country consumption and investment FOCs substituted.
-- `multicountry_growth_kernel_dae.py`: the unreduced one-good multicountry DAE,
-  with RKHS paths for every country control and the common interest rate.
 
 All kernel filenames now refer to the NLLS formulation. Where algebraic DAE
 blocks are retained, the kernel metric acts on their RKHS paths as well as the
@@ -98,7 +96,6 @@ Every solver returns `(results, extras)`, writes nothing itself, and exposes a
 uv run python neoclassical_growth_kernel.py --kernel_set.ell 5.0
 uv run python neoclassical_growth_nn_recursive.py --seed 3 --data_set.train_steps 48
 uv run python multicountry_growth_kernel.py --a_0 '[-0.5, 0.5]'
-uv run python multicountry_growth_kernel_dae.py --a_0 '[-0.5, 0.5]'
 uv run python multicountry_growth_nn.py --a_0 '[-0.5, 0.5]' --seed 0
 ```
 
@@ -115,14 +112,14 @@ print(results["k_rel_error_mean"])
 
 [`extra/`](extra/README.md) contains the UNO kernel implementations, the
 integrated-derivative MLP, the separate RFF NN, the adaptive recursive kernel
-and NN, method-comparison drivers, and HPO sweep material. None are part of the
-main replication command.
+and NN, the unreduced one-good multicountry DAE, method-comparison drivers, and
+HPO sweep material. None are part of the main replication command.
 
 [`trade_growth/`](trade_growth/README.md) contains the full multicountry
 trade-growth model, kernel and NN solvers, comparative statics, specialized
 preconditioners, scaling driver, replication drivers, and tests. The simpler
-one-good model and both its reduced and unreduced kernel solvers remain at the
-top level.
+one-good model and its reduced kernel and NN solvers remain at the top level;
+the unreduced DAE variation is under `extra/`.
 
 The design and verification record for the open-economy and multicountry
 stepping stones is in [`docs/open_economy_growth.md`](docs/open_economy_growth.md).

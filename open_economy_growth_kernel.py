@@ -72,7 +72,7 @@ class SolverSettings:
     damping_decrease: float = 0.1
     damping_increase: float = 4.0
     max_steps: int = 100
-    residual_atol: float = 2e-8
+    residual_atol: float = 5e-8
     metric_eps: float = 1e-7
 
 

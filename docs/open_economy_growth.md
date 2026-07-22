@@ -976,12 +976,12 @@ permanent external-position effect.
 Implemented in [multicountry_growth.py](../multicountry_growth.py),
 [multicountry_growth_benchmark.py](../multicountry_growth_benchmark.py), and
 [multicountry_growth_kernel.py](../multicountry_growth_kernel.py). The fully
-unreduced RKHS DAE is in
-[multicountry_growth_kernel_dae.py](../multicountry_growth_kernel_dae.py). Cached paper
-experiments for the reduced sequential NN are in
+unreduced optional RKHS DAE is in
+[extra/multicountry_growth_kernel_dae.py](../extra/multicountry_growth_kernel_dae.py).
+Cached paper experiments for the reduced sequential NN are in
 [multicountry_growth_nn.py](../multicountry_growth_nn.py) and
-`replication/multicountry_growth_nn.py`; figures for the compact kernel formulation remain under
-`replication/multicountry_growth_kernel*.py`.
+`replication/multicountry_growth_nn.py`; figures for the compact kernel
+formulation remain under `replication/multicountry_growth_kernel*.py`.
 
 Replace the fixed interest rate with an endogenous world rate \(r(t)\). To make country
 size explicit, define \(k_i,a_i,c_i,x_i\) per worker and let fixed population be \(L_i\).
@@ -1143,10 +1143,10 @@ acceptance; all remain ex-post diagnostics.
 
 The compact solver above substitutes the two pointwise country FOCs and represents the
 common rate by algebraic values at the collocation nodes. The separate
-[`multicountry_growth_kernel_dae.py`](../multicountry_growth_kernel_dae.py) keeps all
-three as kernel functions. In addition to the four dynamic paths per country, it has
-positive paths for consumption, the investment rate \(s_i=x_i/k_i\), and the common
-interest rate. The country algebraic residuals remain explicit:
+[`extra/multicountry_growth_kernel_dae.py`](../extra/multicountry_growth_kernel_dae.py)
+keeps all three as kernel functions. In addition to the four dynamic paths per country,
+it has positive paths for consumption, the investment rate \(s_i=x_i/k_i\), and
+the common interest rate. The country algebraic residuals remain explicit:
 
 \[
 m_i c_i^\gamma-1=0,

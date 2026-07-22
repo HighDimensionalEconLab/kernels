@@ -11,13 +11,14 @@ import pandas as pd
 from nlls_gram import (
     LevenbergMarquardt,
     LMStatus,
-    metric_from_cholesky,
-    metric_from_diagonal,
-    metric_with_compute_dtype,
-    repeated_blockdiag_metric,
 )
 
-from kernels import integrated_kernel_matrices, normalize_kernel
+from kernels import (
+    integrated_kernel_matrices,
+    normalize_kernel,
+    rkhs_norm_squared,
+    shifted_kernel_coefficient_metric,
+)
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
 
 if __name__ == "__main__":
@@ -156,12 +157,6 @@ def neoclassical_growth_kernel(
     def train_path_values(theta):
         return path_values(theta, K_jax, K_tilde_jax)
 
-    alpha_metric = metric_from_cholesky(
-        jnp.linalg.cholesky(K_metric + eps * jnp.eye(n_train, dtype=jnp.float64))
-    )
-
-    alpha_metric = metric_with_compute_dtype(alpha_metric, jnp.float64)
-
     # The residual is scaled by 1/sqrt(3n) (the NN files' convention) so that
     # residual_atol is a scale-free per-point bound rather than tightening
     # with grid refinement.
@@ -178,17 +173,11 @@ def neoclassical_growth_kernel(
     # metric M = blockdiag(K, K, K, 0) + eps I selects the interpolant
     # minimizing the summed RKHS norms (the original objective) with free
     # initial values (c_0, mu_0), up to an O(eps) selection shift.
-    metric = metric_with_compute_dtype(
-        repeated_blockdiag_metric(
-            alpha_metric,
-            n_train,
-            3,
-            additional=(
-                metric_from_diagonal(jnp.full(2, eps, dtype=jnp.float64)),
-                2,
-            ),
-        ),
-        jnp.float64,
+    metric = shifted_kernel_coefficient_metric(
+        K_metric,
+        repeats=3,
+        free_size=2,
+        epsilon=eps,
     )
 
     c_flow_guess = max(production(k_0) - delta * k_0, DOMAIN_EPS)
@@ -207,6 +196,7 @@ def neoclassical_growth_kernel(
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         linear_solve_dtype=jnp.float64,
+        metric_solve_dtype=jnp.float64,
         metric=metric,
     )
 
@@ -327,15 +317,9 @@ def neoclassical_growth_kernel(
         "mu_0": float(mu_0),
         # Jitter-free alpha' K alpha, matching the IPOPT report (the metric
         # norm includes the nugget).
-        "rkhs_norm_k": float(
-            alpha_metric.norm(alpha_k) ** 2 - eps * (alpha_k @ alpha_k)
-        ),
-        "rkhs_norm_c": float(
-            alpha_metric.norm(alpha_c) ** 2 - eps * (alpha_c @ alpha_c)
-        ),
-        "rkhs_norm_mu": float(
-            alpha_metric.norm(alpha_mu) ** 2 - eps * (alpha_mu @ alpha_mu)
-        ),
+        "rkhs_norm_k": float(rkhs_norm_squared(alpha_k, K_metric)),
+        "rkhs_norm_c": float(rkhs_norm_squared(alpha_c, K_metric)),
+        "rkhs_norm_mu": float(rkhs_norm_squared(alpha_mu, K_metric)),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
         "p_lower_violation": p_lower_violation,

@@ -88,7 +88,11 @@ the constrained comparison. Where algebraic DAE
 blocks are retained, the kernel metric acts on their RKHS paths as well as the
 dynamic paths and selects among the underdetermined solutions. The small
 systems use dense kernel matrices, a float64 metric solve, and the library's
-default linear solver. For the reduced multicountry model, the common
+default linear solver. `shifted_kernel_coefficient_metric` constructs every
+NLLS metric as
+`blockdiag(repeat(K, r), 0_s) + metric_eps * I`, sharing one kernel factor
+across all `r` paths without materializing the full block matrix. For the
+reduced multicountry model, the common
 algebraic interest rate is an RKHS path with the same shifted kernel metric as
 the dynamic paths. `lm_set.linear_solver=lsmr` switches to a matrix-free solve
 without custom Jacobian or coordinate rescaling.

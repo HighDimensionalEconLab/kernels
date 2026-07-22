@@ -11,14 +11,15 @@ import pandas as pd
 from nlls_gram import (
     LevenbergMarquardt,
     LMStatus,
-    blockdiag_metric,
-    metric_from_cholesky,
-    metric_from_diagonal,
-    metric_with_compute_dtype,
 )
 
 from asset_pricing_benchmark import mu_f_array
-from kernels import integrated_kernel_matrices, normalize_kernel
+from kernels import (
+    integrated_kernel_matrices,
+    normalize_kernel,
+    rkhs_norm_squared,
+    shifted_kernel_coefficient_metric,
+)
 
 if __name__ == "__main__":
     jax.config.update("jax_enable_x64", True)
@@ -123,12 +124,6 @@ def asset_pricing_kernel(
     def train_path_values(theta):
         return path_values(theta, K_jax, K_tilde_jax)
 
-    alpha_metric = metric_from_cholesky(
-        jnp.linalg.cholesky(K_metric + eps * jnp.eye(n_train, dtype=jnp.float64))
-    )
-
-    alpha_metric = metric_with_compute_dtype(alpha_metric, jnp.float64)
-
     def residual_fn(theta):
         p, dp_dt = train_path_values(theta)
         return dp_dt - (r * p - x_train)
@@ -138,14 +133,11 @@ def asset_pricing_kernel(
     # metric M = blockdiag(K, 0) + eps I: the min-RKHS-norm selection (the
     # original a'Ka objective with p_0 free) up to an O(eps) selection shift
     # in all parameters.
-    metric = metric_with_compute_dtype(
-        blockdiag_metric(
-            [
-                (alpha_metric, n_train),
-                (metric_from_diagonal(jnp.full(1, eps, dtype=jnp.float64)), 1),
-            ]
-        ),
-        jnp.float64,
+    metric = shifted_kernel_coefficient_metric(
+        K_metric,
+        repeats=1,
+        free_size=1,
+        epsilon=eps,
     )
 
     solver = LevenbergMarquardt(
@@ -154,6 +146,7 @@ def asset_pricing_kernel(
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         linear_solve_dtype=jnp.float64,
+        metric_solve_dtype=jnp.float64,
         metric=metric,
     )
     theta_0 = (
@@ -248,7 +241,7 @@ def asset_pricing_kernel(
         "p_0": float(p_0),
         "horizon_bias_p0": horizon_bias_p0,
         # Jitter-free alpha' K alpha (the metric norm includes the nugget).
-        "rkhs_norm_p": float(alpha_metric.norm(alpha) ** 2 - eps * (alpha @ alpha)),
+        "rkhs_norm_p": float(rkhs_norm_squared(alpha, K_metric)),
         "max_train_residual": max_train_residual,
         "train_residual_tolerance": train_residual_tolerance,
         "max_test_residual": float(jnp.max(jnp.abs(test_residual))),

@@ -11,13 +11,14 @@ import pandas as pd
 from nlls_gram import (
     LevenbergMarquardt,
     LMStatus,
-    metric_from_cholesky,
-    metric_from_diagonal,
-    metric_with_compute_dtype,
-    repeated_blockdiag_metric,
 )
 
-from kernels import integrated_kernel_matrices, normalize_kernel
+from kernels import (
+    integrated_kernel_matrices,
+    normalize_kernel,
+    rkhs_norm_squared,
+    shifted_kernel_coefficient_metric,
+)
 from open_economy_growth import (
     ModelParameters,
     investment_expenditure,
@@ -153,9 +154,6 @@ def open_economy_growth_kernel(
     K_metric = (K_metric + K_metric.T) / 2.0
     K = K_metric.astype(dtype)
     K_tilde = K_tilde_metric.astype(dtype)
-    alpha_metric = metric_from_cholesky(
-        jnp.linalg.cholesky(K_metric + eps * jnp.eye(n_train, dtype=jnp.float64))
-    )
 
     # theta = (alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q,
     #          (c_offset, mu_offset, q_offset)), matching the metric blocks.
@@ -231,17 +229,11 @@ def open_economy_growth_kernel(
 
     # There are 5n DAE equations in 5n + 3 unknowns. No terminal equation is
     # appended: the metric supplies the three-dimensional selection.
-    metric = metric_with_compute_dtype(
-        repeated_blockdiag_metric(
-            alpha_metric,
-            n_train,
-            5,
-            additional=(
-                metric_from_diagonal(jnp.full(3, eps, dtype=jnp.float64)),
-                3,
-            ),
-        ),
-        jnp.float64,
+    metric = shifted_kernel_coefficient_metric(
+        K_metric,
+        repeats=5,
+        free_size=3,
+        epsilon=eps,
     )
 
     # The zero coordinate contains no saddle-path or present-value information:
@@ -261,6 +253,7 @@ def open_economy_growth_kernel(
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         linear_solve_dtype=jnp.float64,
+        metric_solve_dtype=jnp.float64,
         metric=metric,
     )
 
@@ -417,11 +410,11 @@ def open_economy_growth_kernel(
 
     alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, initial = theta
     c_offset, mu_offset, q_offset = initial
-    rkhs_norm_mu = alpha_metric.norm(alpha_mu) ** 2 - eps * (alpha_mu @ alpha_mu)
-    rkhs_norm_c = alpha_metric.norm(alpha_c) ** 2 - eps * (alpha_c @ alpha_c)
-    rkhs_norm_k = alpha_metric.norm(alpha_k) ** 2 - eps * (alpha_k @ alpha_k)
-    rkhs_norm_a = alpha_metric.norm(alpha_a) ** 2 - eps * (alpha_a @ alpha_a)
-    rkhs_norm_q = alpha_metric.norm(alpha_q) ** 2 - eps * (alpha_q @ alpha_q)
+    rkhs_norm_mu = rkhs_norm_squared(alpha_mu, K_metric)
+    rkhs_norm_c = rkhs_norm_squared(alpha_c, K_metric)
+    rkhs_norm_k = rkhs_norm_squared(alpha_k, K_metric)
+    rkhs_norm_a = rkhs_norm_squared(alpha_a, K_metric)
+    rkhs_norm_q = rkhs_norm_squared(alpha_q, K_metric)
     rkhs_norm_total = (
         rkhs_norm_mu + rkhs_norm_c + rkhs_norm_k + rkhs_norm_a + rkhs_norm_q
     )

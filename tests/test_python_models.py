@@ -17,6 +17,7 @@ from kernels import (
     matern_kernel_1p5,
     matern_kernel_2p5,
     normalize_kernel,
+    shifted_kernel_coefficient_metric,
 )
 from multicountry_growth import (
     MulticountryParameters,
@@ -78,6 +79,46 @@ FAST_GROWTH_DATA = GrowthDataSettings(train_T=10.0, train_points=11, test_T=10.0
 
 
 class KernelSmokeTests(unittest.TestCase):
+    def test_shifted_kernel_metric_matches_explicit_block_matrix(self):
+        gram = jnp.array([[2.0, 0.4], [0.4, 1.0]])
+        epsilon = 0.2
+        repeats = 3
+        free_size = 2
+        metric = shifted_kernel_coefficient_metric(
+            gram,
+            repeats=repeats,
+            free_size=free_size,
+            epsilon=epsilon,
+        )
+        shifted_block = gram + epsilon * jnp.eye(gram.shape[0])
+        explicit = jax.scipy.linalg.block_diag(
+            shifted_block,
+            shifted_block,
+            shifted_block,
+            epsilon * jnp.eye(free_size),
+        )
+        vector = jnp.arange(explicit.shape[0], dtype=jnp.float64) + 1.0
+        matrix = jnp.stack([vector, 2.0 * vector], axis=1)
+
+        np.testing.assert_allclose(
+            metric.solve(matrix),
+            jnp.linalg.solve(explicit, matrix),
+            rtol=1e-13,
+            atol=1e-13,
+        )
+        np.testing.assert_allclose(
+            metric.norm(vector) ** 2,
+            vector @ explicit @ vector,
+            rtol=1e-13,
+            atol=1e-13,
+        )
+        np.testing.assert_allclose(
+            metric.inv_sqrt(metric.inv_sqrt_transpose(matrix)),
+            metric.solve(matrix),
+            rtol=1e-13,
+            atol=1e-13,
+        )
+
     def test_multicountry_growth_math(self):
         parameters = MulticountryParameters(
             populations=(1.0, 2.0, 1.5),

@@ -11,13 +11,14 @@ import pandas as pd
 from nlls_gram import (
     LevenbergMarquardt,
     LMStatus,
-    metric_from_cholesky,
-    metric_from_diagonal,
-    metric_with_compute_dtype,
-    repeated_blockdiag_metric,
 )
 
-from kernels import integrated_kernel_matrices, normalize_kernel
+from kernels import (
+    integrated_kernel_matrices,
+    normalize_kernel,
+    rkhs_norm_squared,
+    shifted_kernel_coefficient_metric,
+)
 
 if __name__ == "__main__":
     jax.config.update("jax_enable_x64", True)
@@ -101,10 +102,6 @@ def optimal_advertising_kernel(
     K_metric = (K_metric + K_metric.T) / 2
     K = K_metric.astype(dtype)
     K_tilde = K_tilde_metric.astype(dtype)
-    alpha_metric = metric_from_cholesky(
-        jnp.linalg.cholesky(K_metric + eps * jnp.eye(n_train, dtype=jnp.float64))
-    )
-
     gamma = (beta + rho_hat) / c
     control_power = (1.0 - kappa) / kappa
 
@@ -132,17 +129,11 @@ def optimal_advertising_kernel(
             residuals(path_values(theta, K, K_tilde))
         )
 
-    metric = metric_with_compute_dtype(
-        repeated_blockdiag_metric(
-            alpha_metric,
-            n_train,
-            3,
-            additional=(
-                metric_from_diagonal(jnp.full(2, eps, dtype=jnp.float64)),
-                2,
-            ),
-        ),
-        jnp.float64,
+    metric = shifted_kernel_coefficient_metric(
+        K_metric,
+        repeats=3,
+        free_size=2,
+        epsilon=eps,
     )
     u_0_guess = max(beta * x_0 / max(1.0 - x_0, DOMAIN_EPS), DOMAIN_EPS)
     mu_0_guess = max(gamma / (rho_hat + beta + u_0_guess), DOMAIN_EPS)
@@ -158,6 +149,7 @@ def optimal_advertising_kernel(
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         linear_solve_dtype=jnp.float64,
+        metric_solve_dtype=jnp.float64,
         metric=metric,
     )
 
@@ -232,9 +224,9 @@ def optimal_advertising_kernel(
         return x, mu, u
 
     rkhs_norms = {
-        "x": alpha_metric.norm(alpha_x) ** 2 - eps * (alpha_x @ alpha_x),
-        "mu": alpha_metric.norm(alpha_mu) ** 2 - eps * (alpha_mu @ alpha_mu),
-        "u": alpha_metric.norm(alpha_u) ** 2 - eps * (alpha_u @ alpha_u),
+        "x": rkhs_norm_squared(alpha_x, K_metric),
+        "mu": rkhs_norm_squared(alpha_mu, K_metric),
+        "u": rkhs_norm_squared(alpha_u, K_metric),
     }
     results = {
         "rho_hat": rho_hat,

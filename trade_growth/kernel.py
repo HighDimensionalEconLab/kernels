@@ -18,13 +18,14 @@ from nlls_gram import (
     PreconditionerFactory,
     RecycleConfig,
     WhitenedPreconditioner,
-    metric_from_cholesky,
-    metric_from_diagonal,
-    metric_with_compute_dtype,
-    repeated_blockdiag_metric,
 )
 
-from kernels import integrated_kernel_matrices, normalize_kernel
+from kernels import (
+    integrated_kernel_matrices,
+    normalize_kernel,
+    rkhs_norm_squared,
+    shifted_kernel_coefficient_metric,
+)
 from multicountry_growth_kernel import make_train_grid
 from trade_growth.model import (
     STATIC_BLOCK_NAMES,
@@ -206,10 +207,6 @@ def multicountry_trade_growth_kernel(
     K_metric = 0.5 * (K_metric + K_metric.T)
     K = K_metric.astype(dtype)
     K_tilde = K_tilde_metric.astype(dtype)
-    alpha_metric = metric_from_cholesky(
-        jnp.linalg.cholesky(K_metric + eps * jnp.eye(n_train, dtype=jnp.float64))
-    )
-
     static_size = n_train * len(STATIC_BLOCK_NAMES) * num_countries
     algebraic_size = n_train + 2 * num_countries + static_size
 
@@ -275,17 +272,11 @@ def multicountry_trade_growth_kernel(
         return multicountry_trade_dae_residual(values, log_static, parameters)
 
     num_dynamic_functions = 4 * num_countries
-    metric = metric_with_compute_dtype(
-        repeated_blockdiag_metric(
-            alpha_metric,
-            n_train,
-            num_dynamic_functions,
-            additional=(
-                metric_from_diagonal(jnp.full(algebraic_size, eps, dtype=jnp.float64)),
-                algebraic_size,
-            ),
-        ),
-        jnp.float64,
+    metric = shifted_kernel_coefficient_metric(
+        K_metric,
+        repeats=num_dynamic_functions,
+        free_size=algebraic_size,
+        epsilon=eps,
     )
     initial_algebraic = jnp.concatenate(
         [
@@ -406,6 +397,7 @@ def multicountry_trade_growth_kernel(
             preconditioner_factory=factory,
             ad_solver_tol=lm_set.ad_solver_tol,
             ad_solver_maxiter=lm_set.ad_solver_maxiter,
+            metric_solve_dtype=jnp.float64,
             metric=metric,
             recycle=recycle,
             geodesic_acceleration=lm_set.cg_geodesic,
@@ -480,6 +472,7 @@ def multicountry_trade_growth_kernel(
                 ad_solver_preconditioner=time_block.implicit_preconditioner,
                 ad_solver_tol=lm_set.ad_solver_tol,
                 ad_solver_maxiter=lm_set.ad_solver_maxiter,
+                metric_solve_dtype=jnp.float64,
                 metric=metric,
                 geodesic_acceleration=False,
             )
@@ -508,6 +501,7 @@ def multicountry_trade_growth_kernel(
             damping_decrease=lm_set.damping_decrease,
             damping_increase=lm_set.damping_increase,
             linear_solve_dtype=jnp.float64,
+            metric_solve_dtype=jnp.float64,
             metric=metric,
         )
 
@@ -736,8 +730,7 @@ def multicountry_trade_growth_kernel(
         "m": theta[3],
     }
     rkhs_norms = {
-        f"{name}_{country + 1}": alpha_metric.norm(coefficients[country]) ** 2
-        - eps * (coefficients[country] @ coefficients[country])
+        f"{name}_{country + 1}": rkhs_norm_squared(coefficients[country], K_metric)
         for name, coefficients in coefficient_groups.items()
         for country in range(num_countries)
     }

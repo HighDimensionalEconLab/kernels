@@ -12,13 +12,14 @@ import pandas as pd
 from nlls_gram import (
     LevenbergMarquardt,
     LMStatus,
-    metric_from_cholesky,
-    metric_from_diagonal,
-    metric_with_compute_dtype,
-    repeated_blockdiag_metric,
 )
 
-from kernels import integrated_kernel_matrices, normalize_kernel
+from kernels import (
+    integrated_kernel_matrices,
+    normalize_kernel,
+    rkhs_norm_squared,
+    shifted_kernel_coefficient_metric,
+)
 from multicountry_growth import (
     MulticountryParameters,
     marginal_product,
@@ -287,9 +288,6 @@ def multicountry_growth_kernel_dae(
     K_metric = (K_metric + K_metric.T) / 2.0
     K = K_metric.astype(dtype)
     K_tilde = K_tilde_metric.astype(dtype)
-    alpha_metric = metric_from_cholesky(
-        jnp.linalg.cholesky(K_metric + eps * jnp.eye(n_train, dtype=jnp.float64))
-    )
 
     # theta contains 6N + 1 RKHS coefficient blocks followed by the finite
     # initial offsets for q, m, c, s, and the common rate.
@@ -376,19 +374,11 @@ def multicountry_growth_kernel_dae(
 
     num_rkhs_functions = 6 * num_countries + 1
     num_initial_values = 4 * num_countries + 1
-    metric = metric_with_compute_dtype(
-        repeated_blockdiag_metric(
-            alpha_metric,
-            n_train,
-            num_rkhs_functions,
-            additional=(
-                metric_from_diagonal(
-                    jnp.full(num_initial_values, eps, dtype=jnp.float64)
-                ),
-                num_initial_values,
-            ),
-        ),
-        jnp.float64,
+    metric = shifted_kernel_coefficient_metric(
+        K_metric,
+        repeats=num_rkhs_functions,
+        free_size=num_initial_values,
+        epsilon=eps,
     )
     coefficient_0 = jnp.zeros((num_countries, n_train), dtype=dtype)
     theta_0 = (
@@ -408,6 +398,7 @@ def multicountry_growth_kernel_dae(
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         linear_solve_dtype=jnp.float64,
+        metric_solve_dtype=jnp.float64,
         metric=metric,
     )
 
@@ -566,12 +557,11 @@ def multicountry_growth_kernel_dae(
         "s": theta[5],
     }
     rkhs_norms = {
-        f"{name}_{country + 1}": alpha_metric.norm(coefficients[country]) ** 2
-        - eps * (coefficients[country] @ coefficients[country])
+        f"{name}_{country + 1}": rkhs_norm_squared(coefficients[country], K_metric)
         for name, coefficients in coefficient_groups.items()
         for country in range(num_countries)
     }
-    rkhs_norm_r = alpha_metric.norm(theta[6]) ** 2 - eps * (theta[6] @ theta[6])
+    rkhs_norm_r = rkhs_norm_squared(theta[6], K_metric)
     rkhs_norm_total = sum(rkhs_norms.values()) + rkhs_norm_r
     shifted_metric_norm_squared = rkhs_norm_total + eps * (
         sum(

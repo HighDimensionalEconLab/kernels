@@ -4,6 +4,11 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 from jax.scipy.special import erf
+from nlls_gram import (
+    metric_from_cholesky,
+    metric_from_diagonal,
+    repeated_blockdiag_metric,
+)
 
 # Stationary kernels with length scale ell (the paper's l) and amplitude
 # sigma, selected by name; the legacy Matern smoothness values nu in
@@ -12,6 +17,58 @@ from jax.scipy.special import erf
 # representation x(t) = x_0 + K_tilde alpha; all four have closed forms.
 
 KERNEL_NAMES = ("matern12", "matern32", "matern52", "rbf")
+
+
+def shifted_kernel_coefficient_metric(
+    gram,
+    *,
+    repeats: int,
+    free_size: int,
+    epsilon: float,
+):
+    """Build ``blockdiag(repeat(gram, repeats), 0) + epsilon * I``.
+
+    The repeated kernel blocks share one Cholesky factor and are applied as a
+    single batched solve. The free-coordinate block is stored as a diagonal,
+    so the full block-diagonal matrix is never formed or repeated.
+    """
+    if repeats < 1:
+        raise ValueError("repeats must be positive")
+    if free_size < 0:
+        raise ValueError("free_size must be nonnegative")
+    if epsilon <= 0.0:
+        raise ValueError("epsilon must be positive")
+
+    gram = jnp.asarray(gram, dtype=jnp.float64)
+    if gram.ndim != 2 or gram.shape[0] != gram.shape[1]:
+        raise ValueError("gram must be a square matrix")
+    block_size = gram.shape[0]
+    shifted_gram = gram + epsilon * jnp.eye(block_size, dtype=gram.dtype)
+    block_metric = metric_from_cholesky(jnp.linalg.cholesky(shifted_gram))
+    additional = None
+    if free_size:
+        additional = (
+            metric_from_diagonal(jnp.full(free_size, epsilon, dtype=gram.dtype)),
+            free_size,
+        )
+    return repeated_blockdiag_metric(
+        block_metric,
+        block_size,
+        repeats,
+        additional=additional,
+    )
+
+
+def rkhs_norm_squared(coefficients, gram):
+    """Return the RKHS coefficient quadratic form along the last axis."""
+    coefficients = jnp.asarray(coefficients)
+    gram = jnp.asarray(gram, dtype=coefficients.dtype)
+    return jnp.einsum(
+        "...i,ij,...j->...",
+        coefficients,
+        gram,
+        coefficients,
+    )
 
 
 def normalize_kernel(kernel):

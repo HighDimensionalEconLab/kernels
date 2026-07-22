@@ -9,13 +9,13 @@ import numpy as np
 from jax.flatten_util import ravel_pytree
 from nlls_gram import (
     LevenbergMarquardt,
-    metric_from_cholesky,
-    metric_from_diagonal,
-    metric_with_compute_dtype,
-    repeated_blockdiag_metric,
 )
 
-from kernels import integrated_kernel_matrices, normalize_kernel
+from kernels import (
+    integrated_kernel_matrices,
+    normalize_kernel,
+    shifted_kernel_coefficient_metric,
+)
 from multicountry_growth_kernel import make_train_grid
 from trade_growth.kernel import (
     DataSettings,
@@ -302,10 +302,6 @@ def build_multicountry_trade_comparative_statics(
     )
     K = 0.5 * (K + K.T)
     eps = lm_set.metric_eps
-    alpha_metric = metric_from_cholesky(
-        jnp.linalg.cholesky(K + eps * jnp.eye(n_train, dtype=dtype))
-    )
-
     static_size = n_train * len(STATIC_BLOCK_NAMES) * num_countries
     algebraic_size = n_train + 2 * num_countries + static_size
 
@@ -439,17 +435,11 @@ def build_multicountry_trade_comparative_statics(
         return residual, statistics(values, runtime)
 
     num_dynamic_functions = 4 * num_countries
-    metric = metric_with_compute_dtype(
-        repeated_blockdiag_metric(
-            alpha_metric,
-            n_train,
-            num_dynamic_functions,
-            additional=(
-                metric_from_diagonal(jnp.full(algebraic_size, eps, dtype=dtype)),
-                algebraic_size,
-            ),
-        ),
-        dtype,
+    metric = shifted_kernel_coefficient_metric(
+        K,
+        repeats=num_dynamic_functions,
+        free_size=algebraic_size,
+        epsilon=eps,
     )
     initial_algebraic = jnp.concatenate(
         [
@@ -474,6 +464,7 @@ def build_multicountry_trade_comparative_statics(
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         linear_solve_dtype=dtype,
+        metric_solve_dtype=jnp.float64,
         metric=metric,
         has_aux=True,
     )

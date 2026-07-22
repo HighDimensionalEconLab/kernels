@@ -11,13 +11,13 @@ import pandas as pd
 from nlls_gram import (
     LevenbergMarquardt,
     LMStatus,
-    metric_from_cholesky,
-    metric_from_diagonal,
-    metric_with_compute_dtype,
-    repeated_blockdiag_metric,
 )
 
-from kernels import integrated_kernel_matrices, normalize_kernel
+from kernels import (
+    integrated_kernel_matrices,
+    normalize_kernel,
+    shifted_kernel_coefficient_metric,
+)
 
 if __name__ == "__main__":
     jax.config.update("jax_enable_x64", True)
@@ -152,10 +152,6 @@ def human_capital_kernel(
     K_metric = (K_metric + K_metric.T) / 2
     K = K_metric.astype(dtype)
     K_tilde = K_tilde_metric.astype(dtype)
-    alpha_metric = metric_from_cholesky(
-        jnp.linalg.cholesky(K_metric + eps * jnp.eye(n_train, dtype=jnp.float64))
-    )
-
     h_0_jax, c_0_init_jax, initial_residual, _ = human_capital_initial_conditions(
         a_k, a_h, delta_k, delta_h, k_0
     )
@@ -225,17 +221,11 @@ def human_capital_kernel(
             residuals(path_values(theta, K, K_tilde))
         )
 
-    metric = metric_with_compute_dtype(
-        repeated_blockdiag_metric(
-            alpha_metric,
-            n_train,
-            7,
-            additional=(
-                metric_from_diagonal(jnp.full(5, eps, dtype=jnp.float64)),
-                5,
-            ),
-        ),
-        jnp.float64,
+    metric = shifted_kernel_coefficient_metric(
+        K_metric,
+        repeats=7,
+        free_size=5,
+        epsilon=eps,
     )
     theta_0 = (
         jnp.zeros(n_train, dtype=dtype),
@@ -262,6 +252,7 @@ def human_capital_kernel(
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         linear_solve_dtype=jnp.float64,
+        metric_solve_dtype=jnp.float64,
         metric=metric,
     )
 

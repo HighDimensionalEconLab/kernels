@@ -5,9 +5,9 @@ replication pipeline.
 
 ## Kernel variations
 
-The original UNO implementations are named `*_kernel_uno.py`, with matching
-drivers under `extra/replication/`. Their output prefixes include `_uno`, so
-they do not overwrite the canonical NLLS results.
+The asset-pricing and neoclassical-growth UNO implementations are main examples
+with drivers under `replication/`. The human-capital and advertising UNO
+implementations remain here as optional comparisons.
 
 `multicountry_growth_kernel_dae.py` is the fully unreduced one-good
 multicountry DAE. It keeps RKHS paths for country consumption and investment
@@ -49,7 +49,7 @@ uv run python -m extra.replication.neoclassical_growth_method_comparison \
   --output_dir .results-extra
 uv run python -m extra.replication.neoclassical_growth_nn_recursive_adaptive \
   --output_dir .results-extra
-uv run python -m extra.replication.neoclassical_growth_kernel_uno \
+uv run python -m extra.replication.human_capital_kernel_uno \
   --output_dir .results-extra
 ```
 

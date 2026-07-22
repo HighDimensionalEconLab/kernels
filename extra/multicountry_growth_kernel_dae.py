@@ -66,7 +66,6 @@ def multicountry_dae_path_values(
 ):
     productivities = jnp.asarray(parameters.productivities, dtype=k.dtype)
     populations = jnp.asarray(parameters.populations, dtype=k.dtype)
-    flow_scale = multicountry_output_scale(parameters, k.dtype)
     rate = interest_rate[:, None]
     investment = k * investment_rate
     output = production(k, productivities, parameters)
@@ -89,24 +88,18 @@ def multicountry_dae_path_values(
         )
         - mpk
     )
-    resource = (
-        jnp.sum(
-            populations * (resources - consumption),
-            axis=-1,
-        )
-        / flow_scale
+    resource = jnp.sum(
+        populations * (resources - consumption),
+        axis=-1,
     )
-    resource_drift = (
-        jnp.sum(
-            populations
-            * (
-                (mpk * k - investment) * dlog_k_dt
-                - investment * dlog_investment_rate_dt
-                - consumption * dlog_consumption_dt
-            ),
-            axis=-1,
-        )
-        / flow_scale
+    resource_drift = jnp.sum(
+        populations
+        * (
+            (mpk * k - investment) * dlog_k_dt
+            - investment * dlog_investment_rate_dt
+            - consumption * dlog_consumption_dt
+        ),
+        axis=-1,
     )
     return {
         "k": k,
@@ -122,7 +115,7 @@ def multicountry_dae_path_values(
         "marginal_wealth": marginal_wealth,
         "relative_welfare_weights": relative_welfare_weights(marginal_wealth),
         "capital": dlog_k_dt - capital_drift / k,
-        "assets": (da_dt - budget_drift) / flow_scale,
+        "assets": da_dt - budget_drift,
         "tobin_q": dlog_q_dt - q_drift / tobin_q,
         "marginal_wealth_euler": dlog_marginal_wealth_dt - (parameters.rho - rate),
         "consumption_foc": marginal_wealth * consumption**parameters.gamma - 1.0,
@@ -133,7 +126,7 @@ def multicountry_dae_path_values(
         - 1.0,
         "resource": resource,
         "resource_drift": resource_drift,
-        "asset_clearing": jnp.sum(populations * a, axis=-1) / flow_scale,
+        "asset_clearing": jnp.sum(populations * a, axis=-1),
     }
 
 
@@ -655,6 +648,7 @@ def multicountry_growth_kernel_dae(
         "linear_solver": lm_set.linear_solver,
         "metric_eps": eps,
         "train_loss": float(result.info.loss),
+        "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
         "solution_accepted": solution_accepted,

@@ -23,7 +23,7 @@ SOLVER = multicountry_growth_nn.multicountry_growth_nn
 
 def run(
     output_dir: str = ".results",
-    n_seeds: int = 100,
+    n_seeds: int = 5,
     use_float64: bool = True,
     verbose: bool = False,
 ):

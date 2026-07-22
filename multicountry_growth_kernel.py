@@ -11,7 +11,6 @@ import pandas as pd
 from nlls_gram import (
     LevenbergMarquardt,
     LMStatus,
-    WhitenedPreconditioner,
     metric_from_cholesky,
     metric_from_diagonal,
     metric_with_compute_dtype,
@@ -74,21 +73,12 @@ class SolverSettings:
     damping_decrease: float = 0.1
     damping_increase: float = 4.0
     max_steps: int = 80
-    residual_atol: float = 2e-8
+    residual_atol: float = 5e-8
     linear_solver: str = "auto"
     iterative_tol: float = 1e-12
     iterative_maxiter: int = 4000
     geodesic_acceleration: bool = True
     metric_eps: float = 1e-7
-
-
-@dataclass(frozen=True)
-class LSMRAlgebraicScale:
-    dynamic_size: int
-    scale: float
-
-    def __call__(self, vector, _damping):
-        return vector.at[self.dynamic_size :].multiply(self.scale)
 
 
 def make_train_grid(data_set):
@@ -196,10 +186,11 @@ def multicountry_growth_kernel(
         jnp.linalg.cholesky(K_metric + eps * jnp.eye(n_train, dtype=jnp.float64))
     )
 
-    def path_coordinates(theta, K_eval, K_tilde_eval, rate_coordinates=None):
-        alpha_k, alpha_a, alpha_q, alpha_m, algebraic = theta
-        q_offsets = algebraic[n_train : n_train + num_countries]
-        marginal_wealth_offsets = algebraic[n_train + num_countries :]
+    def path_coordinates(theta, K_eval, K_tilde_eval):
+        alpha_k, alpha_a, alpha_q, alpha_m, alpha_r, initial = theta
+        q_offsets = initial[:num_countries]
+        marginal_wealth_offsets = initial[num_countries : 2 * num_countries]
+        interest_rate_offset = initial[-1]
         log_k = jnp.log(k_0_array) + K_tilde_eval @ alpha_k.T
         a = a_0_array + output_scale * (K_tilde_eval @ alpha_a.T)
         log_q = jnp.log(q_reference) + q_offsets + K_tilde_eval @ alpha_q.T
@@ -212,10 +203,9 @@ def multicountry_growth_kernel(
         da_dt = output_scale * (K_eval @ alpha_a.T)
         dlog_q_dt = K_eval @ alpha_q.T
         dlog_marginal_wealth_dt = K_eval @ alpha_m.T
-        if rate_coordinates is None:
-            interest_rate = parameters.rho - jnp.mean(dlog_marginal_wealth_dt, axis=1)
-        else:
-            interest_rate = parameters.rho * (1.0 + rate_coordinates)
+        interest_rate = jnp.exp(
+            jnp.log(parameters.rho) + interest_rate_offset + K_tilde_eval @ alpha_r
+        )
         return {
             "k": jnp.exp(log_k),
             "a": a,
@@ -232,26 +222,15 @@ def multicountry_growth_kernel(
         theta,
         K_eval,
         K_tilde_eval,
-        rate_coordinates=None,
     ):
-        coordinates = path_coordinates(
-            theta,
-            K_eval,
-            K_tilde_eval,
-            rate_coordinates,
-        )
+        coordinates = path_coordinates(theta, K_eval, K_tilde_eval)
         return multicountry_path_values(**coordinates, parameters=parameters)
 
     residual_count = (4 * num_countries + 1) * n_train + 1
     residual_scale = 1.0 / jnp.sqrt(float(residual_count))
 
     def residual_fn(theta):
-        values = evaluate_coordinates(
-            theta,
-            K,
-            K_tilde,
-            theta[-1][:n_train],
-        )
+        values = evaluate_coordinates(theta, K, K_tilde)
         # The level-clearing equation at t=0 is fixed by a_0 and has a zero
         # Jacobian. G(0) = 0 replaces that row, while G_dot(0) = 0 supplies the
         # index-consistency equation that identifies the initial algebraic rate.
@@ -273,17 +252,18 @@ def multicountry_growth_kernel(
         )
 
     num_dynamic_functions = 4 * num_countries
-    num_algebraic_values = n_train + 2 * num_countries
+    num_rkhs_functions = num_dynamic_functions + 1
+    num_initial_values = 2 * num_countries + 1
     metric = metric_with_compute_dtype(
         repeated_blockdiag_metric(
             alpha_metric,
             n_train,
-            num_dynamic_functions,
+            num_rkhs_functions,
             additional=(
                 metric_from_diagonal(
-                    jnp.full(num_algebraic_values, eps, dtype=jnp.float64)
+                    jnp.full(num_initial_values, eps, dtype=jnp.float64)
                 ),
-                num_algebraic_values,
+                num_initial_values,
             ),
         ),
         jnp.float64,
@@ -293,28 +273,15 @@ def multicountry_growth_kernel(
         jnp.zeros((num_countries, n_train), dtype=dtype),
         jnp.zeros((num_countries, n_train), dtype=dtype),
         jnp.zeros((num_countries, n_train), dtype=dtype),
-        jnp.zeros(num_algebraic_values, dtype=dtype),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(num_initial_values, dtype=dtype),
     )
     iterative_options = {}
-    lsmr_algebraic_scale = None
     if lm_set.linear_solver == "lsmr":
         iterative_options = {
             "iterative_tol": lm_set.iterative_tol,
             "iterative_maxiter": lm_set.iterative_maxiter,
         }
-        # In whitened coordinates, the dynamic derivative block has spectral
-        # scale sqrt(lambda_max(K)), while the algebraic block has scale
-        # 1 / sqrt(eps). This right scaling balances the two without changing
-        # the converged damped least-squares subproblem.
-        lsmr_algebraic_scale = float(jnp.sqrt(eps * jnp.linalg.eigvalsh(K_metric)[-1]))
-        scale = LSMRAlgebraicScale(
-            dynamic_size=num_dynamic_functions * n_train,
-            scale=lsmr_algebraic_scale,
-        )
-        iterative_options["whitened_preconditioner"] = WhitenedPreconditioner(
-            scale,
-            scale,
-        )
 
     solver = LevenbergMarquardt(
         residual_fn,
@@ -339,7 +306,7 @@ def multicountry_growth_kernel(
     solve_time = time.perf_counter() - solve_start
     theta = result.x
 
-    def evaluate_grid(points, use_algebraic_rate=False):
+    def evaluate_grid(points):
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             points,
             train_data,
@@ -347,15 +314,9 @@ def multicountry_growth_kernel(
             kernel_set.sigma,
             kernel_set.ell,
         )
-        rate_coordinates = theta[-1][:n_train] if use_algebraic_rate else None
-        return evaluate_coordinates(
-            theta,
-            K_eval,
-            K_tilde_eval,
-            rate_coordinates,
-        )
+        return evaluate_coordinates(theta, K_eval, K_tilde_eval)
 
-    train_eval = evaluate_grid(train_data, use_algebraic_rate=True)
+    train_eval = evaluate_grid(train_data)
     validation_eval = evaluate_grid(validation_data)
     test_eval = evaluate_grid(test_data)
     dynamic_residual_names = (
@@ -480,12 +441,14 @@ def multicountry_growth_kernel(
         for name, coefficients in coefficient_groups.items()
         for country in range(num_countries)
     }
-    rkhs_norm_total = sum(rkhs_norms.values())
+    rkhs_norm_rate = alpha_metric.norm(theta[4]) ** 2 - eps * (theta[4] @ theta[4])
+    rkhs_norm_total = sum(rkhs_norms.values()) + rkhs_norm_rate
     shifted_metric_norm_squared = rkhs_norm_total + eps * (
         sum(
             coefficients @ coefficients for group in theta[:4] for coefficients in group
         )
-        + theta[-1] @ theta[-1]
+        + theta[4] @ theta[4]
+        + theta[5] @ theta[5]
     )
 
     results = {
@@ -519,11 +482,11 @@ def multicountry_growth_kernel(
         "interest_rate_scaled_error_max": float(jnp.max(interest_rate_scaled_error)),
         "terminal_residual_count": 0,
         "dae_residual_count": residual_count,
-        "unknown_count": (4 * num_countries + 1) * n_train + 2 * num_countries,
+        "unknown_count": (4 * num_countries + 1) * n_train + 2 * num_countries + 1,
         "dynamic_rkhs_function_count": num_dynamic_functions,
-        "algebraic_rate_value_count": n_train,
-        "free_initial_value_count": 2 * num_countries,
-        "metric_selection_dimension": 2 * num_countries - 1,
+        "algebraic_rkhs_function_count": 1,
+        "free_initial_value_count": num_initial_values,
+        "metric_selection_dimension": 2 * num_countries,
         "selection": "minimum_shifted_rkhs_metric",
         "initialization": "zero_coordinate",
         "global_closure": "explicit_assets_and_algebraic_clearing",
@@ -535,6 +498,7 @@ def multicountry_growth_kernel(
         "ex_post_asset_tvc": float(jnp.max(tvc["asset_tvc"])),
         "ex_post_capital_tvc": float(jnp.max(tvc["capital_tvc"])),
         "rkhs_norm_total": float(rkhs_norm_total),
+        "rkhs_norm_interest_rate": float(rkhs_norm_rate),
         "shifted_metric_norm_squared": float(shifted_metric_norm_squared),
         "solve_time": solve_time,
         "wall_time": solve_time,
@@ -543,13 +507,11 @@ def multicountry_growth_kernel(
         "residual_atol": lm_set.residual_atol,
         "iterative_tol": lm_set.iterative_tol,
         "iterative_maxiter": lm_set.iterative_maxiter,
-        "iterative_preconditioner": (
-            "spectral_balance" if lm_set.linear_solver == "lsmr" else "none"
-        ),
-        "lsmr_algebraic_scale": lsmr_algebraic_scale,
+        "iterative_preconditioner": "none",
         "geodesic_acceleration": lm_set.geodesic_acceleration,
         "metric_eps": eps,
         "train_loss": float(result.info.loss),
+        "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
         "solution_accepted": solution_accepted,

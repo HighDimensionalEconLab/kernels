@@ -4,7 +4,7 @@ import jax
 import jsonargparse
 import numpy as np
 
-import extra.neoclassical_growth_concave_convex_kernel_uno as neoclassical_growth_concave_convex_kernel_uno
+import neoclassical_growth_concave_convex_kernel_uno
 from replication.utilities import (
     classify_path_basin,
     enable_compilation_cache,
@@ -21,13 +21,6 @@ enable_compilation_cache()
 
 PREFIX = "neoclassical_growth_concave_convex_kernel_uno"
 
-# Isolated initial conditions (k_0 ~ 0.70 and ~1.05) fail the fail-fast ipopt
-# solve from the flat warm start; the filtersqp preset solves them cleanly to
-# the same low-basin solution the neighbors reach.
-KINKED_RETRIES = (
-    dict(solver_set=dict(preset="filtersqp", max_iterations=50, time_limit=2.0)),
-)
-
 
 def run(
     output_dir: str = ".results",
@@ -41,7 +34,6 @@ def run(
         "k_0",
         [float(k_0) for k_0 in grid],
         options={"verbose": verbose},
-        retries=KINKED_RETRIES,
     )
 
     # Ex-post basin classification of each finite-horizon path (side of the

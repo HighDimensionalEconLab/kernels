@@ -255,17 +255,15 @@ def dae_residuals(beta, args, log_states, p, kernel_set):
 
     def residual(log_state):
         drift = log_state_drift(log_state, 0.0, (coefficients, args, kernel_set), p)
-        c, dc_dt = jax.jvp(
-            lambda state: consumption_from_coefficients(
-                coefficients, args, state, p, kernel_set
+        _, dlog_c_dt = jax.jvp(
+            lambda state: jnp.log(
+                consumption_from_coefficients(coefficients, args, state, p, kernel_set)
             ),
             (log_state,),
             (drift,),
         )
         z, k = jnp.exp(log_state)
-        euler = dc_dt - c * (mpk(z, k, p) - p.delta - p.rho_hat) / p.sigma_crra
-        c_scale = production(p.z_0, p.k_0, p)
-        return euler / c_scale, jnp.minimum((c - DOMAIN_EPS) / c_scale, 0.0)
+        return dlog_c_dt - (mpk(z, k, p) - p.delta - p.rho_hat) / p.sigma_crra
 
     return jax.vmap(residual)(log_states)
 
@@ -368,20 +366,10 @@ def neoclassical_growth_kernel_recursive_adaptive(
             SaveAt(steps=True),
         )
         log_states = jnp.where(solution.ok, solution.xs, jnp.inf)
-        euler, domain = dae_residuals(
-            beta, residual_args, log_states, parameters, kernel_set
-        )
+        euler = dae_residuals(beta, residual_args, log_states, parameters, kernel_set)
         row_active = solution.accepted
-        active_scale = jnp.sqrt(2 * jnp.maximum(jnp.sum(row_active), 1))
-        residual = (
-            jnp.concatenate(
-                [
-                    jnp.where(row_active, euler, 0.0),
-                    jnp.where(row_active, domain, 0.0),
-                ]
-            )
-            / active_scale
-        )
+        active_scale = jnp.sqrt(jnp.maximum(jnp.sum(row_active), 1))
+        residual = jnp.where(row_active, euler, 0.0) / active_scale
         residual = jnp.where(solution.ok, residual, jnp.inf)
         return residual, (log_states, solution.ts, row_active)
 
@@ -554,7 +542,7 @@ def neoclassical_growth_kernel_recursive_adaptive(
     test_c = jax.vmap(
         lambda state: consumption(result.x, result.args, state, p, kernel_set)
     )(test_log_states)
-    test_euler, _ = dae_residuals(result.x, result.args, test_log_states, p, kernel_set)
+    test_euler = dae_residuals(result.x, result.args, test_log_states, p, kernel_set)
     test_path_ok = bool(
         test_solution.ok
         and jnp.all(jnp.isfinite(test_states))
@@ -710,6 +698,7 @@ def neoclassical_growth_kernel_recursive_adaptive(
         "metric_dtype": str(jnp.dtype(metric_dtype)),
         "optimizer_metric": "identity_in_whitened_rkhs_coordinates",
         "train_loss": float(result.info.loss),
+        "final_damping": float(result.lm_state.damping),
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_euler))),
         "min_test_c": float(jnp.min(test_c)),
         "test_path_ok": test_path_ok,

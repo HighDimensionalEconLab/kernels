@@ -532,6 +532,7 @@ def multicountry_trade_growth_nn(
             jnp.linalg.norm(theta_final_flat - theta_initial_flat)
         ),
         "train_loss": float(result.info.loss),
+        "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
         "solve_time": solve_time,

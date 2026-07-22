@@ -673,25 +673,32 @@ q^\star
 \]
 
 \[
-c
+c(t)
 =
-c_{\mathrm{ref}}\exp(c_0),
-\qquad
-m=c^{-\gamma}.
+g^\star\exp\!\left(c_0+\widetilde K_t\alpha_c\right),
+\]
+
+\[
+m(t)
+=
+(g^\star)^{-\gamma}
+\exp\!\left(m_0+\widetilde K_t\alpha_m\right).
 \tag{24}
 \]
 
-In (24), \(q_0\) and \(c_0\) denote free log offsets, not levels. The integrated kernel
-automatically enforces the initial conditions for \(k\) and \(a\). The log transforms
-guarantee positivity without clipping, branch-dependent penalties, or softplus saturation.
+In (24), \(q_0,c_0,m_0\) denote free log offsets, not levels. The integrated
+kernel automatically enforces the initial conditions for \(k\) and \(a\). The log
+transforms guarantee positivity without clipping, branch-dependent penalties, or
+softplus saturation.
 
-For \(n\) collocation points, the unknowns are three length-\(n\) coefficient vectors plus
-the two free log offsets: \(3n+2\) scalars.
+For \(n\) collocation points, the unknowns are five length-\(n\) coefficient vectors plus
+the three free log offsets: \(5n+3\) scalars. Consumption remains an independent
+algebraic RKHS path; the implementation does not substitute \(c=m^{-1/\gamma}\).
 
-### Dimensionless residuals
+### DAE residuals
 
-At each collocation point, compute \(s(q)\), \(x=ks\), \(m=c^{-\gamma}\),
-\(f\), \(f_k\), and \(CA\) algebraically. Use
+At each collocation point, compute \(s(q)\), \(x=ks\), \(f\), \(f_k\), and
+\(CA\) algebraically. Use
 
 \[
 R_k
@@ -703,8 +710,7 @@ R_k
 \[
 R_a
 =
-\frac{\dot a}{y^\star}
--\frac{r^\star a+f-c-x}{y^\star},
+\dot a-\left(r^\star a+f-c-x\right),
 \]
 
 \[
@@ -714,38 +720,49 @@ R_q
 -\left[
 r^\star+\delta-(1-\lambda)\chi s^\lambda-\frac{f_k}{q}
 \right].
+\]
+
+\[
+R_m
+=
+\frac{\dot m}{m}-(\rho-r^\star),
+\qquad
+R_c=m c^\gamma-1.
 \tag{25}
 \]
 
 Do not append (21), a TVC, a no-Ponzi condition, a steady-state target, or any other
-terminal residual. There are \(3n\) DAE equations in \(3n+2\) unknowns. The two missing
-conditions are deliberately supplied by the minimum-metric selection, exactly as in the
-repository's asset-pricing, growth, and optimal-advertising kernel examples.
+terminal residual. There are \(5n\) DAE equations in \(5n+3\) unknowns. The three missing
+conditions are deliberately supplied by the minimum-metric selection. Four equations
+are differential and \(R_c=0\) is algebraic.
 
-The residual vector is scaled by \(1/\sqrt{3n}\). The parameter-space metric is
+The residual vector is scaled globally by \(1/\sqrt{5n}\); there are no equation-specific
+weights. The parameter-space metric is
 
 \[
 M
 =
-\operatorname{blockdiag}(K,K,K,0_2)+\epsilon I,
+\operatorname{blockdiag}(K,K,K,K,K,0_3)+\epsilon I,
 \]
 
-so the selected feasible path minimizes, up to the common \(O(\epsilon)\) shift,
+so the selected feasible path minimizes
 
 \[
-\|\dot{\log k}\|_{\mathcal H_K}^2
-+\left\|\frac{\dot a}{y^\star}\right\|_{\mathcal H_K}^2
-+\|\dot{\log q}\|_{\mathcal H_K}^2.
+\|\alpha_k\|_K^2+\|\alpha_a\|_K^2+\|\alpha_q\|_K^2
++\|\alpha_m\|_K^2+\|\alpha_c\|_K^2
++\epsilon\|\theta\|_2^2.
 \]
 
-The \(\epsilon I_2\) block makes the metric positive definite while leaving the jump
-values nearly free. Invoke the optimizer through its public `solver.solve` interface and
-report both the three jitter-free RKHS seminorms and the complete shifted metric norm.
+The \(\epsilon I_3\) block makes the NLLS metric positive definite while leaving the
+jump values nearly free. The UNO reference instead minimizes the unshifted sum of the
+five function RKHS norms subject to the same five collocation equations; the three
+finite offsets do not enter its objective.
 
 ### Warm starts and continuation
 
 Use the zero coefficient vector and zero offsets as the baseline initialization. In
-levels this is the constant path \((k_0,a_0,q^\star,g^\star)\); it contains no stable-arm,
+levels this is the constant path
+\((k_0,a_0,q^\star,g^\star,(g^\star)^{-\gamma})\); it contains no stable-arm,
 present-value, terminal-asset, or benchmark information. Continuation from an economic
 boundary solution would contaminate the selection experiment and is not allowed. A
 numerical retry may change generic damping or initialization scales, but it must not use
@@ -914,6 +931,10 @@ The example is ready only when all of the following hold.
   second-order truncation rate of the benchmark conditions in (19)-(20).
 - Results are stable under modest changes in kernel length scale, collocation density, and
   NLLS metric shift.
+- The UNO comparison uses the identical five-path DAE transcription and minimizes the
+  unshifted function-only RKHS norm subject to the collocation equations. Its stopping
+  tolerances are calibrated to the NLLS validation and benchmark-accuracy band before
+  comparing warm solve times.
 
 ### Performance
 
@@ -936,8 +957,11 @@ Implemented:
 - open_economy_growth.py for pure equations, parameters, steady state, and diagnostics;
 - open_economy_growth_benchmark.py for solve_bvp and semi-analytic checks;
 - open_economy_growth_kernel.py for the integrated-kernel solve;
+- open_economy_growth_kernel_uno.py for the constrained solution of the same DAE and
+  function-only RKHS objective;
 - open_economy_growth_nn_recursive.py for the sequential state-space NN solve;
 - replication/open_economy_growth_kernel.py for cached kernel runs;
+- replication/open_economy_growth_kernel_uno.py for cached constrained runs;
 - replication/open_economy_growth_kernel_figures.py for kernel transition plots;
 - replication/open_economy_growth_nn_recursive.py for cached NN runs; and
 - replication/open_economy_growth_nn_recursive_figures.py for NN transition plots.
@@ -1091,29 +1115,27 @@ country equations per country, one global algebraic row per point, and the initi
 index-consistency row. Its unknowns are
 
 \[
-4Nn+n+2N=(4N+1)n+2N:
+4Nn+n+2N+1=(4N+1)n+2N+1:
 \tag{33}
 \]
 
 - \(4Nn\) integrated-kernel coefficients for the country paths;
-- \(n\) algebraic world-rate values; and
-- \(2N\) free initial values for \((q_i,m_i)\).
+- \(n\) integrated-kernel coefficients for the algebraic common rate; and
+- \(2N+1\) free initial values for \((q_i,m_i,r)\).
 
 The metric is
 
 \[
-\operatorname{blockdiag}(\underbrace{K,\ldots,K}_{4N\text{ times}},0_{n+2N})
+\operatorname{blockdiag}(\underbrace{K,\ldots,K}_{4N+1\text{ times}},0_{2N+1})
 +\epsilon I.
 \tag{34}
 \]
 
-The algebraic rate and free initial values receive only the common \(\epsilon\) shift;
-they do not acquire an extra RKHS selection penalty. The minimum norm therefore acts on
-the same four dynamic functions for every country. The unknown-residual difference is
-\(2N-1\), exactly the number of initial \((q_i,m_i)\) directions left after initial DAE
-consistency and world clearing. No terminal projection, lifetime budget, TVC, no-Ponzi
-condition, debt target, or steady-state target enters the residual, initialization,
-stopping rule, or acceptance rule.
+The algebraic rate receives the same kernel metric as every dynamic path. Only the
+finite initial values receive the common \(\epsilon\) shift. The unknown-residual
+difference is \(2N\). No terminal projection, lifetime budget, TVC, no-Ponzi condition,
+debt target, or steady-state target enters the residual, initialization, stopping rule,
+or acceptance rule.
 
 #### Reduced sequential NN
 
@@ -1482,13 +1504,22 @@ redundant global path row explicitly.
 
 The one-country model, independent benchmark, NLLS-gram solver, replication driver, and
 figure driver are implemented in the files listed above. The kernel residual contains
-only the \(3n\) DAE equations, starts from the zero coordinate, and uses no terminal or
+only the \(5n\) DAE equations, starts from the zero coordinate, and uses no terminal or
 present-value information. The default \(T=160\), \(n=96\) solve uses the public
-`solver.solve` interface and converges in five steps. On CPU, the measured warm solve
-time is about \(0.05\) seconds after roughly a two-second compile. The maximum unscaled
-training residual is \(2.9\times10^{-9}\), the dense-grid residual is
-\(3.4\times10^{-4}\), and the maximum normalized path discrepancy from the independent
-benchmark is \(6.7\times10^{-4}\).
+`solver.solve` interface. On CPU, its median warm solve time is \(0.081\) seconds. The
+maximum unscaled training residual is \(6.5\times10^{-6}\), the dense-grid residual is
+\(3.5\times10^{-4}\), and the maximum normalized path discrepancy from the independent
+benchmark is \(6.6\times10^{-4}\).
+
+The UNO reference uses the same 483 unknowns, 480 DAE equations, log/level path
+coordinates, collocation grid, and zero initialization. Its objective is the unshifted
+sum of the five function RKHS norms; the three finite offsets are unpenalized. It adds no
+terminal, TVC, or equilibrium-selection constraint. Its median warm CPU solve time is \(0.309\)
+seconds, with an unscaled training residual of \(5.7\times10^{-11}\), dense-grid residual
+of \(6.1\times10^{-4}\), and benchmark discrepancy of \(9.2\times10^{-4}\). Thus the
+realized off-grid and path accuracy is comparable while the constrained solve is about
+3.8 times slower. UNO is a host-side float64 reference; the NLLS and NN implementations
+retain the float32 and GPU paths.
 
 All three initial-NFA scenarios \(a_0/y^\star\in\{-0.5,0,0.5\}\) pass the same DAE
 gates and match the benchmark at the reporting tolerance. Relative to \(a_0=0\), the

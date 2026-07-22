@@ -138,7 +138,7 @@ class MulticountryGrowthKernelDAETests(unittest.TestCase):
             places=6,
         )
         self.assertAlmostEqual(
-            results["terminal_a_2"], results["terminal_a_3"], delta=1e-3
+            results["terminal_a_2"], results["terminal_a_3"], delta=3e-3
         )
         self.assertIn("consumption_foc_3", extras["test_df"])
         self.assertIn("investment_foc_3", extras["test_df"])

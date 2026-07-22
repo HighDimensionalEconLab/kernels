@@ -5,7 +5,7 @@ import math
 import jax
 import jsonargparse
 
-import extra.neoclassical_growth_kernel_uno as neoclassical_growth_kernel_uno
+import neoclassical_growth_kernel_uno
 from replication.utilities import (
     enable_compilation_cache,
     ensemble,

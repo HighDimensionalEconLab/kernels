@@ -28,10 +28,9 @@ from utilities import ACTIVATIONS, unit_softplus
 # Recursive (state-space) neoclassical growth solver with log utility: the NN
 # approximates gross investment i(k), state = k only. The drift and
 # consumption are implied by the resource constraint
-#   dk(k) = i(k) - delta k,   c(k) = f(k) - i(k),
-# so the investment head is a positive unit-softplus output anchored at the
-# replacement level delta k_0, while c > 0 is enforced through penalty rows in
-# the residual (log utility needs c > 0). The stationary Euler
+#   dk(k) = i(k) - delta k,   c(k) = f(k) - i(k).
+# The investment head is a positive unit-softplus output anchored at the
+# replacement level delta k_0. The stationary Euler
 # residual is
 #   R(k) = c'(k) dk(k) - c(k) (f'(k) - delta - rho_hat),
 # with c'(k) = f'(k) - i'(k). Collocation states come from a bounded
@@ -223,20 +222,14 @@ def drift(policy, k, p):
 
 def euler_residuals(policy, states, p):
     def residual_scalar(k):
-        i, di_dk = jax.jvp(policy, (k,), (jnp.ones_like(k),))
-        c = production(k, p) - i
-        dk_dt = i - p.delta * k
-        dc_dk = mpk(k, p) - di_dk
-        return dc_dk * dk_dt - c * (mpk(k, p) - p.delta - p.rho_hat)
+        _, dlog_c_dk = jax.jvp(
+            lambda state: jnp.log(consumption(policy, state, p)),
+            (k,),
+            (jnp.ones_like(k),),
+        )
+        return dlog_c_dk * drift(policy, k, p) - (mpk(k, p) - p.delta - p.rho_hat)
 
     return jax.vmap(residual_scalar)(states)
-
-
-# c > 0 guard: penalty rows active only where the implied consumption dips
-# below the domain floor.
-def consumption_positivity(policy, states, p):
-    c = jax.vmap(lambda k: consumption(policy, k, p))(states)
-    return jnp.minimum(c - DOMAIN_EPS, 0.0)
 
 
 # Rollouts use tinydiffeq's bounded scans. Training samples the dense solution
@@ -322,13 +315,8 @@ def collocation_states(policy, p, data_set):
 def residual_fn(theta, args, p):
     policy = nnx.merge(args.graphdef, theta, args.fixed_state)
     states = collocation_states(policy, p, args.data_set)
-    residual = jnp.concatenate(
-        [
-            euler_residuals(policy, states, p),
-            consumption_positivity(policy, states, p),
-        ]
-    )
-    return residual / jnp.sqrt(2 * args.data_set.train_points)
+    residual = euler_residuals(policy, states, p)
+    return residual / jnp.sqrt(args.data_set.train_points)
 
 
 # Post-hoc transversality certificate (log utility): the max over horizons
@@ -408,10 +396,6 @@ def neoclassical_growth_nn_recursive(
         k_ss = branch_steady_state(1.0)
         steady_targets = [k_ss]
 
-    # Anchoring and scaling from the initial condition only: the head starts
-    # near zero, so the untrained policy is the flat replacement investment
-    # i(k_0) = delta k_0 (zero drift); the steady-flow magnitude at k_0 sets
-    # the output scale.
     i_scale = max(
         float(A_value * max(k_0**a, b_1_value * k_0**a - b_2_value)) - delta * k_0,
         DOMAIN_EPS,
@@ -560,6 +544,7 @@ def neoclassical_growth_nn_recursive(
         "metric": "identity_parameter_metric",
         "selection": "minimum_identity_metric_parameter_step",
         "train_loss": train_loss,
+        "final_damping": float(result.lm_state.damping),
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_resid))),
         "max_log_tvc_residual": max_log_tvc,
         "transversality_ok": transversality_ok,

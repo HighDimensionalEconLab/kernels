@@ -248,6 +248,7 @@ def asset_pricing_nn(
         "test_points": data_set.test_points,
         "p_0": float(test_df["p"].iloc[0]),
         "train_loss": float(result.info.loss),
+        "final_damping": float(result.lm_state.damping),
         "max_train_residual": max_train_residual,
         "max_test_residual": float(test_df["residual"].abs().max()),
         "p_rel_error_mean": float(test_df["p_rel_error"].mean()),

@@ -11,7 +11,6 @@ import pandas as pd
 from nlls_gram import (
     LevenbergMarquardt,
     LMStatus,
-    blockdiag_metric,
     metric_from_cholesky,
     metric_from_diagonal,
     metric_with_compute_dtype,
@@ -117,7 +116,6 @@ def human_capital_kernel(
     delta_h: float = 0.05,
     rho_hat: float = 0.11,
     k_0: float = 1.5,
-    lambda_p: float = 5e-3,
     use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
@@ -127,8 +125,6 @@ def human_capital_kernel(
     if not jax.config.jax_enable_x64:
         raise RuntimeError("enable jax_enable_x64 in the process entry point")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    if lambda_p <= 0.0:
-        raise ValueError("lambda_p must be positive")
     kernel = normalize_kernel(kernel_set.kernel)
     ell, sigma = kernel_set.ell, kernel_set.sigma
     if data_set.train_points_list is None:
@@ -156,10 +152,8 @@ def human_capital_kernel(
     K_metric = (K_metric + K_metric.T) / 2
     K = K_metric.astype(dtype)
     K_tilde = K_tilde_metric.astype(dtype)
-    identity = jnp.eye(n_train, dtype=jnp.float64)
-    state_metric = metric_from_cholesky(jnp.linalg.cholesky(K_metric + eps * identity))
-    policy_metric = metric_from_cholesky(
-        jnp.linalg.cholesky(lambda_p * K_metric + eps * identity)
+    alpha_metric = metric_from_cholesky(
+        jnp.linalg.cholesky(K_metric + eps * jnp.eye(n_train, dtype=jnp.float64))
     )
 
     h_0_jax, c_0_init_jax, initial_residual, _ = human_capital_initial_conditions(
@@ -231,16 +225,15 @@ def human_capital_kernel(
             residuals(path_values(theta, K, K_tilde))
         )
 
-    state_pair_metric = repeated_blockdiag_metric(state_metric, n_train, 2)
-    policy_triplet_metric = repeated_blockdiag_metric(policy_metric, n_train, 3)
     metric = metric_with_compute_dtype(
-        blockdiag_metric(
-            [
-                (state_pair_metric, 2 * n_train),
-                (policy_triplet_metric, 3 * n_train),
-                (state_pair_metric, 2 * n_train),
-                (metric_from_diagonal(jnp.full(5, eps, dtype=jnp.float64)), 5),
-            ]
+        repeated_blockdiag_metric(
+            alpha_metric,
+            n_train,
+            7,
+            additional=(
+                metric_from_diagonal(jnp.full(5, eps, dtype=jnp.float64)),
+                5,
+            ),
         ),
         jnp.float64,
     )
@@ -387,7 +380,6 @@ def human_capital_kernel(
         "rho_hat": rho_hat,
         "k_0": k_0,
         "h_0": h_0,
-        "lambda_p": lambda_p,
         "residual_dtype": str(jnp.dtype(dtype)),
         "metric_dtype": "float64",
         "kernel": kernel,
@@ -418,6 +410,7 @@ def human_capital_kernel(
         "linear_solver": "auto",
         "metric_eps": eps,
         "train_loss": float(result.info.loss),
+        "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
         "solution_accepted": solution_accepted,
@@ -456,7 +449,6 @@ def human_capital_kernel(
             "delta_k": delta_k,
             "delta_h": delta_h,
             "rho_hat": rho_hat,
-            "lambda_p": lambda_p,
         },
         "initial_conditions": {"k_0": k_0, "h_0": h_0},
     }

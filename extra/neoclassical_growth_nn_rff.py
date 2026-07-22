@@ -199,14 +199,10 @@ def policy_values(model, t, p, integration_substeps):
 
 def training_residual(model, data, p, integration_substeps):
     values = policy_values(model, data["t"], p, integration_substeps)
-    k_positivity = jnp.minimum(values["k"] - DOMAIN_EPS, 0.0)
-    c_positivity = jnp.minimum(values["c"] - DOMAIN_EPS, 0.0)
     residual = jnp.concatenate(
         [
             values["resource"],
             values["euler"],
-            k_positivity,
-            c_positivity,
         ]
     )
     return residual / jnp.sqrt(residual.size)
@@ -421,6 +417,7 @@ def neoclassical_growth_nn_rff(
         "solver": "nlls-gram",
         "ansatz": "integrated_derivative",
         "train_loss": train_loss,
+        "final_damping": float(result.lm_state.damping),
         "train_resource_mean_abs": train_resource_mean_abs,
         "train_euler_mean_abs": train_euler_mean_abs,
         "test_resource_mean_abs": test_resource_mean_abs,

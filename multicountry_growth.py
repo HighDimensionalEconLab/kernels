@@ -195,7 +195,6 @@ def multicountry_path_values(
         parameters,
     )
     populations = jnp.asarray(parameters.populations, dtype=k.dtype)
-    flow_scale = multicountry_output_scale(parameters, k.dtype)
     budget_drift = (
         interest_rate[:, None] * a
         + allocations["resources"]
@@ -203,15 +202,14 @@ def multicountry_path_values(
     )
     residuals = {
         "capital": dlog_k_dt - allocations["capital_drift"] / k,
-        "assets": (da_dt - budget_drift) / flow_scale,
+        "assets": da_dt - budget_drift,
         "tobin_q": dlog_q_dt - allocations["tobin_q_drift"] / tobin_q,
         "marginal_wealth_euler": dlog_marginal_wealth_dt
         - (parameters.rho - interest_rate[:, None]),
         "resource": jnp.sum(
             populations * (allocations["resources"] - allocations["consumption"]),
             axis=-1,
-        )
-        / flow_scale,
+        ),
         "resource_drift": jnp.sum(
             populations
             * (
@@ -224,9 +222,8 @@ def multicountry_path_values(
                 / parameters.gamma
             ),
             axis=-1,
-        )
-        / flow_scale,
-        "asset_clearing": jnp.sum(populations * a, axis=-1) / flow_scale,
+        ),
+        "asset_clearing": jnp.sum(populations * a, axis=-1),
         "interest_rate_country_gap": parameters.rho
         - dlog_marginal_wealth_dt
         - interest_rate[:, None],

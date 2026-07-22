@@ -280,6 +280,7 @@ def run(output_dir: str = ".results"):
         )[0]
         discrete_diagnostics[name] = {
             "final_continuation_steps": int(shocked_solution.steps),
+            "final_damping": float(shocked_solution.lm_state.damping),
             "max_dae_residual": float(jnp.max(jnp.abs(shocked_residual))),
             "log_trade_cost_change": float(log_change),
         }
@@ -302,6 +303,7 @@ def run(output_dir: str = ".results"):
     metadata = {
         "status": int(solution.status),
         "steps": int(solution.steps),
+        "final_damping": float(solution.lm_state.damping),
         "max_dae_residual": float(jnp.max(jnp.abs(residual))),
         "solve_seconds": solve_seconds,
         "jacobian_seconds": jacobian_seconds,

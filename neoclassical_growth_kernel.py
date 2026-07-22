@@ -347,6 +347,7 @@ def neoclassical_growth_kernel(
         "linear_solver": "auto",
         "metric_eps": eps,
         "train_loss": float(result.info.loss),
+        "final_damping": float(result.lm_state.damping),
         "steps": steps,
         "stopping_reason": STATUS_TO_REASON.get(status, "unknown"),
         "solution_accepted": solution_accepted,

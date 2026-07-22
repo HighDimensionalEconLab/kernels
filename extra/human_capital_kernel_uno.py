@@ -109,7 +109,6 @@ def human_capital_kernel_uno(
     delta_h: float = 0.05,
     rho_hat: float = 0.11,
     k_0: float = 1.5,
-    lambda_p: float = 5e-3,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
     solver_set: SolverSettings = SolverSettings(),
@@ -214,8 +213,6 @@ def human_capital_kernel_uno(
         f_h = a_h * (k_positive**a_k) * (h_positive ** (a_h - 1.0))
         return f, f_k, f_h
 
-    # The supplement's lambda_p weights the squared RKHS norms of the policy
-    # functions (i_k, i_h, c); the state/costate norms are unweighted.
     def objective(x):
         (
             alpha_k,
@@ -232,12 +229,9 @@ def human_capital_kernel_uno(
             + alpha_h @ K_jax @ alpha_h
             + alpha_mu_k @ K_jax @ alpha_mu_k
             + alpha_mu_h @ K_jax @ alpha_mu_h
-            + lambda_p
-            * (
-                alpha_i_k @ K_jax @ alpha_i_k
-                + alpha_i_h @ K_jax @ alpha_i_h
-                + alpha_c @ K_jax @ alpha_c
-            )
+            + alpha_i_k @ K_jax @ alpha_i_k
+            + alpha_i_h @ K_jax @ alpha_i_h
+            + alpha_c @ K_jax @ alpha_c
         )
 
     def constraints(x):
@@ -513,7 +507,6 @@ def human_capital_kernel_uno(
         "rho_hat": rho_hat,
         "k_0": k_0,
         "h_0": h_0,
-        "lambda_p": lambda_p,
         "nu": nu,
         "ell": ell,
         "sigma": sigma,
@@ -577,7 +570,6 @@ def human_capital_kernel_uno(
             "delta_k": delta_k,
             "delta_h": delta_h,
             "rho_hat": rho_hat,
-            "lambda_p": lambda_p,
         },
         "initial_conditions": {"k_0": k_0, "h_0": h_0},
     }

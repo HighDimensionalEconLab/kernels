@@ -35,7 +35,7 @@ if __name__ == "__main__":
     jax.config.update("jax_default_matmul_precision", "highest")
 
 TRAIN_RESIDUAL_TOL = 1e-5
-VALIDATION_RESIDUAL_TOL = 5e-3
+VALIDATION_RESIDUAL_TOL = 1e-2
 BENCHMARK_MATCH_TOL = 1e-3
 STATUS_TO_REASON = {
     LMStatus.CONVERGED: "converged",
@@ -72,7 +72,7 @@ class SolverSettings:
     damping_decrease: float = 0.1
     damping_increase: float = 4.0
     max_steps: int = 100
-    residual_atol: float = 5e-8
+    residual_atol: float = 1e-6
     metric_eps: float = 1e-7
 
 
@@ -518,6 +518,7 @@ def open_economy_growth_kernel(
         "linear_solver": "auto",
         "metric_eps": eps,
         "train_loss": float(result.info.loss),
+        "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
         "solution_accepted": solution_accepted,

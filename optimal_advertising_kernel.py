@@ -264,6 +264,7 @@ def optimal_advertising_kernel(
         "linear_solver": "auto",
         "metric_eps": eps,
         "train_loss": float(result.info.loss),
+        "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
         "solution_accepted": solution_accepted,

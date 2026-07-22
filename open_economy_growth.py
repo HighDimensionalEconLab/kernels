@@ -179,8 +179,7 @@ def path_residuals(
             * investment_rate**parameters.installation_elasticity
             - parameters.delta
         ),
-        "assets": (da_dt - current_account(k, a, tobin_q, c, z, parameters))
-        / steady_state(parameters)["output"],
+        "assets": da_dt - current_account(k, a, tobin_q, c, z, parameters),
         "tobin_q": dlog_q_dt - tobin_q_drift(k, tobin_q, z, parameters) / tobin_q,
         "marginal_wealth": dlog_marginal_wealth_dt
         - marginal_wealth_drift(marginal_wealth, parameters) / marginal_wealth,

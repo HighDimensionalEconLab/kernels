@@ -3,7 +3,7 @@ from __future__ import annotations
 import jax
 import jsonargparse
 
-import extra.asset_pricing_kernel_uno as asset_pricing_kernel_uno
+import asset_pricing_kernel_uno
 from replication.utilities import (
     enable_compilation_cache,
     ensemble,

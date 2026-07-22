@@ -243,6 +243,9 @@ def write_summary(output_dir, prefix, experiments=None):
         ):
             continue
         d = json.loads(jf.read_text())
+        experiment = d.get("experiment")
+        if experiment is None or jf.name != f"{prefix}_{experiment}.json":
+            continue
         if experiments is not None and d["experiment"] not in experiments:
             continue
         summary[d["experiment"]] = d

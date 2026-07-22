@@ -518,6 +518,7 @@ def multicountry_growth_nn(
         "num_train_points": n_train,
         "test_T": data_set.test_T,
         "train_loss": float(result.info.loss),
+        "final_damping": float(result.lm_state.damping),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
         "max_asset_clearing_residual": max_asset_clearing_residual,

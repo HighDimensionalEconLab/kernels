@@ -3,7 +3,7 @@ from __future__ import annotations
 import jax
 import jsonargparse
 
-from extra.neoclassical_growth_kernel_uno import (
+from neoclassical_growth_kernel_uno import (
     DataSettings,
     KernelSettings,
     SolverSettings,

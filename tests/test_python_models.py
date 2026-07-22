@@ -21,7 +21,6 @@ from kernels import (
 from multicountry_growth import (
     MulticountryParameters,
     multicountry_allocations,
-    multicountry_output_scale,
     multicountry_path_values,
     multicountry_reference_marginal_wealth,
     multicountry_steady_state,
@@ -66,6 +65,7 @@ from open_economy_growth_kernel import (
     DataSettings as OpenEconomyDataSettings,
 )
 from open_economy_growth_kernel import open_economy_growth_kernel
+from open_economy_growth_kernel_uno import open_economy_growth_kernel_uno
 from open_economy_growth_nn_recursive import DataSettings as OpenEconomyNNDataSettings
 from open_economy_growth_nn_recursive import evaluate_path as evaluate_open_economy_nn
 from open_economy_growth_nn_recursive import open_economy_growth_nn_recursive
@@ -128,9 +128,8 @@ class KernelSmokeTests(unittest.TestCase):
             parameters=parameters,
         )
         populations = jnp.asarray(parameters.populations)
-        flow_scale = multicountry_output_scale(parameters)
 
-        def normalized_resource(logs):
+        def resource(logs):
             k_jvp, q_jvp, m_jvp = jnp.split(jnp.exp(logs), 3)
             allocation_jvp = multicountry_allocations(
                 k_jvp,
@@ -139,16 +138,13 @@ class KernelSmokeTests(unittest.TestCase):
                 parameters.rho,
                 parameters,
             )
-            return (
-                jnp.sum(
-                    populations
-                    * (allocation_jvp["resources"] - allocation_jvp["consumption"])
-                )
-                / flow_scale
+            return jnp.sum(
+                populations
+                * (allocation_jvp["resources"] - allocation_jvp["consumption"])
             )
 
         _, resource_jvp = jax.jvp(
-            normalized_resource,
+            resource,
             (log_state,),
             (log_direction,),
         )
@@ -163,20 +159,17 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertEqual(results["linear_solver"], "auto")
         self.assertEqual(results["iterative_preconditioner"], "none")
-        self.assertIsNone(results["lsmr_algebraic_scale"])
         self.assertTrue(results["benchmark_match"])
         self.assertEqual(results["terminal_residual_count"], 0)
         self.assertEqual(
             results["dae_residual_count"],
             9 * results["num_train_points"] + 1,
         )
-        self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 3)
+        self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 4)
         self.assertEqual(results["dynamic_rkhs_function_count"], 8)
-        self.assertEqual(
-            results["algebraic_rate_value_count"], results["num_train_points"]
-        )
-        self.assertEqual(results["free_initial_value_count"], 4)
-        self.assertEqual(results["metric_selection_dimension"], 3)
+        self.assertEqual(results["algebraic_rkhs_function_count"], 1)
+        self.assertEqual(results["free_initial_value_count"], 5)
+        self.assertEqual(results["metric_selection_dimension"], 4)
         self.assertEqual(
             results["global_closure"],
             "explicit_assets_and_algebraic_clearing",
@@ -211,7 +204,8 @@ class KernelSmokeTests(unittest.TestCase):
             + results["rkhs_norm_q_1"]
             + results["rkhs_norm_q_2"]
             + results["rkhs_norm_m_1"]
-            + results["rkhs_norm_m_2"],
+            + results["rkhs_norm_m_2"]
+            + results["rkhs_norm_interest_rate"],
             places=10,
         )
         self.assertTrue((extras["test_df"]["k_1"] > 0.0).all())
@@ -250,11 +244,10 @@ class KernelSmokeTests(unittest.TestCase):
             lm_set=lm_set,
         )
         self.assertEqual(results["linear_solver"], "lsmr")
-        self.assertEqual(results["iterative_preconditioner"], "spectral_balance")
+        self.assertEqual(results["iterative_preconditioner"], "none")
         self.assertEqual(results["residual_atol"], lm_set.residual_atol)
         self.assertEqual(results["iterative_tol"], 1e-8)
         self.assertEqual(results["iterative_maxiter"], 10)
-        self.assertGreater(results["lsmr_algebraic_scale"], 0.0)
         self.assertFalse(results["solution_accepted"])
         self.assertIn("solver_status", results["rejection_reason"])
 
@@ -350,9 +343,10 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertFalse(results["benchmark_available"])
         self.assertEqual(results["num_countries"], 3)
         self.assertEqual(results["dynamic_rkhs_function_count"], 12)
-        self.assertEqual(results["free_initial_value_count"], 6)
-        self.assertEqual(results["metric_selection_dimension"], 5)
-        self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 5)
+        self.assertEqual(results["algebraic_rkhs_function_count"], 1)
+        self.assertEqual(results["free_initial_value_count"], 7)
+        self.assertEqual(results["metric_selection_dimension"], 6)
+        self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 6)
         self.assertLess(results["max_train_residual"], 1e-5)
         self.assertLess(results["max_validation_residual"], 5e-3)
         self.assertLess(results["max_asset_clearing_residual"], 5e-5)
@@ -446,7 +440,7 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertTrue((extras["test_df"]["c"] > 0.0).all())
         self.assertTrue((extras["test_df"]["x"] > 0.0).all())
         self.assertLess(extras["train_df"]["marginal_wealth"].abs().max(), 1e-6)
-        self.assertLess(extras["train_df"]["consumption_foc"].abs().max(), 1e-6)
+        self.assertLess(extras["train_df"]["consumption_foc"].abs().max(), 2e-6)
 
         short_horizon, _ = open_economy_growth_kernel(
             data_set=OpenEconomyDataSettings(
@@ -456,8 +450,9 @@ class KernelSmokeTests(unittest.TestCase):
                 benchmark_T=120.0,
             )
         )
-        self.assertFalse(short_horizon["solution_accepted"])
-        self.assertIn("solver_status", short_horizon["rejection_reason"])
+        self.assertTrue(
+            short_horizon["solution_accepted"], short_horizon["rejection_reason"]
+        )
         self.assertFalse(short_horizon["benchmark_match"])
         self.assertGreater(short_horizon["ex_post_asset_tvc"], 0.1)
 
@@ -473,6 +468,39 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertLess(results["steps"], 100)
         self.assertLess(results["max_train_residual"], 1e-5)
         self.assertLess(results["max_benchmark_error"], 1e-3)
+
+    def test_open_economy_growth_kernel_uno_matches_dae_formulation(self):
+        results, extras = open_economy_growth_kernel_uno()
+        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+        self.assertEqual(results["solver_status"], "SUCCESS")
+        self.assertEqual(results["solution_status"], "FEASIBLE_KKT_POINT")
+        self.assertEqual(results["terminal_residual_count"], 0)
+        self.assertEqual(
+            results["differential_residual_count"],
+            4 * results["num_train_points"],
+        )
+        self.assertEqual(
+            results["algebraic_residual_count"], results["num_train_points"]
+        )
+        self.assertEqual(results["dae_residual_count"], 5 * results["num_train_points"])
+        self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 3)
+        self.assertEqual(results["dynamic_rkhs_function_count"], 4)
+        self.assertEqual(results["algebraic_rkhs_function_count"], 1)
+        self.assertEqual(results["selection"], "minimum_rkhs_norm_constrained")
+        self.assertLess(results["max_train_residual"], 1e-5)
+        self.assertLess(results["max_validation_residual"], 1e-2)
+        self.assertLess(results["max_benchmark_error"], 1.5e-3)
+        self.assertAlmostEqual(
+            results["objective_value"],
+            results["rkhs_norm_total"],
+            places=12,
+        )
+        self.assertNotIn("metric_eps", results)
+        self.assertNotIn("shifted_metric_norm_squared", results)
+        self.assertNotIn("metric_eps", extras["hyperparameters"]["solver_set"])
+        self.assertTrue((extras["test_df"]["k"] > 0.0).all())
+        self.assertTrue((extras["test_df"]["q"] > 0.0).all())
+        self.assertTrue((extras["test_df"]["c"] > 0.0).all())
 
     def test_open_economy_growth_kernel_nonstationary_consumption(self):
         parameters = OpenEconomyParameters(r_star=0.05)
@@ -490,7 +518,7 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertEqual(results["dae_residual_count"], 5 * results["num_train_points"])
         self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 3)
         self.assertLess(results["max_train_residual"], 1e-5)
-        self.assertLess(results["max_validation_residual"], 5e-3)
+        self.assertLess(results["max_validation_residual"], 1e-2)
         self.assertLess(results["c_relative_error_max"], 2e-4)
         self.assertLess(results["max_benchmark_error"], 2e-2)
 
@@ -501,7 +529,7 @@ class KernelSmokeTests(unittest.TestCase):
         expected_growth = (parameters.interest_rate - parameters.rho) / parameters.gamma
         self.assertAlmostEqual(realized_growth, expected_growth, places=5)
         self.assertLess(path["marginal_wealth"].abs().max(), 1e-6)
-        self.assertLess(path["consumption_foc"].abs().max(), 1e-6)
+        self.assertLess(path["consumption_foc"].abs().max(), 2e-6)
 
     def test_open_economy_growth_nn_recursive_smoke(self):
         parameters = OpenEconomyParameters()

@@ -135,18 +135,14 @@ def drift(policy, k, p):
 
 def euler_residuals(policy, states, p):
     def residual_scalar(k):
-        investment, investment_derivative = jax.jvp(policy, (k,), (jnp.ones_like(k),))
-        c = production(k, p) - investment
-        dk_dt = investment - p.delta * k
-        dc_dk = mpk(k, p) - investment_derivative
-        return dc_dk * dk_dt - c * (mpk(k, p) - p.delta - p.rho_hat)
+        _, dlog_c_dk = jax.jvp(
+            lambda state: jnp.log(consumption(policy, state, p)),
+            (k,),
+            (jnp.ones_like(k),),
+        )
+        return dlog_c_dk * drift(policy, k, p) - (mpk(k, p) - p.delta - p.rho_hat)
 
     return jax.vmap(residual_scalar)(states)
-
-
-def consumption_positivity(policy, states, p):
-    c = jax.vmap(lambda k: consumption(policy, k, p))(states)
-    return jnp.minimum(c - DOMAIN_EPS, 0.0)
 
 
 @dataclass(frozen=True)
@@ -261,17 +257,8 @@ def adaptive_collocation(policy, p, data_set):
 def adaptive_residuals(policy, p, data_set):
     states, _, active, rollout_ok = adaptive_collocation(policy, p, data_set)
     euler = euler_residuals(policy, states, p)
-    domain = consumption_positivity(policy, states, p)
-    active_scale = jnp.sqrt(2 * jnp.maximum(jnp.sum(active), 1))
-    residual = (
-        jnp.concatenate(
-            [
-                jnp.where(active, euler, 0.0),
-                jnp.where(active, domain, 0.0),
-            ]
-        )
-        / active_scale
-    )
+    active_scale = jnp.sqrt(jnp.maximum(jnp.sum(active), 1))
+    residual = jnp.where(active, euler, 0.0) / active_scale
     return jnp.where(rollout_ok, residual, jnp.inf)
 
 
@@ -498,6 +485,7 @@ def neoclassical_growth_nn_recursive_adaptive(
         "metric": "identity_parameter_metric",
         "selection": "minimum_identity_metric_parameter_step",
         "train_loss": float(result.info.loss),
+        "final_damping": float(result.lm_state.damping),
         "test_euler_mean_abs": test_euler_mean_abs,
         "min_test_c": float(jnp.min(test_c)),
         "test_path_ok": test_path_ok,

@@ -255,8 +255,7 @@ def policy_values(policy, k, a, parameters):
         "current_account": current_account,
         "capital_drift": capital_drift,
         "q_euler": log_q_drift - q_equation,
-        "c_euler": (consumption_drift - consumption_growth * consumption)
-        / policy.flow_scale[...],
+        "c_euler": consumption_drift - consumption_growth * consumption,
     }
 
 
@@ -379,13 +378,7 @@ def residual_fn(theta, args, p):
         args.data_set,
     )
     values = path_values(policy, states, p.model)
-    consumption_positivity = jnp.minimum(
-        values["c"] / policy.flow_scale[...] - DOMAIN_EPS,
-        0.0,
-    )
-    residual = jnp.concatenate(
-        [values["q_euler"], values["c_euler"], consumption_positivity]
-    )
+    residual = jnp.concatenate([values["q_euler"], values["c_euler"]])
     return residual / jnp.sqrt(residual.size)
 
 
@@ -655,6 +648,7 @@ def open_economy_growth_nn_recursive(
         "domain_residual_count": int(train_t.size),
         "residual_count": 3 * int(train_t.size),
         "train_loss": float(result.info.loss),
+        "final_damping": float(result.lm_state.damping),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
         "max_benchmark_error": max_benchmark_error,

@@ -416,6 +416,7 @@ def neoclassical_growth_nn(
         "linear_solve_dtype": "float64",
         "solver": "nlls-gram",
         "train_loss": train_loss,
+        "final_damping": float(result.lm_state.damping),
         "train_resource_mean_abs": train_resource_mean_abs,
         "train_euler_mean_abs": train_euler_mean_abs,
         "test_resource_mean_abs": test_resource_mean_abs,

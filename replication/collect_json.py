@@ -53,6 +53,21 @@ def med(block):
     return block["median"] if isinstance(block, dict) else block
 
 
+def final_damping(j):
+    return {"final_damping": sig(med(j["final_damping"]), 4)}
+
+
+def maybe_final_damping(j):
+    return final_damping(j) if "final_damping" in j else {}
+
+
+def final_damping_summary(frame):
+    return {
+        "final_damping_mean": sig(float(frame["final_damping"].mean()), 4),
+        "final_damping_median": sig(float(frame["final_damping"].median()), 4),
+    }
+
+
 def load(out, name):
     # Plain json.load: the ensemble JSONs may contain bare NaN/Infinity.
     return json.loads((out / f"{name}.json").read_text())
@@ -170,6 +185,7 @@ def neoclassical_growth_kernel(out):
             "max_train_residual": sci(med(j["max_train_residual"]), 2),
             "wall_time": sig(med(j["wall_time"]), 2),
             "timing_repetitions": int(med(j["timing_repetitions"])),
+            **final_damping(j),
         }
 
     sparse = load(out, f"{prefix}_sparse")
@@ -229,19 +245,69 @@ def neoclassical_growth_kernel(out):
     }
 
 
+def neoclassical_growth_kernel_uno(out):
+    prefix = "neoclassical_growth_kernel_uno"
+    hp = load(out, f"{prefix}_baseline_hyperparameters")
+
+    def errors(j):
+        return {
+            "solution_accepted": bool(j["n_accepted"] == 1),
+            "k_rel_error_mean": sci(med(j["k_rel_error_mean"])),
+            "c_rel_error_mean": sci(med(j["c_rel_error_mean"])),
+            "k_rel_error_max": sci(med(j["k_rel_error_max"])),
+            "c_rel_error_max": sci(med(j["c_rel_error_max"])),
+            "max_train_residual": sci(med(j["max_train_residual"]), 2),
+            "wall_time": sig(med(j["wall_time"]), 2),
+            "timing_repetitions": int(med(j["timing_repetitions"])),
+        }
+
+    experiments = {}
+    for name in ("baseline", "sparse", "far_steady_state"):
+        result = load(out, f"{prefix}_{name}")
+        experiment = errors(result)
+        if name == "sparse":
+            experiment["train_points_list"] = hp_sparse_points(out, prefix)
+        experiments[name] = experiment
+
+    robustness_table = {}
+    for name, _, ell in NU_RHO_ROWS:
+        result = load(out, f"{prefix}_{name}")
+        experiment_hp = load(out, f"{prefix}_{name}_hyperparameters")
+        nu = experiment_hp["kernel_set"]["nu"]
+        robustness_table[name if name != "baseline" else "nu05_ell10"] = {
+            "nu": "inf" if math.isinf(nu) else nu,
+            "ell": ell,
+            **errors(result),
+        }
+
+    baseline_kernel = hp["kernel_set"]
+    return {
+        "kernel": {
+            "nu": baseline_kernel["nu"],
+            "ell": baseline_kernel["ell"],
+            "sigma": baseline_kernel["sigma"],
+        },
+        "experiments": experiments,
+        "robustness_table": robustness_table,
+    }
+
+
 def hp_sparse_points(out, prefix):
     hp = load(out, f"{prefix}_sparse_hyperparameters")
     return hp["data_set"]["train_points_list"]
 
 
-def neoclassical_growth_concave_convex_kernel(out):
-    prefix = "neoclassical_growth_concave_convex_kernel"
+def neoclassical_growth_concave_convex_kernel(
+    out,
+    prefix="neoclassical_growth_concave_convex_kernel",
+    require_all=True,
+):
     j = load(out, f"{prefix}_threshold")
     hp = load(out, f"{prefix}_threshold_hyperparameters")
     df = pd.read_parquet(out / f"{prefix}_threshold_results.parquet")
     n_total = int(len(df))
     n_accepted = int(df["solution_accepted"].sum())
-    if n_accepted != n_total:
+    if require_all and n_accepted != n_total:
         # The QE caption states every initial condition converges.
         rejected = df.loc[~df["solution_accepted"], "k_0"].tolist()
         raise RuntimeError(f"rejected threshold solves at k_0={rejected}")
@@ -251,38 +317,42 @@ def neoclassical_growth_concave_convex_kernel(out):
     above_thr = df["k_0"] > df["k_thr"]
     ends_high = (df["basin_correct"] & above_thr) | (df["false_positive"] & ~above_thr)
     goes_low = (df["basin_correct"] & ~above_thr) | (df["false_positive"] & above_thr)
-    if not (ends_high | goes_low).all():
+    resolved = ends_high | goes_low
+    if require_all and not resolved.all():
         unresolved = df.loc[~(ends_high | goes_low), "k_0"].tolist()
         raise RuntimeError(f"unclassified threshold paths at k_0={unresolved}")
-    k_0_low_max = float(df.loc[goes_low, "k_0"].max())
-    k_0_high_min = float(df.loc[ends_high, "k_0"].min())
+    k_0_low_max = float(df.loc[goes_low & resolved, "k_0"].max())
+    k_0_high_min = float(df.loc[ends_high & resolved, "k_0"].min())
+    threshold = {
+        "k_0_grid": {
+            "min": sig(df["k_0"].min()),
+            "max": sig(df["k_0"].max()),
+            "n": n_total,
+        },
+        "n_accepted": n_accepted,
+        "n_basin_correct": int(df["basin_correct"].sum()),
+        "n_unresolved": int((~resolved).sum()),
+        "k_thr": sig(float(df["k_thr"].iloc[0]), 6),
+        "k_ss_low": sig(float(df["k_ss_low"].iloc[0]), 4),
+        "k_ss_high": sig(float(df["k_ss_high"].iloc[0]), 4),
+        # Bracketing grid points around the empirical basin split.
+        "k_0_threshold_bracket": [sig(k_0_low_max, 4), sig(k_0_high_min, 4)],
+        "k_0_threshold": sig(0.5 * (k_0_low_max + k_0_high_min), 4),
+    }
+    if "final_damping" in df:
+        threshold.update(final_damping_summary(df.loc[df["solution_accepted"]]))
     return {
         "parameters": {
             "A": hp["parameters"]["A"],
             "b_1": hp["parameters"]["b_1"],
             "b_2": hp["parameters"]["b_2"],
         },
-        "threshold": {
-            "k_0_grid": {
-                "min": sig(df["k_0"].min()),
-                "max": sig(df["k_0"].max()),
-                "n": n_total,
-            },
-            "n_accepted": n_accepted,
-            "n_basin_correct": int(df["basin_correct"].sum()),
-            "k_thr": sig(float(df["k_thr"].iloc[0]), 6),
-            "k_ss_low": sig(float(df["k_ss_low"].iloc[0]), 4),
-            "k_ss_high": sig(float(df["k_ss_high"].iloc[0]), 4),
-            # Bracketing grid points around the empirical basin split.
-            "k_0_threshold_bracket": [sig(k_0_low_max, 4), sig(k_0_high_min, 4)],
-            "k_0_threshold": sig(0.5 * (k_0_low_max + k_0_high_min), 4),
-        },
+        "threshold": threshold,
         "n_seeds": int(j["n_seeds"]),
     }
 
 
-def asset_pricing_kernel(out):
-    prefix = "asset_pricing_kernel"
+def asset_pricing_kernel(out, prefix="asset_pricing_kernel"):
     j = load(out, f"{prefix}_baseline")
     hp = load(out, f"{prefix}_baseline_hyperparameters")
     r, c, g = (hp["parameters"][key] for key in ("r", "c", "g"))
@@ -304,6 +374,7 @@ def asset_pricing_kernel(out):
                 "max_train_residual": sci(med(j["max_train_residual"]), 2),
                 "wall_time": sig(med(j["wall_time"]), 2),
                 "timing_repetitions": int(med(j["timing_repetitions"])),
+                **maybe_final_damping(j),
             }
         },
         # Corrected no-bubble fundamental (QE eq. 19/20 replacement):
@@ -357,6 +428,7 @@ def asset_pricing_nn(out):
                     float(accepted["max_train_residual"].median())
                 ),
                 "train_time_median": sig(float(accepted["train_time"].median())),
+                **final_damping_summary(accepted),
             }
         },
     }
@@ -389,6 +461,7 @@ def optimal_advertising_kernel(out):
         "max_train_residual": sci(med(j["max_train_residual"]), 2),
         "wall_time": sig(med(j["wall_time"]), 2),
         "timing_repetitions": int(med(j["timing_repetitions"])),
+        **final_damping(j),
     }
 
 
@@ -405,7 +478,6 @@ def human_capital_kernel(out):
             "delta_k": hp["parameters"]["delta_k"],
             "delta_h": hp["parameters"]["delta_h"],
             "rho_hat": hp["parameters"]["rho_hat"],
-            "lambda_p": hp["parameters"]["lambda_p"],
             "k_0": hp["initial_conditions"]["k_0"],
         },
         "data": {
@@ -422,6 +494,7 @@ def human_capital_kernel(out):
         "max_test_feasibility": sci(med(j["max_test_feasibility"]), 2),
         "wall_time": sig(med(j["wall_time"]), 2),
         "timing_repetitions": int(med(j["timing_repetitions"])),
+        **final_damping(j),
     }
 
 
@@ -468,6 +541,7 @@ def neoclassical_growth_nn_recursive(out):
                 ),
                 "train_time_median": sig(float(accepted["train_time"].median())),
                 "steps_median": sig(float(accepted["steps"].median())),
+                **final_damping_summary(accepted),
                 "num_collocation_states": int(
                     med(baseline_json["num_collocation_states"])
                 ),
@@ -479,8 +553,11 @@ def neoclassical_growth_nn_recursive(out):
     }
 
 
-def open_economy_growth_kernel(out):
-    prefix = "open_economy_growth_kernel"
+def open_economy_growth_kernel(
+    out,
+    prefix="open_economy_growth_kernel",
+    selection="minimum_shifted_rkhs_metric",
+):
     hp = load(out, f"{prefix}_baseline_hyperparameters")
     baseline = load(out, f"{prefix}_baseline")
 
@@ -501,12 +578,13 @@ def open_economy_growth_kernel(out):
             "ex_post_capital_tvc": sci(med(j["ex_post_capital_tvc"])),
             "wall_time_median": sig(med(j["wall_time"])),
             "timing_repetitions": int(med(j["timing_repetitions"])),
+            **maybe_final_damping(j),
         }
 
     return {
         "parameters": hp["parameters"],
         "kernel": hp["kernel_set"],
-        "selection": "minimum_shifted_rkhs_metric",
+        "selection": selection,
         "training_information": {
             "terminal_residual_count": 0,
             "differential_residual_count": int(
@@ -561,6 +639,7 @@ def open_economy_growth_nn_recursive(out):
                 float(accepted["ex_post_capital_tvc"].median())
             ),
             "train_time_median": sig(float(accepted["train_time"].median())),
+            **final_damping_summary(accepted),
         }
 
     return {
@@ -608,6 +687,7 @@ def multicountry_growth_kernel(out):
             "ex_post_capital_tvc": sci(med(j["ex_post_capital_tvc"])),
             "wall_time_median": sig(med(j["wall_time"])),
             "timing_repetitions": int(med(j["timing_repetitions"])),
+            **final_damping(j),
         }
 
     baseline_hp = load(out, f"{prefix}_baseline_hyperparameters")
@@ -677,6 +757,7 @@ def multicountry_growth_nn(out):
             "max_rate_consistency_residual_median": sci(
                 float(accepted["max_rate_consistency_residual"].median())
             ),
+            **final_damping_summary(accepted),
         }
         experiment_data[name] = (summary, hp, accepted)
 
@@ -721,13 +802,17 @@ def performance_comparisons(out):
         return accepted_frame
 
     asset_kernel = load(out, "asset_pricing_kernel_baseline")
+    asset_uno = load(out, "asset_pricing_kernel_uno_baseline")
     asset_nn = accepted("asset_pricing_nn")
     asset_kernel_time = med(asset_kernel["wall_time"])
     asset_nn_time = float(asset_nn["train_time"].median())
     asset_kernel_error = med(asset_kernel["p_rel_error_mean"])
+    asset_uno_time = med(asset_uno["wall_time"])
+    asset_uno_error = med(asset_uno["p_rel_error_mean"])
     asset_nn_error = float(asset_nn["p_rel_error_mean"].median())
 
     growth_kernel = load(out, "neoclassical_growth_kernel_baseline")
+    growth_uno = load(out, "neoclassical_growth_kernel_uno_baseline")
     growth_nn = accepted("neoclassical_growth_nn_recursive")
     growth_kernel_time = med(growth_kernel["wall_time"])
     growth_nn_time = float(growth_nn["train_time"].median())
@@ -735,16 +820,24 @@ def performance_comparisons(out):
         med(growth_kernel["k_rel_error_mean"]),
         med(growth_kernel["c_rel_error_mean"]),
     )
+    growth_uno_time = med(growth_uno["wall_time"])
+    growth_uno_error = max(
+        med(growth_uno["k_rel_error_mean"]),
+        med(growth_uno["c_rel_error_mean"]),
+    )
     growth_nn_error = max(
         float(growth_nn["test_mean_abs_k_rel_error"].median()),
         float(growth_nn["test_mean_abs_c_rel_error"].median()),
     )
 
     open_kernel = load(out, "open_economy_growth_kernel_baseline")
+    open_uno = load(out, "open_economy_growth_kernel_uno_baseline")
     open_nn = accepted("open_economy_growth_nn_recursive")
     open_kernel_time = med(open_kernel["wall_time"])
+    open_uno_time = med(open_uno["wall_time"])
     open_nn_time = float(open_nn["train_time"].median())
     open_kernel_error = med(open_kernel["max_benchmark_error"])
+    open_uno_error = med(open_uno["max_benchmark_error"])
     open_nn_error = float(open_nn["max_benchmark_error"].median())
 
     multicountry_kernel = load(out, "multicountry_growth_kernel_initial_debt")
@@ -754,8 +847,15 @@ def performance_comparisons(out):
     multicountry_kernel_error = med(multicountry_kernel["max_benchmark_error"])
     multicountry_nn_error = float(multicountry_nn_frame["max_benchmark_error"].median())
 
-    def comparison(kernel_time, nn_time, kernel_error, nn_error):
-        return {
+    def comparison(
+        kernel_time,
+        nn_time,
+        kernel_error,
+        nn_error,
+        uno_time=None,
+        uno_error=None,
+    ):
+        values = {
             "kernel_solve_time_median": sig(kernel_time),
             "nn_solve_time_median": sig(nn_time),
             "nn_to_kernel_time_ratio": sig(nn_time / kernel_time),
@@ -763,29 +863,51 @@ def performance_comparisons(out):
             "nn_error_median": sci(nn_error),
             "nn_to_kernel_error_ratio": sig(nn_error / kernel_error),
         }
+        if uno_time is not None:
+            values.update(
+                {
+                    "uno_solve_time_median": sig(uno_time),
+                    "uno_to_kernel_time_ratio": sig(uno_time / kernel_time),
+                    "uno_error": sci(uno_error),
+                    "uno_to_kernel_error_ratio": sig(uno_error / kernel_error),
+                    "nn_to_uno_time_ratio": sig(nn_time / uno_time),
+                    "nn_to_uno_error_ratio": sig(nn_error / uno_error),
+                }
+            )
+        return values
 
     return {
         "timing_contract": {
             "kernel": "median of five cached deterministic solves",
-            "nn": "median across accepted seeds from 100 initializations",
+            "uno": "median of five cached deterministic constrained solves",
+            "nn": (
+                "median across accepted seeds from 100 initializations; "
+                "five for multicountry growth"
+            ),
         },
         "asset_pricing": comparison(
             asset_kernel_time,
             asset_nn_time,
             asset_kernel_error,
             asset_nn_error,
+            asset_uno_time,
+            asset_uno_error,
         ),
         "neoclassical_growth": comparison(
             growth_kernel_time,
             growth_nn_time,
             growth_kernel_error,
             growth_nn_error,
+            growth_uno_time,
+            growth_uno_error,
         ),
         "open_economy_growth": comparison(
             open_kernel_time,
             open_nn_time,
             open_kernel_error,
             open_nn_error,
+            open_uno_time,
+            open_uno_error,
         ),
         "multicountry_growth": comparison(
             multicountry_kernel_time,
@@ -797,16 +919,18 @@ def performance_comparisons(out):
 
 
 def validate_replication_contract(out):
-    nn_prefixes = (
-        "asset_pricing_nn",
-        "neoclassical_growth_nn_recursive",
-        "open_economy_growth_nn_recursive",
-        "multicountry_growth_nn",
-    )
-    for prefix in nn_prefixes:
+    nn_seed_counts = {
+        "asset_pricing_nn": 100,
+        "neoclassical_growth_nn_recursive": 100,
+        "open_economy_growth_nn_recursive": 100,
+        "multicountry_growth_nn": 5,
+    }
+    for prefix, expected in nn_seed_counts.items():
         summary = load(out, f"{prefix}_baseline")
-        if summary["n_seeds"] != 100:
-            raise RuntimeError(f"{prefix} must use 100 seeds, got {summary['n_seeds']}")
+        if summary["n_seeds"] != expected:
+            raise RuntimeError(
+                f"{prefix} must use {expected} seeds, got {summary['n_seeds']}"
+            )
 
     kernel_prefixes = (
         "neoclassical_growth_kernel",
@@ -814,7 +938,10 @@ def validate_replication_contract(out):
         "optimal_advertising_kernel",
         "human_capital_kernel",
         "open_economy_growth_kernel",
+        "open_economy_growth_kernel_uno",
         "multicountry_growth_kernel",
+        "asset_pricing_kernel_uno",
+        "neoclassical_growth_kernel_uno",
     )
     for prefix in kernel_prefixes:
         timing = pd.read_parquet(out / f"{prefix}_baseline_timing_df.parquet")
@@ -846,15 +973,31 @@ def collect(output_dir: str = ".results"):
                 "band_quantiles": [int(100 * QUANTILES[0]), int(100 * QUANTILES[-1])],
             },
             "neoclassical_growth_kernel": neoclassical_growth_kernel(out),
+            "neoclassical_growth_kernel_uno": neoclassical_growth_kernel_uno(out),
             "neoclassical_growth_concave_convex_kernel": (
                 neoclassical_growth_concave_convex_kernel(out)
             ),
+            "neoclassical_growth_concave_convex_kernel_uno": (
+                neoclassical_growth_concave_convex_kernel(
+                    out,
+                    prefix="neoclassical_growth_concave_convex_kernel_uno",
+                    require_all=False,
+                )
+            ),
             "asset_pricing_kernel": asset_pricing_kernel(out),
+            "asset_pricing_kernel_uno": asset_pricing_kernel(
+                out, prefix="asset_pricing_kernel_uno"
+            ),
             "asset_pricing_nn": asset_pricing_nn(out),
             "optimal_advertising_kernel": optimal_advertising_kernel(out),
             "human_capital_kernel": human_capital_kernel(out),
             "neoclassical_growth_nn_recursive": neoclassical_growth_nn_recursive(out),
             "open_economy_growth_kernel": open_economy_growth_kernel(out),
+            "open_economy_growth_kernel_uno": open_economy_growth_kernel(
+                out,
+                prefix="open_economy_growth_kernel_uno",
+                selection="minimum_rkhs_norm_constrained",
+            ),
             "open_economy_growth_nn_recursive": open_economy_growth_nn_recursive(out),
             "multicountry_growth_kernel": multicountry_growth_kernel(out),
             "multicountry_growth_nn": multicountry_growth_nn(out),

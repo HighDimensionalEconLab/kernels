@@ -849,6 +849,7 @@ def multicountry_trade_growth_kernel(
         else None,
         "metric_eps": eps,
         "train_loss": final_loss,
+        "final_damping": float(result.lm_state.damping),
         "steps": final_steps,
         "stopping_reason": STATUS_TO_REASON.get(final_status, "unknown"),
         "solution_accepted": not rejection_reasons,

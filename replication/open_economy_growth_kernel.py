@@ -46,23 +46,6 @@ def run(output_dir: str = ".results", use_float64: bool = True):
     go("r_star_005", parameters=dict(r_star=0.05))
     go("initial_debt", a_0=-0.5 * output_ss)
     go("initial_assets", a_0=0.5 * output_ss)
-    go(
-        "horizon_200",
-        data_set=dict(
-            train_T=200.0,
-            train_points=101,
-            dense_T=40.0,
-            tail_points=20,
-            benchmark_T=240.0,
-        ),
-    )
-    go(
-        "uniform_321",
-        data_set=dict(
-            train_points=321,
-            sampling="uniform",
-        ),
-    )
     write_summary(output_dir, PREFIX)
 
 

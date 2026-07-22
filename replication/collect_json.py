@@ -523,8 +523,6 @@ def open_economy_growth_kernel(out):
                 "r_star_005",
                 "initial_debt",
                 "initial_assets",
-                "horizon_200",
-                "uniform_321",
             )
         },
     }

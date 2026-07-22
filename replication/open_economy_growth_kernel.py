@@ -3,7 +3,7 @@ from __future__ import annotations
 import jax
 import jsonargparse
 
-import open_economy_growth_kernel_nlls
+import open_economy_growth_kernel
 from open_economy_growth import ModelParameters, steady_state
 from replication.utilities import (
     enable_compilation_cache,
@@ -28,7 +28,7 @@ def run(output_dir: str = ".results", use_float64: bool = True):
     def go(name, **experiment):
         print(f"{name} -> {output_dir}/")
         results_df, frames, hyperparameters = ensemble(
-            open_economy_growth_kernel_nlls.open_economy_growth_kernel_nlls,
+            open_economy_growth_kernel.open_economy_growth_kernel,
             n_seeds=1,
             options={"use_float64": use_float64, **experiment},
         )

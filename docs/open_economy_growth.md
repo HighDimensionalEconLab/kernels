@@ -643,9 +643,9 @@ surplus services the associated interest bill.
 ## NLLS-gram and integrated-kernel mapping
 
 The implementation should follow the integrated-path design in
-[neoclassical_growth_kernel_nlls.py](../neoclassical_growth_kernel_nlls.py) and the
+[neoclassical_growth_kernel.py](../neoclassical_growth_kernel.py) and the
 multi-state residual organization in
-[human_capital_kernel_nlls.py](../human_capital_kernel_nlls.py).
+[human_capital_kernel.py](../human_capital_kernel.py).
 
 ### Path parameterization
 
@@ -762,7 +762,7 @@ that their cost can dominate.
 ### Sequential state-space neural mapping
 
 The NN implementation follows the best-performing recursive formulation in
-[neoclassical_growth_nn_recursive_i.py](../neoclassical_growth_nn_recursive_i.py): it
+[neoclassical_growth_nn_recursive.py](../neoclassical_growth_nn_recursive.py): it
 learns level policies over the endogenous state rather than paths over time or time
 derivatives. A 32-by-3 GELU trunk maps \(\log(k/k_0)\) to two outputs. The first is
 positive investment expenditure through `unit_softplus`; the second is the signed
@@ -933,7 +933,7 @@ Implemented:
 
 - open_economy_growth.py for pure equations, parameters, steady state, and diagnostics;
 - open_economy_growth_benchmark.py for solve_bvp and semi-analytic checks;
-- open_economy_growth_kernel_nlls.py for the integrated-kernel solve;
+- open_economy_growth_kernel.py for the integrated-kernel solve;
 - open_economy_growth_nn_recursive.py for the sequential state-space NN solve;
 - replication/open_economy_growth_kernel.py for cached kernel runs;
 - replication/open_economy_growth_kernel_figures.py for kernel transition plots;
@@ -973,7 +973,7 @@ permanent external-position effect.
 
 Implemented in [multicountry_growth.py](../multicountry_growth.py),
 [multicountry_growth_benchmark.py](../multicountry_growth_benchmark.py), and
-[multicountry_growth_kernel_nlls.py](../multicountry_growth_kernel_nlls.py), with cached
+[multicountry_growth_kernel.py](../multicountry_growth_kernel.py), with cached
 experiments and figures under `replication/multicountry_growth_kernel*.py`.
 
 Replace the fixed interest rate with an endogenous world rate \(r(t)\). To make country
@@ -1127,7 +1127,7 @@ The final model keeps the same dynamic shell but replaces one-good production wi
 implicit static trade equilibrium at each time.
 
 The mechanics are implemented separately in
-[multicountry_trade_growth.py](../multicountry_trade_growth.py). The existing
+[`trade_growth/model.py`](../trade_growth/model.py). The existing
 [multicountry_growth.py](../multicountry_growth.py) and its kernel solver remain the
 standalone one-good example; the trade extension does not mutate or specialize them.
 

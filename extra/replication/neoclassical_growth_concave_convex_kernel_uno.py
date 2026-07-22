@@ -1,0 +1,97 @@
+from __future__ import annotations
+
+import jax
+import jsonargparse
+import numpy as np
+
+import extra.neoclassical_growth_concave_convex_kernel_uno as neoclassical_growth_concave_convex_kernel_uno
+from replication.utilities import (
+    classify_path_basin,
+    enable_compilation_cache,
+    kinked_thresholds,
+    save_experiment,
+    sweep,
+    write_summary,
+)
+
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
+
+enable_compilation_cache()
+
+PREFIX = "neoclassical_growth_concave_convex_kernel_uno"
+
+# Isolated initial conditions (k_0 ~ 0.70 and ~1.05) fail the fail-fast ipopt
+# solve from the flat warm start; the filtersqp preset solves them cleanly to
+# the same low-basin solution the neighbors reach.
+KINKED_RETRIES = (
+    dict(solver_set=dict(preset="filtersqp", max_iterations=50, time_limit=2.0)),
+)
+
+
+def run(
+    output_dir: str = ".results",
+    k_0_min: float = 0.5,
+    k_0_max: float = 4.0,
+    n_points: int = 70,  # QE caption: 70 initial conditions, all converging
+    verbose: bool = False,
+):
+    grid = np.linspace(k_0_min, k_0_max, n_points)
+    print(f"threshold sweep: {n_points} initial conditions -> {output_dir}/")
+    results_df, frames, hyperparameters = sweep(
+        neoclassical_growth_concave_convex_kernel_uno.neoclassical_growth_concave_convex_kernel_uno,
+        "k_0",
+        [float(k_0) for k_0 in grid],
+        options={"verbose": verbose},
+        retries=KINKED_RETRIES,
+    )
+
+    # Ex-post basin classification of each finite-horizon path (side of the
+    # kink the trajectory ends on + direction of motion).
+    parameters = hyperparameters["parameters"]
+    k_thr, k_ss_low, k_ss_high = kinked_thresholds(
+        a=parameters["a"],
+        delta=parameters["delta"],
+        rho_hat=parameters["rho_hat"],
+        A=parameters["A"],
+        b_1=parameters["b_1"],
+        b_2=parameters["b_2"],
+    )
+    test_df = frames["test_df"]
+    outcomes = []
+    for _, row in results_df.iterrows():
+        k_0 = row["k_0"]
+        path = test_df.loc[test_df["k_0"] == k_0].sort_values("t")["k"].to_numpy()
+        if not bool(row["solution_accepted"]) or len(path) < 2:
+            outcomes.append(
+                {"basin_correct": False, "false_positive": False, "basin_failed": True}
+            )
+            continue
+        outcomes.append(
+            classify_path_basin(path, float(k_0), k_thr, k_ss_low, k_ss_high)
+        )
+    for key in ("basin_correct", "false_positive", "basin_failed"):
+        results_df[key] = [outcome[key] for outcome in outcomes]
+    results_df["k_thr"] = k_thr
+    results_df["k_ss_low"] = k_ss_low
+    results_df["k_ss_high"] = k_ss_high
+
+    n_accepted = int(results_df["solution_accepted"].sum())
+    print(
+        f"threshold: {n_accepted}/{n_points} accepted, "
+        f"{int(results_df['basin_correct'].sum())}/{n_points} basin-correct"
+    )
+    save_experiment(
+        "threshold",
+        results_df,
+        frames,
+        output_dir,
+        dict(n_seeds=1, n_points=n_points),
+        prefix=PREFIX,
+        hyperparameters=hyperparameters,
+    )
+    write_summary(output_dir, PREFIX)
+
+
+if __name__ == "__main__":
+    jsonargparse.CLI(run)

@@ -24,7 +24,6 @@ from tinydiffeq import (
     solve_ode,
 )
 
-from neural_networks import ACTIVATIONS, unit_softplus
 from open_economy_growth import (
     ModelParameters,
     marginal_product,
@@ -35,6 +34,7 @@ from open_economy_growth import (
     tvc_diagnostics,
 )
 from open_economy_growth_benchmark import open_economy_growth_benchmark
+from utilities import ACTIVATIONS, unit_softplus
 
 # Sequential/state-space formulation. The neural policy supplies positive
 # investment expenditure x(k) and the signed current account CA(k). Capital and
@@ -88,7 +88,7 @@ class StoppingCriteria:
 
 
 @dataclass(frozen=True)
-class NLLSGramSettings:
+class SolverSettings:
     init_damping: float = 3.26e-5
     damping_decrease: float = 0.482
     damping_increase: float = 2.71
@@ -336,7 +336,7 @@ def open_economy_growth_nn_recursive(
     use_float64: bool = True,
     data_set: DataSettings = DataSettings(),
     nn_set: SequentialPolicySettings = SequentialPolicySettings(),
-    lm_set: NLLSGramSettings = NLLSGramSettings(),
+    lm_set: SolverSettings = SolverSettings(),
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
     measure_compilation: bool = True,
@@ -398,24 +398,33 @@ def open_economy_growth_nn_recursive(
 
     solver = LevenbergMarquardt(
         residual_fn,
-        linear_solver="cholesky",
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
-        dual_solve_dtype=jnp.float64,
+        linear_solve_dtype=jnp.float64,
     )
     atol = math.sqrt(stop_set.train_loss_threshold)
     compile_time = np.nan
     if measure_compilation:
         compile_start = time.perf_counter()
-        compile_result = solver.solve(theta_0, max_steps=1, atol=atol)
+        compile_result = solver.solve(
+            theta_0,
+            max_steps=1,
+            atol=atol,
+            max_steps_is_success=False,
+        )
         jax.block_until_ready(compile_result.x)
         compile_time = time.perf_counter() - compile_start
 
     train_start = time.perf_counter()
-    result = solver.solve(theta_0, max_steps=stop_set.max_steps, atol=atol)
+    result = solver.solve(
+        theta_0,
+        max_steps=stop_set.max_steps,
+        atol=atol,
+        max_steps_is_success=False,
+    )
     jax.block_until_ready(result.x)
     train_time = time.perf_counter() - train_start
     policy = nnx.merge(graphdef, result.x, fixed_state)
@@ -562,7 +571,7 @@ def open_economy_growth_nn_recursive(
         "a_0": a_0,
         "seed": seed,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "dual_solve_dtype": "float64",
+        "linear_solve_dtype": "float64",
         "solver": "nlls-gram",
         "ansatz": "sequential_investment_current_account_levels",
         "selection": "minimum_identity_metric_parameter_step",

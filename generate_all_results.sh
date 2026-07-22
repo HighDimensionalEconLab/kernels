@@ -16,8 +16,6 @@ uv run python -m replication.asset_pricing_kernel --output_dir "$output_dir"
 uv run python -m replication.optimal_advertising_kernel --output_dir "$output_dir"
 uv run python -m replication.human_capital_kernel --output_dir "$output_dir"
 uv run python -m replication.neoclassical_growth_nn_recursive --output_dir "$output_dir"
-uv run python -m replication.kernel_vs_nn --output_dir "$output_dir"
-uv run python -m replication.neoclassical_growth_method_comparison --output_dir "$output_dir"
 
 echo "==> figures -> $output_dir/"
 uv run python -m replication.neoclassical_growth_kernel_figures --output_dir "$output_dir"
@@ -26,8 +24,6 @@ uv run python -m replication.asset_pricing_kernel_figures --output_dir "$output_
 uv run python -m replication.optimal_advertising_kernel_figures --output_dir "$output_dir"
 uv run python -m replication.human_capital_kernel_figures --output_dir "$output_dir"
 uv run python -m replication.neoclassical_growth_nn_recursive_figures --output_dir "$output_dir"
-# Last: the basin overlay reads the recursive prefix's butterfly files.
-uv run python -m replication.kernel_vs_nn_figures --output_dir "$output_dir"
 
 echo "==> paper numbers -> $output_dir/all_results.json"
 uv run python -m replication.collect_json --output_dir "$output_dir"

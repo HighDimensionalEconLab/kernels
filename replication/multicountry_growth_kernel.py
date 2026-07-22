@@ -3,7 +3,7 @@ from __future__ import annotations
 import jax
 import jsonargparse
 
-import multicountry_growth_kernel_nlls
+import multicountry_growth_kernel
 from multicountry_growth import MulticountryParameters, multicountry_output_scale
 from replication.utilities import (
     enable_compilation_cache,
@@ -18,7 +18,7 @@ jax.config.update("jax_default_matmul_precision", "highest")
 enable_compilation_cache()
 
 PREFIX = "multicountry_growth_kernel"
-SOLVER = multicountry_growth_kernel_nlls.multicountry_growth_kernel_nlls
+SOLVER = multicountry_growth_kernel.multicountry_growth_kernel
 
 
 def run(output_dir: str = ".results", use_float64: bool = True):

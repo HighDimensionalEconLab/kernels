@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import jax
 import jsonargparse
-import pandas as pd
 
-import neoclassical_growth_nn_recursive_i
-import neoclassical_growth_nn_recursive_i_adaptive
+import neoclassical_growth_nn_recursive
 from replication.utilities import (
     BASIN_K0_GRID,
     enable_compilation_cache,
@@ -22,27 +20,17 @@ enable_compilation_cache()
 
 PREFIX = "neoclassical_growth_nn_recursive"
 
-SOLVER = neoclassical_growth_nn_recursive_i.neoclassical_growth_nn_recursive_i
-ADAPTIVE_SOLVER = neoclassical_growth_nn_recursive_i_adaptive.neoclassical_growth_nn_recursive_i_adaptive
+SOLVER = neoclassical_growth_nn_recursive.neoclassical_growth_nn_recursive
 
 BUTTERFLY = dict(A=0.5, b_1=3.0, b_2=2.5)
-
-# Rollout-tolerance robustness of adaptive Tsit5 (JSON-only).
-# (rtol/atol, rollout budget, certificate budget): a tighter tolerance needs
-# more accepted steps to cover the horizon, so the attempt budgets scale
-# with it -- otherwise exhausted budgets masquerade as tolerance failures.
-TOLERANCES = [
-    (1e-4, 24, 48),
-    (1e-6, 24, 48),
-    (1e-8, 48, 96),
-]
 
 
 def run(
     output_dir: str = ".results",
-    # Exploration default; scale up (training is ~1s/seed) once the
-    # experiment set is frozen for the final replication run.
-    n_seeds: int = 10,
+    # Adaptive solves recompile for each independently constructed seed. Three
+    # seeds preserve a robustness band without making the core pipeline a
+    # 10-minute compilation sweep; larger ensembles belong in extra/sweeps.
+    n_seeds: int = 3,
     use_float64: bool = True,
     verbose: bool = False,
 ):
@@ -64,39 +52,6 @@ def run(
         meta,
         prefix=PREFIX,
         hyperparameters=hyperparameters,
-    )
-
-    print(f"tolerance_sweep: {n_seeds} seeds -> {output_dir}/")
-    rows = []
-    sweep_hyperparameters = None
-    for tolerance, adaptive_steps, tvc_steps in TOLERANCES:
-        results_df, _, run_hyperparameters = ensemble(
-            ADAPTIVE_SOLVER,
-            n_seeds,
-            options={
-                **common,
-                "k_0": 1.0,
-                "data_set": dict(
-                    ode_solver="tsit5",
-                    rtol=tolerance,
-                    atol=tolerance,
-                    adaptive_steps=adaptive_steps,
-                    tvc_steps=tvc_steps,
-                ),
-            },
-        )
-        results_df["rtol"] = tolerance
-        rows.append(results_df)
-        if sweep_hyperparameters is None:
-            sweep_hyperparameters = run_hyperparameters
-    save_experiment(
-        "tolerance_sweep",
-        pd.concat(rows, ignore_index=True),
-        {},
-        output_dir,
-        meta,
-        prefix=PREFIX,
-        hyperparameters=sweep_hyperparameters,
     )
 
     # Butterfly basin-of-attraction outcomes over the shared k_0 grid

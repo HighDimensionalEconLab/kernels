@@ -1,4 +1,7 @@
 *.pdf
+# Generated experiment and replication data. Add a targeted !path exception
+# when a JSON file is intentionally source-controlled.
+*.json
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -169,6 +172,5 @@ cython_debug/
 .jax_cache/
 
 # wandb sweeps (runtime artifacts)
-sweeps/logs/
-sweeps/sweep_ids.json
+extra/sweeps/logs/
 wandb/

@@ -66,16 +66,10 @@ def rbf_state_gram(centers, sigma, ell):
 # h(d) = int_0^d k = (sigma^2/a) [c - e^{-a d} eta(a d)] with eta a degree-p
 # polynomial satisfying eta(0) = c (so h(0) = 0). Coefficients are in powers
 # of (a d).
-MATERN_ORDER = {"matern12": 0, "matern32": 1, "matern52": 2}
 MATERN_DECAY = {
     "matern12": 1.0,
     "matern32": math.sqrt(3.0),
     "matern52": math.sqrt(5.0),
-}
-MATERN_PI = {
-    "matern12": (1.0,),
-    "matern32": (1.0, 1.0),
-    "matern52": (1.0, 1.0, 1.0 / 3.0),
 }
 MATERN_ETA = {
     "matern12": (1.0,),
@@ -142,111 +136,3 @@ def integrated_kernel_matrices(t_i, t_j, kernel, sigma, ell):
         in_axes=(0, None, None, None),
     )(t_i, t_j, sigma, ell)
     return K, K_tilde
-
-
-# Matrix-free O(n) matvecs for the half-integer Matern kernels and their
-# integrated kernels on a sorted strictly increasing grid t. Both K v and
-# K_tilde v reduce to the exponential moments
-#   M^(k)_i = sum_j (a |t_i - t_j|)^k e^{-a |t_i - t_j|} v_j,  k = 0..p,
-# over j < i (forward) and j > i (backward), which obey the affine recurrence
-#   M^(k)_{i+1} = e [sum_m C(k, m) delta^{k-m} M^(m)_i + delta^k v_i]
-# with delta = a dt_i and e = e^{-delta} -- a (p+1)-dimensional carry per
-# step, so the classic Rybicki-Press scalar recurrence is the p = 0 case.
-# The remaining K_tilde pieces are prefix/suffix sums plus the row-independent
-# scalar sum_j h(t_j) v_j, since K_tilde(t_i, t_j) = h(t_j) +/- h(|t_i - t_j|).
-def matern_exp_moments(t, decay_rate, v, order, parallel=None):
-    # parallel=None chooses by backend: off-CPU a sequential scan pays a
-    # kernel launch per step (~1000x slower at n=1e5 on GPU), so use the
-    # associative O(log n)-depth form; on CPU the tight sequential loop wins.
-    # The affine maps M -> A M + b compose associatively:
-    # (A_1, b_1) then (A_2, b_2) is (A_2 A_1, A_2 b_1 + b_2).
-    if parallel is None:
-        parallel = jax.default_backend() != "cpu"
-    size = order + 1
-    delta = decay_rate * jnp.diff(t)
-    e = jnp.exp(-delta)
-    powers = jnp.stack([delta**k for k in range(size)], axis=-1)
-    update = jnp.stack(
-        [
-            jnp.stack(
-                [
-                    math.comb(k, m) * delta ** (k - m)
-                    if m <= k
-                    else jnp.zeros_like(delta)
-                    for m in range(size)
-                ],
-                axis=-1,
-            )
-            for k in range(size)
-        ],
-        axis=-2,
-    )
-    update = e[:, None, None] * update
-    forward_input = e[:, None] * powers * v[:-1, None]
-    backward_input = e[:, None] * powers * v[1:, None]
-    edge = jnp.zeros((1, size), dtype=v.dtype)
-
-    if parallel:
-
-        def combine(earlier, later):
-            update_1, input_1 = earlier
-            update_2, input_2 = later
-            return (
-                update_2 @ update_1,
-                jnp.einsum("...ij,...j->...i", update_2, input_1) + input_2,
-            )
-
-        _, lower_rest = jax.lax.associative_scan(combine, (update, forward_input))
-        lower = jnp.concatenate([edge, lower_rest])
-        _, upper_head = jax.lax.associative_scan(
-            combine, (update, backward_input), reverse=True
-        )
-        upper = jnp.concatenate([upper_head, edge])
-        return lower, upper
-
-    def step(carry, inputs):
-        update_i, input_i = inputs
-        out = update_i @ carry + input_i
-        return out, out
-
-    zero = jnp.zeros((size,), dtype=v.dtype)
-    _, lower_rest = jax.lax.scan(step, zero, (update, forward_input))
-    lower = jnp.concatenate([edge, lower_rest])
-    _, upper_head = jax.lax.scan(step, zero, (update, backward_input), reverse=True)
-    upper = jnp.concatenate([upper_head, edge])
-    return lower, upper
-
-
-# Both matvecs from one moments pass: the scans dominate the matrix-free
-# residual, and each JVP/VJP inside the solver's CG loop replays them, so
-# sharing halves the hot-path work. t must be sorted strictly increasing --
-# not validated (t may be traced); unsorted input silently returns garbage,
-# so callers validate before entering jit.
-def matern_kernel_matvec_pair(kernel, t, v, sigma, ell, parallel=None):
-    name = normalize_kernel(kernel)
-    if name not in MATERN_ORDER:
-        raise ValueError(f"matvecs require a Matern kernel, got {name!r}")
-    order = MATERN_ORDER[name]
-    a = MATERN_DECAY[name] / ell
-    pi = MATERN_PI[name]
-    eta = MATERN_ETA[name]
-    lower, upper = matern_exp_moments(t, a, v, order, parallel=parallel)
-
-    both = lower + upper
-    k_v = sigma**2 * (
-        v + sum(coefficient * both[:, k] for k, coefficient in enumerate(pi))
-    )
-
-    # (K_tilde v)_i = sum_j h(t_j) v_j
-    #   + (sigma^2/a) [c (P_i - Q_i) - eta-moments_{j<=i} + eta-moments_{j>i}]
-    # with P/Q the inclusive-prefix/strict-suffix sums of v and c = eta(0).
-    c = eta[0]
-    total = matern_antiderivative(name, t, sigma, ell) @ v
-    prefix = jnp.cumsum(v)
-    suffix = jnp.cumsum(v[::-1])[::-1] - v
-    eta_lower = (
-        sum(coefficient * lower[:, k] for k, coefficient in enumerate(eta)) + c * v
-    )
-    eta_upper = sum(coefficient * upper[:, k] for k, coefficient in enumerate(eta))
-    k_tilde_v = total + (sigma**2 / a) * (c * (prefix - suffix) - eta_lower + eta_upper)
-    return k_v, k_tilde_v

@@ -5,24 +5,16 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import scipy.integrate
-from nlls_gram import matern_state_space, metric_from_state_space
 
-from asset_pricing_kernel import asset_pricing_kernel
-from asset_pricing_kernel_nlls import DataSettings as APDataSettings
-from asset_pricing_kernel_nlls import KernelSettings as APKernelSettings
-from asset_pricing_kernel_nlls import (
-    NLLSGramSettings,
-    asset_pricing_kernel_nlls,
-)
-from human_capital_kernel import human_capital_initial_conditions, human_capital_kernel
-from human_capital_kernel_nlls import human_capital_kernel_nlls
+from asset_pricing_kernel import KernelSettings as APKernelSettings
+from asset_pricing_kernel import SolverSettings, asset_pricing_kernel
+from human_capital_kernel import human_capital_kernel
 from kernels import (
     gaussian_kernel,
     integrated_kernel_matrices,
     matern_kernel_0p5,
     matern_kernel_1p5,
     matern_kernel_2p5,
-    matern_kernel_matvec_pair,
     normalize_kernel,
 )
 from multicountry_growth import (
@@ -33,60 +25,12 @@ from multicountry_growth import (
     multicountry_reference_marginal_wealth,
     multicountry_steady_state,
 )
-from multicountry_growth_kernel_nlls import multicountry_growth_kernel_nlls
-from multicountry_trade_growth import (
-    STATIC_BLOCK_NAMES,
-    TradeGrowthParameters,
-    multicountry_trade_allocations,
-    multicountry_trade_path_values,
-    static_trade_equilibrium,
-    symmetric_trade_growth_parameters,
-)
-from multicountry_trade_growth_comparative_statics import (
-    build_multicountry_trade_comparative_statics,
-)
-from multicountry_trade_growth_kernel_nlls import (
-    DataSettings as MulticountryTradeDataSettings,
-)
-from multicountry_trade_growth_kernel_nlls import (
-    NLLSGramSettings as MulticountryTradeNLLSGramSettings,
-)
-from multicountry_trade_growth_kernel_nlls import (
-    multicountry_trade_growth_kernel_nlls,
-)
-from multicountry_trade_growth_nn import DataSettings as MulticountryTradeNNDataSettings
-from multicountry_trade_growth_nn import (
-    NLLSGramSettings as MulticountryTradeNNNLLSGramSettings,
-)
-from multicountry_trade_growth_nn import (
-    SequentialNNSettings,
-    multicountry_trade_growth_nn,
-)
+from multicountry_growth_kernel import multicountry_growth_kernel
 from neoclassical_growth_concave_convex_kernel import (
     neoclassical_growth_concave_convex_kernel,
 )
-from neoclassical_growth_concave_convex_kernel_nlls import (
-    neoclassical_growth_concave_convex_kernel_nlls,
-)
-from neoclassical_growth_kernel import (
-    DataSettings as GrowthDataSettings,
-)
-from neoclassical_growth_kernel import (
-    KernelSettings,
-    neoclassical_growth_kernel,
-)
-from neoclassical_growth_kernel_nlls import (
-    DataSettings as GrowthNLLSDataSettings,
-)
-from neoclassical_growth_kernel_nlls import (
-    KernelSettings as GrowthNLLSKernelSettings,
-)
-from neoclassical_growth_kernel_nlls import (
-    NLLSGramSettings as GrowthNLLSSettings,
-)
-from neoclassical_growth_kernel_nlls import (
-    neoclassical_growth_kernel_nlls,
-)
+from neoclassical_growth_kernel import DataSettings as GrowthDataSettings
+from neoclassical_growth_kernel import KernelSettings, neoclassical_growth_kernel
 from neoclassical_growth_nn import (
     DataSettings as GrowthNNDataSettings,
 )
@@ -99,33 +43,11 @@ from neoclassical_growth_nn import (
 from neoclassical_growth_nn import (
     neoclassical_growth_nn,
 )
-
-try:
-    from neoclassical_growth_nn_integrated import (
-        DataSettings as IntegratedNNDataSettings,
-    )
-    from neoclassical_growth_nn_integrated import (
-        GrowthDerivativeSettings as IntegratedNNSettings,
-    )
-    from neoclassical_growth_nn_integrated import (
-        StoppingCriteria as IntegratedNNStoppingCriteria,
-    )
-    from neoclassical_growth_nn_integrated import (
-        neoclassical_growth_nn_integrated,
-    )
-    from neoclassical_growth_nn_recursive_i import (
-        DataSettings as RecursiveIDataSettings,
-    )
-    from neoclassical_growth_nn_recursive_i import (
-        StoppingCriteria as RecursiveIStoppingCriteria,
-    )
-    from neoclassical_growth_nn_recursive_i import (
-        neoclassical_growth_nn_recursive_i,
-    )
-
-    NN_DAE_DRIVERS_AVAILABLE = True
-except ImportError:
-    NN_DAE_DRIVERS_AVAILABLE = False
+from neoclassical_growth_nn_recursive import DataSettings as RecursiveNNDataSettings
+from neoclassical_growth_nn_recursive import (
+    StoppingCriteria as RecursiveNNStoppingCriteria,
+)
+from neoclassical_growth_nn_recursive import neoclassical_growth_nn_recursive
 from open_economy_growth import (
     ModelParameters as OpenEconomyParameters,
 )
@@ -136,29 +58,19 @@ from open_economy_growth import (
     steady_state as open_economy_steady_state,
 )
 from open_economy_growth_benchmark import open_economy_growth_benchmark
-from open_economy_growth_kernel_nlls import (
+from open_economy_growth_kernel import (
     DataSettings as OpenEconomyDataSettings,
 )
-from open_economy_growth_kernel_nlls import open_economy_growth_kernel_nlls
-
-try:
-    from open_economy_growth_nn_recursive import (
-        DataSettings as OpenEconomyNNDataSettings,
-    )
-    from open_economy_growth_nn_recursive import (
-        evaluate_path as evaluate_open_economy_nn,
-    )
-    from open_economy_growth_nn_recursive import open_economy_growth_nn_recursive
-except ImportError:
-    NN_DAE_DRIVERS_AVAILABLE = False
+from open_economy_growth_kernel import open_economy_growth_kernel
+from open_economy_growth_nn_recursive import DataSettings as OpenEconomyNNDataSettings
+from open_economy_growth_nn_recursive import evaluate_path as evaluate_open_economy_nn
+from open_economy_growth_nn_recursive import open_economy_growth_nn_recursive
 from optimal_advertising_kernel import optimal_advertising_kernel
-from optimal_advertising_kernel_nlls import optimal_advertising_kernel_nlls
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
 
 FAST_GROWTH_DATA = GrowthDataSettings(train_T=10.0, train_points=11, test_T=10.0)
-FAST_GROWTH_NLLS = GrowthNLLSDataSettings(train_T=10.0, train_points=11, test_T=10.0)
 
 
 class KernelSmokeTests(unittest.TestCase):
@@ -243,7 +155,7 @@ class KernelSmokeTests(unittest.TestCase):
         )
 
     def test_multicountry_growth_kernel_smoke(self):
-        results, extras = multicountry_growth_kernel_nlls(a_0=(-0.5, 0.5))
+        results, extras = multicountry_growth_kernel(a_0=(-0.5, 0.5))
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertTrue(results["benchmark_match"])
         self.assertEqual(results["terminal_residual_count"], 0)
@@ -306,7 +218,7 @@ class KernelSmokeTests(unittest.TestCase):
             populations=(1.0, 1.0, 1.0),
             productivities=(1.0, 1.0, 1.0),
         )
-        results, extras = multicountry_growth_kernel_nlls(
+        results, extras = multicountry_growth_kernel(
             a_0=(-0.5, 0.25, 0.25),
             parameters=parameters,
         )
@@ -333,405 +245,10 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertIn("resource_drift_residual", extras["test_df"])
 
         with self.assertRaisesRegex(ValueError, "must sum to zero"):
-            multicountry_growth_kernel_nlls(
+            multicountry_growth_kernel(
                 a_0=(-0.5, 0.25, 0.0),
                 parameters=parameters,
             )
-
-    def test_multicountry_trade_static_equilibrium(self):
-        for num_countries in (2, 3):
-            parameters = symmetric_trade_growth_parameters(num_countries)
-            k = jnp.ones(num_countries)
-            tobin_q = jnp.full(num_countries, 1.0 / parameters.installation_elasticity)
-            marginal_wealth = jnp.ones(num_countries)
-            values, diagnostics = static_trade_equilibrium(
-                k,
-                tobin_q,
-                marginal_wealth,
-                parameters,
-            )
-            self.assertLess(diagnostics["max_residual"], 1e-10)
-            self.assertGreater(diagnostics["minimum_jacobian_singular_value"], 1e-3)
-            np.testing.assert_allclose(
-                values["trade_shares"].sum(axis=1), 1.0, atol=1e-13
-            )
-            np.testing.assert_allclose(values["budget_trade_gap"], 0.0, atol=1e-13)
-            np.testing.assert_allclose(values["world_trade_balance"], 0.0, atol=1e-13)
-            np.testing.assert_allclose(values["wage"], values["wage"][0], atol=1e-13)
-            np.testing.assert_allclose(
-                values["sector_capital"].sum(axis=0),
-                k * jnp.asarray(parameters.populations),
-                atol=1e-12,
-            )
-            np.testing.assert_allclose(
-                values["sector_labor"].sum(axis=0),
-                parameters.populations,
-                atol=1e-12,
-            )
-            self.assertTrue(
-                np.all(np.diag(values["trade_shares"]) > values["trade_shares"][0, -1])
-            )
-
-    def test_multicountry_trade_dynamic_shell(self):
-        parameters = symmetric_trade_growth_parameters(3)
-        k = jnp.ones(3)
-        tobin_q = jnp.full(3, 1.0 / parameters.installation_elasticity)
-        marginal_wealth = jnp.ones(3)
-        static, _ = static_trade_equilibrium(
-            k,
-            tobin_q,
-            marginal_wealth,
-            parameters,
-        )
-        k_path = k[None, :]
-        q_path = tobin_q[None, :]
-        marginal_wealth_path = marginal_wealth[None, :]
-        interest_rate = jnp.asarray((parameters.rho,))
-        log_static = static["log_static"][None, :, :]
-        allocations = multicountry_trade_allocations(
-            k_path,
-            q_path,
-            marginal_wealth_path,
-            interest_rate,
-            log_static,
-            parameters,
-        )
-        a = jnp.zeros((1, 3))
-        da_dt = (
-            interest_rate[:, None] * a
-            + allocations["factor_income"]
-            - allocations["final_expenditure"]
-        )
-        values = multicountry_trade_path_values(
-            k=k_path,
-            a=a,
-            tobin_q=q_path,
-            marginal_wealth=marginal_wealth_path,
-            interest_rate=interest_rate,
-            log_static=log_static,
-            dlog_k_dt=allocations["capital_drift"] / k_path,
-            da_dt=da_dt,
-            dlog_q_dt=allocations["tobin_q_drift"] / q_path,
-            dlog_marginal_wealth_dt=jnp.zeros((1, 3)),
-            parameters=parameters,
-        )
-        for name in (
-            "capital",
-            "assets",
-            "tobin_q",
-            "marginal_wealth_euler",
-            "world_flow",
-            "asset_clearing",
-        ):
-            np.testing.assert_allclose(values[name], 0.0, atol=1e-12)
-        np.testing.assert_allclose(values["static_residuals"], 0.0, atol=1e-12)
-        np.testing.assert_allclose(values["budget_trade_gap"], 0.0, atol=1e-12)
-
-    def test_multicountry_trade_three_country_joint_kernel_solve(self):
-        parameters = symmetric_trade_growth_parameters(3)
-        results, frames = multicountry_trade_growth_kernel_nlls(
-            a_0=(-0.2, 0.1, 0.1),
-            parameters=parameters,
-            data_set=MulticountryTradeDataSettings(
-                train_T=15.0,
-                train_points=6,
-                sampling="uniform",
-                dense_T=8.0,
-                tail_points=2,
-                test_T=8.0,
-                test_points=9,
-                validation_points=13,
-                quality_T=10.0,
-                rank_audit=True,
-            ),
-            lm_set=MulticountryTradeNLLSGramSettings(
-                max_steps=30,
-                residual_atol=1e-7,
-            ),
-        )
-
-        self.assertTrue(results["solution_accepted"])
-        self.assertEqual(results["terminal_residual_count"], 0)
-        self.assertEqual(results["dynamic_rkhs_function_count"], 12)
-        self.assertEqual(results["metric_selection_dimension"], 6)
-        self.assertEqual(results["unknown_count"] - results["dae_residual_count"], 6)
-        self.assertEqual(results["dae_jacobian_rank"], results["dae_residual_count"])
-        self.assertGreater(results["dae_jacobian_min_singular_value"], 1e-8)
-        self.assertEqual(results["quality_T"], 10.0)
-        self.assertEqual(results["quality_validation_point_count"], 9)
-        self.assertLess(results["max_train_residual"], 1e-8)
-        self.assertLess(results["max_validation_residual"], 1e-3)
-        self.assertGreaterEqual(
-            results["max_full_horizon_validation_residual"],
-            results["max_validation_residual"],
-        )
-        self.assertLess(results["max_asset_clearing_residual"], 5e-8)
-        self.assertGreaterEqual(
-            results["max_full_horizon_asset_clearing_residual"],
-            results["max_asset_clearing_residual"],
-        )
-        self.assertLess(results["max_rate_consistency_residual"], 1e-8)
-        self.assertGreaterEqual(
-            results["max_full_horizon_rate_consistency_residual"],
-            results["max_rate_consistency_residual"],
-        )
-        self.assertEqual(results["backend"], jax.default_backend())
-        self.assertTrue(np.isfinite(results["ex_post_discounted_assets_decay_ratio"]))
-        self.assertTrue(np.isfinite(results["ex_post_asset_tvc_decay_ratio"]))
-        self.assertTrue(np.isfinite(results["ex_post_capital_tvc_decay_ratio"]))
-        self.assertTrue(results["ex_post_discounted_assets_decay_ratio_applicable"])
-        self.assertTrue(results["ex_post_asset_tvc_decay_ratio_applicable"])
-        self.assertTrue(results["ex_post_capital_tvc_decay_ratio_applicable"])
-        self.assertAlmostEqual(results["terminal_a_2"], results["terminal_a_3"], 7)
-        for name in (
-            "capital",
-            "assets",
-            "tobin_q",
-            "marginal_wealth",
-            "consumption",
-            "investment_rate",
-            "trade_balance",
-            "current_account",
-            *STATIC_BLOCK_NAMES,
-        ):
-            self.assertLess(results[f"max_country_2_3_{name}_gap"], 2e-7)
-        self.assertLess(results["max_country_2_3_trade_share_permutation_gap"], 1e-7)
-        self.assertAlmostEqual(
-            results["terminal_steady_trade_gap_1"],
-            results["terminal_current_account_1"],
-            5,
-        )
-        self.assertTrue(np.isfinite(results["plateau_interest_rate_gap"]))
-        quality_frame = frames["validation_df"].query("t <= 10.0")
-        self.assertLess(
-            np.max(np.abs(quality_frame["consumption_basket_log_price"])),
-            1e-4,
-        )
-        for name in (
-            "ode_residual_rms",
-            "algebraic_residual_rms",
-            "dae_residual_rms",
-        ):
-            self.assertTrue(np.isfinite(quality_frame[name]).all())
-            self.assertGreaterEqual(quality_frame[name].min(), 0.0)
-            self.assertAlmostEqual(
-                results[f"max_validation_{name}"], quality_frame[name].max()
-            )
-        np.testing.assert_allclose(
-            quality_frame["dae_residual_rms"] ** 2,
-            (
-                12.0 * quality_frame["ode_residual_rms"] ** 2
-                + 25.0 * quality_frame["algebraic_residual_rms"] ** 2
-            )
-            / 37.0,
-            rtol=1e-12,
-            atol=1e-16,
-        )
-
-    def test_multicountry_trade_structural_parameter_implicit_ad(self):
-        parameters = symmetric_trade_growth_parameters(2)
-        problem = build_multicountry_trade_comparative_statics(
-            k_0=(1.0, 0.9),
-            a_0=(-0.1, 0.1),
-            parameters=parameters,
-            data_set=MulticountryTradeDataSettings(
-                train_T=10.0,
-                train_points=5,
-                sampling="uniform",
-                dense_T=5.0,
-                tail_points=1,
-                test_T=10.0,
-                test_points=11,
-                validation_points=21,
-                quality_T=10.0,
-            ),
-            lm_set=MulticountryTradeNLLSGramSettings(
-                init_damping=1e-8,
-                residual_atol=1e-12,
-                max_steps=40,
-            ),
-            statistic_times=(0.0, 5.0, 10.0),
-        )
-        p = problem.structural_parameters
-        p_dot = jax.tree.map(jnp.zeros_like, p)
-        p_dot = {**p_dot, "rho": p["rho"]}
-        result, result_dot = jax.jvp(problem.solve, (p,), (p_dot,))
-
-        def residual(theta, parameters_pytree):
-            return problem.solver.residual_fn(theta, None, parameters_pytree)[0]
-
-        _, linearized_residual = jax.jvp(
-            residual,
-            (result.x, p),
-            (result_dot.x, p_dot),
-        )
-        self.assertEqual(int(result.status), 1)
-        self.assertLess(float(jnp.max(jnp.abs(residual(result.x, p)))), 1e-10)
-        self.assertLess(float(jnp.max(jnp.abs(linearized_residual))), 1e-8)
-        self.assertTrue(bool(jnp.all(jnp.isfinite(result_dot.aux))))
-        self.assertIn("initial_log_capital[1]", problem.parameter_names)
-        self.assertIn("initial_aggregate_assets_free[1]", problem.parameter_names)
-
-        step = 1e-3
-        p_plus = jax.tree.map(lambda value, dot: value + step * dot, p, p_dot)
-        p_minus = jax.tree.map(lambda value, dot: value - step * dot, p, p_dot)
-        theta_plus = jax.tree.map(
-            lambda value, dot: value + step * dot,
-            result.x,
-            result_dot.x,
-        )
-        theta_minus = jax.tree.map(
-            lambda value, dot: value - step * dot,
-            result.x,
-            result_dot.x,
-        )
-        result_plus = problem.solver.solve(
-            theta_plus,
-            p=p_plus,
-            max_steps=40,
-            atol=1e-14,
-        )
-        result_minus = problem.solver.solve(
-            theta_minus,
-            p=p_minus,
-            max_steps=40,
-            atol=1e-14,
-        )
-        finite_difference = (result_plus.aux - result_minus.aux) / (2.0 * step)
-        relative_error = jnp.linalg.norm(
-            finite_difference - result_dot.aux
-        ) / jnp.linalg.norm(result_dot.aux)
-        self.assertLess(float(relative_error), 1e-4)
-
-    def test_multicountry_trade_three_country_sequential_nn_solve(self):
-        results, frames = multicountry_trade_growth_nn(
-            a_0=(-0.2, 0.1, 0.1),
-            parameters=symmetric_trade_growth_parameters(3),
-            seed=0,
-            data_set=MulticountryTradeNNDataSettings(
-                train_T=15.0,
-                train_points=6,
-                sampling="uniform",
-                dense_T=8.0,
-                tail_points=2,
-                test_T=8.0,
-                test_points=9,
-                validation_points=13,
-                quality_T=10.0,
-            ),
-            nn_set=SequentialNNSettings(
-                width=16,
-                depth=2,
-                input_scale=10.0,
-            ),
-            lm_set=MulticountryTradeNNNLLSGramSettings(
-                max_steps=60,
-                residual_atol=1e-10,
-            ),
-            verbose=False,
-        )
-
-        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
-        self.assertEqual(results["terminal_residual_count"], 0)
-        self.assertEqual(results["initial_residual_count"], 0)
-        self.assertEqual(results["network_output_count"], 37)
-        self.assertEqual(results["algebraic_network_output_count"], 25)
-        self.assertEqual(results["dae_residual_count"], 37 * 6)
-        self.assertGreater(results["unknown_count"], results["dae_residual_count"])
-        self.assertEqual(
-            results["selection"],
-            "minimum_identity_metric_parameter_step",
-        )
-        self.assertEqual(results["quality_T"], 10.0)
-        self.assertEqual(results["quality_validation_point_count"], 9)
-        self.assertLess(results["max_initial_residual"], 1e-12)
-        self.assertLess(results["max_train_residual"], 1e-8)
-        self.assertLess(results["max_validation_residual"], 1e-3)
-        self.assertGreaterEqual(
-            results["max_full_horizon_validation_residual"],
-            results["max_validation_residual"],
-        )
-        self.assertLess(results["max_asset_clearing_residual"], 5e-5)
-        self.assertGreaterEqual(
-            results["max_full_horizon_asset_clearing_residual"],
-            results["max_asset_clearing_residual"],
-        )
-        self.assertLess(results["max_rate_consistency_residual"], 1e-5)
-        self.assertGreaterEqual(
-            results["max_full_horizon_rate_consistency_residual"],
-            results["max_rate_consistency_residual"],
-        )
-        self.assertTrue(np.isfinite(results["ex_post_discounted_assets"]))
-        self.assertTrue(np.isfinite(results["ex_post_asset_tvc"]))
-        self.assertTrue(np.isfinite(results["ex_post_capital_tvc"]))
-        for name in (
-            "capital",
-            "assets",
-            "tobin_q",
-            "marginal_wealth",
-            "consumption",
-            "investment_rate",
-            "trade_balance",
-            "current_account",
-            *STATIC_BLOCK_NAMES,
-        ):
-            self.assertLess(results[f"max_country_2_3_{name}_gap"], 2e-4)
-        self.assertLess(
-            results["max_country_2_3_trade_share_permutation_gap"],
-            2e-4,
-        )
-        quality_frame = frames["validation_df"].query("t <= 10.0")
-        self.assertLess(
-            np.max(np.abs(quality_frame["consumption_basket_log_price"])), 1e-4
-        )
-        for name in (
-            "ode_residual_rms",
-            "algebraic_residual_rms",
-            "dae_residual_rms",
-        ):
-            self.assertTrue(np.isfinite(quality_frame[name]).all())
-            self.assertGreaterEqual(quality_frame[name].min(), 0.0)
-            self.assertAlmostEqual(
-                results[f"max_validation_{name}"], quality_frame[name].max()
-            )
-        np.testing.assert_allclose(
-            quality_frame["dae_residual_rms"] ** 2,
-            (
-                12.0 * quality_frame["ode_residual_rms"] ** 2
-                + 25.0 * quality_frame["algebraic_residual_rms"] ** 2
-            )
-            / 37.0,
-            rtol=1e-12,
-            atol=1e-16,
-        )
-
-    def test_multicountry_trade_heterogeneous_static_equilibrium(self):
-        parameters = TradeGrowthParameters(
-            populations=(1.0, 2.0, 1.5),
-            intermediate_productivities=(1.0, 1.1, 0.9),
-            consumption_productivities=(1.0, 1.05, 0.95),
-            investment_productivities=(1.0, 0.9, 1.1),
-            consumption_value_added_shares=(0.75, 0.7, 0.8),
-            intermediate_value_added_shares=(0.5, 0.55, 0.45),
-            investment_value_added_shares=(0.5, 0.45, 0.55),
-            trade_costs=(
-                (1.0, 1.3, 1.8),
-                (1.5, 1.0, 1.4),
-                (1.2, 1.6, 1.0),
-            ),
-        )
-        values, diagnostics = static_trade_equilibrium(
-            k=jnp.asarray((1.0, 0.8, 1.3)),
-            tobin_q=jnp.full(3, 1.0 / parameters.installation_elasticity),
-            marginal_wealth=jnp.asarray((1.0, 1.1, 0.9)),
-            parameters=parameters,
-        )
-        self.assertLess(diagnostics["max_residual"], 1e-10)
-        self.assertGreater(diagnostics["minimum_jacobian_singular_value"], 1e-3)
-        np.testing.assert_allclose(values["trade_shares"].sum(axis=1), 1.0, atol=1e-13)
-        np.testing.assert_allclose(values["budget_trade_gap"], 0.0, atol=1e-13)
-        np.testing.assert_allclose(values["world_trade_balance"], 0.0, atol=1e-13)
-        self.assertFalse(np.allclose(values["trade_shares"], values["trade_shares"].T))
 
     def test_open_economy_growth_math_and_benchmark(self):
         parameters = OpenEconomyParameters()
@@ -758,8 +275,8 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertLess(abs(diagnostics["present_value_residual"]), 1e-10)
         self.assertGreater(values["x"].min(), 0.0)
 
-    def test_open_economy_growth_nlls_smoke(self):
-        results, extras = open_economy_growth_kernel_nlls()
+    def test_open_economy_growth_kernel_smoke(self):
+        results, extras = open_economy_growth_kernel()
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertTrue(results["benchmark_match"])
         self.assertEqual(results["terminal_residual_count"], 0)
@@ -786,7 +303,7 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertTrue((extras["test_df"]["q"] > 0.0).all())
         self.assertTrue((extras["test_df"]["x"] > 0.0).all())
 
-        short_horizon, _ = open_economy_growth_kernel_nlls(
+        short_horizon, _ = open_economy_growth_kernel(
             data_set=OpenEconomyDataSettings(
                 train_T=80.0,
                 train_points=86,
@@ -798,9 +315,6 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertFalse(short_horizon["benchmark_match"])
         self.assertGreater(short_horizon["ex_post_asset_tvc"], 0.1)
 
-    @unittest.skipUnless(
-        NN_DAE_DRIVERS_AVAILABLE, "tinydiffeq-dependent drivers unavailable"
-    )
     def test_open_economy_growth_nn_recursive_smoke(self):
         parameters = OpenEconomyParameters()
         data_set = OpenEconomyNNDataSettings(
@@ -887,38 +401,8 @@ class KernelSmokeTests(unittest.TestCase):
                         )[0]
                         self.assertLess(abs(float(K_tilde[0, 0]) - reference), 1e-11)
 
-    def test_neoclassical_growth_smoke(self):
-        results, extras = neoclassical_growth_kernel(data_set=FAST_GROWTH_DATA)
-
-        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
-        self.assertLess(results["max_train_residual"], 1e-8)
-        self.assertLess(results["k_rel_error_mean"], 2e-2)
-        self.assertLess(results["c_rel_error_mean"], 2e-2)
-        self.assertTrue((extras["test_df"]["k"] > 0.0).all())
-        self.assertTrue((extras["test_df"]["c"] > 0.0).all())
-
-    def test_neoclassical_growth_rbf_smoke(self):
-        # Gaussian/RBF limit with a short length scale (well conditioned).
-        results, _ = neoclassical_growth_kernel(
-            kernel_set=KernelSettings(nu=math.inf, ell=2.0),
-            data_set=FAST_GROWTH_DATA,
-        )
-
-        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
-        self.assertLess(results["k_rel_error_mean"], 2e-2)
-
-    def test_concave_convex_smoke(self):
+    def test_concave_convex_kernel_smoke(self):
         results, extras = neoclassical_growth_concave_convex_kernel()
-
-        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
-        self.assertLess(results["max_train_residual"], 1e-5)
-        self.assertLess(results["max_validation_residual"], 5e-3)
-        self.assertLess(results["solve_time"], 0.5)
-        self.assertTrue((extras["test_df"]["k"] > 0.0).all())
-        self.assertTrue((extras["test_df"]["c"] > 0.0).all())
-
-    def test_concave_convex_nlls_smoke(self):
-        results, extras = neoclassical_growth_concave_convex_kernel_nlls()
 
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertLess(results["max_train_residual"], 1e-5)
@@ -928,11 +412,10 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertTrue((extras["test_df"]["k"] > 0.0).all())
         self.assertTrue((extras["test_df"]["c"] > 0.0).all())
 
-    def test_neoclassical_growth_nlls_smoke(self):
-        results, extras = neoclassical_growth_kernel_nlls(data_set=FAST_GROWTH_NLLS)
+    def test_neoclassical_growth_kernel_smoke(self):
+        results, extras = neoclassical_growth_kernel(data_set=FAST_GROWTH_DATA)
 
-        self.assertEqual(results["linear_solver_resolved"], "cholesky")
-        self.assertEqual(results["residuals_method_resolved"], "dense")
+        self.assertEqual(results["linear_solver"], "auto")
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertLess(results["max_train_residual"], 1e-8)
         self.assertLess(results["k_rel_error_mean"], 2e-2)
@@ -940,132 +423,31 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertTrue((extras["test_df"]["k"] > 0.0).all())
         self.assertTrue((extras["test_df"]["c"] > 0.0).all())
 
-        # matrix_free recovers the same selection as dense at scale.
-        data_set = GrowthNLLSDataSettings(train_points=501)
-        dense, _ = neoclassical_growth_kernel_nlls(
-            data_set=data_set, lm_set=GrowthNLLSSettings(linear_solver="cholesky")
-        )
-        structured, _ = neoclassical_growth_kernel_nlls(
-            data_set=data_set, lm_set=GrowthNLLSSettings(linear_solver="cg")
-        )
-        self.assertEqual(structured["linear_solver_resolved"], "cg")
-        self.assertEqual(structured["residuals_method_resolved"], "matrix_free")
-        self.assertTrue(structured["solution_accepted"])
-        self.assertLess(abs(structured["c_0"] - dense["c_0"]), 1e-4)
-
-    def test_neoclassical_growth_nlls_matern32_auto_stays_dense(self):
-        # The matern32 iterative window from asset pricing fails the growth
-        # gates at scale (measured at n >= 501): auto must not pick cg. On
-        # the dense branch it prefers qr for the smooth Materns at
-        # n >= DENSE_QR_MIN_POINTS (the ill-conditioned regime where qr
-        # converges in 11 steps at n = 101 while cholesky caps out at 50).
-        results, _ = neoclassical_growth_kernel_nlls(
-            kernel_set=GrowthNLLSKernelSettings(kernel="matern32"),
-            data_set=GrowthNLLSDataSettings(train_points=101),
-        )
-        self.assertEqual(results["linear_solver_resolved"], "qr")
-        self.assertEqual(results["residuals_method_resolved"], "dense")
-        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
-        self.assertLess(results["steps"], 50)
-
-        results, _ = neoclassical_growth_kernel_nlls(
-            kernel_set=GrowthNLLSKernelSettings(kernel="matern32"),
-            data_set=GrowthNLLSDataSettings(train_points=501),
-        )
-        self.assertEqual(results["linear_solver_resolved"], "qr")
-        self.assertEqual(results["residuals_method_resolved"], "dense")
-        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
-
-    def test_neoclassical_growth_nlls_kernels_smoke(self):
+    def test_neoclassical_growth_kernel_families(self):
         for kernel_set, error_bar in [
-            (GrowthNLLSKernelSettings(kernel="matern32"), 2e-2),
-            (GrowthNLLSKernelSettings(kernel="matern52"), 2e-2),
-            (GrowthNLLSKernelSettings(kernel="rbf", ell=2.0), 2e-2),
+            (KernelSettings(kernel="matern32"), 2e-2),
+            (KernelSettings(kernel="matern52"), 2e-2),
+            (KernelSettings(kernel="rbf", ell=2.0), 2e-2),
         ]:
             with self.subTest(kernel=kernel_set.kernel):
-                results, _ = neoclassical_growth_kernel_nlls(
-                    kernel_set=kernel_set, data_set=FAST_GROWTH_NLLS
+                results, _ = neoclassical_growth_kernel(
+                    kernel_set=kernel_set, data_set=FAST_GROWTH_DATA
                 )
                 self.assertTrue(
                     results["solution_accepted"], results["rejection_reason"]
                 )
                 self.assertLess(results["k_rel_error_mean"], error_bar)
 
-    def test_asset_pricing_smoke(self):
-        results, extras = asset_pricing_kernel()
+    def test_asset_pricing_kernel_smoke(self):
+        reference, extras = asset_pricing_kernel()
 
-        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
-        self.assertLess(results["max_train_residual"], 1e-10)
-        self.assertLess(results["p_rel_error_mean"], 5e-3)
-        self.assertTrue((extras["test_df"]["p"] > 0.0).all())
-
-    def test_matern_matvecs_match_dense(self):
-        rng = np.random.default_rng(7)
-        t = jnp.asarray(np.sort(rng.uniform(0.0, 50.0, 501)))
-        v = jnp.asarray(rng.standard_normal(501))
-        for name in ("matern12", "matern32", "matern52"):
-            K, K_tilde = integrated_kernel_matrices(t, t, name, 1.3, 10.0)
-            K = (K + K.T) / 2
-            for parallel in (False, True):
-                with self.subTest(kernel=name, parallel=parallel):
-                    k_v, k_tilde_v = matern_kernel_matvec_pair(
-                        name, t, v, 1.3, 10.0, parallel=parallel
-                    )
-                    self.assertLess(float(jnp.max(jnp.abs(K @ v - k_v))), 1e-10)
-                    self.assertLess(
-                        float(jnp.max(jnp.abs(K_tilde @ v - k_tilde_v))), 1e-10
-                    )
-
-    def test_state_space_metric_matches_dense(self):
-        # The nlls-gram state-space metric replaced the tinygp qsm solve;
-        # keep the dense cross-check of the exact plumbing this repo uses.
-        rng = np.random.default_rng(8)
-        t = jnp.linspace(0.0, 50.0, 300)
-        v = jnp.asarray(rng.standard_normal(300))
-        for name, nu in (("matern12", 0.5), ("matern32", 1.5), ("matern52", 2.5)):
-            with self.subTest(kernel=name):
-                jitter = 1e-8 * 1.3**2
-                K, _ = integrated_kernel_matrices(t, t, name, 1.3, 10.0)
-                K_jittered = np.asarray((K + K.T) / 2) + jitter * np.eye(300)
-                metric = metric_from_state_space(
-                    t, *matern_state_space(1.3, 10.0, nu), nugget=jitter
-                )
-                solution = metric.solve(v)
-                reference = np.linalg.solve(K_jittered, np.asarray(v))
-                self.assertLess(
-                    float(np.max(np.abs(np.asarray(solution) - reference)))
-                    / float(np.max(np.abs(reference))),
-                    1e-6,
-                )
-                norm_reference = float(np.sqrt(np.asarray(v) @ K_jittered @ v))
-                self.assertLess(
-                    abs(float(metric.norm(v)) - norm_reference) / norm_reference,
-                    1e-10,
-                )
-
-    def test_asset_pricing_nlls_smoke(self):
-        reference, extras = asset_pricing_kernel_nlls()
-
-        self.assertEqual(reference["linear_solver_resolved"], "cholesky")
-        self.assertEqual(reference["residuals_method_resolved"], "dense")
+        self.assertEqual(reference["linear_solver"], "auto")
         self.assertTrue(reference["solution_accepted"], reference["rejection_reason"])
         self.assertLess(reference["max_train_residual"], 1e-10)
         self.assertLess(reference["p_rel_error_mean"], 5e-3)
         self.assertTrue((extras["test_df"]["p"] > 0.0).all())
 
-        # matrix_free must recover the same min-norm selection as the dense
-        # default, not just interpolate.
-        lm_set = NLLSGramSettings(linear_solver="cg", residuals_method="matrix_free")
-        results, extras = asset_pricing_kernel_nlls(lm_set=lm_set)
-
-        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
-        self.assertLess(results["max_train_residual"], 1e-10)
-        self.assertLess(results["p_rel_error_mean"], 5e-3)
-        self.assertLess(abs(results["p_0"] - reference["p_0"]), 1e-9)
-        self.assertLess(abs(results["rkhs_norm_p"] - reference["rkhs_norm_p"]), 1e-9)
-        self.assertTrue((extras["test_df"]["p"] > 0.0).all())
-
-    def test_asset_pricing_nlls_kernels_smoke(self):
+    def test_asset_pricing_kernel_families(self):
         # Every named kernel solves on the dense path; the smoother kernels
         # need their documented working configurations (rbf: short length
         # scale -- its Gram at ell = 10 is numerically singular for every
@@ -1077,31 +459,14 @@ class KernelSmokeTests(unittest.TestCase):
         }
         for name, (kernel_set, error_bar) in cases.items():
             with self.subTest(kernel=name):
-                results, _ = asset_pricing_kernel_nlls(kernel_set=kernel_set)
+                results, _ = asset_pricing_kernel(kernel_set=kernel_set)
 
-                self.assertEqual(results["linear_solver_resolved"], "cholesky")
-                self.assertEqual(results["residuals_method_resolved"], "dense")
+                self.assertEqual(results["linear_solver"], "auto")
                 self.assertTrue(
                     results["solution_accepted"], results["rejection_reason"]
                 )
                 self.assertLess(results["max_train_residual"], 1e-8)
                 self.assertLess(results["p_rel_error_mean"], error_bar)
-
-        # matern32 matrix_free agrees with its dense selection.
-        kernel_set = APKernelSettings(kernel="matern32")
-        data_set = APDataSettings(train_T=50.0, train_points=1001)
-        dense, _ = asset_pricing_kernel_nlls(
-            kernel_set=kernel_set,
-            data_set=data_set,
-            lm_set=NLLSGramSettings(linear_solver="cholesky"),
-        )
-        structured, _ = asset_pricing_kernel_nlls(
-            kernel_set=kernel_set,
-            data_set=data_set,
-            lm_set=NLLSGramSettings(linear_solver="cg"),
-        )
-        self.assertTrue(structured["solution_accepted"])
-        self.assertLess(abs(structured["p_0"] - dense["p_0"]), 1e-8)
 
     def test_normalize_kernel_aliases(self):
         cases = [
@@ -1119,144 +484,20 @@ class KernelSmokeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize_kernel("matern72")
 
-    def test_asset_pricing_nlls_eps_contract(self):
-        # The unified shift applies identically across configurations --
-        # every one factors K + eps I and weights p_0 by eps -- so their
-        # min-M-norm selections agree, matern12 included (the newly unified
-        # case: its matrix_free metric is now state-space, not the old
-        # nugget-free tridiagonal precision).
-        data_set = APDataSettings(train_T=50.0, train_points=501)
-        eps = 1e-6
-        for kernel in ("matern12", "matern32"):
-            with self.subTest(kernel=kernel):
-                kernel_set = APKernelSettings(kernel=kernel)
-                dense, _ = asset_pricing_kernel_nlls(
-                    kernel_set=kernel_set,
-                    data_set=data_set,
-                    lm_set=NLLSGramSettings(linear_solver="cholesky", metric_eps=eps),
-                )
-                structured, _ = asset_pricing_kernel_nlls(
-                    kernel_set=kernel_set,
-                    data_set=data_set,
-                    lm_set=NLLSGramSettings(linear_solver="cg", metric_eps=eps),
-                )
-                self.assertTrue(structured["solution_accepted"])
-                self.assertLess(abs(structured["p_0"] - dense["p_0"]), 1e-8)
-
+    def test_asset_pricing_metric_shift_must_be_positive(self):
         with self.assertRaises(ValueError):
-            asset_pricing_kernel_nlls(lm_set=NLLSGramSettings(metric_eps=0.0))
+            asset_pricing_kernel(lm_set=SolverSettings(metric_eps=0.0))
 
-    def test_asset_pricing_nlls_auto_dispatch(self):
-        small, _ = asset_pricing_kernel_nlls()
-        self.assertEqual(small["linear_solver_resolved"], "cholesky")
-        self.assertEqual(small["residuals_method_resolved"], "dense")
-
-        large, _ = asset_pricing_kernel_nlls(
-            data_set=APDataSettings(train_T=50.0, train_points=501)
-        )
-        self.assertEqual(large["linear_solver_resolved"], "cg")
-        self.assertEqual(large["residuals_method_resolved"], "matrix_free")
-        self.assertTrue(large["solution_accepted"])
-
-        rbf, _ = asset_pricing_kernel_nlls(
-            kernel_set=APKernelSettings(kernel="rbf", ell=2.0),
-            data_set=APDataSettings(train_T=50.0, train_points=501),
-        )
-        self.assertEqual(rbf["linear_solver_resolved"], "cholesky")
-        self.assertEqual(rbf["residuals_method_resolved"], "dense")
-
-        with self.assertRaises(ValueError):
-            asset_pricing_kernel_nlls(
-                kernel_set=APKernelSettings(kernel="matern52"),
-                lm_set=NLLSGramSettings(residuals_method="matrix_free"),
-            )
-
-        # Point lists are sorted at intake (collocation is permutation-
-        # invariant), so an unsorted list resolves and solves exactly like
-        # its sorted version -- matrix_free at this scale.
-        points = np.linspace(0.0, 50.0, 1600)
-        shuffled = points.copy()
-        shuffled[10], shuffled[11] = shuffled[11], shuffled[10]
-        unsorted, _ = asset_pricing_kernel_nlls(
-            data_set=APDataSettings(train_points_list=[float(p) for p in shuffled])
-        )
-        sorted_run, _ = asset_pricing_kernel_nlls(
-            data_set=APDataSettings(train_points_list=[float(p) for p in points])
-        )
-        self.assertEqual(unsorted["linear_solver_resolved"], "cg")
-        self.assertEqual(unsorted["residuals_method_resolved"], "matrix_free")
-        self.assertTrue(unsorted["solution_accepted"], unsorted["rejection_reason"])
-        self.assertEqual(unsorted["p_0"], sorted_run["p_0"])
-
-        # Duplicate points are the one remaining obstruction: auto falls
-        # back to dense, and explicit matrix_free refuses.
-        duplicated = [float(p) for p in points[:-1]] + [float(points[-2])]
-        dup, _ = asset_pricing_kernel_nlls(
-            data_set=APDataSettings(train_points_list=duplicated)
-        )
-        self.assertEqual(dup["linear_solver_resolved"], "cholesky")
-        self.assertEqual(dup["residuals_method_resolved"], "dense")
-        with self.assertRaises(ValueError):
-            asset_pricing_kernel_nlls(
-                data_set=APDataSettings(train_points_list=duplicated),
-                lm_set=NLLSGramSettings(residuals_method="matrix_free"),
-            )
-
-    def test_nlls_qr_matches_cholesky(self):
-        # qr factors the whitened Jacobian instead of the dual Gram; both
-        # dense solvers must land on the same min-M-norm selection.
-        cholesky_ap, _ = asset_pricing_kernel_nlls(
-            lm_set=NLLSGramSettings(linear_solver="cholesky")
-        )
-        qr_ap, _ = asset_pricing_kernel_nlls(
-            lm_set=NLLSGramSettings(linear_solver="qr")
-        )
-        self.assertEqual(qr_ap["linear_solver_resolved"], "qr")
-        self.assertEqual(qr_ap["residuals_method_resolved"], "dense")
-        self.assertTrue(qr_ap["solution_accepted"], qr_ap["rejection_reason"])
-        self.assertLess(abs(qr_ap["p_0"] - cholesky_ap["p_0"]), 1e-8)
-
-        cholesky_gr, _ = neoclassical_growth_kernel_nlls(
-            lm_set=GrowthNLLSSettings(linear_solver="cholesky")
-        )
-        qr_gr, _ = neoclassical_growth_kernel_nlls(
-            lm_set=GrowthNLLSSettings(linear_solver="qr")
-        )
-        self.assertEqual(qr_gr["linear_solver_resolved"], "qr")
-        self.assertEqual(qr_gr["residuals_method_resolved"], "dense")
-        self.assertTrue(qr_gr["solution_accepted"], qr_gr["rejection_reason"])
-        self.assertLess(abs(qr_gr["c_0"] - cholesky_gr["c_0"]), 1e-4)
-
-    def test_nlls_cg_falls_back_to_dense_residuals(self):
-        # Explicit cg on a matrix-free-ineligible kernel: residuals auto
-        # falls back to dense (no error), exercising cg with dense residual
-        # matrices and the Sherman-Morrison preconditioner.
-        results, _ = asset_pricing_kernel_nlls(
-            kernel_set=APKernelSettings(kernel="rbf", ell=2.0),
-            lm_set=NLLSGramSettings(linear_solver="cg"),
-        )
-        self.assertEqual(results["linear_solver_resolved"], "cg")
-        self.assertEqual(results["residuals_method_resolved"], "dense")
-        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
-
-    def test_nlls_float32_residuals_use_float64_metric(self):
-        results, frames = asset_pricing_kernel_nlls(use_float64=False)
+    def test_float32_residuals_use_float64_metric(self):
+        results, frames = asset_pricing_kernel(use_float64=False)
 
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertEqual(results["residual_dtype"], "float32")
         self.assertEqual(results["metric_dtype"], "float64")
         self.assertEqual(set(frames["train_df"].dtypes.astype(str)), {"float32"})
 
-    def test_optimal_advertising_smoke(self):
+    def test_optimal_advertising_kernel_smoke(self):
         results, extras = optimal_advertising_kernel()
-
-        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
-        self.assertLess(results["max_train_residual"], 1e-8)
-        self.assertAlmostEqual(results["gamma"], 0.32)
-        self.assertTrue((extras["test_df"]["u"] > 0.0).all())
-
-    def test_optimal_advertising_nlls_smoke(self):
-        results, extras = optimal_advertising_kernel_nlls()
 
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertLess(results["max_train_residual"], 1e-8)
@@ -1265,22 +506,8 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(results["gamma"], 0.32)
         self.assertTrue((extras["test_df"]["u"] > 0.0).all())
 
-    def test_human_capital_smoke(self):
-        h_0, c_0, residual, _ = human_capital_initial_conditions()
-        self.assertAlmostEqual(float(h_0), 1.3745155888757778, places=10)
-        self.assertLess(float(jnp.linalg.norm(residual, ord=jnp.inf)), 1e-12)
-
+    def test_human_capital_kernel_smoke(self):
         results, extras = human_capital_kernel()
-
-        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
-        self.assertEqual(results["num_train_points"], 81)
-        self.assertAlmostEqual(results["h_0"], 1.3745155888757778, places=10)
-        self.assertLess(results["max_train_residual"], 1e-8)
-        self.assertLess(results["max_test_feasibility"], 1e-3)
-        self.assertTrue((extras["test_df"]["c"] > 0.0).all())
-
-    def test_human_capital_nlls_smoke(self):
-        results, extras = human_capital_kernel_nlls()
 
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertEqual(results["num_train_points"], 81)
@@ -1321,50 +548,14 @@ class NNSmokeTests(unittest.TestCase):
         self.assertTrue((frames["test_df"]["k"] > 0.0).all())
         self.assertIn("nn_set", frames["hyperparameters"])
 
-    @unittest.skipUnless(
-        NN_DAE_DRIVERS_AVAILABLE, "tinydiffeq-dependent drivers unavailable"
-    )
-    def test_neoclassical_growth_nn_integrated_rff_smoke(self):
-        results, frames = neoclassical_growth_nn_integrated(
+    def test_recursive_nn_smoke(self):
+        results, extras = neoclassical_growth_nn_recursive(
             verbose=False,
             measure_compilation=False,
-            data_set=IntegratedNNDataSettings(
-                train_T=10.0,
-                train_points=11,
-                test_T=10.0,
-                test_points=21,
-                test_tvc_T=50.0,
-                integration_substeps=4,
-            ),
-            nn_set=IntegratedNNSettings(
-                approximation="rff",
-                width=1024,
-                rff_kernel="matern12",
-                rff_radius=10.0,
-                rff_sigma=1.0,
-            ),
-            stop_set=IntegratedNNStoppingCriteria(
-                max_steps=120,
-                train_loss_threshold=1e-8,
-                num_attempts=1,
-            ),
-        )
-
-        self.assertEqual(results["approximation"], "rff")
-        self.assertTrue(results["solution_accepted"], results["stopping_reason"])
-        self.assertLess(results["test_mean_abs_k_rel_error"], 5e-2)
-
-    @unittest.skipUnless(
-        NN_DAE_DRIVERS_AVAILABLE, "tinydiffeq-dependent drivers unavailable"
-    )
-    def test_recursive_i_smoke(self):
-        results, extras = neoclassical_growth_nn_recursive_i(
-            verbose=False,
-            measure_compilation=False,
-            data_set=RecursiveIDataSettings(
+            data_set=RecursiveNNDataSettings(
                 dt=2.0, train_T=20.0, train_tvc_T=100.0, test_T=20.0
             ),
-            stop_set=RecursiveIStoppingCriteria(max_steps=200, num_attempts=1),
+            stop_set=RecursiveNNStoppingCriteria(max_steps=200, num_attempts=1),
         )
 
         self.assertTrue(results["solution_accepted"], results["stopping_reason"])
@@ -1372,6 +563,32 @@ class NNSmokeTests(unittest.TestCase):
         self.assertLess(results["test_mean_abs_k_rel_error"], 5e-2)
         self.assertGreater(results["min_test_c"], 0.0)
         self.assertIn("i_nn", extras["policy_df"].columns)
+
+    def test_recursive_nn_butterfly_smoke(self):
+        results, _ = neoclassical_growth_nn_recursive(
+            k_0=1.5,
+            A=0.5,
+            b_1=3.0,
+            b_2=2.5,
+            verbose=False,
+            measure_compilation=False,
+            data_set=RecursiveNNDataSettings(
+                dt=2.0,
+                train_T=20.0,
+                train_tvc_T=100.0,
+                test_T=20.0,
+                settle_T=200.0,
+            ),
+            stop_set=RecursiveNNStoppingCriteria(max_steps=200, num_attempts=1),
+        )
+
+        self.assertTrue(results["solution_accepted"], results["stopping_reason"])
+        self.assertTrue(results["basin_correct"])
+        self.assertFalse(results["false_positive"])
+        self.assertLess(
+            abs(results["k_settled"] - results["k_ss_low"]),
+            0.05 * results["k_thr"],
+        )
 
 
 if __name__ == "__main__":

@@ -8,23 +8,33 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-import unopy
+from nlls_gram import (
+    LevenbergMarquardt,
+    LMStatus,
+    metric_from_cholesky,
+    metric_from_diagonal,
+    metric_with_compute_dtype,
+    repeated_blockdiag_metric,
+)
 
-from kernels import integrated_kernel_matrices
-from rkhs import rkhs_norm_squared
+from kernels import integrated_kernel_matrices, normalize_kernel
 
 if __name__ == "__main__":
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
 
-ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
 TRAIN_RESIDUAL_TOL = 1e-8
 DOMAIN_EPS = 1e-8
+STATUS_TO_REASON = {
+    LMStatus.CONVERGED: "converged",
+    LMStatus.NONFINITE: "nonfinite",
+    LMStatus.MAX_STEPS: "max_steps",
+}
 
 
 @dataclass(frozen=True)
 class KernelSettings:
-    nu: float = 0.5  # math.inf selects the Gaussian/RBF kernel
+    kernel: str = "matern12"
     ell: float = 15.0
     sigma: float = 1.0
 
@@ -36,13 +46,17 @@ class DataSettings:
     train_points_list: list[float] | None = None
     test_T: float = 50.0
     test_points: int = 100
+    validation_points: int = 300
 
 
 @dataclass(frozen=True)
 class SolverSettings:
-    preset: str = "ipopt"
-    max_iterations: int | None = None
-    time_limit: float | None = None
+    init_damping: float = 1e-8
+    damping_decrease: float = 0.1
+    damping_increase: float = 4.0
+    max_steps: int = 50
+    residual_atol: float = 1e-10
+    metric_eps: float = 1e-7
 
 
 def optimal_advertising_kernel(
@@ -51,45 +65,52 @@ def optimal_advertising_kernel(
     beta: float = 0.05,
     kappa: float = 0.5,
     x_0: float = 0.4,
+    use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
-    solver_set: SolverSettings = SolverSettings(),
+    lm_set: SolverSettings = SolverSettings(),
     verbose: bool = False,
 ):
-    nu, ell, sigma = kernel_set.nu, kernel_set.ell, kernel_set.sigma
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    dtype = jnp.float64 if use_float64 else jnp.float32
+    kernel = normalize_kernel(kernel_set.kernel)
+    ell, sigma = kernel_set.ell, kernel_set.sigma
     if data_set.train_points_list is None:
-        train_data = jnp.linspace(0, data_set.train_T, data_set.train_points)
+        train_data = jnp.linspace(
+            0.0, data_set.train_T, data_set.train_points, dtype=dtype
+        )
     else:
-        train_data = jnp.array(data_set.train_points_list)
-    test_data = jnp.linspace(0, data_set.test_T, data_set.test_points)
-
+        train_data = jnp.sort(jnp.asarray(data_set.train_points_list, dtype=dtype))
+    test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
+    validation_data = jnp.linspace(
+        0.0,
+        data_set.train_T,
+        max(data_set.test_points, data_set.validation_points),
+        dtype=dtype,
+    )
     n_train = len(train_data)
-    K, K_tilde = integrated_kernel_matrices(train_data, train_data, nu, sigma, ell)
-    K = np.asarray((K + K.T) / 2)
-    K_tilde = np.asarray(K_tilde)
-    K_jax = jnp.asarray(K)
-    K_tilde_jax = jnp.asarray(K_tilde)
+    eps = lm_set.metric_eps
+    if eps <= 0.0:
+        raise ValueError("metric_eps must be positive")
 
-    n_variables = 3 * n_train + 2
-    n_constraints = 4 * n_train
+    metric_data = train_data.astype(jnp.float64)
+    K_metric, K_tilde_metric = integrated_kernel_matrices(
+        metric_data, metric_data, kernel, sigma, ell
+    )
+    K_metric = (K_metric + K_metric.T) / 2
+    K = K_metric.astype(dtype)
+    K_tilde = K_tilde_metric.astype(dtype)
+    alpha_metric = metric_from_cholesky(
+        jnp.linalg.cholesky(K_metric + eps * jnp.eye(n_train, dtype=jnp.float64))
+    )
+
     gamma = (beta + rho_hat) / c
     control_power = (1.0 - kappa) / kappa
-    u_0_guess = max(beta * x_0 / max(1.0 - x_0, DOMAIN_EPS), DOMAIN_EPS)
-    mu_0_guess = max(gamma / (rho_hat + beta + u_0_guess), DOMAIN_EPS)
-    x_initial = np.zeros(n_variables, dtype=np.float64)
-    x_initial[3 * n_train] = mu_0_guess
-    x_initial[3 * n_train + 1] = u_0_guess
 
-    def unpack(z):
-        alpha_x = z[:n_train]
-        alpha_mu = z[n_train : 2 * n_train]
-        alpha_u = z[2 * n_train : 3 * n_train]
-        mu_0 = z[3 * n_train]
-        u_0 = z[3 * n_train + 1]
-        return alpha_x, alpha_mu, alpha_u, mu_0, u_0
-
-    def path_values(z, K_eval, K_tilde_eval):
-        alpha_x, alpha_mu, alpha_u, mu_0, u_0 = unpack(z)
+    def path_values(theta, K_eval, K_tilde_eval):
+        alpha_x, alpha_mu, alpha_u, initial = theta
+        mu_0, u_0 = initial
         x = x_0 + K_tilde_eval @ alpha_x
         mu = mu_0 + K_tilde_eval @ alpha_mu
         u = u_0 + K_tilde_eval @ alpha_u
@@ -97,179 +118,135 @@ def optimal_advertising_kernel(
         dmu_dt = K_eval @ alpha_mu
         return x, mu, u, dx_dt, dmu_dt
 
-    def objective(z):
-        alpha_x, alpha_mu, alpha_u, _, _ = unpack(z)
-        return (
-            alpha_x @ K_jax @ alpha_x
-            + alpha_mu @ K_jax @ alpha_mu
-            + alpha_u @ K_jax @ alpha_u
-        )
-
-    def residuals(x, mu, u, dx_dt, dmu_dt):
+    def residuals(values):
+        x, mu, u, dx_dt, dmu_dt = values
         state = dx_dt - ((1.0 - x) * u - beta * x)
         costate = dmu_dt - (-gamma + (rho_hat + beta) * mu + mu * u)
         shadow_price = u**control_power - kappa * mu * (1.0 - x)
         return state, costate, shadow_price
 
-    def constraints(z):
-        x, mu, u, dx_dt, dmu_dt = path_values(z, K_jax, K_tilde_jax)
-        state, costate, shadow_price = residuals(x, mu, u, dx_dt, dmu_dt)
-        return jnp.concatenate([state, costate, shadow_price, u])
+    residual_scale = 1.0 / jnp.sqrt(3.0 * n_train)
 
-    def lagrangian(z, objective_multiplier, multipliers):
-        return objective_multiplier * objective(z) + jnp.dot(
-            multipliers, constraints(z)
+    def residual_fn(theta):
+        return residual_scale * jnp.concatenate(
+            residuals(path_values(theta, K, K_tilde))
         )
 
-    objective_value = jax.jit(objective)
-    objective_gradient = jax.jit(jax.grad(objective))
-    constraint_values = jax.jit(constraints)
-    constraint_jacobian = jax.jit(jax.jacfwd(constraints))
-    lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
-
-    x_initial_jax = jnp.asarray(x_initial)
-    zero_multipliers = jnp.zeros(n_constraints, dtype=jnp.float64)
-    jax.block_until_ready(objective_value(x_initial_jax))
-    jax.block_until_ready(objective_gradient(x_initial_jax))
-    jax.block_until_ready(constraint_values(x_initial_jax))
-    jax.block_until_ready(constraint_jacobian(x_initial_jax))
-    jax.block_until_ready(lagrangian_hessian(x_initial_jax, 1.0, zero_multipliers))
-
-    variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
-    variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
-    variable_lower_bounds[3 * n_train] = 0.0
-    variable_lower_bounds[3 * n_train + 1] = DOMAIN_EPS
-    constraint_lower_bounds = np.concatenate(
-        [
-            np.zeros(3 * n_train, dtype=np.float64),
-            np.full(n_train, DOMAIN_EPS, dtype=np.float64),
-        ]
+    metric = metric_with_compute_dtype(
+        repeated_blockdiag_metric(
+            alpha_metric,
+            n_train,
+            3,
+            additional=(
+                metric_from_diagonal(jnp.full(2, eps, dtype=jnp.float64)),
+                2,
+            ),
+        ),
+        jnp.float64,
     )
-    constraint_upper_bounds = np.concatenate(
-        [
-            np.zeros(3 * n_train, dtype=np.float64),
-            np.full(n_train, np.inf, dtype=np.float64),
-        ]
+    u_0_guess = max(beta * x_0 / max(1.0 - x_0, DOMAIN_EPS), DOMAIN_EPS)
+    mu_0_guess = max(gamma / (rho_hat + beta + u_0_guess), DOMAIN_EPS)
+    theta_0 = (
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.asarray([mu_0_guess, u_0_guess], dtype=dtype),
+    )
+    solver = LevenbergMarquardt(
+        residual_fn,
+        init_damping=lm_set.init_damping,
+        damping_decrease=lm_set.damping_decrease,
+        damping_increase=lm_set.damping_increase,
+        linear_solve_dtype=jnp.float64,
+        metric=metric,
     )
 
-    model = unopy.Model(
-        unopy.PROBLEM_NONLINEAR,
-        n_variables,
-        variable_lower_bounds,
-        variable_upper_bounds,
-        unopy.ZERO_BASED_INDEXING,
-    )
-
-    def objective_callback(z):
-        return float(objective_value(jnp.asarray(z)))
-
-    def objective_gradient_callback(z, gradient):
-        gradient[:] = np.asarray(objective_gradient(jnp.asarray(z)))
-
-    model.set_objective(unopy.MINIMIZE, objective_callback, objective_gradient_callback)
-
-    jacobian_rows = np.repeat(np.arange(n_constraints, dtype=np.int32), n_variables)
-    jacobian_columns = np.tile(np.arange(n_variables, dtype=np.int32), n_constraints)
-
-    def constraints_callback(z, constraint_output):
-        constraint_output[:] = np.asarray(constraint_values(jnp.asarray(z)))
-
-    def jacobian_callback(z, jacobian_output):
-        jacobian_output[:] = np.asarray(constraint_jacobian(jnp.asarray(z))).reshape(-1)
-
-    model.set_constraints(
-        n_constraints,
-        constraints_callback,
-        constraint_lower_bounds,
-        constraint_upper_bounds,
-        len(jacobian_rows),
-        jacobian_rows,
-        jacobian_columns,
-        jacobian_callback,
-    )
-
-    hessian_rows, hessian_columns = np.tril_indices(n_variables)
-    hessian_rows = hessian_rows.astype(np.int32)
-    hessian_columns = hessian_columns.astype(np.int32)
-
-    def hessian_callback(z, objective_multiplier, multipliers, hessian_output):
-        hessian = np.asarray(
-            lagrangian_hessian(
-                jnp.asarray(z),
-                float(objective_multiplier),
-                jnp.asarray(multipliers),
-            )
+    compile_start = time.perf_counter()
+    jax.block_until_ready(
+        solver.solve(
+            theta_0,
+            max_steps=1,
+            atol=lm_set.residual_atol,
+            max_steps_is_success=False,
         )
-        hessian_output[:] = hessian[hessian_rows, hessian_columns]
-
-    model.set_lagrangian_hessian(
-        len(hessian_rows),
-        unopy.LOWER_TRIANGLE,
-        hessian_rows,
-        hessian_columns,
-        hessian_callback,
     )
-    model.set_lagrangian_sign_convention(unopy.MULTIPLIER_POSITIVE)
-    model.set_initial_primal_iterate(x_initial)
-
-    solver = unopy.UnoSolver()
-    solver.set_preset(solver_set.preset)
-    if not verbose:
-        solver.set_option("logger", "SILENT")
-        solver.set_option("print_solution", False)
-    if solver_set.max_iterations is not None:
-        solver.set_option("max_iterations", solver_set.max_iterations)
-    if solver_set.time_limit is not None:
-        solver.set_option("time_limit", solver_set.time_limit)
+    compile_time = time.perf_counter() - compile_start
 
     start = time.perf_counter()
-    result = solver.optimize(model)
+    result = solver.solve(
+        theta_0,
+        max_steps=lm_set.max_steps,
+        atol=lm_set.residual_atol,
+        max_steps_is_success=False,
+    )
+    jax.block_until_ready(result)
     elapsed = time.perf_counter() - start
+    theta = result.x
+    alpha_x, alpha_mu, alpha_u, initial = theta
+    mu_0, u_0 = initial
 
-    z = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))
-    alpha_x, alpha_mu, alpha_u, mu_0, u_0 = unpack(z)
-
-    x_train, mu_train, u_train, dx_train, dmu_train = path_values(z, K_jax, K_tilde_jax)
-    state_res, costate_res, shadow_res = residuals(
-        x_train, mu_train, u_train, dx_train, dmu_train
-    )
-    max_train_residual = max(
-        float(jnp.max(jnp.abs(residual)))
-        for residual in (state_res, costate_res, shadow_res)
-    )
-
-    @jax.jit
-    def kernel_solution(test_points_data):
-        K_test, K_tilde_test = integrated_kernel_matrices(
-            test_points_data, train_data, nu, sigma, ell
+    def evaluate_grid(points):
+        K_eval, K_tilde_eval = integrated_kernel_matrices(
+            points, train_data, kernel, sigma, ell
         )
-        x_test, mu_test, u_test, _, _ = path_values(z, K_test, K_tilde_test)
-        return x_test, mu_test, u_test
+        values = path_values(theta, K_eval, K_tilde_eval)
+        state, costate, shadow_price = residuals(values)
+        x, mu, u, *_ = values
+        return {
+            "t": points,
+            "x": x,
+            "mu": mu,
+            "u": u,
+            "state": state,
+            "costate": costate,
+            "shadow_price": shadow_price,
+        }
 
-    x_test, mu_test, u_test = kernel_solution(test_data)
-
-    solve_time = result.cpu_time
-    if solve_time is None:
-        solve_time = elapsed
-    solver_status = str(result.optimization_status).split(".")[-1]
-    solution_status = str(result.solution_status).split(".")[-1]
+    train_eval = evaluate_grid(train_data)
+    validation_eval = evaluate_grid(validation_data)
+    test_eval = evaluate_grid(test_data)
+    residual_names = ("state", "costate", "shadow_price")
+    max_train_residual = max(
+        float(jnp.max(jnp.abs(train_eval[name]))) for name in residual_names
+    )
+    max_validation_residual = max(
+        float(jnp.max(jnp.abs(validation_eval[name]))) for name in residual_names
+    )
     finite_valid = bool(
-        jnp.all(jnp.isfinite(x_test))
-        and jnp.all(jnp.isfinite(mu_test))
-        and jnp.all(jnp.isfinite(u_test))
-        and jnp.min(u_test) > 0.0
+        all(
+            jnp.all(jnp.isfinite(grid[name]))
+            for grid in (train_eval, validation_eval, test_eval)
+            for name in ("x", "mu", "u")
+        )
+        and all(
+            jnp.min(grid["u"]) > 0.0
+            for grid in (train_eval, validation_eval, test_eval)
+        )
+    )
+    train_residual_tolerance = max(
+        TRAIN_RESIDUAL_TOL,
+        8.0 * float(jnp.finfo(dtype).eps),
     )
     rejection_reasons = []
-    if solver_status != "SUCCESS":
-        rejection_reasons.append("solver_status")
-    if solution_status not in ACCEPTED_SOLUTION_STATUSES:
-        rejection_reasons.append("solution_status")
     if not finite_valid:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > TRAIN_RESIDUAL_TOL:
+    if max_train_residual > train_residual_tolerance:
         rejection_reasons.append("train_residual")
     solution_accepted = not rejection_reasons
 
+    @jax.jit
+    def kernel_solution(points):
+        K_eval, K_tilde_eval = integrated_kernel_matrices(
+            points, train_data, kernel, sigma, ell
+        )
+        x, mu, u, *_ = path_values(theta, K_eval, K_tilde_eval)
+        return x, mu, u
+
+    rkhs_norms = {
+        "x": alpha_metric.norm(alpha_x) ** 2 - eps * (alpha_x @ alpha_x),
+        "mu": alpha_metric.norm(alpha_mu) ** 2 - eps * (alpha_mu @ alpha_mu),
+        "u": alpha_metric.norm(alpha_u) ** 2 - eps * (alpha_u @ alpha_u),
+    }
     results = {
         "rho_hat": rho_hat,
         "c": c,
@@ -277,7 +254,9 @@ def optimal_advertising_kernel(
         "kappa": kappa,
         "x_0": x_0,
         "gamma": gamma,
-        "nu": nu,
+        "residual_dtype": str(jnp.dtype(dtype)),
+        "metric_dtype": "float64",
+        "kernel": kernel,
         "ell": ell,
         "sigma": sigma,
         "train_T": float(train_data[-1]),
@@ -286,46 +265,38 @@ def optimal_advertising_kernel(
         "test_points": data_set.test_points,
         "mu_0": float(mu_0),
         "u_0": float(u_0),
-        "rkhs_norm_x": rkhs_norm_squared(alpha_x, K),
-        "rkhs_norm_mu": rkhs_norm_squared(alpha_mu, K),
-        "rkhs_norm_u": rkhs_norm_squared(alpha_u, K),
+        **{f"rkhs_norm_{name}": float(value) for name, value in rkhs_norms.items()},
         "max_train_residual": max_train_residual,
-        "solve_time": solve_time,
+        "train_residual_tolerance": train_residual_tolerance,
+        "max_validation_residual": max_validation_residual,
+        "solve_time": elapsed,
         "wall_time": elapsed,
-        "solver_status": solver_status,
-        "solution_status": solution_status,
-        "stationarity": result.solution_stationarity,
-        "primal_feasibility": result.solution_primal_feasibility,
+        "solver": "nlls-gram",
+        "linear_solver": "auto",
+        "metric_eps": eps,
+        "train_loss": float(result.info.loss),
+        "steps": int(result.steps),
+        "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
+        "compile_time": compile_time,
         "solution_accepted": solution_accepted,
-        "rejection_reason": "accepted"
-        if solution_accepted
-        else ",".join(rejection_reasons),
+        "rejection_reason": (
+            "accepted" if solution_accepted else ",".join(rejection_reasons)
+        ),
     }
-    print(f"solve_time(s) = {solve_time}")
+    if verbose:
+        print(f"solve_time(s) = {elapsed}")
 
+    frame_columns = ("t", "x", "mu", "u", "state", "costate", "shadow_price")
     train_df = pd.DataFrame(
-        {
-            "t": np.asarray(train_data),
-            "x": np.asarray(x_train),
-            "mu": np.asarray(mu_train),
-            "u": np.asarray(u_train),
-            "state": np.asarray(state_res),
-            "costate": np.asarray(costate_res),
-            "shadow_price": np.asarray(shadow_res),
-        }
+        {name: np.asarray(train_eval[name]) for name in frame_columns}
     )
     test_df = pd.DataFrame(
-        {
-            "t": np.asarray(test_data),
-            "x": np.asarray(x_test),
-            "mu": np.asarray(mu_test),
-            "u": np.asarray(u_test),
-        }
+        {name: np.asarray(test_eval[name]) for name in frame_columns}
     )
     hyperparameters = {
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
-        "solver_set": asdict(solver_set),
+        "lm_set": asdict(lm_set),
         "parameters": {
             "rho_hat": rho_hat,
             "c": c,

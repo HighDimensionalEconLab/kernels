@@ -21,20 +21,12 @@ enable_compilation_cache()
 
 PREFIX = "neoclassical_growth_concave_convex_kernel"
 
-# Isolated initial conditions (k_0 ~ 0.70 and ~1.05) fail the fail-fast ipopt
-# solve from the flat warm start; the filtersqp preset solves them cleanly to
-# the same low-basin solution the neighbors reach.
-KINKED_RETRIES = (
-    dict(solver_set=dict(preset="filtersqp", max_iterations=50, time_limit=2.0)),
-)
-
 
 def run(
     output_dir: str = ".results",
     k_0_min: float = 0.5,
     k_0_max: float = 4.0,
     n_points: int = 70,  # QE caption: 70 initial conditions, all converging
-    verbose: bool = False,
 ):
     grid = np.linspace(k_0_min, k_0_max, n_points)
     print(f"threshold sweep: {n_points} initial conditions -> {output_dir}/")
@@ -42,8 +34,7 @@ def run(
         neoclassical_growth_concave_convex_kernel.neoclassical_growth_concave_convex_kernel,
         "k_0",
         [float(k_0) for k_0 in grid],
-        options={"verbose": verbose},
-        retries=KINKED_RETRIES,
+        options={},
     )
 
     # Ex-post basin classification of each finite-horizon path (side of the

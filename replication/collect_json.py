@@ -122,6 +122,13 @@ NU_RHO_COLUMNS = [
     "c_rel_error_min",
 ]
 
+KERNEL_NU = {
+    "matern12": 0.5,
+    "matern32": 1.5,
+    "matern52": 2.5,
+    "rbf": "inf",
+}
+
 
 def write_nu_rho_table(out):
     # Same layout as the original pandas to_latex output (booktabs, %.1e cells);
@@ -199,18 +206,20 @@ def neoclassical_growth_kernel(out):
     robustness_table = {}
     for name, _, ell in NU_RHO_ROWS:
         j = load(out, f"{prefix}_{name}")
-        nu = med(j["nu"])
+        experiment_hp = load(out, f"{prefix}_{name}_hyperparameters")
+        kernel_name = experiment_hp["kernel_set"]["kernel"]
         robustness_table[name if name != "baseline" else "nu05_ell10"] = {
-            "nu": "inf"
-            if nu is None or (isinstance(nu, float) and math.isinf(nu))
-            else nu,
+            "kernel": kernel_name,
+            "nu": KERNEL_NU[kernel_name],
             "ell": ell,
             **errors(j),
         }
 
+    baseline_kernel = hp["kernel_set"]["kernel"]
     return {
         "kernel": {
-            "nu": hp["kernel_set"]["nu"],
+            "name": baseline_kernel,
+            "nu": KERNEL_NU[baseline_kernel],
             "ell": hp["kernel_set"]["ell"],
             "sigma": hp["kernel_set"]["sigma"],
         },
@@ -309,6 +318,7 @@ def optimal_advertising_kernel(out):
     prefix = "optimal_advertising_kernel"
     j = load(out, f"{prefix}_baseline")
     hp = load(out, f"{prefix}_baseline_hyperparameters")
+    kernel_name = hp["kernel_set"]["kernel"]
     return {
         "parameters": {
             "rho_hat": hp["parameters"]["rho_hat"],
@@ -320,7 +330,8 @@ def optimal_advertising_kernel(out):
         },
         # ell differs from the headline ell = 10 used elsewhere.
         "kernel": {
-            "nu": hp["kernel_set"]["nu"],
+            "name": kernel_name,
+            "nu": KERNEL_NU[kernel_name],
             "ell": hp["kernel_set"]["ell"],
             "sigma": hp["kernel_set"]["sigma"],
         },
@@ -374,17 +385,6 @@ def neoclassical_growth_nn_recursive(out):
     accepted = baseline_df[baseline_df["solution_accepted"]]
     hp = load(out, f"{prefix}_baseline_hyperparameters")
 
-    tolerance_df = pd.read_parquet(out / f"{prefix}_tolerance_sweep_results.parquet")
-    tolerance_sweep = {}
-    for rtol, group in tolerance_df.groupby("rtol"):
-        group_accepted = group[group["solution_accepted"]]
-        tolerance_sweep[f"{rtol:g}"] = {
-            "frac_accepted": sig(float(group["solution_accepted"].mean())),
-            "test_mean_abs_k_rel_error_median": sci(
-                float(group_accepted["test_mean_abs_k_rel_error"].median())
-            ),
-        }
-
     bf_hp = load(out, f"{prefix}_butterfly_basin_hyperparameters")
     bf = load(out, f"{prefix}_butterfly_basin")
     bf_df = pd.read_parquet(out / f"{prefix}_butterfly_basin_results.parquet")
@@ -426,8 +426,7 @@ def neoclassical_growth_nn_recursive(out):
                 ),
                 "rtol": hp["data_set"]["rtol"],
                 "k_ss": sig(med(baseline_json["k_ss"]), 4),
-            },
-            "tolerance_sweep": tolerance_sweep,
+            }
         },
         "butterfly": {
             "parameters": {
@@ -450,113 +449,6 @@ def neoclassical_growth_nn_recursive(out):
             "frac_correct_by_k_0": {
                 f"{k_0:g}": sig(float(value)) for k_0, value in frac_by_k0.items()
             },
-        },
-    }
-
-
-def kernel_vs_nn(out):
-    prefix = "kernel_vs_nn"
-
-    def per_count(name, points_column, error_column):
-        df = pd.read_parquet(out / f"{prefix}_{name}_results.parquet")
-        block = {}
-        for count, group in df.groupby(points_column):
-            accepted = group[group["solution_accepted"]]
-            entry = {"frac_accepted": sig(float(group["solution_accepted"].mean()))}
-            if len(accepted):
-                entry["k_rel_error_median"] = sci(
-                    float(accepted[error_column].median())
-                )
-            block[str(int(count))] = entry
-        return block
-
-    def basin(prefix_name, name):
-        df = pd.read_parquet(out / f"{prefix_name}_{name}_results.parquet")
-        frac_by_k0 = df.groupby("k_0")["basin_correct"].mean()
-        return {
-            "frac_basin_correct": sig(float(df["basin_correct"].mean())),
-            "frac_correct_by_k_0": {
-                f"{k_0:g}": sig(float(value)) for k_0, value in frac_by_k0.items()
-            },
-        }
-
-    # Timing table: like compared with like. Kernel cost is wall_time (includes
-    # Gram construction / quadrature; the UNO cpu_time excludes it) at 41 train
-    # points; NN cost is train_time (gradient descent only) at 41 points with
-    # compile_time reported separately (persistent-cache warm).
-    kernel_df = pd.read_parquet(out / f"{prefix}_kernel_points_sweep_results.parquet")
-    kernel_41 = kernel_df[kernel_df["train_points"] == 41].iloc[0]
-
-    def nn_timing(name):
-        df = pd.read_parquet(out / f"{prefix}_{name}_results.parquet")
-        at_41 = df[(df["train_points"] == 41) & df["solution_accepted"]]
-        return {
-            "train_time_median": sig(float(at_41["train_time"].median())),
-            "compile_time_median": sig(float(at_41["compile_time"].median())),
-        }
-
-    def recursive_timing():
-        # Accepted-only medians, matching nn_timing's like-for-like basis.
-        df = pd.read_parquet(
-            out / "neoclassical_growth_nn_recursive_baseline_results.parquet"
-        )
-        accepted = df[df["solution_accepted"]]
-        return {
-            "train_time_median": sig(float(accepted["train_time"].median())),
-            "compile_time_median": sig(float(accepted["compile_time"].median())),
-        }
-
-    hp_nn = load(out, f"{prefix}_nn_direct_points_sweep_hyperparameters")
-    j_direct = load(out, f"{prefix}_nn_direct_points_sweep")
-    return {
-        "n_seeds": int(j_direct["n_seeds"]),
-        "architecture": {
-            "width": hp_nn["nn_set"]["width"],
-            "depth": hp_nn["nn_set"]["depth"],
-            "hidden_activation": hp_nn["nn_set"]["hidden_activation"],
-        },
-        "stopping": {
-            "train_loss_threshold": hp_nn["stop_set"]["train_loss_threshold"],
-            "max_steps": hp_nn["stop_set"]["max_steps"],
-        },
-        "points_sweep": {
-            "kernel": per_count(
-                "kernel_points_sweep", "train_points", "k_rel_error_mean"
-            ),
-            "nn_direct": per_count(
-                "nn_direct_points_sweep", "train_points", "test_mean_abs_k_rel_error"
-            ),
-            "nn_integrated_mlp": per_count(
-                "nn_integrated_mlp_points_sweep",
-                "train_points",
-                "test_mean_abs_k_rel_error",
-            ),
-            "nn_integrated_rff": per_count(
-                "nn_integrated_rff_points_sweep",
-                "train_points",
-                "test_mean_abs_k_rel_error",
-            ),
-        },
-        "basin": {
-            "kernel": basin(prefix, "basin_kernel"),
-            "nn_direct": basin(prefix, "basin_nn_direct"),
-            "nn_recursive": basin(
-                "neoclassical_growth_nn_recursive", "butterfly_basin"
-            ),
-        },
-        "timing": {
-            "definitions": (
-                "kernel_wall_time includes Gram construction and the NLP solve; "
-                "NN train_time is optimizer time only, with jit compile_time "
-                "reported separately (warm persistent cache). All at 41 "
-                "training points; the recursive solver uses its baseline run."
-            ),
-            "kernel_wall_time": sig(float(kernel_41["wall_time"]), 2),
-            "kernel_solve_time": sig(float(kernel_41["solve_time"]), 2),
-            "nn_direct": nn_timing("nn_direct_points_sweep"),
-            "nn_integrated_mlp": nn_timing("nn_integrated_mlp_points_sweep"),
-            "nn_integrated_rff": nn_timing("nn_integrated_rff_points_sweep"),
-            "nn_recursive": recursive_timing(),
         },
     }
 
@@ -590,7 +482,6 @@ def collect(output_dir: str = ".results"):
             "optimal_advertising_kernel": optimal_advertising_kernel(out),
             "human_capital_kernel": human_capital_kernel(out),
             "neoclassical_growth_nn_recursive": neoclassical_growth_nn_recursive(out),
-            "kernel_vs_nn": kernel_vs_nn(out),
         }
     )
     # allow_nan=False guarantees the output is strict JSON (any NaN raises here).

@@ -8,26 +8,36 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-import unopy
+from nlls_gram import (
+    LevenbergMarquardt,
+    LMStatus,
+    metric_from_cholesky,
+    metric_from_diagonal,
+    metric_with_compute_dtype,
+    repeated_blockdiag_metric,
+)
 
-from kernels import integrated_kernel_matrices
+from kernels import integrated_kernel_matrices, normalize_kernel
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
-from rkhs import rkhs_norm_squared
 
 if __name__ == "__main__":
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
 
-ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
 TRAIN_RESIDUAL_TOL = 1e-5
 VALIDATION_RESIDUAL_TOL = 5e-3
 MPK_BOUND_TOL = 1e-3
 DOMAIN_EPS = 1e-6
+STATUS_TO_REASON = {
+    LMStatus.CONVERGED: "converged",
+    LMStatus.NONFINITE: "nonfinite",
+    LMStatus.MAX_STEPS: "max_steps",
+}
 
 
 @dataclass(frozen=True)
 class KernelSettings:
-    nu: float = 0.5  # math.inf selects the Gaussian/RBF kernel
+    kernel: str = "matern12"  # matern12 | matern32 | matern52 | rbf
     ell: float = 10.0
     sigma: float = 1.0
 
@@ -43,16 +53,29 @@ class DataSettings:
     benchmark_points: int = 300
 
 
+# The residual is nonlinear (production, mu*c products) but mildly so: with
+# near-Gauss-Newton damping (tiny init, fast decrease) and geodesic
+# acceleration (library default) the solve lands in 4-25 steps, where a
+# cautious damping schedule needed 100+.
 @dataclass(frozen=True)
 class SolverSettings:
-    preset: str = "ipopt"
-    max_iterations: int | None = None
-    time_limit: float | None = None
-
-
-# Kinked production needs the fail-fast budget: near the basin threshold the NLP
-# can wander, and the sweep classifies a slow solve as rejected.
-KINKED_SOLVER_SETTINGS = SolverSettings(max_iterations=25, time_limit=0.15)
+    init_damping: float = 1e-8
+    damping_decrease: float = 0.1
+    damping_increase: float = 4.0
+    max_steps: int = 50
+    residual_atol: float = 2e-8  # on the 1/sqrt(3n)-scaled residual norm
+    # The single shift of the unified metric M = blockdiag(K, K, K, 0) +
+    # eps I: every kernel block is factored as K + eps I and the free
+    # (c_0, mu_0) carry weight eps, so ||M^{-1}|| = 1/eps uniformly in n and
+    # the min-M-norm interpolant is O(eps) from the pure RKHS-seminorm
+    # solution with free initial values. Selection-side only; every
+    # solver/representation combination uses the same eps so their selections
+    # agree. The default balances the ends of the measured working range:
+    # larger shifts visibly bias the near-singular smooth Grams (rbf), while
+    # below ~1e-8 the
+    # (1/eps)-weighted dual spike outruns the inner CG budget. Tuning:
+    # https://highdimensionaleconlab.github.io/nlls_gram/tuning_guide/#the-metric
+    metric_eps: float = 1e-7
 
 
 def neoclassical_growth_kernel(
@@ -63,12 +86,15 @@ def neoclassical_growth_kernel(
     A: float | None = None,
     b_1: float | None = None,
     b_2: float | None = None,
+    use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
-    solver_set: SolverSettings | None = None,
+    lm_set: SolverSettings = SolverSettings(),
     c_0_guess: float | None = None,  # overrides the flat steady-flow warm start
-    verbose: bool = False,
 ):
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    dtype = jnp.float64 if use_float64 else jnp.float32
     kinked_parameter_count = sum(parameter is not None for parameter in (A, b_1, b_2))
     if kinked_parameter_count not in {0, 3}:
         raise ValueError("Set all of A, b_1, and b_2, or set none of them.")
@@ -76,53 +102,42 @@ def neoclassical_growth_kernel(
     A_value = 1.0 if A is None else float(A)
     b_1_value = 1.0 if b_1 is None else float(b_1)
     b_2_value = 0.0 if b_2 is None else float(b_2)
-    if solver_set is None:
-        solver_set = (
-            KINKED_SOLVER_SETTINGS if use_kinked_production else SolverSettings()
-        )
 
-    nu, ell, sigma = kernel_set.nu, kernel_set.ell, kernel_set.sigma
+    kernel = normalize_kernel(kernel_set.kernel)
+    ell, sigma = kernel_set.ell, kernel_set.sigma
     if data_set.train_points_list is None:
-        train_data = jnp.linspace(0, data_set.train_T, data_set.train_points)
+        train_data = jnp.linspace(
+            0, data_set.train_T, data_set.train_points, dtype=dtype
+        )
     else:
-        train_data = jnp.array(data_set.train_points_list)
-    test_data = jnp.linspace(0, data_set.test_T, data_set.test_points)
+        train_data = jnp.sort(jnp.array(data_set.train_points_list, dtype=dtype))
+    test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
     validation_points = max(data_set.test_points, data_set.benchmark_points)
-    validation_data = jnp.linspace(0, data_set.train_T, validation_points)
-    benchmark_grid = jnp.linspace(0, data_set.benchmark_T, data_set.benchmark_points)
-
+    validation_data = jnp.linspace(0, data_set.train_T, validation_points, dtype=dtype)
+    benchmark_grid = jnp.linspace(
+        0, data_set.benchmark_T, data_set.benchmark_points, dtype=dtype
+    )
     n_train = len(train_data)
-    K, K_tilde = integrated_kernel_matrices(train_data, train_data, nu, sigma, ell)
-    K = np.asarray((K + K.T) / 2)
-    K_tilde = np.asarray(K_tilde)
-    K_jax = jnp.asarray(K)
-    K_tilde_jax = jnp.asarray(K_tilde)
 
-    n_variables = 3 * n_train + 2
-    n_constraints = 6 * n_train
+    eps = lm_set.metric_eps
+    if eps <= 0:
+        raise ValueError("metric_eps must be positive (the (c_0, mu_0) block needs PD)")
 
-    def initial_production(k_value):
-        if use_kinked_production:
-            return A_value * max(k_value**a, b_1_value * k_value**a - b_2_value)
-        return k_value**a
+    def production(k):
+        base = k**a
+        return A_value * jnp.maximum(base, b_1_value * base - b_2_value)
 
-    c_flow_guess = max(initial_production(k_0) - delta * k_0, DOMAIN_EPS)
-    if c_0_guess is not None:
-        c_flow_guess = max(float(c_0_guess), DOMAIN_EPS)
-    x_initial = np.zeros(n_variables, dtype=np.float64)
-    x_initial[3 * n_train] = c_flow_guess
-    x_initial[3 * n_train + 1] = 1.0 / c_flow_guess
+    def marginal_product(k):
+        base = k**a
+        branch = jnp.where(b_1_value * base - b_2_value > base, b_1_value, 1.0)
+        return A_value * a * branch * k ** (a - 1.0)
 
-    def unpack(x):
-        alpha_mu = x[:n_train]
-        alpha_c = x[n_train : 2 * n_train]
-        alpha_k = x[2 * n_train : 3 * n_train]
-        c_0 = x[3 * n_train]
-        mu_0 = x[3 * n_train + 1]
-        return alpha_mu, alpha_c, alpha_k, c_0, mu_0
-
-    def path_values(x, K_eval, K_tilde_eval):
-        alpha_mu, alpha_c, alpha_k, c_0, mu_0 = unpack(x)
+    # theta is the tuple (alpha_mu, alpha_c, alpha_k, (c_0, mu_0)), which
+    # flattens to [alpha_mu (n), alpha_c (n), alpha_k (n), c_0, mu_0] -- the
+    # block order of the metric below.
+    def path_values(theta, K_eval, K_tilde_eval):
+        alpha_mu, alpha_c, alpha_k, initial = theta
+        c_0, mu_0 = initial
         mu = mu_0 + K_tilde_eval @ alpha_mu
         c = c_0 + K_tilde_eval @ alpha_c
         k = k_0 + K_tilde_eval @ alpha_k
@@ -130,209 +145,152 @@ def neoclassical_growth_kernel(
         dk_dt = K_eval @ alpha_k
         return k, c, mu, dk_dt, dmu_dt
 
-    def production_scalar(k_scalar):
-        k_positive = jnp.maximum(k_scalar, DOMAIN_EPS)
-        z = k_positive**a
-        if use_kinked_production:
-            return A_value * jnp.maximum(z, b_1_value * z - b_2_value)
-        return z
+    metric_data = train_data.astype(jnp.float64)
+    K_metric, K_tilde_metric = integrated_kernel_matrices(
+        metric_data, metric_data, kernel, sigma, ell
+    )
+    K_metric = (K_metric + K_metric.T) / 2
+    K_jax = K_metric.astype(dtype)
+    K_tilde_jax = K_tilde_metric.astype(dtype)
 
-    production = jax.vmap(production_scalar)
-    marginal_product = jax.vmap(jax.grad(production_scalar))
+    def train_path_values(theta):
+        return path_values(theta, K_jax, K_tilde_jax)
 
-    def objective(x):
-        alpha_mu, alpha_c, alpha_k, _, _ = unpack(x)
-        return (
-            alpha_mu @ K_jax @ alpha_mu
-            + alpha_c @ K_jax @ alpha_c
-            + alpha_k @ K_jax @ alpha_k
-        )
+    alpha_metric = metric_from_cholesky(
+        jnp.linalg.cholesky(K_metric + eps * jnp.eye(n_train, dtype=jnp.float64))
+    )
 
-    def constraints(x):
-        k, c, mu, dk_dt, dmu_dt = path_values(x, K_jax, K_tilde_jax)
-        output = production(k)
-        mpk = marginal_product(k)
-        resource = dk_dt - (output - delta * k - c)
-        euler = dmu_dt + mu * (mpk - delta - rho_hat)
+    alpha_metric = metric_with_compute_dtype(alpha_metric, jnp.float64)
+
+    # The residual is scaled by 1/sqrt(3n) (the NN files' convention) so that
+    # residual_atol is a scale-free per-point bound rather than tightening
+    # with grid refinement.
+    residual_scale = 1.0 / jnp.sqrt(3.0 * n_train)
+
+    def residual_fn(theta):
+        k, c, mu, dk_dt, dmu_dt = train_path_values(theta)
+        resource = dk_dt - (production(k) - delta * k - c)
+        euler = dmu_dt + mu * (marginal_product(k) - delta - rho_hat)
         shadow_price = mu * c - 1.0
-        return jnp.concatenate([resource, euler, shadow_price, k, c, mu])
+        return residual_scale * jnp.concatenate([resource, euler, shadow_price])
 
-    def lagrangian(x, objective_multiplier, multipliers):
-        return objective_multiplier * objective(x) + jnp.dot(
-            multipliers, constraints(x)
+    # 3n nonlinear residuals in 3n + 2 unknowns: LM with the unified shifted
+    # metric M = blockdiag(K, K, K, 0) + eps I selects the interpolant
+    # minimizing the summed RKHS norms (the original objective) with free
+    # initial values (c_0, mu_0), up to an O(eps) selection shift.
+    metric = metric_with_compute_dtype(
+        repeated_blockdiag_metric(
+            alpha_metric,
+            n_train,
+            3,
+            additional=(
+                metric_from_diagonal(jnp.full(2, eps, dtype=jnp.float64)),
+                2,
+            ),
+        ),
+        jnp.float64,
+    )
+
+    c_flow_guess = max(production(k_0) - delta * k_0, DOMAIN_EPS)
+    if c_0_guess is not None:
+        c_flow_guess = max(float(c_0_guess), DOMAIN_EPS)
+    theta_0 = (
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.array([c_flow_guess, 1.0 / c_flow_guess], dtype=dtype),
+    )
+
+    solver = LevenbergMarquardt(
+        residual_fn,
+        init_damping=lm_set.init_damping,
+        damping_decrease=lm_set.damping_decrease,
+        damping_increase=lm_set.damping_increase,
+        linear_solve_dtype=jnp.float64,
+        metric=metric,
+    )
+
+    # The timed solve below reuses this solver instance, so its jit cache is
+    # warm; max_steps/atol are dynamic and do not recompile.
+    compile_start = time.perf_counter()
+    jax.block_until_ready(
+        solver.solve(
+            theta_0,
+            max_steps=1,
+            atol=lm_set.residual_atol,
+            max_steps_is_success=False,
         )
-
-    objective_value = jax.jit(objective)
-    objective_gradient = jax.jit(jax.grad(objective))
-    constraint_values = jax.jit(constraints)
-    constraint_jacobian = jax.jit(jax.jacfwd(constraints))
-    lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
-
-    x_initial_jax = jnp.asarray(x_initial)
-    zero_multipliers = jnp.zeros(n_constraints, dtype=jnp.float64)
-    jax.block_until_ready(objective_value(x_initial_jax))
-    jax.block_until_ready(objective_gradient(x_initial_jax))
-    jax.block_until_ready(constraint_values(x_initial_jax))
-    jax.block_until_ready(constraint_jacobian(x_initial_jax))
-    jax.block_until_ready(lagrangian_hessian(x_initial_jax, 1.0, zero_multipliers))
-
-    variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
-    variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
-    variable_lower_bounds[3 * n_train :] = DOMAIN_EPS
-    constraint_lower_bounds = np.concatenate(
-        [
-            np.zeros(3 * n_train, dtype=np.float64),
-            np.full(3 * n_train, DOMAIN_EPS, dtype=np.float64),
-        ]
     )
-    constraint_upper_bounds = np.concatenate(
-        [
-            np.zeros(3 * n_train, dtype=np.float64),
-            np.full(3 * n_train, np.inf, dtype=np.float64),
-        ]
-    )
-
-    model = unopy.Model(
-        unopy.PROBLEM_NONLINEAR,
-        n_variables,
-        variable_lower_bounds,
-        variable_upper_bounds,
-        unopy.ZERO_BASED_INDEXING,
-    )
-
-    def objective_callback(x):
-        return float(objective_value(jnp.asarray(x)))
-
-    def objective_gradient_callback(x, gradient):
-        gradient[:] = np.asarray(objective_gradient(jnp.asarray(x)))
-
-    model.set_objective(unopy.MINIMIZE, objective_callback, objective_gradient_callback)
-
-    jacobian_rows = np.repeat(np.arange(n_constraints, dtype=np.int32), n_variables)
-    jacobian_columns = np.tile(np.arange(n_variables, dtype=np.int32), n_constraints)
-
-    def constraints_callback(x, constraint_output):
-        constraint_output[:] = np.asarray(constraint_values(jnp.asarray(x)))
-
-    def jacobian_callback(x, jacobian_output):
-        jacobian_output[:] = np.asarray(constraint_jacobian(jnp.asarray(x))).reshape(-1)
-
-    model.set_constraints(
-        n_constraints,
-        constraints_callback,
-        constraint_lower_bounds,
-        constraint_upper_bounds,
-        len(jacobian_rows),
-        jacobian_rows,
-        jacobian_columns,
-        jacobian_callback,
-    )
-
-    hessian_rows, hessian_columns = np.tril_indices(n_variables)
-    hessian_rows = hessian_rows.astype(np.int32)
-    hessian_columns = hessian_columns.astype(np.int32)
-
-    def hessian_callback(x, objective_multiplier, multipliers, hessian_output):
-        hessian = np.asarray(
-            lagrangian_hessian(
-                jnp.asarray(x),
-                float(objective_multiplier),
-                jnp.asarray(multipliers),
-            )
-        )
-        hessian_output[:] = hessian[hessian_rows, hessian_columns]
-
-    model.set_lagrangian_hessian(
-        len(hessian_rows),
-        unopy.LOWER_TRIANGLE,
-        hessian_rows,
-        hessian_columns,
-        hessian_callback,
-    )
-    model.set_lagrangian_sign_convention(unopy.MULTIPLIER_POSITIVE)
-    model.set_initial_primal_iterate(x_initial)
-
-    solver = unopy.UnoSolver()
-    solver.set_preset(solver_set.preset)
-    if not verbose:
-        solver.set_option("logger", "SILENT")
-        solver.set_option("print_solution", False)
-    if solver_set.max_iterations is not None:
-        solver.set_option("max_iterations", solver_set.max_iterations)
-    if solver_set.time_limit is not None:
-        solver.set_option("time_limit", solver_set.time_limit)
+    compile_time = time.perf_counter() - compile_start
 
     start = time.perf_counter()
-    result = solver.optimize(model)
+    result = solver.solve(
+        theta_0,
+        max_steps=lm_set.max_steps,
+        atol=lm_set.residual_atol,
+        max_steps_is_success=False,
+    )
+    jax.block_until_ready(result)
     elapsed = time.perf_counter() - start
 
-    x = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))
-    alpha_mu, alpha_c, alpha_k, c_0, mu_0 = unpack(x)
-    rkhs_norms = {
-        "k": rkhs_norm_squared(alpha_k, K),
-        "c": rkhs_norm_squared(alpha_c, K),
-        "mu": rkhs_norm_squared(alpha_mu, K),
-    }
+    theta = result.x
+    alpha_mu, alpha_c, alpha_k, initial = theta
+    c_0, mu_0 = initial
+    steps = int(result.steps)
+    status = int(result.status)
 
     def evaluate_grid(points_data):
         K_eval, K_tilde_eval = integrated_kernel_matrices(
-            points_data, train_data, nu, sigma, ell
+            points_data, train_data, kernel, sigma, ell
         )
-        k_values, c_values, mu_values, dk_values, dmu_values = path_values(
-            x, K_eval, K_tilde_eval
-        )
-        output_values = production(k_values)
-        mpk_values = marginal_product(k_values)
-        k_positive = jnp.maximum(k_values, DOMAIN_EPS)
-        if use_kinked_production:
-            m1_values = A_value * a * k_positive ** (a - 1.0)
-            m2_values = b_1_value * m1_values
-        else:
-            m1_values = mpk_values
-            m2_values = mpk_values
-        implied_mpk = delta + rho_hat - dmu_values / mu_values
-        mpk_lower_bound = jnp.minimum(m1_values, m2_values)
-        mpk_upper_bound = jnp.maximum(m1_values, m2_values)
+        k, c, mu, dk_dt, dmu_dt = path_values(theta, K_eval, K_tilde_eval)
         return {
             "t": points_data,
-            "k": k_values,
-            "c": c_values,
-            "mu": mu_values,
-            "Y": output_values,
-            "resource": dk_values - (output_values - delta * k_values - c_values),
-            "euler": dmu_values + mu_values * (mpk_values - delta - rho_hat),
-            "shadow_price": mu_values * c_values - 1.0,
-            "mpk_lower_violation": jnp.maximum(mpk_lower_bound - implied_mpk, 0.0),
-            "mpk_upper_violation": jnp.maximum(implied_mpk - mpk_upper_bound, 0.0),
+            "k": k,
+            "c": c,
+            "mu": mu,
+            "Y": production(k),
+            "resource": dk_dt - (production(k) - delta * k - c),
+            "euler": dmu_dt + mu * (marginal_product(k) - delta - rho_hat),
+            "shadow_price": mu * c - 1.0,
         }
 
     train_eval = evaluate_grid(train_data)
     validation_eval = evaluate_grid(validation_data)
     test_eval = evaluate_grid(test_data)
 
-    residual_names = ["resource", "euler", "shadow_price"]
+    residual_names = ("resource", "euler", "shadow_price")
     max_train_residual = max(
         float(jnp.max(jnp.abs(train_eval[name]))) for name in residual_names
     )
     max_validation_residual = max(
         float(jnp.max(jnp.abs(validation_eval[name]))) for name in residual_names
     )
+
+    def mpk_violations(grid):
+        m1 = A_value * a * grid["k"] ** (a - 1.0)
+        m2 = b_1_value * m1
+        implied = marginal_product(grid["k"]) - grid["euler"] / grid["mu"]
+        lower = jnp.minimum(m1, m2)
+        upper = jnp.maximum(m1, m2)
+        return jnp.maximum(lower - implied, 0.0), jnp.maximum(implied - upper, 0.0)
+
+    train_lower, train_upper = mpk_violations(train_eval)
+    validation_lower, validation_upper = mpk_violations(validation_eval)
     p_lower_violation = max(
-        float(jnp.max(train_eval["mpk_lower_violation"])),
-        float(jnp.max(validation_eval["mpk_lower_violation"])),
+        float(jnp.max(train_lower)), float(jnp.max(validation_lower))
     )
     p_upper_violation = max(
-        float(jnp.max(train_eval["mpk_upper_violation"])),
-        float(jnp.max(validation_eval["mpk_upper_violation"])),
+        float(jnp.max(train_upper)), float(jnp.max(validation_upper))
     )
 
     @jax.jit
     def kernel_solution(test_points_data):
         K_test, K_tilde_test = integrated_kernel_matrices(
-            test_points_data, train_data, nu, sigma, ell
+            test_points_data, train_data, kernel, sigma, ell
         )
-        k_test, c_test, _, _, _ = path_values(x, K_test, K_tilde_test)
-        return k_test, c_test
+        k, c, _, _, _ = path_values(theta, K_test, K_tilde_test)
+        return k, c
 
     finite_positive = bool(
         all(
@@ -347,16 +305,7 @@ def neoclassical_growth_kernel(
         )
     )
 
-    solve_time = result.cpu_time
-    if solve_time is None:
-        solve_time = elapsed
-    solver_status = str(result.optimization_status).split(".")[-1]
-    solution_status = str(result.solution_status).split(".")[-1]
     rejection_reasons = []
-    if solver_status != "SUCCESS":
-        rejection_reasons.append("solver_status")
-    if solution_status not in ACCEPTED_SOLUTION_STATUSES:
-        rejection_reasons.append("solution_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
     if max_train_residual > TRAIN_RESIDUAL_TOL:
@@ -378,7 +327,9 @@ def neoclassical_growth_kernel(
         "b_1": b_1_value,
         "b_2": b_2_value,
         "use_kinked_production": use_kinked_production,
-        "nu": nu,
+        "residual_dtype": str(jnp.dtype(dtype)),
+        "metric_dtype": "float64",
+        "kernel": kernel,
         "ell": ell,
         "sigma": sigma,
         "train_T": float(train_data[-1]),
@@ -387,26 +338,36 @@ def neoclassical_growth_kernel(
         "test_points": data_set.test_points,
         "c_0": float(c_0),
         "mu_0": float(mu_0),
-        "rkhs_norm_k": rkhs_norms["k"],
-        "rkhs_norm_c": rkhs_norms["c"],
-        "rkhs_norm_mu": rkhs_norms["mu"],
+        # Jitter-free alpha' K alpha, matching the IPOPT report (the metric
+        # norm includes the nugget).
+        "rkhs_norm_k": float(
+            alpha_metric.norm(alpha_k) ** 2 - eps * (alpha_k @ alpha_k)
+        ),
+        "rkhs_norm_c": float(
+            alpha_metric.norm(alpha_c) ** 2 - eps * (alpha_c @ alpha_c)
+        ),
+        "rkhs_norm_mu": float(
+            alpha_metric.norm(alpha_mu) ** 2 - eps * (alpha_mu @ alpha_mu)
+        ),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
         "p_lower_violation": p_lower_violation,
         "p_upper_violation": p_upper_violation,
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_eval["euler"]))),
-        "solve_time": solve_time,
+        "solve_time": elapsed,
         "wall_time": elapsed,
-        "solver_status": solver_status,
-        "solution_status": solution_status,
-        "stationarity": result.solution_stationarity,
-        "primal_feasibility": result.solution_primal_feasibility,
+        "solver": "nlls-gram",
+        "linear_solver": "auto",
+        "metric_eps": eps,
+        "train_loss": float(result.info.loss),
+        "steps": steps,
+        "stopping_reason": STATUS_TO_REASON.get(status, "unknown"),
+        "compile_time": compile_time,
         "solution_accepted": solution_accepted,
         "rejection_reason": "accepted"
         if solution_accepted
         else ",".join(rejection_reasons),
     }
-
     train_df = pd.DataFrame(
         {
             name: np.asarray(train_eval[name])
@@ -419,7 +380,6 @@ def neoclassical_growth_kernel(
             for name in ("t", "k", "c", "mu", "Y", "resource", "euler", "shadow_price")
         }
     )
-
     if not use_kinked_production:
         benchmark_solution = neoclassical_growth_benchmark(
             a, delta, rho_hat, 1.0, k_0, benchmark_grid
@@ -431,8 +391,6 @@ def neoclassical_growth_kernel(
         test_df["c_benchmark"] = np.asarray(c_benchmark)
         test_df["k_rel_error"] = np.asarray(k_rel_error)
         test_df["c_rel_error"] = np.asarray(c_rel_error)
-        # min/max error statistics exclude the pinned t = 0 point ([1:]): its
-        # near-zero error is an artifact of the initial condition, not accuracy.
         results.update(
             k_rel_error_mean=float(k_rel_error.mean()),
             c_rel_error_mean=float(c_rel_error.mean()),
@@ -442,17 +400,17 @@ def neoclassical_growth_kernel(
             c_rel_error_min=float(c_rel_error[1:].min()),
         )
         print(
-            f"solve_time(s) = {solve_time}, "
+            f"solve_time(s) = {elapsed}, "
             f"E(|rel_error(k)|) = {results['k_rel_error_mean']:.3e}, "
             f"E(|rel_error(c)|) = {results['c_rel_error_mean']:.3e}"
         )
     else:
-        print(f"solve_time(s) = {solve_time}")
+        print(f"solve_time(s) = {elapsed}")
 
     hyperparameters = {
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
-        "solver_set": asdict(solver_set),
+        "lm_set": asdict(lm_set),
         "parameters": {
             "a": a,
             "delta": delta,

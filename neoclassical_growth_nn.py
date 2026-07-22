@@ -19,7 +19,7 @@ from nlls_gram import (
 )
 
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
-from neural_networks import ACTIVATIONS, unit_softplus
+from utilities import ACTIVATIONS, unit_softplus
 
 if __name__ == "__main__":
     jax.config.update("jax_enable_x64", True)
@@ -79,7 +79,7 @@ class StoppingCriteria:
 # same 8/8 acceptance; geodesic acceleration is required (off fails to reach
 # the loss threshold at any swept damping).
 @dataclass(frozen=True)
-class NLLSGramSettings:
+class SolverSettings:
     init_damping: float = 1e-5
     damping_decrease: float = 0.5
     damping_increase: float = 2.0
@@ -250,7 +250,7 @@ def neoclassical_growth_nn(
     use_float64: bool = True,
     data_set: DataSettings = DataSettings(),
     nn_set: GrowthPolicySettings = GrowthPolicySettings(),
-    lm_set: NLLSGramSettings = NLLSGramSettings(),
+    lm_set: SolverSettings = SolverSettings(),
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
     measure_compilation: bool = True,
@@ -332,13 +332,12 @@ def neoclassical_growth_nn(
 
     solver = LevenbergMarquardt(
         residual_fn,
-        linear_solver="cholesky",
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
-        dual_solve_dtype=jnp.float64,
+        linear_solve_dtype=jnp.float64,
     )
 
     # solve()'s atol is on the residual norm; the settings threshold is on
@@ -368,6 +367,7 @@ def neoclassical_growth_nn(
                     num_starts=stop_set.num_attempts,
                     draw=draw,
                 ),
+                max_steps_is_success=False,
             ).x
         )
         compile_time = time.perf_counter() - compile_start
@@ -383,6 +383,7 @@ def neoclassical_growth_nn(
             num_starts=stop_set.num_attempts,
             draw=draw,
         ),
+        max_steps_is_success=False,
     )
     jax.block_until_ready(result.x)
     train_time = time.perf_counter() - start_time
@@ -424,7 +425,7 @@ def neoclassical_growth_nn(
         "use_kinked_production": use_kinked_production,
         "seed": seed,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "dual_solve_dtype": "float64",
+        "linear_solve_dtype": "float64",
         "solver": "nlls-gram",
         "train_loss": train_loss,
         "train_resource_mean_abs": train_resource_mean_abs,

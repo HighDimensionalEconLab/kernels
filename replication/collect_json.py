@@ -632,6 +632,65 @@ def multicountry_growth_kernel(out):
     }
 
 
+def multicountry_growth_nn(out):
+    prefix = "multicountry_growth_nn"
+    summary = load(out, f"{prefix}_baseline")
+    hp = load(out, f"{prefix}_baseline_hyperparameters")
+    frame = pd.read_parquet(out / f"{prefix}_baseline_results.parquet")
+    accepted = frame[frame["solution_accepted"]]
+    if accepted.empty:
+        raise RuntimeError("multicountry_growth_nn baseline has no accepted solutions")
+    return {
+        "parameters": hp["parameters"],
+        "architecture": {
+            "width": hp["nn_set"]["width"],
+            "depth": hp["nn_set"]["depth"],
+            "hidden_activation": hp["nn_set"]["hidden_activation"],
+            "total_params": int(accepted["total_params"].median()),
+            "dynamic_output_count": int(
+                accepted["dynamic_network_output_count"].median()
+            ),
+        },
+        "selection": "minimum_identity_metric_parameter_step",
+        "training_information": {
+            "terminal_residual_count": 0,
+            "benchmark_training_residual_count": 0,
+            "tvc_training_residual_count": 0,
+        },
+        "n_seeds": int(summary["n_seeds"]),
+        "experiments": {
+            "baseline": {
+                "scenario": summary["scenario"],
+                "initial_conditions": hp["initial_conditions"],
+                "fraction_accepted": sig(summary["frac_accepted"]),
+                "fraction_equation_diagnostics_passed": sig(
+                    float(accepted["equation_diagnostics_pass"].mean())
+                ),
+                "train_time_median": sig(float(accepted["train_time"].median())),
+                "max_train_residual_median": sci(
+                    float(accepted["max_train_residual"].median())
+                ),
+                "max_validation_residual_median": sci(
+                    float(accepted["max_validation_residual"].median())
+                ),
+                "max_benchmark_error_median": sci(
+                    float(accepted["max_benchmark_error"].median())
+                ),
+                "log_relative_weight_error_median": sci(
+                    float(
+                        (
+                            accepted["log_relative_weight"]
+                            - accepted["benchmark_log_relative_weight"]
+                        )
+                        .abs()
+                        .median()
+                    )
+                ),
+            }
+        },
+    }
+
+
 def performance_comparisons(out):
     def accepted(prefix):
         frame = pd.read_parquet(out / f"{prefix}_baseline_results.parquet")
@@ -667,6 +726,13 @@ def performance_comparisons(out):
     open_kernel_error = med(open_kernel["max_benchmark_error"])
     open_nn_error = float(open_nn["max_benchmark_error"].median())
 
+    multicountry_kernel = load(out, "multicountry_growth_kernel_initial_debt")
+    multicountry_nn_frame = accepted("multicountry_growth_nn")
+    multicountry_kernel_time = med(multicountry_kernel["wall_time"])
+    multicountry_nn_time = float(multicountry_nn_frame["train_time"].median())
+    multicountry_kernel_error = med(multicountry_kernel["max_benchmark_error"])
+    multicountry_nn_error = float(multicountry_nn_frame["max_benchmark_error"].median())
+
     def comparison(kernel_time, nn_time, kernel_error, nn_error):
         return {
             "kernel_solve_time_median": sig(kernel_time),
@@ -700,6 +766,12 @@ def performance_comparisons(out):
             open_kernel_error,
             open_nn_error,
         ),
+        "multicountry_growth": comparison(
+            multicountry_kernel_time,
+            multicountry_nn_time,
+            multicountry_kernel_error,
+            multicountry_nn_error,
+        ),
     }
 
 
@@ -708,6 +780,7 @@ def validate_replication_contract(out):
         "asset_pricing_nn",
         "neoclassical_growth_nn_recursive",
         "open_economy_growth_nn_recursive",
+        "multicountry_growth_nn",
     )
     for prefix in nn_prefixes:
         summary = load(out, f"{prefix}_baseline")
@@ -763,6 +836,7 @@ def collect(output_dir: str = ".results"):
             "open_economy_growth_kernel": open_economy_growth_kernel(out),
             "open_economy_growth_nn_recursive": open_economy_growth_nn_recursive(out),
             "multicountry_growth_kernel": multicountry_growth_kernel(out),
+            "multicountry_growth_nn": multicountry_growth_nn(out),
             "performance_comparisons": performance_comparisons(out),
         }
     )

@@ -44,6 +44,7 @@ The core pipeline covers:
 - `open_economy_growth_kernel.py`
 - `open_economy_growth_nn_recursive.py`
 - `multicountry_growth_kernel.py`
+- `multicountry_growth_nn.py`
 
 Each driver in `replication/` writes Parquet data and summary JSON. Figure
 drivers read those saved results, and `replication/collect_json.py` assembles
@@ -84,6 +85,9 @@ The main NN modules are deliberately limited:
 - `neoclassical_growth_nn_recursive.py`: fixed-step RK4 state-space investment
   policy used as the recursive NN baseline.
 - `open_economy_growth_nn_recursive.py`: the open-economy state-space policy.
+- `multicountry_growth_nn.py`: the reduced one-good multicountry sequential NN;
+  consumption, investment, and the common rate are calculated from its four
+  country path blocks inside the residual evaluation.
 
 Shared activation and transform helpers are in `utilities.py`.
 
@@ -95,6 +99,7 @@ uv run python neoclassical_growth_kernel.py --kernel_set.ell 5.0
 uv run python neoclassical_growth_nn_recursive.py --seed 3 --data_set.train_steps 48
 uv run python multicountry_growth_kernel.py --a_0 '[-0.5, 0.5]'
 uv run python multicountry_growth_kernel_dae.py --a_0 '[-0.5, 0.5]'
+uv run python multicountry_growth_nn.py --a_0 '[-0.5, 0.5]' --seed 0
 ```
 
 or import directly:

@@ -978,7 +978,9 @@ Implemented in [multicountry_growth.py](../multicountry_growth.py),
 [multicountry_growth_kernel.py](../multicountry_growth_kernel.py). The fully
 unreduced RKHS DAE is in
 [multicountry_growth_kernel_dae.py](../multicountry_growth_kernel_dae.py). Cached paper
-experiments and figures for the compact formulation remain under
+experiments for the reduced sequential NN are in
+[multicountry_growth_nn.py](../multicountry_growth_nn.py) and
+`replication/multicountry_growth_nn.py`; figures for the compact kernel formulation remain under
 `replication/multicountry_growth_kernel*.py`.
 
 Replace the fixed interest rate with an endogenous world rate \(r(t)\). To make country
@@ -1112,6 +1114,30 @@ the same four dynamic functions for every country. The unknown-residual differen
 consistency and world clearing. No terminal projection, lifetime budget, TVC, no-Ponzi
 condition, debt target, or steady-state target enters the residual, initialization,
 stopping rule, or acceptance rule.
+
+#### Reduced sequential NN
+
+[`multicountry_growth_nn.py`](../multicountry_growth_nn.py) uses the same reduced
+economic equations and global index-consistent rows as the compact kernel solver. A
+time-input MLP learns only the four country path blocks
+
+\[
+(\log k_i,a_i,\log q_i,\log m_i).
+\]
+
+The capital and asset parameterizations impose their supplied initial values exactly.
+Consumption and investment are calculated inside each residual evaluation from (27)
+and the investment FOC, and the common rate is calculated from the mean
+marginal-wealth growth rate. The remaining country marginal-wealth equations require
+every country to imply that same rate. Thus the NN has no separate consumption,
+investment, or rate output heads.
+
+The training residual contains the same \((4N+1)n+1\) equations as the reduced kernel
+formulation. It is scaled by the square root of that count, so the reported loss is the
+mean squared equation residual. The NN is selected only by its architecture,
+initialization, and the identity metric on its parameters. Neither the independent BVP
+nor any terminal, TVC, no-Ponzi, debt, or steady-state target enters training or solver
+acceptance; all remain ex-post diagnostics.
 
 #### Fully unreduced RKHS DAE
 

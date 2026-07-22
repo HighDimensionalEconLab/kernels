@@ -20,6 +20,7 @@ uv run python -m replication.neoclassical_growth_nn_recursive --output_dir "$out
 uv run python -m replication.open_economy_growth_kernel --output_dir "$output_dir"
 uv run python -m replication.open_economy_growth_nn_recursive --output_dir "$output_dir"
 uv run python -m replication.multicountry_growth_kernel --output_dir "$output_dir"
+uv run python -m replication.multicountry_growth_nn --output_dir "$output_dir"
 
 echo "==> figures -> $output_dir/"
 uv run python -m replication.neoclassical_growth_kernel_figures --output_dir "$output_dir"

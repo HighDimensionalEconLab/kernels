@@ -29,6 +29,7 @@ from multicountry_growth import (
 )
 from multicountry_growth_kernel import multicountry_growth_kernel
 from multicountry_growth_kernel_dae import multicountry_growth_kernel_dae
+from multicountry_growth_nn import multicountry_growth_nn
 from neoclassical_growth_concave_convex_kernel import (
     neoclassical_growth_concave_convex_kernel,
 )
@@ -333,6 +334,77 @@ class KernelSmokeTests(unittest.TestCase):
         )
         self.assertIn("consumption_foc_3", extras["test_df"])
         self.assertIn("investment_foc_3", extras["test_df"])
+
+    def test_multicountry_growth_nn_smoke(self):
+        results, extras = multicountry_growth_nn(
+            a_0=(-0.5, 0.5),
+            seed=0,
+            verbose=False,
+        )
+        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+        self.assertTrue(
+            results["equation_diagnostics_pass"],
+            results["equation_diagnostic_reason"],
+        )
+        self.assertTrue(results["benchmark_match"])
+        self.assertEqual(results["stopping_reason"], "early_stopping_met")
+        self.assertEqual(results["attempt"], 1)
+        self.assertEqual(results["linear_solver"], "auto")
+        self.assertEqual(results["terminal_residual_count"], 0)
+        self.assertEqual(results["benchmark_training_residual_count"], 0)
+        self.assertEqual(results["tvc_training_residual_count"], 0)
+        self.assertEqual(results["dynamic_network_output_count"], 8)
+        self.assertEqual(results["calculated_algebraic_value_count"], 5)
+        self.assertEqual(
+            results["dae_residual_count"],
+            9 * results["num_train_points"] + 1,
+        )
+        self.assertGreater(results["total_params"], 500)
+        self.assertLess(results["max_train_residual"], 1e-5)
+        self.assertLess(results["max_validation_residual"], 5e-3)
+        self.assertLess(results["max_asset_clearing_residual"], 5e-5)
+        self.assertLess(results["max_rate_consistency_residual"], 5e-5)
+        self.assertLess(results["max_benchmark_error"], 5e-4)
+        self.assertLess(
+            abs(
+                results["log_relative_weight"]
+                - results["benchmark_log_relative_weight"]
+            ),
+            1e-5,
+        )
+        initial = extras["test_df"].iloc[0]
+        self.assertAlmostEqual(initial["k_1"], 1.0, places=14)
+        self.assertAlmostEqual(initial["k_2"], 1.0, places=14)
+        self.assertAlmostEqual(initial["a_1"], -0.5, places=14)
+        self.assertAlmostEqual(initial["a_2"], 0.5, places=14)
+
+    def test_multicountry_growth_nn_three_country_smoke(self):
+        parameters = MulticountryParameters(
+            populations=(1.0, 1.0, 1.0),
+            productivities=(1.0, 1.0, 1.0),
+        )
+        results, extras = multicountry_growth_nn(
+            a_0=(-0.5, 0.25, 0.25),
+            parameters=parameters,
+            seed=0,
+            verbose=False,
+        )
+        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+        self.assertTrue(
+            results["equation_diagnostics_pass"],
+            results["equation_diagnostic_reason"],
+        )
+        self.assertFalse(results["benchmark_available"])
+        self.assertEqual(results["num_countries"], 3)
+        self.assertEqual(results["dynamic_network_output_count"], 12)
+        self.assertEqual(results["calculated_algebraic_value_count"], 7)
+        self.assertAlmostEqual(
+            results["relative_weight_2"],
+            results["relative_weight_3"],
+            delta=1e-6,
+        )
+        self.assertIn("k_3", extras["test_df"])
+        self.assertIn("marginal_wealth_3", extras["test_df"])
 
     def test_multicountry_growth_three_country_smoke(self):
         parameters = MulticountryParameters(

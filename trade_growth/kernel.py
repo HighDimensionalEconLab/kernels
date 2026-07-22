@@ -519,11 +519,6 @@ def multicountry_trade_growth_kernel(
                 max_steps_is_success=False,
             )
 
-    compile_start = time.perf_counter()
-    compile_result = run_solve(1)
-    jax.block_until_ready(compile_result)
-    compile_time = time.perf_counter() - compile_start
-
     solve_start = time.perf_counter()
     phase1_result = run_solve(lm_set.max_steps)
     jax.block_until_ready(phase1_result)
@@ -840,7 +835,6 @@ def multicountry_trade_growth_kernel(
         "rkhs_norm_total": float(rkhs_norm_total),
         "solve_time": solve_time,
         "wall_time": total_wall,
-        "compile_time": compile_time,
         "solver": "nlls-gram",
         "linear_solver_resolved": lm_set.linear_solver,
         "two_phase_endgame": two_phase,

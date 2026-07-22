@@ -161,17 +161,6 @@ def optimal_advertising_kernel(
         metric=metric,
     )
 
-    compile_start = time.perf_counter()
-    jax.block_until_ready(
-        solver.solve(
-            theta_0,
-            max_steps=1,
-            atol=lm_set.residual_atol,
-            max_steps_is_success=False,
-        )
-    )
-    compile_time = time.perf_counter() - compile_start
-
     start = time.perf_counter()
     result = solver.solve(
         theta_0,
@@ -277,7 +266,6 @@ def optimal_advertising_kernel(
         "train_loss": float(result.info.loss),
         "steps": int(result.steps),
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
-        "compile_time": compile_time,
         "solution_accepted": solution_accepted,
         "rejection_reason": (
             "accepted" if solution_accepted else ",".join(rejection_reasons)

@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from flax import nnx
+from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import DrawNNXModule, LevenbergMarquardt, LMStatus, MultiStart
 
@@ -38,9 +38,7 @@ class DataSettings:
 
 @dataclass(frozen=True)
 class PricePolicySettings:
-    # Ten-seed capacity check: 4x2 is the smallest architecture that reaches
-    # the common loss tolerance for every seed; one-layer networks stall.
-    width: int = 4
+    width: int = 16
     depth: int = 2
     hidden_activation: str = "tanh"
     hidden_bias: bool = True
@@ -53,6 +51,12 @@ class StoppingCriteria:
     max_steps: int = 400
     train_loss_threshold: float = 1e-15
     num_attempts: int = 1
+
+
+@struct.dataclass
+class ResidualArgs:
+    graphdef: nnx.GraphDef
+    train_t: jax.Array
 
 
 class PricePolicyNN(nnx.Module):
@@ -134,6 +138,19 @@ def policy_values(model, t, r, c, g, x_0):
     }
 
 
+def residual_fn(theta, args, p):
+    candidate = nnx.merge(args.graphdef, theta)
+    residual = policy_values(
+        candidate,
+        args.train_t,
+        p["r"],
+        p["c"],
+        p["g"],
+        p["x_0"],
+    )["residual"]
+    return residual / jnp.sqrt(residual.size)
+
+
 def snapshot(model, t, r, c, g, x_0):
     values = jax.device_get(policy_values(model, t, r, c, g, x_0))
     frame = pd.DataFrame({key: np.asarray(value) for key, value in values.items()})
@@ -156,7 +173,6 @@ def asset_pricing_nn(
     nn_set: PricePolicySettings = PricePolicySettings(),
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
-    measure_compilation: bool = True,
 ):
     if not jax.config.jax_enable_x64:
         raise RuntimeError("enable jax_enable_x64 in the process entry point")
@@ -175,11 +191,11 @@ def asset_pricing_nn(
         rngs=nnx.Rngs(init_key),
     )
     _, theta_0 = nnx.split(model, nnx.Param)
-
-    def residual_fn(theta):
-        candidate = nnx.merge(graphdef, theta)
-        residual = policy_values(candidate, train_t, r, c, g, x_0)["residual"]
-        return residual / jnp.sqrt(residual.size)
+    residual_args = ResidualArgs(graphdef=graphdef, train_t=train_t)
+    p = {
+        name: jnp.asarray(value, dtype=dtype)
+        for name, value in {"r": r, "c": c, "g": g, "x_0": x_0}.items()
+    }
 
     solver = LevenbergMarquardt(
         residual_fn,
@@ -188,26 +204,11 @@ def asset_pricing_nn(
     atol = math.sqrt(stop_set.train_loss_threshold)
     draw = DrawNNXModule(PricePolicyNN, nn_set, dtype=dtype)
 
-    compile_time = np.nan
-    if measure_compilation:
-        compile_start = time.perf_counter()
-        compiled = solver.solve(
-            theta_0,
-            max_steps=1,
-            atol=atol,
-            multi_start=MultiStart(
-                key=jax.random.key(0),
-                num_starts=stop_set.num_attempts,
-                draw=draw,
-            ),
-            max_steps_is_success=False,
-        )
-        jax.block_until_ready(compiled.info.loss)
-        compile_time = time.perf_counter() - compile_start
-
     start = time.perf_counter()
     result = solver.solve(
         theta_0,
+        residual_args,
+        p=p,
         max_steps=stop_set.max_steps,
         atol=atol,
         multi_start=MultiStart(
@@ -217,7 +218,7 @@ def asset_pricing_nn(
         ),
         max_steps_is_success=False,
     )
-    jax.block_until_ready(result.info.loss)
+    jax.block_until_ready(result)
     train_time = time.perf_counter() - start
     model = nnx.merge(graphdef, result.x)
 
@@ -259,7 +260,6 @@ def asset_pricing_nn(
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
         "train_time": train_time,
         "wall_time": train_time,
-        "compile_time": compile_time,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
         "solution_accepted": solution_accepted,
         "rejection_reason": (

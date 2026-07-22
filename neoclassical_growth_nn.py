@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from flax import nnx
+from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import (
     DrawNNXModule,
@@ -28,7 +28,7 @@ if __name__ == "__main__":
 DOMAIN_EPS = 1e-8
 
 
-@dataclass(frozen=True)
+@struct.dataclass
 class StructuralParameters:
     a: jax.Array
     delta: jax.Array
@@ -95,6 +95,12 @@ class GrowthPolicySettings:
     hidden_bias: bool = True
     output_bias: bool = True
     input_scale: float = 40.0
+
+
+@struct.dataclass
+class ResidualArgs:
+    graphdef: nnx.GraphDef
+    t: jax.Array
 
 
 class GrowthPolicyNN(nnx.Module):
@@ -219,6 +225,10 @@ def training_residual(model, data, p):
     return residual / jnp.sqrt(residual.size)
 
 
+def residual_fn(theta, args, p):
+    return training_residual(nnx.merge(args.graphdef, theta), {"t": args.t}, p)
+
+
 def snapshot(data, model, p):
     values = jax.device_get(policy_values(model, data["t"], p))
     columns = {key: np.asarray(value) for key, value in values.items()}
@@ -253,7 +263,6 @@ def neoclassical_growth_nn(
     lm_set: SolverSettings = SolverSettings(),
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
-    measure_compilation: bool = True,
 ):
     if not jax.config.jax_enable_x64:
         raise RuntimeError("enable jax_enable_x64 in the process entry point")
@@ -326,9 +335,7 @@ def neoclassical_growth_nn(
         rngs=nnx.Rngs(init_key),
     )
     _, theta_0 = nnx.split(model, nnx.Param)
-
-    def residual_fn(theta, t):
-        return training_residual(nnx.merge(graphdef, theta), {"t": t}, p)
+    residual_args = ResidualArgs(graphdef=graphdef, t=t_train)
 
     solver = LevenbergMarquardt(
         residual_fn,
@@ -353,29 +360,11 @@ def neoclassical_growth_nn(
         dtype=dtype,
     )
 
-    compile_time = np.nan
-    if measure_compilation:
-        compile_start = time.perf_counter()
-        jax.block_until_ready(
-            solver.solve(
-                theta_0,
-                t_train,
-                max_steps=1,
-                atol=atol,
-                multi_start=MultiStart(
-                    key=jax.random.key(0),
-                    num_starts=stop_set.num_attempts,
-                    draw=draw,
-                ),
-                max_steps_is_success=False,
-            ).x
-        )
-        compile_time = time.perf_counter() - compile_start
-
     start_time = time.perf_counter()
     result = solver.solve(
         theta_0,
-        t_train,
+        residual_args,
+        p=p,
         max_steps=stop_set.max_steps,
         atol=atol,
         multi_start=MultiStart(
@@ -385,7 +374,7 @@ def neoclassical_growth_nn(
         ),
         max_steps_is_success=False,
     )
-    jax.block_until_ready(result.x)
+    jax.block_until_ready(result)
     train_time = time.perf_counter() - start_time
     model = nnx.merge(graphdef, result.x)
     steps = int(result.steps)
@@ -440,7 +429,6 @@ def neoclassical_growth_nn(
         "stopping_reason": stopping_reason,
         "train_time": train_time,
         "train_time_success": train_time if accepted else np.nan,
-        "compile_time": compile_time,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
         "nn_width": policy_settings.width,
         "nn_depth": policy_settings.depth,

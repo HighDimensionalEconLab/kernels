@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import asdict, dataclass, replace
+from functools import partial
 from typing import Literal
 
 import jax
@@ -10,14 +11,9 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from flax import nnx
+from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
-from nlls_gram import (
-    DrawNNXModule,
-    LevenbergMarquardt,
-    LMStatus,
-    MultiStart,
-)
+from nlls_gram import LevenbergMarquardt, LMStatus, MultiStart
 from tinydiffeq import (
     RK4,
     ConstantStepSize,
@@ -51,7 +47,7 @@ if __name__ == "__main__":
 DOMAIN_EPS = 1e-8
 
 
-@dataclass(frozen=True)
+@struct.dataclass
 class StructuralParameters:
     a: jax.Array
     delta: jax.Array
@@ -69,7 +65,7 @@ class StructuralParameters:
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class DataSettings:
     # dt is the grid spacing of the test/settle evaluation paths.
     dt: float = 1.0
@@ -91,6 +87,13 @@ class DataSettings:
     policy_grid_size: int = 100
     benchmark_T: float = 80.0
     benchmark_points: int = 300
+
+
+@struct.dataclass
+class ResidualArgs:
+    graphdef: nnx.GraphDef
+    fixed_state: nnx.State
+    data_set: DataSettings = struct.field(pytree_node=False)
 
 
 @dataclass(frozen=True)
@@ -139,9 +142,9 @@ class InvestmentPolicySettings:
 class InvestmentPolicyNN(nnx.Module):
     def __init__(self, settings: InvestmentPolicySettings, *, dtype, rngs: nnx.Rngs):
         self.hidden_activation = ACTIVATIONS[settings.hidden_activation]
-        self.i_scale = settings.i_scale
-        self.i_anchor = settings.i_anchor
-        self.k_0_ref = settings.k_0_ref
+        self.i_scale = nnx.Variable(jnp.asarray(settings.i_scale, dtype=dtype))
+        self.i_anchor = nnx.Variable(jnp.asarray(settings.i_anchor, dtype=dtype))
+        self.k_0_ref = nnx.Variable(jnp.asarray(settings.k_0_ref, dtype=dtype))
         self.layers = nnx.List(
             [nnx.Linear(1, settings.width, dtype=dtype, param_dtype=dtype, rngs=rngs)]
         )
@@ -165,11 +168,28 @@ class InvestmentPolicyNN(nnx.Module):
         )
 
     def __call__(self, k):
-        h = jnp.atleast_1d(jnp.log(k / self.k_0_ref))
+        h = jnp.atleast_1d(jnp.log(k / self.k_0_ref[...]))
         for layer in self.layers:
             h = self.hidden_activation(layer(h))
         raw = self.head(h)[0]
-        return self.i_anchor * unit_softplus((self.i_scale / self.i_anchor) * raw)
+        return self.i_anchor[...] * unit_softplus(
+            (self.i_scale[...] / self.i_anchor[...]) * raw
+        )
+
+
+@dataclass(frozen=True)
+class DrawInvestmentPolicy:
+    settings: InvestmentPolicySettings
+    dtype: object
+
+    def __call__(self, key, _, args):
+        module = InvestmentPolicyNN(
+            self.settings,
+            dtype=self.dtype,
+            rngs=nnx.Rngs(key),
+        )
+        _, theta, _ = nnx.split(module, nnx.Param, ...)
+        return theta, args
 
 
 # The optimizer stops solely on its residual tolerance. The exact log-TVC
@@ -221,16 +241,15 @@ def consumption_positivity(policy, states, p):
 
 # Rollouts use tinydiffeq's bounded scans. Training samples the dense solution
 # on a fixed grid; the ex-post TVC retains the internal path.
-def rollout_field(policy, p):
-    return lambda k: drift(policy, k, p)
+def capital_drift_field(k, _, args, p):
+    policy, structural = p
+    return drift(policy, k, structural)
 
 
-def log_rollout_field(policy, p):
-    def log_capital_drift(q):
-        k = p.k_0 * jnp.exp(q)
-        return drift(policy, k, p) / k
-
-    return log_capital_drift
+def log_capital_drift_field(q, _, args, p):
+    policy, structural = p
+    k = structural.k_0 * jnp.exp(q)
+    return drift(policy, k, structural) / k
 
 
 def rollout(policy, T, budget, p, data_set, *, save_at=None):
@@ -247,7 +266,7 @@ def rollout(policy, T, budget, p, data_set, *, save_at=None):
     else:
         raise ValueError(f"unknown ode_solver: {data_set.ode_solver!r}")
     return solve_ode(
-        log_rollout_field(policy, p),
+        log_capital_drift_field,
         ode_solver,
         0.0,
         T,
@@ -256,12 +275,18 @@ def rollout(policy, T, budget, p, data_set, *, save_at=None):
         controller=controller,
         max_steps=budget,
         save_at=save_at,
+        p=(policy, p),
     )
 
 
-def collocation_states(policy, p, data_set):
-    train_ts = jnp.linspace(0.0, data_set.train_T, data_set.train_points)
-    sol = rollout(
+@partial(jax.jit, static_argnames=("T", "budget", "data_set"))
+def rollout_steps(policy, T, budget, p, data_set):
+    return rollout(policy, T, budget, p, data_set, save_at=SaveAt(steps=True))
+
+
+@partial(jax.jit, static_argnames=("data_set",))
+def collocation_rollout(policy, p, train_ts, data_set):
+    return rollout(
         policy,
         data_set.train_T,
         data_set.train_steps,
@@ -269,9 +294,41 @@ def collocation_states(policy, p, data_set):
         data_set,
         save_at=SaveAt(ts=train_ts),
     )
+
+
+@partial(jax.jit, static_argnames=("T", "budget", "dt"))
+def capital_rollout_steps(policy, T, budget, dt, p):
+    return solve_ode(
+        capital_drift_field,
+        RK4(),
+        0.0,
+        T,
+        p.k_0,
+        dt_0=dt,
+        max_steps=budget,
+        save_at=SaveAt(steps=True),
+        p=(policy, p),
+    )
+
+
+def collocation_states(policy, p, data_set):
+    train_ts = jnp.linspace(0.0, data_set.train_T, data_set.train_points)
+    sol = collocation_rollout(policy, p, train_ts, data_set)
     # A failed rollout poisons every row so LM rejects the trial loudly.
     states = p.k_0 * jnp.exp(sol.xs)
     return jnp.where(sol.ok, states, jnp.inf)
+
+
+def residual_fn(theta, args, p):
+    policy = nnx.merge(args.graphdef, theta, args.fixed_state)
+    states = collocation_states(policy, p, args.data_set)
+    residual = jnp.concatenate(
+        [
+            euler_residuals(policy, states, p),
+            consumption_positivity(policy, states, p),
+        ]
+    )
+    return residual / jnp.sqrt(2 * args.data_set.train_points)
 
 
 # Post-hoc transversality certificate (log utility): the max over horizons
@@ -285,7 +342,7 @@ def collocation_states(policy, p, data_set):
 # the saddle path (the continuous-time analog of the stock-policy identity
 # initialization); this certificate checks that selection ex post.
 def log_tvc_residual(policy, T_start, T_end, p, data_set):
-    sol = rollout(policy, T_end, data_set.tvc_steps, p, data_set)
+    sol = rollout_steps(policy, T_end, data_set.tvc_steps, p, data_set)
     ts = jnp.where(sol.ok, sol.ts, jnp.inf)
     states = p.k_0 * jnp.exp(jnp.where(sol.ok, sol.xs, jnp.inf))
     c = jax.vmap(lambda k: consumption(policy, k, p))(states)
@@ -309,7 +366,6 @@ def neoclassical_growth_nn_recursive(
     lm_set: SolverSettings = SolverSettings(),
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
-    measure_compilation: bool = True,
 ):
     if not jax.config.jax_enable_x64:
         raise RuntimeError("enable jax_enable_x64 in the process entry point")
@@ -368,21 +424,15 @@ def neoclassical_growth_nn_recursive(
     )
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
 
-    graphdef, _ = nnx.split(
-        InvestmentPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(0)), nnx.Param
+    graphdef, _, fixed_state = nnx.split(
+        InvestmentPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(0)), nnx.Param, ...
     )
     num_collocation_states = data_set.train_points
-
-    def residual_fn(theta):
-        policy = nnx.merge(graphdef, theta)
-        states = collocation_states(policy, p, data_set)
-        residual = jnp.concatenate(
-            [
-                euler_residuals(policy, states, p),
-                consumption_positivity(policy, states, p),
-            ]
-        )
-        return residual / jnp.sqrt(2 * data_set.train_points)
+    residual_args = ResidualArgs(
+        graphdef=graphdef,
+        fixed_state=fixed_state,
+        data_set=data_set,
+    )
 
     solver = LevenbergMarquardt(
         residual_fn,
@@ -396,40 +446,27 @@ def neoclassical_growth_nn_recursive(
 
     def tvc_certificate(theta):
         return log_tvc_residual(
-            nnx.merge(graphdef, theta),
+            nnx.merge(graphdef, theta, fixed_state),
             data_set.train_T,
             data_set.train_tvc_T,
             p,
             data_set,
         )
 
-    _, theta_0 = nnx.split(
-        InvestmentPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(init_key)), nnx.Param
+    _, theta_0, _ = nnx.split(
+        InvestmentPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(init_key)),
+        nnx.Param,
+        ...,
     )
     atol = math.sqrt(stop_set.train_loss_threshold)
-    draw = DrawNNXModule(InvestmentPolicyNN, nn_set, dtype=dtype)
-
-    compile_time = np.nan
-    if measure_compilation:
-        compile_start = time.perf_counter()
-        jax.block_until_ready(
-            solver.solve(
-                theta_0,
-                max_steps=1,
-                atol=atol,
-                multi_start=MultiStart(
-                    key=jax.random.key(0),
-                    num_starts=stop_set.num_attempts,
-                    draw=draw,
-                ),
-                max_steps_is_success=False,
-            ).x
-        )
-        compile_time = time.perf_counter() - compile_start
+    draw_settings = replace(nn_set, i_scale=1.0, i_anchor=1.0, k_0_ref=1.0)
+    draw = DrawInvestmentPolicy(draw_settings, dtype)
 
     start_time = time.perf_counter()
     result = solver.solve(
         theta_0,
+        residual_args,
+        p=p,
         max_steps=stop_set.max_steps,
         atol=atol,
         multi_start=MultiStart(
@@ -439,9 +476,9 @@ def neoclassical_growth_nn_recursive(
         ),
         max_steps_is_success=False,
     )
-    jax.block_until_ready(result.x)
+    jax.block_until_ready(result)
     train_time = time.perf_counter() - start_time
-    policy = nnx.merge(graphdef, result.x)
+    policy = nnx.merge(graphdef, result.x, fixed_state)
     steps = int(result.steps)
     attempt = int(result.multi_start.attempt) + 1
     stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
@@ -453,16 +490,14 @@ def neoclassical_growth_nn_recursive(
     # Test path: simulate the final policy to test_T and evaluate the Euler
     # residual along it.
     n_test_steps = round(data_set.test_T / data_set.dt)
-    test_solution = solve_ode(
-        rollout_field(policy, p),
-        RK4(),
-        0.0,
+    test_solution = capital_rollout_steps(
+        policy,
         n_test_steps * data_set.dt,
-        p.k_0,
-        dt_0=data_set.dt,
-        max_steps=n_test_steps,
-        save_at=SaveAt(steps=True),
+        n_test_steps,
+        data_set.dt,
+        p,
     )
+    jax.block_until_ready(test_solution)
     test_states = jnp.where(test_solution.ok, test_solution.xs, jnp.nan)
     test_i = jax.vmap(policy)(test_states)
     test_c = jax.vmap(lambda k: consumption(policy, k, p))(test_states)
@@ -535,7 +570,6 @@ def neoclassical_growth_nn_recursive(
         "stopping_reason": stopping_reason,
         "train_time": train_time,
         "train_time_success": train_time if accepted else np.nan,
-        "compile_time": compile_time,
         "total_params": int(ravel_pytree(nnx.state(policy, nnx.Param))[0].size),
         "solution_accepted": bool(accepted),
         "num_collocation_states": num_collocation_states,
@@ -551,15 +585,12 @@ def neoclassical_growth_nn_recursive(
         # Settle the trained policy to settle_T and classify the basin it
         # reaches (ball of 5% of the kink around a steady state).
         n_settle_steps = round(data_set.settle_T / data_set.dt)
-        settle_solution = solve_ode(
-            rollout_field(policy, p),
-            RK4(),
-            0.0,
+        settle_solution = capital_rollout_steps(
+            policy,
             n_settle_steps * data_set.dt,
-            p.k_0,
-            dt_0=data_set.dt,
-            max_steps=n_settle_steps,
-            save_at=SaveAt(steps=True),
+            n_settle_steps,
+            data_set.dt,
+            p,
         )
         settled = jnp.where(settle_solution.ok, settle_solution.xs, jnp.nan)
         k_settled = float(settled[-1])
@@ -630,6 +661,7 @@ def neoclassical_growth_nn_recursive(
         },
         "initial_conditions": {"k_0": k_0},
     }
+    jax.block_until_ready(nnx.state(policy))
     return results, {
         "model": policy,
         "test_df": test_df,

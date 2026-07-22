@@ -27,7 +27,7 @@ BUTTERFLY = dict(A=0.5, b_1=3.0, b_2=2.5)
 
 def run(
     output_dir: str = ".results_extra",
-    n_seeds: int = 3,
+    n_seeds: int = 100,
     use_float64: bool = True,
     verbose: bool = False,
 ):

@@ -21,7 +21,6 @@ class NNVariantSmokeTests(unittest.TestCase):
     def test_integrated_mlp_smoke(self):
         results, _ = neoclassical_growth_nn_integrated(
             verbose=False,
-            measure_compilation=False,
             data_set=IntegratedDataSettings(
                 train_T=10.0,
                 train_points=11,
@@ -44,7 +43,6 @@ class NNVariantSmokeTests(unittest.TestCase):
     def test_rff_smoke(self):
         results, _ = neoclassical_growth_nn_rff(
             verbose=False,
-            measure_compilation=False,
             data_set=RFFDataSettings(
                 train_T=10.0,
                 train_points=11,

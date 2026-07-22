@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from flax import nnx
+from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import LevenbergMarquardt, LMStatus
 
@@ -73,6 +73,22 @@ class SolverSettings:
     geodesic_acceptance_ratio: float = 0.8
     max_steps: int = 150
     residual_atol: float = 1e-12
+
+
+@struct.dataclass
+class ResidualArgs:
+    graphdef: nnx.GraphDef
+    fixed_state: nnx.State
+    train_data: jax.Array
+    k_0: jax.Array
+    a_0: jax.Array
+    q_reference: jax.Array
+    marginal_wealth_reference: jax.Array
+    output_scale: jax.Array
+    static_reference_log: jax.Array
+    parameters: TradeGrowthParameters = struct.field(pytree_node=False)
+    num_countries: int = struct.field(pytree_node=False)
+    n_train: int = struct.field(pytree_node=False)
 
 
 class MulticountryTransitionNN(nnx.Module):
@@ -152,6 +168,31 @@ def dynamic_coordinates(
     }
 
 
+def residual_fn(theta, args):
+    policy = nnx.merge(args.graphdef, theta, args.fixed_state)
+    coordinates = dynamic_coordinates(
+        policy,
+        args.train_data,
+        args.k_0,
+        args.a_0,
+        args.q_reference,
+        args.marginal_wealth_reference,
+        args.output_scale,
+    )
+    raw = jax.vmap(policy)(args.train_data)
+    interest_rate = args.parameters.rho * (1.0 + raw[:, 4 * args.num_countries])
+    log_static = args.static_reference_log + raw[
+        :, 4 * args.num_countries + 1 :
+    ].reshape(args.n_train, len(STATIC_BLOCK_NAMES), args.num_countries)
+    values = multicountry_trade_path_values(
+        **coordinates,
+        interest_rate=interest_rate,
+        log_static=log_static,
+        parameters=args.parameters,
+    )
+    return multicountry_trade_dae_residual(values, log_static, args.parameters)
+
+
 def multicountry_trade_growth_nn(
     k_0: tuple[float, ...] | None = None,
     a_0: tuple[float, ...] | None = None,
@@ -162,7 +203,6 @@ def multicountry_trade_growth_nn(
     nn_set: SequentialNNSettings = SequentialNNSettings(),
     lm_set: SolverSettings = SolverSettings(),
     verbose: bool = True,
-    measure_compilation: bool = True,
 ):
     if not jax.config.jax_enable_x64:
         raise RuntimeError("enable jax_enable_x64 in the process entry point")
@@ -239,32 +279,20 @@ def multicountry_trade_growth_nn(
     static_reference_log = static_reference["log_static"]
 
     residual_count = (12 * num_countries + 1) * n_train
-
-    def residual_fn(theta):
-        policy = nnx.merge(graphdef, theta, fixed_state)
-        coordinates = dynamic_coordinates(
-            policy,
-            train_data,
-            k_0_array,
-            a_0_array,
-            q_reference,
-            marginal_wealth_reference,
-            output_scale,
-        )
-        raw = jax.vmap(policy)(train_data)
-        interest_rate = parameters.rho * (1.0 + raw[:, 4 * num_countries])
-        log_static = static_reference_log + raw[:, 4 * num_countries + 1 :].reshape(
-            n_train,
-            len(STATIC_BLOCK_NAMES),
-            num_countries,
-        )
-        values = multicountry_trade_path_values(
-            **coordinates,
-            interest_rate=interest_rate,
-            log_static=log_static,
-            parameters=parameters,
-        )
-        return multicountry_trade_dae_residual(values, log_static, parameters)
+    residual_args = ResidualArgs(
+        graphdef=graphdef,
+        fixed_state=fixed_state,
+        train_data=train_data,
+        k_0=k_0_array,
+        a_0=a_0_array,
+        q_reference=q_reference,
+        marginal_wealth_reference=marginal_wealth_reference,
+        output_scale=output_scale,
+        static_reference_log=static_reference_log,
+        parameters=parameters,
+        num_countries=num_countries,
+        n_train=n_train,
+    )
 
     solver = LevenbergMarquardt(
         residual_fn,
@@ -275,26 +303,15 @@ def multicountry_trade_growth_nn(
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
         linear_solve_dtype=jnp.float64,
     )
-    compile_time = np.nan
-    if measure_compilation:
-        compile_start = time.perf_counter()
-        compile_result = solver.solve(
-            theta_0,
-            max_steps=1,
-            atol=lm_set.residual_atol,
-            max_steps_is_success=False,
-        )
-        jax.block_until_ready(compile_result.x)
-        compile_time = time.perf_counter() - compile_start
-
     solve_start = time.perf_counter()
     result = solver.solve(
         theta_0,
+        residual_args,
         max_steps=lm_set.max_steps,
         atol=lm_set.residual_atol,
         max_steps_is_success=False,
     )
-    jax.block_until_ready(result.x)
+    jax.block_until_ready(result)
     solve_time = time.perf_counter() - solve_start
     theta = result.x
     policy = nnx.merge(graphdef, theta, fixed_state)
@@ -518,7 +535,6 @@ def multicountry_trade_growth_nn(
         "steps": int(result.steps),
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
         "solve_time": solve_time,
-        "compile_time": compile_time,
         "solver": "nlls-gram",
         "solution_accepted": not rejection_reasons,
         "rejection_reason": (

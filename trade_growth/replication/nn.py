@@ -27,7 +27,7 @@ SOLVER = trade_growth_nn.multicountry_trade_growth_nn
 
 def run(
     output_dir: str = ".results",
-    n_seeds: int = 3,
+    n_seeds: int = 100,
     use_float64: bool = True,
     verbose: bool = False,
 ):

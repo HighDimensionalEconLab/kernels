@@ -917,8 +917,10 @@ The example is ready only when all of the following hold.
 
 ### Performance
 
-- Report compile time separately from warm solve time.
-- Reuse compiled solves across the NFA and shock grids.
+- Enable the persistent JAX compilation cache before the first solve.
+- Report deterministic timings as medians of five cached solves and NN timings as
+  accepted-seed medians from 100 initializations.
+- Reuse compiled solves across seeds and the NFA and shock grids.
 - Compare dense Cholesky, dense QR, and eligible structured/matrix-free paths at the same
   collocation points.
 - Record NLLS steps, accepted/rejected steps, residual evaluations, and peak problem size.

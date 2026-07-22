@@ -289,16 +289,6 @@ def multicountry_growth_kernel(
         metric=metric,
     )
 
-    compile_start = time.perf_counter()
-    compile_result = solver.solve(
-        theta_0,
-        max_steps=1,
-        atol=lm_set.residual_atol,
-        max_steps_is_success=False,
-    )
-    jax.block_until_ready(compile_result)
-    compile_time = time.perf_counter() - compile_start
-
     solve_start = time.perf_counter()
     result = solver.solve(
         theta_0,
@@ -507,7 +497,6 @@ def multicountry_growth_kernel(
         "shifted_metric_norm_squared": float(shifted_metric_norm_squared),
         "solve_time": solve_time,
         "wall_time": solve_time,
-        "compile_time": compile_time,
         "solver": "nlls-gram",
         "linear_solver_resolved": lm_set.linear_solver,
         "metric_eps": eps,

@@ -27,7 +27,6 @@ parameters:
   sweep_settings.log_tables:           {value: "false"}
   # --- fixed solver settings (passed through to the solver CLI) ---
   verbose:                             {value: false}
-  measure_compilation:                 {value: true}   # warm-up outside the timed budget: Fir compiles ~2.8s, the whole budget
   # ~500 steps spans the old 2.0s wall budget at Fir step times, with margin
   stop_set.max_steps:                  {value: 500}
   stop_set.num_attempts:               {value: 1}

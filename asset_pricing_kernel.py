@@ -161,19 +161,6 @@ def asset_pricing_kernel(
         jnp.asarray(lm_set.p0_init, dtype=dtype),
     )
 
-    # The timed solve below reuses this solver instance, so its jit cache is
-    # warm; max_steps/atol are dynamic and do not recompile.
-    compile_start = time.perf_counter()
-    jax.block_until_ready(
-        solver.solve(
-            theta_0,
-            max_steps=1,
-            atol=lm_set.residual_atol,
-            max_steps_is_success=False,
-        )
-    )
-    compile_time = time.perf_counter() - compile_start
-
     start = time.perf_counter()
     result = solver.solve(
         theta_0,
@@ -277,7 +264,6 @@ def asset_pricing_kernel(
         "train_loss": float(result.info.loss),
         "steps": steps,
         "stopping_reason": STATUS_TO_REASON.get(status, "unknown"),
-        "compile_time": compile_time,
         "solution_accepted": solution_accepted,
         "rejection_reason": "accepted"
         if solution_accepted

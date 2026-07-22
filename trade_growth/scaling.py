@@ -78,7 +78,6 @@ def run_case(num_countries, phase1_steps, phase2_mode, trade_cost):
         "phase2_build_time": results["phase2_build_time"],
         "phase2_solve_time": results["phase2_solve_time"],
         "wall_time": results["wall_time"],
-        "compile_time": results["compile_time"],
         "outer_wall": outer_wall,
         "passed": passed,
     }

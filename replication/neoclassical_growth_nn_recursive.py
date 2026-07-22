@@ -5,11 +5,9 @@ import jsonargparse
 
 import neoclassical_growth_nn_recursive
 from replication.utilities import (
-    BASIN_K0_GRID,
     enable_compilation_cache,
     ensemble,
     save_experiment,
-    sweep,
     write_summary,
 )
 
@@ -22,12 +20,10 @@ PREFIX = "neoclassical_growth_nn_recursive"
 
 SOLVER = neoclassical_growth_nn_recursive.neoclassical_growth_nn_recursive
 
-BUTTERFLY = dict(A=0.5, b_1=3.0, b_2=2.5)
-
 
 def run(
     output_dir: str = ".results",
-    n_seeds: int = 3,
+    n_seeds: int = 100,
     use_float64: bool = True,
     verbose: bool = False,
 ):
@@ -51,31 +47,7 @@ def run(
         hyperparameters=hyperparameters,
     )
 
-    # Butterfly basin-of-attraction outcomes over the shared k_0 grid
-    # (settle-based classification inside the solver).
-    print(f"butterfly_basin: {n_seeds} seeds x {len(BASIN_K0_GRID)} ICs")
-    results_df, frames, hyperparameters = sweep(
-        SOLVER,
-        "k_0",
-        [float(k_0) for k_0 in BASIN_K0_GRID],
-        n_seeds=n_seeds,
-        options={**common, **BUTTERFLY},
-    )
-    frac = results_df.groupby("k_0")["basin_correct"].mean()
-    n_converged = int(results_df["solution_accepted"].sum())
-    print(f"  solver converged: {n_converged}/{len(results_df)}")
-    print(f"  P(correct basin) by k_0: min={frac.min():.2f} mean={frac.mean():.2f}")
-    save_experiment(
-        "butterfly_basin",
-        results_df,
-        {"test_df": frames["test_df"]},
-        output_dir,
-        meta,
-        prefix=PREFIX,
-        hyperparameters=hyperparameters,
-    )
-
-    write_summary(output_dir, PREFIX)
+    write_summary(output_dir, PREFIX, experiments={"baseline"})
 
 
 if __name__ == "__main__":

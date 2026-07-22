@@ -300,7 +300,6 @@ def neoclassical_growth_kernel_recursive_adaptive(
     lm_set: SolverSettings = SolverSettings(),
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
-    measure_compilation: bool = True,
 ):
     if not jax.config.jax_enable_x64:
         raise RuntimeError("enable jax_enable_x64 in the process entry point")
@@ -521,22 +520,6 @@ def neoclassical_growth_kernel_recursive_adaptive(
     }
     atol = math.sqrt(stop_set.train_loss_threshold)
 
-    compile_time = np.nan
-    if measure_compilation:
-        compile_start = time.perf_counter()
-        compiled = solver.solve(
-            beta_0,
-            args,
-            p=p,
-            max_steps=1,
-            atol=atol,
-            callback=center_callback,
-            user_state=user_state_0,
-            max_steps_is_success=False,
-        )
-        jax.block_until_ready(compiled.x)
-        compile_time = time.perf_counter() - compile_start
-
     start_time = time.perf_counter()
     result = solver.solve(
         beta_0,
@@ -548,7 +531,7 @@ def neoclassical_growth_kernel_recursive_adaptive(
         user_state=user_state_0,
         max_steps_is_success=False,
     )
-    jax.block_until_ready(result.x)
+    jax.block_until_ready(result)
     train_time = time.perf_counter() - start_time
 
     test_ts = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
@@ -741,7 +724,6 @@ def neoclassical_growth_kernel_recursive_adaptive(
             solver_converged and test_path_ok and center_fixed_point_ok
         ),
         "train_time": train_time,
-        "compile_time": compile_time,
         "total_params": int(result.x.size),
         "num_collocation_states": int(jnp.sum(result.args.active)),
         "collocation_capacity": capacity,

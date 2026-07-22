@@ -55,12 +55,10 @@ median certified tts | certification rate:
 
 ## Operational notes
 
-- Job 47575834 failed structurally: the sweep had `measure_compilation=false`,
-  which puts the first jit compile (~2.8 s on Fir cores vs ~0.6 s locally)
-  inside the 2 s timed budget — every seed hit max_time_reached. Fixed by
-  `measure_compilation=true` (warm-up outside the budget; also makes the
-  objective pure training time) in sweep 9j88zxne; sweep
-  `etk3wmsa` abandoned with smoke runs only.
+- Job 47575834 failed structurally because the first jit compile (~2.8 s on Fir
+  cores vs ~0.6 s locally) entered the old 2 s timed budget. That historical
+  sweep used an explicit warm-up; current replication instead enables the
+  persistent cache and reports medians across repeated solves.
 - The sbatch exports `JAX_COMPILATION_CACHE_DIR` (shared persistent XLA cache
   on scratch) to amortize per-config compiles across seeds/trials/agents.
 - 12 of 50 array tasks died at startup (3 s) with a partially-visible `yaml`

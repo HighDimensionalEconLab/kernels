@@ -10,14 +10,9 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from flax import nnx
+from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
-from nlls_gram import (
-    DrawNNXModule,
-    LevenbergMarquardt,
-    LMStatus,
-    MultiStart,
-)
+from nlls_gram import LevenbergMarquardt, LMStatus, MultiStart
 from tinydiffeq import IController, Rodas5P, SaveAt, Tsit5, solve_ode
 
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
@@ -30,7 +25,7 @@ if __name__ == "__main__":
 DOMAIN_EPS = 1e-8
 
 
-@dataclass(frozen=True)
+@struct.dataclass
 class StructuralParameters:
     a: jax.Array
     delta: jax.Array
@@ -70,9 +65,9 @@ class InvestmentPolicySettings:
 class InvestmentPolicyNN(nnx.Module):
     def __init__(self, settings: InvestmentPolicySettings, *, dtype, rngs: nnx.Rngs):
         self.hidden_activation = ACTIVATIONS[settings.hidden_activation]
-        self.i_scale = settings.i_scale
-        self.i_anchor = settings.i_anchor
-        self.k_0_ref = settings.k_0_ref
+        self.i_scale = nnx.Variable(jnp.asarray(settings.i_scale, dtype=dtype))
+        self.i_anchor = nnx.Variable(jnp.asarray(settings.i_anchor, dtype=dtype))
+        self.k_0_ref = nnx.Variable(jnp.asarray(settings.k_0_ref, dtype=dtype))
         self.layers = nnx.List(
             [nnx.Linear(1, settings.width, dtype=dtype, param_dtype=dtype, rngs=rngs)]
         )
@@ -96,11 +91,28 @@ class InvestmentPolicyNN(nnx.Module):
         )
 
     def __call__(self, k):
-        h = jnp.atleast_1d(jnp.log(k / self.k_0_ref))
+        h = jnp.atleast_1d(jnp.log(k / self.k_0_ref[...]))
         for layer in self.layers:
             h = self.hidden_activation(layer(h))
         raw = self.head(h)[0]
-        return self.i_anchor * unit_softplus((self.i_scale / self.i_anchor) * raw)
+        return self.i_anchor[...] * unit_softplus(
+            (self.i_scale[...] / self.i_anchor[...]) * raw
+        )
+
+
+@dataclass(frozen=True)
+class DrawInvestmentPolicy:
+    settings: InvestmentPolicySettings
+    dtype: object
+
+    def __call__(self, key, _, args):
+        module = InvestmentPolicyNN(
+            self.settings,
+            dtype=self.dtype,
+            rngs=nnx.Rngs(key),
+        )
+        _, theta, _ = nnx.split(module, nnx.Param, ...)
+        return theta, args
 
 
 def production(k, p):
@@ -158,6 +170,13 @@ class DataSettings:
     policy_grid_size: int = 100
 
 
+@struct.dataclass
+class ResidualArgs:
+    graphdef: nnx.GraphDef
+    fixed_state: nnx.State
+    data_set: DataSettings = struct.field(pytree_node=False)
+
+
 @dataclass(frozen=True)
 class StoppingCriteria:
     max_steps: int = 250
@@ -193,15 +212,26 @@ def training_attempt_budget(data_set):
     return 64 if data_set.ode_solver == "tsit5" else 128
 
 
+def log_capital_drift_field(log_kappa, _, args, p):
+    policy, structural = p
+    k = structural.k_0 * jnp.exp(log_kappa)
+    return drift(policy, k, structural) / k
+
+
 def adaptive_rollout(policy, T, budget, p, data_set, save_at):
     ode_solver, controller = ode_components(data_set)
+    field = log_capital_drift_field
+    field_p = (policy, p)
+    if not isinstance(policy, nnx.Module):
 
-    def log_capital_drift(log_kappa):
-        k = p.k_0 * jnp.exp(log_kappa)
-        return drift(policy, k, p) / k
+        def field(log_kappa):
+            k = p.k_0 * jnp.exp(log_kappa)
+            return drift(policy, k, p) / k
+
+        field_p = None
 
     return solve_ode(
-        log_capital_drift,
+        field,
         ode_solver,
         0.0,
         T,
@@ -210,6 +240,7 @@ def adaptive_rollout(policy, T, budget, p, data_set, save_at):
         controller=controller,
         max_steps=budget,
         save_at=save_at,
+        p=field_p,
     )
 
 
@@ -244,6 +275,12 @@ def adaptive_residuals(policy, p, data_set):
     return jnp.where(rollout_ok, residual, jnp.inf)
 
 
+def residual_fn(theta, args, p):
+    return adaptive_residuals(
+        nnx.merge(args.graphdef, theta, args.fixed_state), p, args.data_set
+    )
+
+
 def neoclassical_growth_nn_recursive_adaptive(
     a: float = 1 / 3,
     delta: float = 0.1,
@@ -259,7 +296,6 @@ def neoclassical_growth_nn_recursive_adaptive(
     lm_set: SolverSettings = SolverSettings(),
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
-    measure_compilation: bool = True,
 ):
     if not jax.config.jax_enable_x64:
         raise RuntimeError("enable jax_enable_x64 in the process entry point")
@@ -308,12 +344,14 @@ def neoclassical_growth_nn_recursive_adaptive(
         k_0_ref=k_0,
     )
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
-    graphdef, _ = nnx.split(
-        InvestmentPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(0)), nnx.Param
+    graphdef, _, fixed_state = nnx.split(
+        InvestmentPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(0)), nnx.Param, ...
     )
-
-    def residual_fn(theta):
-        return adaptive_residuals(nnx.merge(graphdef, theta), p, data_set)
+    residual_args = ResidualArgs(
+        graphdef=graphdef,
+        fixed_state=fixed_state,
+        data_set=data_set,
+    )
 
     solver = LevenbergMarquardt(
         residual_fn,
@@ -324,10 +362,13 @@ def neoclassical_growth_nn_recursive_adaptive(
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
         linear_solve_dtype=jnp.float64,
     )
-    _, theta_0 = nnx.split(
-        InvestmentPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(init_key)), nnx.Param
+    _, theta_0, _ = nnx.split(
+        InvestmentPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(init_key)),
+        nnx.Param,
+        ...,
     )
-    draw = DrawNNXModule(InvestmentPolicyNN, nn_set, dtype=dtype)
+    draw_settings = replace(nn_set, i_scale=1.0, i_anchor=1.0, k_0_ref=1.0)
+    draw = DrawInvestmentPolicy(draw_settings, dtype)
     multi_start = MultiStart(
         key=multi_start_key,
         num_starts=stop_set.num_attempts,
@@ -335,34 +376,19 @@ def neoclassical_growth_nn_recursive_adaptive(
     )
     atol = math.sqrt(stop_set.train_loss_threshold)
 
-    compile_time = np.nan
-    if measure_compilation:
-        compile_start = time.perf_counter()
-        compiled = solver.solve(
-            theta_0,
-            max_steps=1,
-            atol=atol,
-            multi_start=MultiStart(
-                key=jax.random.key(0),
-                num_starts=stop_set.num_attempts,
-                draw=draw,
-            ),
-            max_steps_is_success=False,
-        )
-        jax.block_until_ready(compiled.x)
-        compile_time = time.perf_counter() - compile_start
-
     start_time = time.perf_counter()
     result = solver.solve(
         theta_0,
+        residual_args,
+        p=p,
         max_steps=stop_set.max_steps,
         atol=atol,
         multi_start=multi_start,
         max_steps_is_success=False,
     )
-    jax.block_until_ready(result.x)
+    jax.block_until_ready(result)
     train_time = time.perf_counter() - start_time
-    policy = nnx.merge(graphdef, result.x)
+    policy = nnx.merge(graphdef, result.x, fixed_state)
 
     collocation_states, collocation_times, active, collocation_ok = (
         adaptive_collocation(policy, p, data_set)
@@ -485,7 +511,6 @@ def neoclassical_growth_nn_recursive_adaptive(
         "solution_accepted": solution_accepted,
         "train_time": train_time,
         "train_time_success": train_time if solution_accepted else np.nan,
-        "compile_time": compile_time,
         "attempt": int(result.multi_start.attempt) + 1,
         "total_params": int(ravel_pytree(nnx.state(policy, nnx.Param))[0].size),
         "num_collocation_states": int(jnp.sum(active)),

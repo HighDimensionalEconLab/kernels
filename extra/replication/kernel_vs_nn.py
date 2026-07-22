@@ -64,7 +64,7 @@ def run(
     output_dir: str = ".results",
     # Exploration default; scale up (training is well under a second per
     # seed) once the experiment set is frozen for the final replication run.
-    n_seeds: int = 10,
+    n_seeds: int = 100,
     use_float64: bool = True,
     verbose: bool = False,
 ):

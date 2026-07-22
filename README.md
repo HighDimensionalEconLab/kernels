@@ -41,10 +41,17 @@ The core pipeline covers:
 - `optimal_advertising_kernel.py`
 - `human_capital_kernel.py`
 - `neoclassical_growth_nn_recursive.py`
+- `open_economy_growth_kernel.py`
+- `open_economy_growth_nn_recursive.py`
+- `multicountry_growth_kernel.py`
 
 Each driver in `replication/` writes Parquet data and summary JSON. Figure
 drivers read those saved results, and `replication/collect_json.py` assembles
-the authoritative paper-number file.
+the authoritative paper-number file. Core NN baselines use 100 seeds; the two
+open-economy paths included only for the transition figure use one displayed
+seed each. A deterministic kernel specification is solved five times with the
+persistent JAX cache enabled; its JSON reports median solve time and its five
+raw timings are retained in Parquet.
 
 ## Canonical solvers
 

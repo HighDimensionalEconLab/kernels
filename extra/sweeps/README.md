@@ -13,7 +13,7 @@ Smoke-test one point locally with no wandb credentials:
         --sweep_settings.script=extra/neoclassical_growth_nn_recursive_adaptive.py \
         --sweep_settings.sort_criteria=train_time_success \
         --sweep_settings.num_seeds=2 --sweep_settings.wandb_mode=disabled \
-        --verbose=false --measure_compilation=false --stop_set.max_steps=500
+        --verbose=false --stop_set.max_steps=500
 
 ## Cluster venv
 `build_cluster_venv.sh [cpu|gpu]` builds a persistent venv from the Alliance wheelhouse

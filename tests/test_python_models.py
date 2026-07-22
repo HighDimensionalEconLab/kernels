@@ -326,7 +326,6 @@ class KernelSmokeTests(unittest.TestCase):
         results, extras = open_economy_growth_nn_recursive(
             parameters=parameters,
             verbose=False,
-            measure_compilation=False,
             data_set=data_set,
         )
 
@@ -520,15 +519,9 @@ class KernelSmokeTests(unittest.TestCase):
 
 
 class NNSmokeTests(unittest.TestCase):
-    def tearDown(self):
-        # These solves retain large reverse-over-forward executables on GPU;
-        # release them before compiling the next model family.
-        jax.clear_caches()
-
     def test_neoclassical_growth_nn_smoke(self):
         results, frames = neoclassical_growth_nn(
             verbose=False,
-            measure_compilation=False,
             data_set=GrowthNNDataSettings(
                 train_T=10.0,
                 train_points=11,
@@ -552,7 +545,6 @@ class NNSmokeTests(unittest.TestCase):
     def test_asset_pricing_nn_smoke(self):
         results, frames = asset_pricing_nn(
             verbose=False,
-            measure_compilation=False,
         )
 
         self.assertTrue(results["solution_accepted"], results["stopping_reason"])
@@ -567,7 +559,6 @@ class NNSmokeTests(unittest.TestCase):
     def test_recursive_nn_smoke(self):
         results, extras = neoclassical_growth_nn_recursive(
             verbose=False,
-            measure_compilation=False,
             data_set=RecursiveNNDataSettings(
                 dt=2.0, train_T=20.0, train_tvc_T=100.0, test_T=20.0
             ),
@@ -587,7 +578,6 @@ class NNSmokeTests(unittest.TestCase):
             b_1=3.0,
             b_2=2.5,
             verbose=False,
-            measure_compilation=False,
             data_set=RecursiveNNDataSettings(
                 dt=2.0,
                 train_T=20.0,

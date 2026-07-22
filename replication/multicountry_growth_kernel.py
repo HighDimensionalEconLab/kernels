@@ -73,21 +73,18 @@ def run(output_dir: str = ".results", use_float64: bool = True):
             productivities=(1.0, 1.1),
         ),
     )
-    for horizon, points in ((40.0, 41), (80.0, 61), (120.0, 81)):
-        go(
-            f"horizon_{round(horizon)}",
-            a_0=(-0.5 * output_scale, 0.5 * output_scale),
-            data_set=dict(
-                train_T=horizon,
-                train_points=points,
-                sampling="uniform",
-                test_T=min(50.0, horizon),
-                validation_points=201,
-                benchmark_T=max(160.0, horizon + 40.0),
-                benchmark_points=181,
-            ),
-        )
-    write_summary(output_dir, PREFIX)
+    write_summary(
+        output_dir,
+        PREFIX,
+        experiments={
+            "baseline",
+            "initial_debt",
+            "initial_assets",
+            "asymmetric_capital",
+            "three_countries",
+            "heterogeneous_countries",
+        },
+    )
 
 
 if __name__ == "__main__":

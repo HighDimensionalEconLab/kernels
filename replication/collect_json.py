@@ -169,6 +169,7 @@ def neoclassical_growth_kernel(out):
             "c_rel_error_min": sci(med(j["c_rel_error_min"])),
             "max_train_residual": sci(med(j["max_train_residual"]), 2),
             "wall_time": sig(med(j["wall_time"]), 2),
+            "timing_repetitions": int(med(j["timing_repetitions"])),
         }
 
     sparse = load(out, f"{prefix}_sparse")
@@ -302,6 +303,7 @@ def asset_pricing_kernel(out):
                 "p_rel_error_min": sci(med(j["p_rel_error_min"])),
                 "max_train_residual": sci(med(j["max_train_residual"]), 2),
                 "wall_time": sig(med(j["wall_time"]), 2),
+                "timing_repetitions": int(med(j["timing_repetitions"])),
             }
         },
         # Corrected no-bubble fundamental (QE eq. 19/20 replacement):
@@ -323,6 +325,8 @@ def asset_pricing_nn(out):
     if accepted.empty:
         raise RuntimeError("asset-pricing NN has no accepted seeds")
     return {
+        "parameters": hp["parameters"],
+        "data": hp["data_set"],
         "architecture": {
             "width": hp["nn_set"]["width"],
             "depth": hp["nn_set"]["depth"],
@@ -384,6 +388,7 @@ def optimal_advertising_kernel(out):
         "u_0": sig(med(j["u_0"]), 4),
         "max_train_residual": sci(med(j["max_train_residual"]), 2),
         "wall_time": sig(med(j["wall_time"]), 2),
+        "timing_repetitions": int(med(j["timing_repetitions"])),
     }
 
 
@@ -416,6 +421,7 @@ def human_capital_kernel(out):
         "max_validation_residual": sci(med(j["max_validation_residual"]), 2),
         "max_test_feasibility": sci(med(j["max_test_feasibility"]), 2),
         "wall_time": sig(med(j["wall_time"]), 2),
+        "timing_repetitions": int(med(j["timing_repetitions"])),
     }
 
 
@@ -429,12 +435,9 @@ def neoclassical_growth_nn_recursive(out):
     accepted = baseline_df[baseline_df["solution_accepted"]]
     hp = load(out, f"{prefix}_baseline_hyperparameters")
 
-    bf_hp = load(out, f"{prefix}_butterfly_basin_hyperparameters")
-    bf = load(out, f"{prefix}_butterfly_basin")
-    bf_df = pd.read_parquet(out / f"{prefix}_butterfly_basin_results.parquet")
-    frac_by_k0 = bf_df.groupby("k_0")["basin_correct"].mean()
-
     return {
+        "parameters": hp["parameters"],
+        "data": hp["data_set"],
         "architecture": {
             "width": hp["nn_set"]["width"],
             "depth": hp["nn_set"]["depth"],
@@ -473,35 +476,250 @@ def neoclassical_growth_nn_recursive(out):
                 "k_ss": sig(med(baseline_json["k_ss"]), 4),
             }
         },
-        "butterfly": {
-            "parameters": {
-                "A": bf_hp["parameters"]["A"],
-                "b_1": bf_hp["parameters"]["b_1"],
-                "b_2": bf_hp["parameters"]["b_2"],
-            },
-            "steady_states": {
-                "k_thr": sig(med(bf["k_thr"]), 6),
-                "k_ss_low": sig(med(bf["k_ss_low"]), 4),
-                "k_ss_high": sig(med(bf["k_ss_high"]), 4),
-            },
-            "k_0_grid": {
-                "min": sig(float(bf_df["k_0"].min())),
-                "max": sig(float(bf_df["k_0"].max())),
-                "n": int(bf_df["k_0"].nunique()),
-            },
-            "n_solver_converged": int(bf_df["solution_accepted"].sum()),
-            "frac_solver_converged": sig(float(bf_df["solution_accepted"].mean())),
-            "frac_basin_correct": sig(float(bf_df["basin_correct"].mean())),
-            "frac_false_positive": sig(float(bf_df["false_positive"].mean())),
-            "frac_correct_by_k_0": {
-                f"{k_0:g}": sig(float(value)) for k_0, value in frac_by_k0.items()
-            },
+    }
+
+
+def open_economy_growth_kernel(out):
+    prefix = "open_economy_growth_kernel"
+    hp = load(out, f"{prefix}_baseline_hyperparameters")
+
+    def experiment(name):
+        j = load(out, f"{prefix}_{name}")
+        return {
+            "solution_accepted": bool(j["frac_accepted"] == 1.0),
+            "k_0": sig(med(j["k_0"]), 5),
+            "a_0": sig(med(j["a_0"]), 5),
+            "num_train_points": int(med(j["num_train_points"])),
+            "train_T": sig(med(j["train_T"]), 5),
+            "max_train_residual": sci(med(j["max_train_residual"])),
+            "max_validation_residual": sci(med(j["max_validation_residual"])),
+            "max_benchmark_error": sci(med(j["max_benchmark_error"])),
+            "ex_post_present_value_gap": sci(med(j["ex_post_present_value_gap"])),
+            "ex_post_asset_tvc": sci(med(j["ex_post_asset_tvc"])),
+            "ex_post_capital_tvc": sci(med(j["ex_post_capital_tvc"])),
+            "wall_time_median": sig(med(j["wall_time"])),
+            "timing_repetitions": int(med(j["timing_repetitions"])),
+        }
+
+    return {
+        "parameters": hp["parameters"],
+        "kernel": hp["kernel_set"],
+        "selection": "minimum_shifted_rkhs_metric",
+        "training_information": {"terminal_residual_count": 0},
+        "experiments": {
+            name: experiment(name)
+            for name in (
+                "baseline",
+                "initial_debt",
+                "initial_assets",
+                "horizon_200",
+                "uniform_321",
+            )
         },
     }
 
 
+def open_economy_growth_nn_recursive(out):
+    prefix = "open_economy_growth_nn_recursive"
+    hp = load(out, f"{prefix}_baseline_hyperparameters")
+
+    def experiment(name):
+        j = load(out, f"{prefix}_{name}")
+        frame = pd.read_parquet(out / f"{prefix}_{name}_results.parquet")
+        accepted = frame[frame["solution_accepted"]]
+        if accepted.empty:
+            return {"frac_accepted": sig(j["frac_accepted"])}
+        return {
+            "frac_accepted": sig(j["frac_accepted"]),
+            "k_0": sig(float(accepted["k_0"].median()), 5),
+            "a_0": sig(float(accepted["a_0"].median()), 5),
+            "max_train_residual_median": sci(
+                float(accepted["max_train_residual"].median())
+            ),
+            "max_validation_residual_median": sci(
+                float(accepted["max_validation_residual"].median())
+            ),
+            "max_benchmark_error_median": sci(
+                float(accepted["max_benchmark_error"].median())
+            ),
+            "ex_post_present_value_gap_median": sci(
+                float(accepted["ex_post_present_value_gap"].median())
+            ),
+            "ex_post_asset_tvc_median": sci(
+                float(accepted["ex_post_asset_tvc"].median())
+            ),
+            "ex_post_capital_tvc_median": sci(
+                float(accepted["ex_post_capital_tvc"].median())
+            ),
+            "train_time_median": sig(float(accepted["train_time"].median())),
+        }
+
+    return {
+        "parameters": hp["parameters"],
+        "architecture": {
+            "width": hp["nn_set"]["width"],
+            "depth": hp["nn_set"]["depth"],
+            "hidden_activation": hp["nn_set"]["hidden_activation"],
+            "total_params": int(med(load(out, f"{prefix}_baseline")["total_params"])),
+        },
+        "selection": "minimum_identity_metric_parameter_step",
+        "training_information": {"terminal_residual_count": 0},
+        "n_seeds": int(load(out, f"{prefix}_baseline")["n_seeds"]),
+        "experiments": {
+            name: experiment(name)
+            for name in (
+                "baseline",
+                "initial_debt",
+                "initial_assets",
+            )
+        },
+    }
+
+
+def multicountry_growth_kernel(out):
+    prefix = "multicountry_growth_kernel"
+
+    def experiment(name):
+        j = load(out, f"{prefix}_{name}")
+        hp = load(out, f"{prefix}_{name}_hyperparameters")
+        return {
+            "num_countries": len(hp["parameters"]["populations"]),
+            "initial_conditions": hp["initial_conditions"],
+            "solution_accepted": bool(j["frac_accepted"] == 1.0),
+            "num_train_points": int(med(j["num_train_points"])),
+            "train_T": sig(med(j["train_T"]), 5),
+            "max_train_residual": sci(med(j["max_train_residual"])),
+            "max_validation_residual": sci(med(j["max_validation_residual"])),
+            "max_asset_clearing_residual": sci(med(j["max_asset_clearing_residual"])),
+            "max_rate_consistency_residual": sci(
+                med(j["max_rate_consistency_residual"])
+            ),
+            "max_benchmark_error": sci(med(j["max_benchmark_error"])),
+            "ex_post_asset_tvc": sci(med(j["ex_post_asset_tvc"])),
+            "ex_post_capital_tvc": sci(med(j["ex_post_capital_tvc"])),
+            "wall_time_median": sig(med(j["wall_time"])),
+            "timing_repetitions": int(med(j["timing_repetitions"])),
+        }
+
+    baseline_hp = load(out, f"{prefix}_baseline_hyperparameters")
+    return {
+        "parameters": baseline_hp["parameters"],
+        "kernel": baseline_hp["kernel_set"],
+        "selection": "minimum_shifted_rkhs_metric",
+        "training_information": {"terminal_residual_count": 0},
+        "experiments": {
+            name: experiment(name)
+            for name in (
+                "baseline",
+                "initial_debt",
+                "initial_assets",
+                "asymmetric_capital",
+                "three_countries",
+                "heterogeneous_countries",
+            )
+        },
+    }
+
+
+def performance_comparisons(out):
+    def accepted(prefix):
+        frame = pd.read_parquet(out / f"{prefix}_baseline_results.parquet")
+        accepted_frame = frame[frame["solution_accepted"]]
+        if accepted_frame.empty:
+            raise RuntimeError(f"{prefix} baseline has no accepted solutions")
+        return accepted_frame
+
+    asset_kernel = load(out, "asset_pricing_kernel_baseline")
+    asset_nn = accepted("asset_pricing_nn")
+    asset_kernel_time = med(asset_kernel["wall_time"])
+    asset_nn_time = float(asset_nn["train_time"].median())
+    asset_kernel_error = med(asset_kernel["p_rel_error_mean"])
+    asset_nn_error = float(asset_nn["p_rel_error_mean"].median())
+
+    growth_kernel = load(out, "neoclassical_growth_kernel_baseline")
+    growth_nn = accepted("neoclassical_growth_nn_recursive")
+    growth_kernel_time = med(growth_kernel["wall_time"])
+    growth_nn_time = float(growth_nn["train_time"].median())
+    growth_kernel_error = max(
+        med(growth_kernel["k_rel_error_mean"]),
+        med(growth_kernel["c_rel_error_mean"]),
+    )
+    growth_nn_error = max(
+        float(growth_nn["test_mean_abs_k_rel_error"].median()),
+        float(growth_nn["test_mean_abs_c_rel_error"].median()),
+    )
+
+    open_kernel = load(out, "open_economy_growth_kernel_baseline")
+    open_nn = accepted("open_economy_growth_nn_recursive")
+    open_kernel_time = med(open_kernel["wall_time"])
+    open_nn_time = float(open_nn["train_time"].median())
+    open_kernel_error = med(open_kernel["max_benchmark_error"])
+    open_nn_error = float(open_nn["max_benchmark_error"].median())
+
+    def comparison(kernel_time, nn_time, kernel_error, nn_error):
+        return {
+            "kernel_solve_time_median": sig(kernel_time),
+            "nn_solve_time_median": sig(nn_time),
+            "nn_to_kernel_time_ratio": sig(nn_time / kernel_time),
+            "kernel_error": sci(kernel_error),
+            "nn_error_median": sci(nn_error),
+            "nn_to_kernel_error_ratio": sig(nn_error / kernel_error),
+        }
+
+    return {
+        "timing_contract": {
+            "kernel": "median of five cached deterministic solves",
+            "nn": "median across accepted seeds from 100 initializations",
+        },
+        "asset_pricing": comparison(
+            asset_kernel_time,
+            asset_nn_time,
+            asset_kernel_error,
+            asset_nn_error,
+        ),
+        "neoclassical_growth": comparison(
+            growth_kernel_time,
+            growth_nn_time,
+            growth_kernel_error,
+            growth_nn_error,
+        ),
+        "open_economy_growth": comparison(
+            open_kernel_time,
+            open_nn_time,
+            open_kernel_error,
+            open_nn_error,
+        ),
+    }
+
+
+def validate_replication_contract(out):
+    nn_prefixes = (
+        "asset_pricing_nn",
+        "neoclassical_growth_nn_recursive",
+        "open_economy_growth_nn_recursive",
+    )
+    for prefix in nn_prefixes:
+        summary = load(out, f"{prefix}_baseline")
+        if summary["n_seeds"] != 100:
+            raise RuntimeError(f"{prefix} must use 100 seeds, got {summary['n_seeds']}")
+
+    kernel_prefixes = (
+        "neoclassical_growth_kernel",
+        "asset_pricing_kernel",
+        "optimal_advertising_kernel",
+        "human_capital_kernel",
+        "open_economy_growth_kernel",
+        "multicountry_growth_kernel",
+    )
+    for prefix in kernel_prefixes:
+        timing = pd.read_parquet(out / f"{prefix}_baseline_timing_df.parquet")
+        if len(timing) != 5:
+            raise RuntimeError(f"{prefix} must retain five timing runs")
+
+
 def collect(output_dir: str = ".results"):
     out = pathlib.Path(output_dir)
+    validate_replication_contract(out)
     write_nu_rho_table(out)
     payload = clean(
         {
@@ -511,8 +729,9 @@ def collect(output_dir: str = ".results"):
                     "paper: each value is selected and rounded to copy/paste "
                     "form here (replication/collect_json.py) and must never be "
                     "recomputed or re-rounded downstream. Cross-seed statistics "
-                    "are medians (suffix _median); error magnitudes below 0.001 "
-                    "are LaTeX math-mode strings from sci()."
+                    "are medians (suffix _median); deterministic wall_time values "
+                    "are medians of five cached solves; error magnitudes below "
+                    "0.001 are LaTeX math-mode strings from sci()."
                 ),
                 "generated": datetime.datetime.now()
                 .astimezone()
@@ -530,6 +749,10 @@ def collect(output_dir: str = ".results"):
             "optimal_advertising_kernel": optimal_advertising_kernel(out),
             "human_capital_kernel": human_capital_kernel(out),
             "neoclassical_growth_nn_recursive": neoclassical_growth_nn_recursive(out),
+            "open_economy_growth_kernel": open_economy_growth_kernel(out),
+            "open_economy_growth_nn_recursive": open_economy_growth_nn_recursive(out),
+            "multicountry_growth_kernel": multicountry_growth_kernel(out),
+            "performance_comparisons": performance_comparisons(out),
         }
     )
     # allow_nan=False guarantees the output is strict JSON (any NaN raises here).

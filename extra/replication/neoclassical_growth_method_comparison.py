@@ -8,6 +8,7 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 import jax
 import jax.numpy as jnp
 import jsonargparse
+import numpy as np
 import pandas as pd
 
 import extra.neoclassical_growth_kernel_recursive_adaptive as neoclassical_growth_kernel_recursive_adaptive
@@ -30,6 +31,7 @@ QUALITY_T = 100.0
 TVC_T = 200.0
 TEST_POINTS = 401
 BENCHMARK_POINTS = 800
+TIMING_REPETITIONS = 5
 
 
 def path_tvc(k, c, t, rho_hat=0.11, sigma_crra=1.0):
@@ -82,7 +84,6 @@ def comparison_row(
         "collocation_points": int(collocation_points),
         "parameter_count": int(parameter_count),
         "post_compile_seconds": float(results[solve_time_key]),
-        "compile_seconds": float(results["compile_time"]),
         "lm_steps": int(results["steps"]),
         "capital_mean_relative_error": float(results[capital_error_key]),
         "consumption_mean_relative_error": float(results[consumption_error_key]),
@@ -98,6 +99,15 @@ def comparison_row(
     if not row["solution_accepted"]:
         raise RuntimeError(f"{method} did not pass its finite-horizon acceptance gates")
     return row
+
+
+def repeated_solve(solve, time_key):
+    outputs = [solve() for _ in range(TIMING_REPETITIONS)]
+    results, extra = outputs[-1]
+    results[time_key] = float(
+        np.median([candidate[0][time_key] for candidate in outputs])
+    )
+    return results, extra
 
 
 def write_appendix_tables(results_df, output_dir):
@@ -123,7 +133,7 @@ def write_appendix_tables(results_df, output_dir):
     ]
     note = (
         "\n\nAll errors and residuals are evaluated on a 401-point grid over "
-        "$t \\in [0,100]$. Timings are one post-compilation CPU float64 solve. "
+        "$t \\in [0,100]$. Timings are cached CPU float64 solves. "
         "The TVC is checked only ex post through $t=200$."
     )
     (out / f"{PREFIX}_appendix.md").write_text(
@@ -143,8 +153,8 @@ def write_appendix_tables(results_df, output_dir):
             r"\begin{table}",
             r"\centering",
             r"\caption{Neoclassical-growth solution methods. Quality statistics use "
-            r"a 401-point grid on $t \in [0,100]$; timings are one "
-            r"post-compilation CPU float64 solve. The TVC is evaluated only ex post "
+            r"a 401-point grid on $t \in [0,100]$; timings are medians of five "
+            r"cached CPU float64 solves. The TVC is evaluated only ex post "
             r"through $t=200$.}",
             r"\label{tab:neoclassical-growth-method-comparison}",
             r"\begin{tabular}{lrrrrrrc}",
@@ -173,13 +183,13 @@ def run(
     hyperparameters = {
         "quality_grid": {"T": QUALITY_T, "points": TEST_POINTS},
         "ex_post_tvc_T": TVC_T,
-        "timing": "one post-compilation solve",
+        "timing": "median of five cached solves",
         "methods": {},
     }
 
     print("sequence-space kernel")
-    sequence_kernel_results, sequence_kernel_extra = (
-        neoclassical_growth_kernel.neoclassical_growth_kernel(
+    sequence_kernel_results, sequence_kernel_extra = repeated_solve(
+        lambda: neoclassical_growth_kernel.neoclassical_growth_kernel(
             use_float64=use_float64,
             data_set=neoclassical_growth_kernel.DataSettings(
                 train_T=QUALITY_T,
@@ -189,7 +199,8 @@ def run(
                 benchmark_T=TVC_T,
                 benchmark_points=BENCHMARK_POINTS,
             ),
-        )
+        ),
+        "solve_time",
     )
     sequence_kernel_tvc_results = sequence_kernel_tvc(sequence_kernel_extra["model"])
     rows.append(
@@ -211,8 +222,8 @@ def run(
     ]
 
     print("sequence-space NN")
-    sequence_nn_results, sequence_nn_extra = (
-        neoclassical_growth_nn.neoclassical_growth_nn(
+    sequence_nn_results, sequence_nn_extra = repeated_solve(
+        lambda: neoclassical_growth_nn.neoclassical_growth_nn(
             seed=seed,
             **common,
             data_set=neoclassical_growth_nn.DataSettings(
@@ -224,7 +235,8 @@ def run(
                 benchmark_T=TVC_T,
                 benchmark_points=BENCHMARK_POINTS,
             ),
-        )
+        ),
+        "train_time",
     )
     sequence_nn_tvc_results = sequence_nn_tvc(sequence_nn_extra["model"])
     rows.append(
@@ -246,14 +258,17 @@ def run(
     ]
 
     print("recursive NN, Adaptive Tsit5")
-    adaptive_nn_results, adaptive_nn_extra = (
-        neoclassical_growth_nn_recursive_adaptive.neoclassical_growth_nn_recursive_adaptive(
-            seed=seed,
-            **common,
-            data_set=neoclassical_growth_nn_recursive_adaptive.DataSettings(
-                ode_solver="tsit5"
-            ),
-        )
+    adaptive_nn_results, adaptive_nn_extra = repeated_solve(
+        lambda: (
+            neoclassical_growth_nn_recursive_adaptive.neoclassical_growth_nn_recursive_adaptive(
+                seed=seed,
+                **common,
+                data_set=neoclassical_growth_nn_recursive_adaptive.DataSettings(
+                    ode_solver="tsit5"
+                ),
+            )
+        ),
+        "train_time",
     )
     rows.append(
         comparison_row(
@@ -273,14 +288,17 @@ def run(
     ]
 
     print("recursive kernel, Adaptive Tsit5")
-    adaptive_kernel_results, adaptive_kernel_extra = (
-        neoclassical_growth_kernel_recursive_adaptive.neoclassical_growth_kernel_recursive_adaptive(
-            use_float64=use_float64,
-            verbose=verbose,
-            data_set=neoclassical_growth_kernel_recursive_adaptive.DataSettings(
-                ode_solver="tsit5"
-            ),
-        )
+    adaptive_kernel_results, adaptive_kernel_extra = repeated_solve(
+        lambda: (
+            neoclassical_growth_kernel_recursive_adaptive.neoclassical_growth_kernel_recursive_adaptive(
+                use_float64=use_float64,
+                verbose=verbose,
+                data_set=neoclassical_growth_kernel_recursive_adaptive.DataSettings(
+                    ode_solver="tsit5"
+                ),
+            )
+        ),
+        "train_time",
     )
     rows.append(
         comparison_row(

@@ -169,20 +169,20 @@ def run(output_dir: str = ".results"):
         parameters=heterogeneous_four_country_parameters(),
     )
 
-    compile_start = time.perf_counter()
-    solution = problem.solve()
-    jax.block_until_ready(solution.aux)
-    solve_compile_seconds = time.perf_counter() - compile_start
+    solve_times = []
+    jacobian_times = []
+    for _ in range(5):
+        solve_start = time.perf_counter()
+        solution = problem.solve()
+        jax.block_until_ready(solution.aux)
+        solve_times.append(time.perf_counter() - solve_start)
 
-    solve_start = time.perf_counter()
-    solution = problem.solve()
-    jax.block_until_ready(solution.aux)
-    solve_seconds = time.perf_counter() - solve_start
-
-    jacobian_start = time.perf_counter()
-    statistics, jacobian = full_structural_jacobian(problem)
-    jax.block_until_ready(jacobian)
-    jacobian_seconds = time.perf_counter() - jacobian_start
+        jacobian_start = time.perf_counter()
+        statistics, jacobian = full_structural_jacobian(problem)
+        jax.block_until_ready(jacobian)
+        jacobian_times.append(time.perf_counter() - jacobian_start)
+    solve_seconds = float(np.median(solve_times))
+    jacobian_seconds = float(np.median(jacobian_times))
     interpretable_jacobian = jacobian * problem.parameter_coordinate_scales[None, :]
 
     statistics_array = np.asarray(statistics)
@@ -303,9 +303,9 @@ def run(output_dir: str = ".results"):
         "status": int(solution.status),
         "steps": int(solution.steps),
         "max_dae_residual": float(jnp.max(jnp.abs(residual))),
-        "solve_compile_seconds": solve_compile_seconds,
         "solve_seconds": solve_seconds,
         "jacobian_seconds": jacobian_seconds,
+        "timing_repetitions": 5,
         "num_statistics": len(problem.statistic_names),
         "num_parameters": len(problem.parameter_names),
         "jacobian_method": "nlls_gram_ad_solver_auto_vjp",

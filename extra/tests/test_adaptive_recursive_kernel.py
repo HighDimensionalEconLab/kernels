@@ -108,7 +108,6 @@ class AdaptiveRecursiveKernelTests(unittest.TestCase):
     def test_short_solve(self):
         results, extras = neoclassical_growth_kernel_recursive_adaptive(
             verbose=False,
-            measure_compilation=False,
             data_set=DataSettings(
                 train_T=5.0,
                 adaptive_steps=32,

@@ -38,8 +38,10 @@ class DataSettings:
 
 @dataclass(frozen=True)
 class PricePolicySettings:
-    width: int = 32
-    depth: int = 3
+    # Ten-seed capacity check: 4x2 is the smallest architecture that reaches
+    # the common loss tolerance for every seed; one-layer networks stall.
+    width: int = 4
+    depth: int = 2
     hidden_activation: str = "tanh"
     hidden_bias: bool = True
     output_bias: bool = True

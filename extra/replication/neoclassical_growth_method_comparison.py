@@ -11,9 +11,9 @@ import jsonargparse
 import pandas as pd
 
 import extra.neoclassical_growth_kernel_recursive_adaptive as neoclassical_growth_kernel_recursive_adaptive
+import extra.neoclassical_growth_nn_recursive_adaptive as neoclassical_growth_nn_recursive_adaptive
 import neoclassical_growth_kernel
 import neoclassical_growth_nn
-import neoclassical_growth_nn_recursive
 from replication.utilities import (
     enable_compilation_cache,
     save_experiment,
@@ -247,10 +247,12 @@ def run(
 
     print("recursive NN, Adaptive Tsit5")
     adaptive_nn_results, adaptive_nn_extra = (
-        neoclassical_growth_nn_recursive.neoclassical_growth_nn_recursive(
+        neoclassical_growth_nn_recursive_adaptive.neoclassical_growth_nn_recursive_adaptive(
             seed=seed,
             **common,
-            data_set=neoclassical_growth_nn_recursive.DataSettings(ode_solver="tsit5"),
+            data_set=neoclassical_growth_nn_recursive_adaptive.DataSettings(
+                ode_solver="tsit5"
+            ),
         )
     )
     rows.append(

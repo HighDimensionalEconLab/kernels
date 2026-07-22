@@ -37,6 +37,7 @@ The core pipeline covers:
 - `neoclassical_growth_kernel.py`
 - `neoclassical_growth_concave_convex_kernel.py`
 - `asset_pricing_kernel.py`
+- `asset_pricing_nn.py`
 - `optimal_advertising_kernel.py`
 - `human_capital_kernel.py`
 - `neoclassical_growth_nn_recursive.py`
@@ -51,6 +52,8 @@ The main kernel modules are:
 
 - `asset_pricing_kernel.py`: asset-pricing kernel solution and closed-form
   benchmark.
+- `asset_pricing_nn.py`: sequence-space MLP trained only on the pricing ODE;
+  the no-bubble benchmark is used only for ex-post diagnostics.
 - `neoclassical_growth_kernel.py`: smooth or kinked neoclassical growth.
 - `neoclassical_growth_concave_convex_kernel.py`: the butterfly-production
   threshold experiment.
@@ -67,9 +70,8 @@ a float64 metric solve, and the library's default linear solver.
 The main NN modules are deliberately limited:
 
 - `neoclassical_growth_nn.py`: direct sequence-space MLP.
-- `neoclassical_growth_nn_recursive.py`: adaptive accepted-step state-space
-  investment policy using Tsit5 or Rodas5P. The old fixed-grid recursive NN has
-  been removed.
+- `neoclassical_growth_nn_recursive.py`: fixed-step RK4 state-space investment
+  policy used as the recursive NN baseline.
 - `open_economy_growth_nn_recursive.py`: the open-economy state-space policy.
 
 Shared activation and transform helpers are in `utilities.py`.
@@ -79,7 +81,7 @@ Every solver returns `(results, extras)`, writes nothing itself, and exposes a
 
 ```bash
 uv run python neoclassical_growth_kernel.py --kernel_set.ell 5.0
-uv run python neoclassical_growth_nn_recursive.py --seed 3 --data_set.rtol 1e-8
+uv run python neoclassical_growth_nn_recursive.py --seed 3 --data_set.train_steps 48
 uv run python multicountry_growth_kernel.py --a_0 '[-0.5, 0.5]'
 ```
 
@@ -95,9 +97,9 @@ print(results["k_rel_error_mean"])
 ## Optional examples
 
 [`extra/`](extra/README.md) contains the UNO kernel implementations, the
-integrated-derivative MLP, the separate RFF NN, the adaptive recursive kernel,
-method-comparison drivers, and HPO sweep material. None are part of the main
-replication command.
+integrated-derivative MLP, the separate RFF NN, the adaptive recursive kernel
+and NN, method-comparison drivers, and HPO sweep material. None are part of the
+main replication command.
 
 [`trade_growth/`](trade_growth/README.md) contains the full multicountry
 trade-growth model, kernel and NN solvers, comparative statics, specialized
@@ -107,8 +109,8 @@ level.
 
 The design and verification record for the open-economy and multicountry
 stepping stones is in [`docs/open_economy_growth.md`](docs/open_economy_growth.md).
-The adaptive recursive NN is described in
-[`docs/neoclassical_growth_nn_recursive.md`](docs/neoclassical_growth_nn_recursive.md).
+The optional adaptive recursive NN is described in
+[`extra/docs/neoclassical_growth_nn_recursive_adaptive.md`](extra/docs/neoclassical_growth_nn_recursive_adaptive.md).
 
 ## Tests and lint
 

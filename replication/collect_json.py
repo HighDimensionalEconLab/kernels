@@ -314,6 +314,50 @@ def asset_pricing_kernel(out):
     }
 
 
+def asset_pricing_nn(out):
+    prefix = "asset_pricing_nn"
+    j = load(out, f"{prefix}_baseline")
+    hp = load(out, f"{prefix}_baseline_hyperparameters")
+    frame = pd.read_parquet(out / f"{prefix}_baseline_results.parquet")
+    accepted = frame[frame["solution_accepted"]]
+    if accepted.empty:
+        raise RuntimeError("asset-pricing NN has no accepted seeds")
+    return {
+        "architecture": {
+            "width": hp["nn_set"]["width"],
+            "depth": hp["nn_set"]["depth"],
+            "hidden_activation": hp["nn_set"]["hidden_activation"],
+            "total_params": int(accepted["total_params"].median()),
+        },
+        "n_seeds": int(j["n_seeds"]),
+        "frac_accepted": sig(j["frac_accepted"]),
+        "selection": "minimum_identity_metric_parameter_step",
+        "training_information": {
+            "terminal_residual_count": 0,
+            "tvc_residual_count": 0,
+            "benchmark_residual_count": 0,
+        },
+        "experiments": {
+            "baseline": {
+                "p_0_median": sig(float(accepted["p_0"].median()), 6),
+                "p_rel_error_mean_median": sci(
+                    float(accepted["p_rel_error_mean"].median())
+                ),
+                "p_rel_error_max_median": sci(
+                    float(accepted["p_rel_error_max"].median())
+                ),
+                "max_abs_bubble_coefficient_median": sci(
+                    float(accepted["max_abs_bubble_coefficient"].median())
+                ),
+                "max_train_residual_median": sci(
+                    float(accepted["max_train_residual"].median())
+                ),
+                "train_time_median": sig(float(accepted["train_time"].median())),
+            }
+        },
+    }
+
+
 def optimal_advertising_kernel(out):
     prefix = "optimal_advertising_kernel"
     j = load(out, f"{prefix}_baseline")
@@ -424,7 +468,8 @@ def neoclassical_growth_nn_recursive(out):
                 "num_collocation_states": int(
                     med(baseline_json["num_collocation_states"])
                 ),
-                "rtol": hp["data_set"]["rtol"],
+                "ode_solver": hp["data_set"]["ode_solver"],
+                "train_steps": hp["data_set"]["train_steps"],
                 "k_ss": sig(med(baseline_json["k_ss"]), 4),
             }
         },
@@ -444,6 +489,8 @@ def neoclassical_growth_nn_recursive(out):
                 "max": sig(float(bf_df["k_0"].max())),
                 "n": int(bf_df["k_0"].nunique()),
             },
+            "n_solver_converged": int(bf_df["solution_accepted"].sum()),
+            "frac_solver_converged": sig(float(bf_df["solution_accepted"].mean())),
             "frac_basin_correct": sig(float(bf_df["basin_correct"].mean())),
             "frac_false_positive": sig(float(bf_df["false_positive"].mean())),
             "frac_correct_by_k_0": {
@@ -479,6 +526,7 @@ def collect(output_dir: str = ".results"):
                 neoclassical_growth_concave_convex_kernel(out)
             ),
             "asset_pricing_kernel": asset_pricing_kernel(out),
+            "asset_pricing_nn": asset_pricing_nn(out),
             "optimal_advertising_kernel": optimal_advertising_kernel(out),
             "human_capital_kernel": human_capital_kernel(out),
             "neoclassical_growth_nn_recursive": neoclassical_growth_nn_recursive(out),

@@ -10,7 +10,7 @@ is the gate and speed the objective) over 11 seeds via `wandb_sweep_wrapper.py`.
 Smoke-test one point locally with no wandb credentials:
 
     uv run --group sweep python extra/sweeps/wandb_sweep_wrapper.py \
-        --sweep_settings.script=neoclassical_growth_nn_recursive.py \
+        --sweep_settings.script=extra/neoclassical_growth_nn_recursive_adaptive.py \
         --sweep_settings.sort_criteria=train_time_success \
         --sweep_settings.num_seeds=2 --sweep_settings.wandb_mode=disabled \
         --verbose=false --measure_compilation=false --stop_set.max_steps=500

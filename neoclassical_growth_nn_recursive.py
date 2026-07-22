@@ -18,17 +18,37 @@ from nlls_gram import (
     LMStatus,
     MultiStart,
 )
-from tinydiffeq import IController, Rodas5P, SaveAt, Tsit5, solve_ode
+from tinydiffeq import (
+    RK4,
+    ConstantStepSize,
+    Euler,
+    SaveAt,
+    solve_ode,
+)
 
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from utilities import ACTIVATIONS, unit_softplus
+
+# Recursive (state-space) neoclassical growth solver with log utility: the NN
+# approximates gross investment i(k), state = k only. The drift and
+# consumption are implied by the resource constraint
+#   dk(k) = i(k) - delta k,   c(k) = f(k) - i(k),
+# so the investment head is a positive unit-softplus output anchored at the
+# replacement level delta k_0, while c > 0 is enforced through penalty rows in
+# the residual (log utility needs c > 0). The stationary Euler
+# residual is
+#   R(k) = c'(k) dk(k) - c(k) (f'(k) - delta - rho_hat),
+# with c'(k) = f'(k) - i'(k). Collocation states come from a bounded
+# tinydiffeq rollout of the learned policy from k_0, differentiated through
+# by the optimizer and sampled on a fixed time grid. The input derivative
+# i'(k) uses forward-mode jax.jvp inside the residual while the LM solver
+# uses reverse mode over the parameters (reverse-over-forward).
 
 if __name__ == "__main__":
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
 
 DOMAIN_EPS = 1e-8
-KINKED_EULER_TOL = 5e-3
 
 
 @dataclass(frozen=True)
@@ -49,6 +69,48 @@ class StructuralParameters:
         )
 
 
+@dataclass
+class DataSettings:
+    # dt is the grid spacing of the test/settle evaluation paths.
+    dt: float = 1.0
+    ode_solver: Literal["rk4", "euler"] = "rk4"
+    # Static internal-step budgets. Fixed solvers use train_T / train_steps.
+    train_steps: int = 32
+    # A fixed grid keeps the residual shape and scaling constant. The capacity
+    # sweep reaches its accuracy plateau at 65 points.
+    train_points: int = 65
+    tvc_steps: int = 64
+    train_T: float = 40.0
+    # Auxiliary horizon for the post-hoc transversality certificate. The
+    # signal peaks at or just after train_T (capital is bounded by c > 0, so
+    # the level term saturates while the discount keeps falling), so a short
+    # window past the training horizon suffices.
+    train_tvc_T: float = 50.0
+    test_T: float = 50.0
+    settle_T: float = 400.0  # basin classification horizon (kinked production)
+    policy_grid_size: int = 100
+    benchmark_T: float = 80.0
+    benchmark_points: int = 300
+
+
+@dataclass(frozen=True)
+class StoppingCriteria:
+    # Three-seed RK4 calibration converges in 47-62 steps.
+    max_steps: int = 250
+    # 1e-14 certifies k relative error around 1.4e-6 against the tight
+    # benchmark within the default budget.
+    train_loss_threshold: float = 1e-14
+    num_attempts: int = 1  # single attempt: frac_accepted measures first-try robustness
+    # Bar on the log-TVC certificate: 0.0 demands the discounted value of
+    # capital in marginal-utility units stays below its O(1) scale at every
+    # checked horizon (saddle: -rho_hat t + O(1) < 0; the degenerate branch
+    # is far positive).
+    log_tvc_threshold: float = 0.0
+
+
+# Defaults from the Fir HPO sweep winner (kernels/9j88zxne; see
+# sweeps/cluster_hpo.md) -- though the sweep found every damping knob flat
+# across orders of magnitude; geodesic acceleration is the one that matters.
 @dataclass(frozen=True)
 class SolverSettings:
     init_damping: float = 3.26e-5
@@ -58,6 +120,12 @@ class SolverSettings:
     geodesic_acceptance_ratio: float = 0.541
 
 
+# Runtime i_scale, i_anchor, and k_0_ref are folded in via replace() before
+# construction (computed from the initial condition only -- no steady-state or
+# kink info).
+# The local capacity/collocation sweep found the smooth-model error plateaus at
+# width 32, depth 3, and 65 collocation points. Wider 8.5k and 33k parameter
+# networks match its accuracy but cost 1.3-3.4x more warm solve time.
 @dataclass(frozen=True)
 class InvestmentPolicySettings:
     width: int = 32
@@ -104,11 +172,22 @@ class InvestmentPolicyNN(nnx.Module):
         return self.i_anchor * unit_softplus((self.i_scale / self.i_anchor) * raw)
 
 
+# The optimizer stops solely on its residual tolerance. The exact log-TVC
+# certificate is computed once afterward and never enters training or
+# acceptance.
+STATUS_TO_REASON = {
+    LMStatus.CONVERGED: "early_stopping_met",
+    LMStatus.NONFINITE: "loss_divergence",
+    LMStatus.MAX_STEPS: "max_steps",
+}
+
+
 def production(k, p):
     base = k**p.a
     return p.A * jnp.maximum(base, p.b_1 * base - p.b_2)
 
 
+# Marginal product with the branch selected by the (model-intrinsic) kink.
 def mpk(k, p):
     base = p.A * p.a * k ** (p.a - 1.0)
     return jnp.where(k > p.k_thr, p.b_1 * base, base)
@@ -124,125 +203,95 @@ def drift(policy, k, p):
 
 def euler_residuals(policy, states, p):
     def residual_scalar(k):
-        investment, investment_derivative = jax.jvp(policy, (k,), (jnp.ones_like(k),))
-        c = production(k, p) - investment
-        dk_dt = investment - p.delta * k
-        dc_dk = mpk(k, p) - investment_derivative
+        i, di_dk = jax.jvp(policy, (k,), (jnp.ones_like(k),))
+        c = production(k, p) - i
+        dk_dt = i - p.delta * k
+        dc_dk = mpk(k, p) - di_dk
         return dc_dk * dk_dt - c * (mpk(k, p) - p.delta - p.rho_hat)
 
     return jax.vmap(residual_scalar)(states)
 
 
+# c > 0 guard: penalty rows active only where the implied consumption dips
+# below the domain floor.
 def consumption_positivity(policy, states, p):
     c = jax.vmap(lambda k: consumption(policy, k, p))(states)
     return jnp.minimum(c - DOMAIN_EPS, 0.0)
 
 
-@dataclass(frozen=True)
-class DataSettings:
-    train_T: float = 100.0
-    ode_solver: Literal["tsit5", "rodas5p"] = "tsit5"
-    adaptive_steps: int | None = None
-    dt: float = 0.25
-    step_growth_max: float = 3.0
-    rtol: float = 1e-8
-    atol: float = 1e-10
-    test_T: float = 100.0
-    test_points: int = 401
-    test_steps: int = 128
-    settle_T: float = 400.0
-    train_tvc_T: float = 200.0
-    tvc_points: int = 129
-    tvc_steps: int = 128
-    benchmark_T: float = 200.0
-    benchmark_points: int = 800
-    policy_grid_size: int = 100
+# Rollouts use tinydiffeq's bounded scans. Training samples the dense solution
+# on a fixed grid; the ex-post TVC retains the internal path.
+def rollout_field(policy, p):
+    return lambda k: drift(policy, k, p)
 
 
-@dataclass(frozen=True)
-class StoppingCriteria:
-    max_steps: int = 250
-    train_loss_threshold: float = 1e-14
-    num_attempts: int = 1
-    log_tvc_threshold: float = 0.0
-
-
-STATUS_TO_REASON = {
-    LMStatus.CONVERGED: "early_stopping_met",
-    LMStatus.NONFINITE: "loss_divergence",
-    LMStatus.MAX_STEPS: "max_steps",
-}
-
-
-def ode_components(data_set):
-    controller = IController(
-        rtol=data_set.rtol,
-        atol=data_set.atol,
-        dt_min=1e-10,
-        factor_max=data_set.step_growth_max,
-    )
-    if data_set.ode_solver == "tsit5":
-        return Tsit5(), controller
-    if data_set.ode_solver == "rodas5p":
-        return Rodas5P(), controller
-    raise ValueError(f"unknown ode_solver: {data_set.ode_solver!r}")
-
-
-def training_attempt_budget(data_set):
-    if data_set.adaptive_steps is not None:
-        return data_set.adaptive_steps
-    return 64 if data_set.ode_solver == "tsit5" else 128
-
-
-def adaptive_rollout(policy, T, budget, p, data_set, save_at):
-    ode_solver, controller = ode_components(data_set)
-
-    def log_capital_drift(log_kappa):
-        k = p.k_0 * jnp.exp(log_kappa)
+def log_rollout_field(policy, p):
+    def log_capital_drift(q):
+        k = p.k_0 * jnp.exp(q)
         return drift(policy, k, p) / k
 
+    return log_capital_drift
+
+
+def rollout(policy, T, budget, p, data_set, *, save_at=None):
+    if save_at is None:
+        save_at = SaveAt(steps=True)
+    if data_set.ode_solver == "rk4":
+        ode_solver = RK4()
+        controller = ConstantStepSize()
+        dt_0 = T / budget
+    elif data_set.ode_solver == "euler":
+        ode_solver = Euler()
+        controller = ConstantStepSize()
+        dt_0 = T / budget
+    else:
+        raise ValueError(f"unknown ode_solver: {data_set.ode_solver!r}")
     return solve_ode(
-        log_capital_drift,
+        log_rollout_field(policy, p),
         ode_solver,
         0.0,
         T,
         jnp.zeros_like(p.k_0),
-        dt_0=data_set.dt,
+        dt_0=dt_0,
         controller=controller,
         max_steps=budget,
         save_at=save_at,
     )
 
 
-def adaptive_collocation(policy, p, data_set):
-    budget = training_attempt_budget(data_set)
-    solution = adaptive_rollout(
+def collocation_states(policy, p, data_set):
+    train_ts = jnp.linspace(0.0, data_set.train_T, data_set.train_points)
+    sol = rollout(
         policy,
         data_set.train_T,
-        budget,
+        data_set.train_steps,
         p,
         data_set,
-        SaveAt(steps=True),
+        save_at=SaveAt(ts=train_ts),
     )
-    states = p.k_0 * jnp.exp(jnp.where(solution.ok, solution.xs, jnp.inf))
-    return states, solution.ts, solution.accepted, solution.ok
+    # A failed rollout poisons every row so LM rejects the trial loudly.
+    states = p.k_0 * jnp.exp(sol.xs)
+    return jnp.where(sol.ok, states, jnp.inf)
 
 
-def adaptive_residuals(policy, p, data_set):
-    states, _, active, rollout_ok = adaptive_collocation(policy, p, data_set)
-    euler = euler_residuals(policy, states, p)
-    domain = consumption_positivity(policy, states, p)
-    active_scale = jnp.sqrt(2 * jnp.maximum(jnp.sum(active), 1))
-    residual = (
-        jnp.concatenate(
-            [
-                jnp.where(active, euler, 0.0),
-                jnp.where(active, domain, 0.0),
-            ]
-        )
-        / active_scale
-    )
-    return jnp.where(rollout_ok, residual, jnp.inf)
+# Post-hoc transversality certificate (log utility): the max over horizons
+# t in [T_start, T_end] of
+#   log(e^{-rho_hat t} u'(c_t) k_t) = -rho_hat t - log c(k_t) + log k_t.
+# On the saddle path this is -rho_hat t + O(1) < 0 at every horizon past the
+# training window; a capital bubble grows into the test, and the degenerate
+# near-zero-consumption (over-accumulation) branch shows up as a large
+# POSITIVE u'(c) k level -- the level itself is the signal, so the residual is
+# deliberately NOT normalized. The flat-start parameterization is what selects
+# the saddle path (the continuous-time analog of the stock-policy identity
+# initialization); this certificate checks that selection ex post.
+def log_tvc_residual(policy, T_start, T_end, p, data_set):
+    sol = rollout(policy, T_end, data_set.tvc_steps, p, data_set)
+    ts = jnp.where(sol.ok, sol.ts, jnp.inf)
+    states = p.k_0 * jnp.exp(jnp.where(sol.ok, sol.xs, jnp.inf))
+    c = jax.vmap(lambda k: consumption(policy, k, p))(states)
+    log_tvc = -p.rho_hat * ts - jnp.log(c) + jnp.log(states)
+    valid = sol.accepted & (ts >= T_start)
+    return jnp.max(jnp.where(valid, log_tvc, -jnp.inf))
 
 
 def neoclassical_growth_nn_recursive(
@@ -276,6 +325,7 @@ def neoclassical_growth_nn_recursive(
         if use_kinked_production
         else float("inf")
     )
+
     dtype = jnp.float64 if use_float64 else jnp.float32
     p = StructuralParameters.create(
         dtype,
@@ -289,19 +339,27 @@ def neoclassical_growth_nn_recursive(
         k_thr=k_thr,
     )
 
+    # Steady states from f'(k_ss) = delta + rho_hat, per production branch --
+    # EX-POST classification/reporting only; nothing enters the net or training.
     def branch_steady_state(branch_factor):
         return ((delta + rho_hat) / (A_value * a * branch_factor)) ** (1.0 / (a - 1.0))
 
     if use_kinked_production:
         k_ss_low = branch_steady_state(1.0)
         k_ss_high = branch_steady_state(b_1_value)
-        steady_targets = (k_ss_low, k_ss_high)
+        steady_targets = [k_ss_low, k_ss_high]
     else:
         k_ss = branch_steady_state(1.0)
-        steady_targets = (k_ss,)
+        steady_targets = [k_ss]
 
-    output_0 = A_value * max(k_0**a, b_1_value * k_0**a - b_2_value)
-    i_scale = max(output_0 - delta * k_0, DOMAIN_EPS)
+    # Anchoring and scaling from the initial condition only: the head starts
+    # near zero, so the untrained policy is the flat replacement investment
+    # i(k_0) = delta k_0 (zero drift); the steady-flow magnitude at k_0 sets
+    # the output scale.
+    i_scale = max(
+        float(A_value * max(k_0**a, b_1_value * k_0**a - b_2_value)) - delta * k_0,
+        DOMAIN_EPS,
+    )
     nn_set = replace(
         nn_set,
         i_scale=i_scale,
@@ -309,12 +367,22 @@ def neoclassical_growth_nn_recursive(
         k_0_ref=k_0,
     )
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
+
     graphdef, _ = nnx.split(
         InvestmentPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(0)), nnx.Param
     )
+    num_collocation_states = data_set.train_points
 
     def residual_fn(theta):
-        return adaptive_residuals(nnx.merge(graphdef, theta), p, data_set)
+        policy = nnx.merge(graphdef, theta)
+        states = collocation_states(policy, p, data_set)
+        residual = jnp.concatenate(
+            [
+                euler_residuals(policy, states, p),
+                consumption_positivity(policy, states, p),
+            ]
+        )
+        return residual / jnp.sqrt(2 * data_set.train_points)
 
     solver = LevenbergMarquardt(
         residual_fn,
@@ -325,32 +393,38 @@ def neoclassical_growth_nn_recursive(
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
         linear_solve_dtype=jnp.float64,
     )
+
+    def tvc_certificate(theta):
+        return log_tvc_residual(
+            nnx.merge(graphdef, theta),
+            data_set.train_T,
+            data_set.train_tvc_T,
+            p,
+            data_set,
+        )
+
     _, theta_0 = nnx.split(
         InvestmentPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(init_key)), nnx.Param
     )
-    draw = DrawNNXModule(InvestmentPolicyNN, nn_set, dtype=dtype)
-    multi_start = MultiStart(
-        key=multi_start_key,
-        num_starts=stop_set.num_attempts,
-        draw=draw,
-    )
     atol = math.sqrt(stop_set.train_loss_threshold)
+    draw = DrawNNXModule(InvestmentPolicyNN, nn_set, dtype=dtype)
 
     compile_time = np.nan
     if measure_compilation:
         compile_start = time.perf_counter()
-        compiled = solver.solve(
-            theta_0,
-            max_steps=1,
-            atol=atol,
-            multi_start=MultiStart(
-                key=jax.random.key(0),
-                num_starts=stop_set.num_attempts,
-                draw=draw,
-            ),
-            max_steps_is_success=False,
+        jax.block_until_ready(
+            solver.solve(
+                theta_0,
+                max_steps=1,
+                atol=atol,
+                multi_start=MultiStart(
+                    key=jax.random.key(0),
+                    num_starts=stop_set.num_attempts,
+                    draw=draw,
+                ),
+                max_steps_is_success=False,
+            ).x
         )
-        jax.block_until_ready(compiled.x)
         compile_time = time.perf_counter() - compile_start
 
     start_time = time.perf_counter()
@@ -358,43 +432,42 @@ def neoclassical_growth_nn_recursive(
         theta_0,
         max_steps=stop_set.max_steps,
         atol=atol,
-        multi_start=multi_start,
+        multi_start=MultiStart(
+            key=multi_start_key,
+            num_starts=stop_set.num_attempts,
+            draw=draw,
+        ),
         max_steps_is_success=False,
     )
     jax.block_until_ready(result.x)
     train_time = time.perf_counter() - start_time
     policy = nnx.merge(graphdef, result.x)
+    steps = int(result.steps)
+    attempt = int(result.multi_start.attempt) + 1
+    stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
+    train_loss = float(result.info.loss)
+    max_log_tvc = float(tvc_certificate(result.x))
+    transversality_ok = bool(max_log_tvc < stop_set.log_tvc_threshold)
+    solver_accepted = bool(result.multi_start.accepted)
 
-    collocation_states, collocation_times, active, collocation_ok = (
-        adaptive_collocation(policy, p, data_set)
+    # Test path: simulate the final policy to test_T and evaluate the Euler
+    # residual along it.
+    n_test_steps = round(data_set.test_T / data_set.dt)
+    test_solution = solve_ode(
+        rollout_field(policy, p),
+        RK4(),
+        0.0,
+        n_test_steps * data_set.dt,
+        p.k_0,
+        dt_0=data_set.dt,
+        max_steps=n_test_steps,
+        save_at=SaveAt(steps=True),
     )
-    train_attempt_budget = training_attempt_budget(data_set)
-    accepted_times = np.asarray(collocation_times)[np.asarray(active)]
-    accepted_time_steps = np.diff(accepted_times)
-    min_accepted_time_step = (
-        float(np.min(accepted_time_steps)) if accepted_time_steps.size else np.nan
-    )
-    max_accepted_time_step = (
-        float(np.max(accepted_time_steps)) if accepted_time_steps.size else np.nan
-    )
-
-    test_ts = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
-    test_solution = adaptive_rollout(
-        policy,
-        data_set.test_T,
-        data_set.test_steps,
-        p,
-        data_set,
-        SaveAt(ts=test_ts),
-    )
-    test_states = p.k_0 * jnp.exp(
-        jnp.where(test_solution.ok, test_solution.xs, jnp.nan)
-    )
+    test_states = jnp.where(test_solution.ok, test_solution.xs, jnp.nan)
     test_i = jax.vmap(policy)(test_states)
     test_c = jax.vmap(lambda k: consumption(policy, k, p))(test_states)
     test_dk = jax.vmap(lambda k: drift(policy, k, p))(test_states)
-    test_euler = euler_residuals(policy, test_states, p)
-    test_euler_mean_abs = float(jnp.mean(jnp.abs(test_euler)))
+    test_resid = euler_residuals(policy, test_states, p)
     test_path_ok = bool(
         test_solution.ok
         and jnp.all(jnp.isfinite(test_states))
@@ -402,71 +475,42 @@ def neoclassical_growth_nn_recursive(
         and jnp.min(test_states) > 0.0
         and jnp.min(test_c) > 0.0
     )
-
-    tvc_ts = jnp.linspace(
-        data_set.train_T, data_set.train_tvc_T, data_set.tvc_points, dtype=dtype
-    )
-    tvc_solution = adaptive_rollout(
-        policy,
-        data_set.train_tvc_T,
-        data_set.tvc_steps,
-        p,
-        data_set,
-        SaveAt(ts=tvc_ts),
-    )
-    tvc_states = p.k_0 * jnp.exp(jnp.where(tvc_solution.ok, tvc_solution.xs, jnp.nan))
-    tvc_c = jax.vmap(lambda k: consumption(policy, k, p))(tvc_states)
-    log_tvc = -p.rho_hat * tvc_ts - jnp.log(tvc_c) + jnp.log(tvc_states)
-    max_log_tvc = float(jnp.nanmax(log_tvc))
-    terminal_log_tvc = float(log_tvc[-1])
-    log_tvc_tail_change = float(log_tvc[-1] - log_tvc[0])
-    tvc_tail_declining = bool(log_tvc_tail_change < 0.0)
-    transversality_ok = bool(
-        tvc_solution.ok
-        and max_log_tvc < stop_set.log_tvc_threshold
-        and tvc_tail_declining
-    )
-
+    accepted = solver_accepted
+    test_t = np.arange(n_test_steps + 1) * data_set.dt
     test_df = pd.DataFrame(
         {
-            "t": np.asarray(test_ts),
+            "t": test_t,
             "k": np.asarray(test_states),
             "c": np.asarray(test_c),
             "dk": np.asarray(test_dk),
             "i": np.asarray(test_i),
-            "euler_residual": np.asarray(test_euler),
+            "euler_residual": np.asarray(test_resid),
         }
     )
 
-    k_grid = jnp.linspace(
-        max(min(k_0, *steady_targets) * 0.9, DOMAIN_EPS),
-        max(k_0, *steady_targets) * 1.1,
+    # Policy diagnostics on a k-grid spanning the IC and steady-state targets.
+    grid_lo = min([float(k_0)] + steady_targets)
+    grid_hi = max([float(k_0)] + steady_targets)
+    margin = 0.05 * (grid_hi - grid_lo) + 1e-6
+    k_grid = np.linspace(
+        max(grid_lo - margin, DOMAIN_EPS),
+        grid_hi + margin,
         data_set.policy_grid_size,
-        dtype=dtype,
     )
-    policy_i = jax.vmap(policy)(k_grid)
-    policy_c = jax.vmap(lambda k: consumption(policy, k, p))(k_grid)
+    k_grid_jax = jnp.asarray(k_grid, dtype=dtype)
     policy_df = pd.DataFrame(
         {
-            "k": np.asarray(k_grid),
-            "i_nn": np.asarray(policy_i),
-            "c_nn": np.asarray(policy_c),
-            "dk_nn": np.asarray(policy_i - delta * k_grid),
+            "k": k_grid,
+            "c_nn": np.asarray(
+                jax.vmap(lambda k: consumption(policy, k, p))(k_grid_jax)
+            ),
+            "dk_nn": np.asarray(jax.vmap(lambda k: drift(policy, k, p))(k_grid_jax)),
+            "i_nn": np.asarray(jax.vmap(policy)(k_grid_jax)),
         }
     )
 
-    status = int(result.status)
-    solver_converged = status == LMStatus.CONVERGED
-    solution_accepted = bool(
-        test_path_ok
-        and collocation_ok
-        and (
-            solver_converged
-            or (use_kinked_production and test_euler_mean_abs < KINKED_EULER_TOL)
-        )
-    )
     results = {
-        "variant": "i_adaptive",
+        "variant": "i",
         "a": a,
         "delta": delta,
         "rho_hat": rho_hat,
@@ -480,135 +524,117 @@ def neoclassical_growth_nn_recursive(
         "linear_solve_dtype": "float64",
         "metric": "identity_parameter_metric",
         "selection": "minimum_identity_metric_parameter_step",
-        "train_loss": float(result.info.loss),
-        "test_euler_mean_abs": test_euler_mean_abs,
-        "kinked_euler_tolerance": KINKED_EULER_TOL,
+        "train_loss": train_loss,
+        "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_resid))),
+        "max_log_tvc_residual": max_log_tvc,
+        "transversality_ok": transversality_ok,
         "min_test_c": float(jnp.min(test_c)),
         "test_path_ok": test_path_ok,
-        "max_log_tvc_residual": max_log_tvc,
-        "terminal_log_tvc_residual": terminal_log_tvc,
-        "log_tvc_tail_change": log_tvc_tail_change,
-        "tvc_tail_declining": tvc_tail_declining,
-        "transversality_ok": transversality_ok,
-        "steps": int(result.steps),
-        "stopping_reason": STATUS_TO_REASON.get(status, "max_steps"),
-        "solution_accepted": solution_accepted,
+        "steps": steps,
+        "attempt": attempt,
+        "stopping_reason": stopping_reason,
         "train_time": train_time,
-        "train_time_success": train_time if solution_accepted else np.nan,
+        "train_time_success": train_time if accepted else np.nan,
         "compile_time": compile_time,
-        "attempt": int(result.multi_start.attempt) + 1,
         "total_params": int(ravel_pytree(nnx.state(policy, nnx.Param))[0].size),
-        "num_collocation_states": int(jnp.sum(active)),
-        "collocation_capacity": train_attempt_budget + 1,
-        "integrator_attempt_budget": train_attempt_budget,
-        "collocation_path_ok": bool(collocation_ok),
-        "min_accepted_time_step": min_accepted_time_step,
-        "max_accepted_time_step": max_accepted_time_step,
+        "solution_accepted": bool(accepted),
+        "num_collocation_states": num_collocation_states,
         "ode_solver": data_set.ode_solver,
-        "step_growth_max": data_set.step_growth_max,
+        "train_steps": data_set.train_steps,
+        "dt": data_set.dt,
         "train_T": data_set.train_T,
         "test_T": data_set.test_T,
         "train_tvc_T": data_set.train_tvc_T,
     }
 
     if use_kinked_production:
-        settle_ts = jnp.asarray([data_set.settle_T], dtype=dtype)
-        settle_solution = adaptive_rollout(
-            policy,
-            data_set.settle_T,
-            data_set.test_steps,
-            p,
-            data_set,
-            SaveAt(ts=settle_ts),
+        # Settle the trained policy to settle_T and classify the basin it
+        # reaches (ball of 5% of the kink around a steady state).
+        n_settle_steps = round(data_set.settle_T / data_set.dt)
+        settle_solution = solve_ode(
+            rollout_field(policy, p),
+            RK4(),
+            0.0,
+            n_settle_steps * data_set.dt,
+            p.k_0,
+            dt_0=data_set.dt,
+            max_steps=n_settle_steps,
+            save_at=SaveAt(steps=True),
         )
-        k_settled = float(
-            p.k_0
-            * jnp.exp(jnp.where(settle_solution.ok, settle_solution.xs[-1], jnp.nan))
-        )
-        basin_tolerance = 0.05 * k_thr
+        settled = jnp.where(settle_solution.ok, settle_solution.xs, jnp.nan)
+        k_settled = float(settled[-1])
+        tol = 0.05 * k_thr
         target = k_ss_low if k_0 < k_thr else k_ss_high
         other = k_ss_high if k_0 < k_thr else k_ss_low
-        basin_correct = abs(k_settled - target) < basin_tolerance
-        false_positive = not basin_correct and abs(k_settled - other) < basin_tolerance
+        per_correct = abs(k_settled - target) < tol
+        per_fp = (not per_correct) and abs(k_settled - other) < tol
         results.update(
             k_thr=k_thr,
             k_ss_low=k_ss_low,
             k_ss_high=k_ss_high,
             k_settled=k_settled,
-            basin_correct=bool(basin_correct and results["solution_accepted"]),
-            false_positive=bool(false_positive and results["solution_accepted"]),
-            basin_failed=bool(
-                not (basin_correct or false_positive)
-                or not results["solution_accepted"]
-            ),
+            basin_correct=bool(per_correct),
+            false_positive=bool(per_fp),
+            basin_failed=bool(not (per_correct or per_fp)),
         )
     else:
         results["k_ss"] = k_ss
+        # Benchmark path from solve_bvp, interpolated onto the simulated grid.
         benchmark_grid = jnp.linspace(
-            0.0,
-            data_set.benchmark_T,
-            data_set.benchmark_points,
-            dtype=dtype,
+            0.0, data_set.benchmark_T, data_set.benchmark_points, dtype=dtype
         )
         benchmark_solution = neoclassical_growth_benchmark(
             a, delta, rho_hat, 1.0, k_0, benchmark_grid
         )
-        k_benchmark, c_benchmark = benchmark_solution(test_ts)
-        k_relative_error = jnp.abs(test_states - k_benchmark) / jnp.maximum(
-            jnp.abs(k_benchmark), DOMAIN_EPS
-        )
-        c_relative_error = jnp.abs(test_c - c_benchmark) / jnp.maximum(
-            jnp.abs(c_benchmark), DOMAIN_EPS
-        )
+        k_benchmark, c_benchmark = benchmark_solution(jnp.asarray(test_t, dtype))
         test_df["k_benchmark"] = np.asarray(k_benchmark)
         test_df["c_benchmark"] = np.asarray(c_benchmark)
-        test_df["k_rel_error"] = np.asarray(k_relative_error)
-        test_df["c_rel_error"] = np.asarray(c_relative_error)
+        test_df["k_rel_error"] = np.abs(test_df["k"] - test_df["k_benchmark"]) / np.abs(
+            test_df["k_benchmark"]
+        ).clip(lower=DOMAIN_EPS)
+        test_df["c_rel_error"] = np.abs(test_df["c"] - test_df["c_benchmark"]) / np.abs(
+            test_df["c_benchmark"]
+        ).clip(lower=DOMAIN_EPS)
         results.update(
-            test_mean_abs_k_rel_error=float(jnp.mean(k_relative_error)),
-            test_mean_abs_c_rel_error=float(jnp.mean(c_relative_error)),
+            test_mean_abs_k_rel_error=float(test_df["k_rel_error"].mean()),
+            test_mean_abs_c_rel_error=float(test_df["c_rel_error"].mean()),
         )
-
-        k_benchmark_path, c_benchmark_path = benchmark_solution(benchmark_grid)
-        order = np.argsort(np.asarray(k_benchmark_path))
+        # Benchmark policy by interpolating the (k, c) benchmark path sorted in k.
+        k_bench_path, c_bench_path = benchmark_solution(benchmark_grid)
+        order = np.argsort(np.asarray(k_bench_path))
         c_benchmark_grid = np.interp(
-            np.asarray(k_grid),
-            np.asarray(k_benchmark_path)[order],
-            np.asarray(c_benchmark_path)[order],
+            k_grid, np.asarray(k_bench_path)[order], np.asarray(c_bench_path)[order]
         )
         policy_df["c_benchmark"] = c_benchmark_grid
         policy_df["dk_benchmark"] = (
-            np.asarray(production(k_grid, p))
-            - delta * np.asarray(k_grid)
-            - c_benchmark_grid
+            np.asarray(production(k_grid_jax, p)) - delta * k_grid - c_benchmark_grid
         )
+
     if verbose:
         print("\nFinal results:")
         for name, value in results.items():
             print(f"  {name}: {value}")
 
+    hyperparameters = {
+        "nn_set": asdict(nn_set),
+        "data_set": asdict(data_set),
+        "lm_set": asdict(lm_set),
+        "stop_set": asdict(stop_set),
+        "parameters": {
+            "a": a,
+            "delta": delta,
+            "rho_hat": rho_hat,
+            "A": A_value,
+            "b_1": b_1_value,
+            "b_2": b_2_value,
+        },
+        "initial_conditions": {"k_0": k_0},
+    }
     return results, {
         "model": policy,
-        "parameters": p,
-        "collocation_states": collocation_states,
-        "collocation_times": collocation_times,
-        "collocation_active": active,
         "test_df": test_df,
         "policy_df": policy_df,
-        "hyperparameters": {
-            "data_set": asdict(data_set),
-            "nn_set": asdict(nn_set),
-            "lm_set": asdict(lm_set),
-            "stop_set": asdict(stop_set),
-            "parameters": {
-                "a": a,
-                "delta": delta,
-                "rho_hat": rho_hat,
-                "A": A_value,
-                "b_1": b_1_value,
-                "b_2": b_2_value,
-            },
-        },
+        "hyperparameters": hyperparameters,
     }
 
 

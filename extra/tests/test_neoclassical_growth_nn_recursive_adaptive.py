@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 from tinydiffeq import SaveAt
 
-from neoclassical_growth_nn_recursive import (
+from extra.neoclassical_growth_nn_recursive_adaptive import (
     DataSettings,
     StructuralParameters,
     adaptive_rollout,

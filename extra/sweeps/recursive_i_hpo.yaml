@@ -19,7 +19,7 @@ command:
   - ${args}
 parameters:
   # --- wrapper config (consumed by wandb_sweep_wrapper.py) ---
-  sweep_settings.script:               {value: neoclassical_growth_nn_recursive.py}
+  sweep_settings.script:               {value: extra/neoclassical_growth_nn_recursive_adaptive.py}
   sweep_settings.sort_criteria:        {value: train_time_success}
   sweep_settings.num_seeds:            {value: 11}
   sweep_settings.starting_seed:        {value: 0}

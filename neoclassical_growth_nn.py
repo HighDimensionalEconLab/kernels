@@ -327,8 +327,8 @@ def neoclassical_growth_nn(
     )
     _, theta_0 = nnx.split(model, nnx.Param)
 
-    def residual_fn(theta, data):
-        return training_residual(nnx.merge(graphdef, theta), data, p)
+    def residual_fn(theta, t):
+        return training_residual(nnx.merge(graphdef, theta), {"t": t}, p)
 
     solver = LevenbergMarquardt(
         residual_fn,
@@ -359,7 +359,7 @@ def neoclassical_growth_nn(
         jax.block_until_ready(
             solver.solve(
                 theta_0,
-                train_data,
+                t_train,
                 max_steps=1,
                 atol=atol,
                 multi_start=MultiStart(
@@ -375,7 +375,7 @@ def neoclassical_growth_nn(
     start_time = time.perf_counter()
     result = solver.solve(
         theta_0,
-        train_data,
+        t_train,
         max_steps=stop_set.max_steps,
         atol=atol,
         multi_start=MultiStart(
@@ -400,7 +400,6 @@ def neoclassical_growth_nn(
     tvc_values = policy_values(model, jnp.atleast_1d(tvc_t), p)
     log_tvc = float(tvc_values["log_tvc"][0])
     transversality_ok = bool(log_tvc < stop_set.log_tvc_threshold)
-    accepted = accepted and transversality_ok
 
     train_resource_mean_abs = float(train_df["resource"].abs().mean())
     train_euler_mean_abs = float(train_df["euler"].abs().mean())

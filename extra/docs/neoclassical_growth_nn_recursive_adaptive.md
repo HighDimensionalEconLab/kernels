@@ -1,6 +1,6 @@
-# Recursive growth NN
+# Adaptive recursive growth NN
 
-`neoclassical_growth_nn_recursive.py` uses a one-function adaptive
+`extra/neoclassical_growth_nn_recursive_adaptive.py` uses a one-function adaptive
 state-space approximation:
 
 \[

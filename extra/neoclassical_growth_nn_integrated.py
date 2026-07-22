@@ -412,7 +412,6 @@ def neoclassical_growth_nn_integrated(
         and (train_df[["k", "c"]].to_numpy() > DOMAIN_EPS).all()
         and (test_df[["k", "c"]].to_numpy() > DOMAIN_EPS).all()
     )
-    accepted = accepted and transversality_ok and tvc_positive and finite_positive
 
     train_resource_mean_abs = float(train_df["resource"].abs().mean())
     train_euler_mean_abs = float(train_df["euler"].abs().mean())

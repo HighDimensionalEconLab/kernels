@@ -27,9 +27,6 @@ BUTTERFLY = dict(A=0.5, b_1=3.0, b_2=2.5)
 
 def run(
     output_dir: str = ".results",
-    # Adaptive solves recompile for each independently constructed seed. Three
-    # seeds preserve a robustness band without making the core pipeline a
-    # 10-minute compilation sweep; larger ensembles belong in extra/sweeps.
     n_seeds: int = 3,
     use_float64: bool = True,
     verbose: bool = False,
@@ -65,7 +62,9 @@ def run(
         options={**common, **BUTTERFLY},
     )
     frac = results_df.groupby("k_0")["basin_correct"].mean()
-    print(f"  P(correct) by k_0: min={frac.min():.2f} mean={frac.mean():.2f}")
+    n_converged = int(results_df["solution_accepted"].sum())
+    print(f"  solver converged: {n_converged}/{len(results_df)}")
+    print(f"  P(correct basin) by k_0: min={frac.min():.2f} mean={frac.mean():.2f}")
     save_experiment(
         "butterfly_basin",
         results_df,

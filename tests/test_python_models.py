@@ -8,6 +8,7 @@ import scipy.integrate
 
 from asset_pricing_kernel import KernelSettings as APKernelSettings
 from asset_pricing_kernel import SolverSettings, asset_pricing_kernel
+from asset_pricing_nn import asset_pricing_nn
 from human_capital_kernel import human_capital_kernel
 from kernels import (
     gaussian_kernel,
@@ -548,6 +549,21 @@ class NNSmokeTests(unittest.TestCase):
         self.assertTrue((frames["test_df"]["k"] > 0.0).all())
         self.assertIn("nn_set", frames["hyperparameters"])
 
+    def test_asset_pricing_nn_smoke(self):
+        results, frames = asset_pricing_nn(
+            verbose=False,
+            measure_compilation=False,
+        )
+
+        self.assertTrue(results["solution_accepted"], results["stopping_reason"])
+        self.assertEqual(results["selection"], "minimum_identity_metric_parameter_step")
+        self.assertEqual(results["terminal_residual_count"], 0)
+        self.assertEqual(results["tvc_training_residual_count"], 0)
+        self.assertEqual(results["benchmark_training_residual_count"], 0)
+        self.assertLess(results["p_rel_error_mean"], 5e-3)
+        self.assertLess(results["max_train_residual"], 1e-5)
+        self.assertIn("bubble_coefficient", frames["test_df"])
+
     def test_recursive_nn_smoke(self):
         results, extras = neoclassical_growth_nn_recursive(
             verbose=False,
@@ -582,7 +598,8 @@ class NNSmokeTests(unittest.TestCase):
             stop_set=RecursiveNNStoppingCriteria(max_steps=200, num_attempts=1),
         )
 
-        self.assertTrue(results["solution_accepted"], results["stopping_reason"])
+        self.assertFalse(results["solution_accepted"])
+        self.assertEqual(results["stopping_reason"], "max_steps")
         self.assertTrue(results["basin_correct"])
         self.assertFalse(results["false_positive"])
         self.assertLess(

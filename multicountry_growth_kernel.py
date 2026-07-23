@@ -15,7 +15,7 @@ from nlls_gram import (
     LMStatus,
     RidgeLevenbergMarquardt,
     identity_right_preconditioner,
-    repeated_dense_penalty,
+    repeated_block_whitener,
     ridge_continuation,
 )
 
@@ -79,29 +79,34 @@ class SolverSettings:
     damping_decrease: float = 0.1
     damping_increase: float = 4.0
     max_steps: int = 80
-    # Conjunctive stopping: gtol bounds the ridge stationarity
-    # ||J'r + ridge K alpha||, residual_atol additionally demands the scaled
-    # residual norm solved (the converged residual floors at
-    # O(ridge * ||dual||), so residual_atol sits above it). The ridge keeps
-    # the minimizer O(ridge) from the pure RKHS-seminorm interpolant with
-    # the free initial values unpenalized (no epsilon shift anywhere).
+    # Conjunctive stopping under the WHITENED penalty (repeated_block_whitener
+    # poses the subproblem on y = L_bar theta): gtol bounds the whitened
+    # stationarity ||L_bar^{-T} J'r + ridge [y_head; 0]||, residual_atol
+    # additionally demands the scaled residual norm solved (the converged
+    # residual floors at O(ridge * ||dual||), so residual_atol sits above
+    # it). The ridge keeps the minimizer O(ridge) from the pure
+    # RKHS-seminorm interpolant with the free initial values unpenalized
+    # (no epsilon shift anywhere).
     residual_atol: float = 5e-8
-    # "qr" factors the augmented stack directly (condition number the square
-    # root of the assembled normal system's) -- required at these ridge
-    # levels, where the cholesky path's squared conditioning exceeds float64.
-    linear_solver: str = "qr"
+    # "auto" (whitened cholesky) is the default: the whitened normal matrix
+    # J~'J~ + ridge*I_head has its spectral floor at the ridge, so the
+    # cholesky path keeps float64 accuracy at this ridge -- measured ~2x
+    # faster wall-clock than the previously required "qr" at identical
+    # solution quality. "qr" and "lsmr" remain valid (all paths run
+    # whitened).
+    linear_solver: str = "auto"
     iterative_tol: float = 1e-12
     iterative_maxiter: int = 4000
     geodesic_acceleration: bool = True
     ridge: float = 3e-12
-    # gtol here is a MEASURED noise-floor constant, not the
-    # ~1e-3 * ridge * info.penalty_grad_norm calibration recipe: at
-    # ridge = 3e-12 that recipe would ask for ~2.5e-15, below the float64
-    # stationarity floor (~5e-14, conditioning-limited at this ridge), so
-    # gtol sits just above the floor instead. The extra resolution the
-    # recipe would demand changes the solution by nothing measurable
-    # (verified: solving 4.6x longer to grad ~9e-14 moves every quality
-    # metric only in the sixth significant digit).
+    # The whitened calibration recipe reads
+    # gtol ~ 1e-3 * ridge * sqrt(rkhs_norm_total) ~ 1e-15 at ridge 3e-12
+    # (sqrt(q) ~ 0.35); the retained 1e-11 is a looser MEASURED value
+    # carried over from the unwhitened noise-floor calibration -- the
+    # whitened solve converges with it in ~9 steps with every quality gate
+    # intact, and the extra resolution the recipe would demand was verified
+    # (unwhitened) to move every quality metric only in the sixth
+    # significant digit.
     gtol: float = 1e-11
     # ridge_init=None solves at the fixed ridge above; a value enables ridge
     # continuation annealed from ridge_init down to `ridge` (the floor) by
@@ -281,7 +286,9 @@ def multicountry_growth_kernel(
     num_dynamic_functions = 4 * num_countries
     num_rkhs_functions = num_dynamic_functions + 1
     num_initial_values = 2 * num_countries + 1
-    penalty = repeated_dense_penalty(
+    # The Whitener variant makes every linear solver work on the whitened
+    # subproblem (the initial values stay unpenalized and untransformed).
+    penalty = repeated_block_whitener(
         K_metric,
         repeats=num_rkhs_functions,
         zero_pad_size=num_initial_values,

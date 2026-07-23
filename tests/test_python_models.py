@@ -198,7 +198,7 @@ class KernelSmokeTests(unittest.TestCase):
     def test_multicountry_growth_kernel_smoke(self):
         results, extras = multicountry_growth_kernel(a_0=(-0.5, 0.5))
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
-        self.assertEqual(results["linear_solver"], "qr")
+        self.assertEqual(results["linear_solver"], "auto")
         self.assertEqual(results["iterative_preconditioner"], "none")
         self.assertTrue(results["benchmark_match"])
         self.assertEqual(results["terminal_residual_count"], 0)

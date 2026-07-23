@@ -14,7 +14,7 @@ from nlls_gram import (
     Cholesky,
     LMStatus,
     RidgeLevenbergMarquardt,
-    repeated_dense_penalty,
+    repeated_block_whitener,
     ridge_continuation,
 )
 
@@ -77,41 +77,44 @@ class SolverSettings:
     damping_decrease: float = 0.1
     damping_increase: float = 4.0
     max_steps: int = 100
-    # Conjunctive stopping: gtol bounds the ridge stationarity
-    # ||J'r + ridge K alpha||, residual_atol additionally demands the scaled
-    # residual norm solved (the converged residual floors at
-    # O(ridge * ||dual||), so residual_atol sits above it). The ridge keeps
-    # the minimizer O(ridge) from the pure RKHS-seminorm interpolant with
-    # the free offsets unpenalized (no epsilon shift anywhere).
-    # gtol here is a MEASURED noise-floor constant, not the
-    # ~1e-3 * ridge * info.penalty_grad_norm calibration recipe: at
-    # ridge ~ 3e-12 the float64 stationarity noise floor
-    # (cond([J; sqrt(ridge)L]) grows ~ 1/sqrt(ridge); the DAE Jacobian's
-    # scale spread makes it worse) sits 15-780x ABOVE ridge * ||L'L theta||
-    # across the parameter variants -- measured gradient floors 7e-11
-    # (default) to 9.7e-9 (r*=0.05) vs recipe values ~5e-15 -- so gtol sits
-    # just above the WORST variant floor instead, while residual_atol sits
-    # BETWEEN the ridge-floor residual (~1.3-2.9e-7 scaled across variants)
-    # and the last intermediate continuation level's (~9e-7), so the solve
-    # can only stop at the floor.
+    # Conjunctive stopping under the WHITENED penalty (repeated_block_whitener
+    # poses the subproblem on y = L_bar theta): gtol bounds the whitened
+    # stationarity ||L_bar^{-T} J'r + ridge [y_head; 0]||, residual_atol
+    # additionally demands the scaled residual norm solved (the converged
+    # residual floors at O(ridge * ||dual||), so residual_atol sits above
+    # it). The ridge keeps the minimizer O(ridge) from the pure
+    # RKHS-seminorm interpolant with the free offsets unpenalized (no
+    # epsilon shift anywhere).
+    # The whitened calibration recipe reads
+    # gtol ~ 1e-3 * ridge * sqrt(rkhs_norm_total) ~ 1e-14 at ridge 3e-12
+    # (sqrt(q) ~ 3.7); the retained 5e-8 is a much looser MEASURED value
+    # carried over from the unwhitened noise-floor calibration -- the
+    # whitened runs converge with it in 8-38 steps across the parameter
+    # variants with every quality gate intact, and residual_atol (sitting
+    # BETWEEN the ridge-floor residual ~1.3-2.9e-7 and the last
+    # intermediate continuation level's ~9e-7) is what pins the solve to
+    # the floor.
     residual_atol: float = 5e-7
     ridge: float = 3e-12
     gtol: float = 5e-8
     # ridge_init=None solves at the fixed ridge above; a value enables ridge
     # continuation annealed from ridge_init down to `ridge` (the floor) by
-    # factors of `ridge_decrease` on inner stationarity.
+    # factors of `ridge_decrease` on inner stationarity. The whitener's
+    # factorization never involves the ridge, so the anneal composes
+    # unchanged.
     ridge_init: float | None = 1e-7
     ridge_decrease: float = 0.01
     # Relative stationarity threshold that triggers the next ridge level:
     # looser anneals faster (fewer steps per level), tighter solves each
     # level out more completely before descending.
     ridge_grad_rtol: float = 1e-2
-    # "qr" factors [J; sqrt(ridge) L] directly (condition number the square
-    # root of the assembled normal system's) -- the DAE Jacobian's spread
-    # makes the cholesky path's squared conditioning exceed float64 at small
-    # ridge, where steps stay descent directions but lose their Gauss-Newton
-    # accuracy and progress stalls.
-    linear_solver: str = "qr"
+    # "auto" (whitened cholesky) is the default: the whitened normal matrix
+    # J~'J~ + ridge*I_head has its spectral floor at the ridge, so the DAE
+    # Jacobian's scale spread no longer pushes the cholesky path past
+    # float64 at this ridge -- measured 1.8-3x faster wall-clock than the
+    # previously required "qr" at identical solution quality. "qr" and
+    # "cholesky" remain valid (all paths run whitened).
+    linear_solver: str = "auto"
 
 
 def open_economy_growth_kernel(
@@ -262,7 +265,9 @@ def open_economy_growth_kernel(
 
     # There are 5n DAE equations in 5n + 3 unknowns. No terminal equation is
     # appended: the ridge penalty supplies the three-dimensional selection.
-    penalty = repeated_dense_penalty(
+    # The Whitener variant makes every linear solver work on the whitened
+    # subproblem (the offsets stay unpenalized and untransformed).
+    penalty = repeated_block_whitener(
         K_metric,
         repeats=5,
         zero_pad_size=3,

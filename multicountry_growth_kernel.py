@@ -52,6 +52,20 @@ STATUS_TO_REASON = {
 
 
 @dataclass(frozen=True)
+class ToleranceSettings:
+    # Solution acceptance gates. The train gate bounds the max scaled DAE
+    # residual on the collocation grid; at a fixed ridge the converged
+    # residual floors at the O(ridge) bias, so a run at a deliberately
+    # larger ridge (e.g. an iterative linear solver whose Krylov iteration
+    # count scales like 1/sqrt(ridge)) must pass a ridge-aware value here
+    # rather than the float64 production default.
+    train_residual: float = TRAIN_RESIDUAL_TOL
+    validation_residual: float = VALIDATION_RESIDUAL_TOL
+    accounting: float = ACCOUNTING_RESIDUAL_TOL
+    benchmark_match: float = BENCHMARK_MATCH_TOL
+
+
+@dataclass(frozen=True)
 class KernelSettings:
     kernel: str = "matern52"
     ell: float = 10.0
@@ -159,6 +173,7 @@ def multicountry_growth_kernel(
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
     lm_set: SolverSettings = SolverSettings(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
 ):
     if not jax.config.jax_enable_x64:
         raise RuntimeError("enable jax_enable_x64 in the process entry point")
@@ -408,13 +423,13 @@ def multicountry_growth_kernel(
         rejection_reasons.append("solver_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > TRAIN_RESIDUAL_TOL:
+    if max_train_residual > tolerance_set.train_residual:
         rejection_reasons.append("train_residual")
-    if max_validation_residual > VALIDATION_RESIDUAL_TOL:
+    if max_validation_residual > tolerance_set.validation_residual:
         rejection_reasons.append("validation_residual")
-    if max_asset_clearing_residual > ACCOUNTING_RESIDUAL_TOL:
+    if max_asset_clearing_residual > tolerance_set.accounting:
         rejection_reasons.append("asset_clearing")
-    if max_rate_consistency_residual > ACCOUNTING_RESIDUAL_TOL:
+    if max_rate_consistency_residual > tolerance_set.accounting:
         rejection_reasons.append("rate_consistency")
     solution_accepted = not rejection_reasons
 
@@ -455,7 +470,7 @@ def multicountry_growth_kernel(
             float(jnp.max(a_scaled_error)),
             float(jnp.max(interest_rate_scaled_error)),
         )
-        benchmark_match = max_benchmark_error <= BENCHMARK_MATCH_TOL
+        benchmark_match = max_benchmark_error <= tolerance_set.benchmark_match
     else:
         k_relative_error = jnp.asarray(jnp.nan)
         q_relative_error = jnp.asarray(jnp.nan)
@@ -538,6 +553,7 @@ def multicountry_growth_kernel(
         "solver": "nlls-gram",
         "linear_solver": lm_set.linear_solver,
         "residual_atol": lm_set.residual_atol,
+        "train_residual_tol": tolerance_set.train_residual,
         "iterative_tol": lm_set.iterative_tol,
         "iterative_maxiter": lm_set.iterative_maxiter,
         "iterative_preconditioner": "none",

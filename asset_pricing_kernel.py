@@ -9,9 +9,9 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from nlls_gram import (
-    LevenbergMarquardt,
     LMStatus,
-    repeated_shifted_dense_metric,
+    RidgeLevenbergMarquardt,
+    repeated_dense_penalty,
 )
 
 from asset_pricing_benchmark import mu_f_array
@@ -58,20 +58,24 @@ class SolverSettings:
     damping_decrease: float = 0.5
     damping_increase: float = 4.0
     max_steps: int = 100
-    residual_atol: float = 1e-11  # unscaled residual norm; bounds max|residual|
+    residual_atol: float = 1e-9  # unscaled residual norm; bounds max|residual|
     p0_init: float = 0.0
-    # The single shift of the unified metric M = blockdiag(K, 0) + eps I:
-    # the kernel block is factored as K + eps I and the free p_0 carries
-    # weight eps, so ||M^{-1}|| = 1/eps uniformly in n and the min-M-norm
-    # interpolant is O(eps) from the pure RKHS-seminorm solution with p_0
-    # free. A selection-side regularization only: residuals are unaffected,
-    # and every solver/representation combination uses the same eps so their
-    # selections agree. The default balances the ends of the measured working
-    # range: larger shifts visibly bias the near-singular smooth Grams (rbf),
-    # while below ~1e-8
-    # the (c^2/eps)-weighted dual spike outruns the inner CG budgets. Tuning:
-    # https://highdimensionaleconlab.github.io/nlls_gram/tuning_guide/#the-metric
-    metric_eps: float = 1e-7
+    # The fixed ridge weight of the objective ||r||^2 + ridge * a'Ka with the
+    # free p_0 unpenalized (no epsilon shift anywhere): the minimizer is
+    # O(ridge) from the pure RKHS-seminorm interpolant with p_0 free. The
+    # converged residual norm is O(ridge * ||dual||), so residual_atol must
+    # sit above that floor -- the ridge objective deliberately backs off
+    # exact interpolation, unlike the metric formulation whose affine solve
+    # reached float64 roundoff. gtol bounds the ridge stationarity
+    # ||J'r + ridge K a||; convergence requires gtol AND residual_atol
+    # (conjunctive). The one-dimensional null space here runs along the
+    # weakly penalized p_0 mixture, and the selection is resolved only to
+    # gtol / ridge -- gtol must sit ~3 orders below ridge or p_0 drifts
+    # (measured: gtol = 1e-9 leaves p_0 off by O(1); 1e-13 matches the
+    # metric selection). Tuning:
+    # https://highdimensionaleconlab.github.io/nlls_gram/ridge_lm/
+    ridge: float = 1e-10
+    gtol: float = 1e-13
 
 
 def asset_pricing_kernel(
@@ -97,10 +101,6 @@ def asset_pricing_kernel(
         train_data = jnp.sort(jnp.array(data_set.train_points_list, dtype=dtype))
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
     n_train = len(train_data)
-
-    eps = lm_set.metric_eps
-    if eps <= 0:
-        raise ValueError("metric_eps must be positive (the p_0 block needs PD)")
 
     def dividends(t):
         return (x_0 + c / g) * jnp.exp(g * t) - c / g
@@ -128,26 +128,24 @@ def asset_pricing_kernel(
         p, dp_dt = train_path_values(theta)
         return dp_dt - (r * p - x_train)
 
-    # The residual is affine in theta, so LM from theta_0 = 0 converges to the
-    # exact interpolant minimizing theta' M theta with the unified shifted
-    # metric M = blockdiag(K, 0) + eps I: the min-RKHS-norm selection (the
-    # original a'Ka objective with p_0 free) up to an O(eps) selection shift
-    # in all parameters.
-    metric = repeated_shifted_dense_metric(
+    # The residual is affine in theta, so each ridge-LM step is an exact
+    # kernel ridge regression: the solve converges to the minimizer of
+    # ||r||^2 + ridge * a'Ka with p_0 free -- the min-RKHS-norm selection
+    # (the original a'Ka objective) up to an O(ridge) bias.
+    penalty = repeated_dense_penalty(
         K_metric,
         repeats=1,
         zero_pad_size=1,
-        epsilon=eps,
     )
 
-    solver = LevenbergMarquardt(
+    solver = RidgeLevenbergMarquardt(
         residual_fn,
+        penalty=penalty,
+        ridge=lm_set.ridge,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         linear_solve_dtype=jnp.float64,
-        metric_solve_dtype=jnp.float64,
-        metric=metric,
     )
     theta_0 = (
         jnp.zeros(n_train, dtype=dtype),
@@ -158,6 +156,7 @@ def asset_pricing_kernel(
     result = solver.solve(
         theta_0,
         max_steps=lm_set.max_steps,
+        gtol=lm_set.gtol,
         atol=lm_set.residual_atol,
         max_steps_is_success=False,
     )
@@ -230,7 +229,7 @@ def asset_pricing_kernel(
         "g": g,
         "x_0": x_0,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "metric_dtype": "float64",
+        "linear_solve_dtype": "float64",
         "kernel": kernel,
         "ell": ell,
         "sigma": sigma,
@@ -253,8 +252,9 @@ def asset_pricing_kernel(
         "wall_time": elapsed,
         "solver": "nlls-gram",
         "linear_solver": "auto",
-        "metric_eps": eps,
-        "train_loss": float(result.info.loss),
+        "ridge": lm_set.ridge,
+        "gtol": lm_set.gtol,
+        "train_loss": float(result.info.resid_loss),
         "final_damping": float(result.lm_state.damping),
         "steps": steps,
         "stopping_reason": STATUS_TO_REASON.get(status, "unknown"),

@@ -740,16 +740,16 @@ class KernelSmokeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize_kernel("matern72")
 
-    def test_asset_pricing_metric_shift_must_be_positive(self):
+    def test_asset_pricing_ridge_must_be_positive(self):
         with self.assertRaises(ValueError):
-            asset_pricing_kernel(lm_set=SolverSettings(metric_eps=0.0))
+            asset_pricing_kernel(lm_set=SolverSettings(ridge=0.0))
 
-    def test_float32_residuals_use_float64_metric(self):
+    def test_float32_residuals_use_float64_linear_solves(self):
         results, frames = asset_pricing_kernel(use_float64=False)
 
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertEqual(results["residual_dtype"], "float32")
-        self.assertEqual(results["metric_dtype"], "float64")
+        self.assertEqual(results["linear_solve_dtype"], "float64")
         self.assertEqual(set(frames["train_df"].dtypes.astype(str)), {"float32"})
 
     def test_optimal_advertising_kernel_smoke(self):
@@ -757,8 +757,8 @@ class KernelSmokeTests(unittest.TestCase):
 
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertLess(results["max_train_residual"], 1e-8)
-        self.assertAlmostEqual(results["mu_0"], 0.8835154879257, places=10)
-        self.assertAlmostEqual(results["u_0"], 0.2650546463776, places=10)
+        self.assertAlmostEqual(results["mu_0"], 0.8835154870013, places=10)
+        self.assertAlmostEqual(results["u_0"], 0.2650546436059, places=10)
         self.assertAlmostEqual(results["gamma"], 0.32)
         self.assertTrue((extras["test_df"]["u"] > 0.0).all())
 

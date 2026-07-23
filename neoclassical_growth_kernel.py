@@ -9,9 +9,9 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from nlls_gram import (
-    LevenbergMarquardt,
     LMStatus,
-    repeated_shifted_dense_metric,
+    RidgeLevenbergMarquardt,
+    repeated_dense_penalty,
 )
 
 from kernels import (
@@ -65,18 +65,19 @@ class SolverSettings:
     damping_increase: float = 4.0
     max_steps: int = 50
     residual_atol: float = 2e-8  # on the 1/sqrt(3n)-scaled residual norm
-    # The single shift of the unified metric M = blockdiag(K, K, K, 0) +
-    # eps I: every kernel block is factored as K + eps I and the free
-    # (c_0, mu_0) carry weight eps, so ||M^{-1}|| = 1/eps uniformly in n and
-    # the min-M-norm interpolant is O(eps) from the pure RKHS-seminorm
-    # solution with free initial values. Selection-side only; every
-    # solver/representation combination uses the same eps so their selections
-    # agree. The default balances the ends of the measured working range:
-    # larger shifts visibly bias the near-singular smooth Grams (rbf), while
-    # below ~1e-8 the
-    # (1/eps)-weighted dual spike outruns the inner CG budget. Tuning:
-    # https://highdimensionaleconlab.github.io/nlls_gram/tuning_guide/#the-metric
-    metric_eps: float = 1e-7
+    # The fixed ridge weight of the objective ||r||^2 + ridge * q(theta) with
+    # q = sum_j alpha_j' K alpha_j and the free (c_0, mu_0) unpenalized (no
+    # epsilon shift anywhere): the minimizer is O(ridge) from the pure
+    # RKHS-seminorm interpolant. The converged residual norm is
+    # O(ridge * ||dual||) (~25x ridge measured here), so ridge must sit low
+    # enough that residual_atol is reachable; 1e-10 leaves the selection
+    # unchanged (the null space is 2-dimensional and steeply penalized) while
+    # meeting the same atol as the metric formulation in 5 steps. gtol bounds
+    # the ridge stationarity ||J'r + ridge K alpha||; convergence requires
+    # gtol AND residual_atol (conjunctive). Tuning:
+    # https://highdimensionaleconlab.github.io/nlls_gram/ridge_lm/
+    ridge: float = 1e-10
+    gtol: float = 1e-9
 
 
 def neoclassical_growth_kernel(
@@ -119,10 +120,6 @@ def neoclassical_growth_kernel(
         0, data_set.benchmark_T, data_set.benchmark_points, dtype=dtype
     )
     n_train = len(train_data)
-
-    eps = lm_set.metric_eps
-    if eps <= 0:
-        raise ValueError("metric_eps must be positive (the (c_0, mu_0) block needs PD)")
 
     def production(k):
         base = k**a
@@ -169,15 +166,14 @@ def neoclassical_growth_kernel(
         shadow_price = mu * c - 1.0
         return residual_scale * jnp.concatenate([resource, euler, shadow_price])
 
-    # 3n nonlinear residuals in 3n + 2 unknowns: LM with the unified shifted
-    # metric M = blockdiag(K, K, K, 0) + eps I selects the interpolant
-    # minimizing the summed RKHS norms (the original objective) with free
-    # initial values (c_0, mu_0), up to an O(eps) selection shift.
-    metric = repeated_shifted_dense_metric(
+    # 3n nonlinear residuals in 3n + 2 unknowns: ridge LM on
+    # ||r||^2 + ridge * (a_mu'K a_mu + a_c'K a_c + a_k'K a_k) selects the
+    # interpolant minimizing the summed RKHS norms (the original objective)
+    # with free initial values (c_0, mu_0), up to an O(ridge) bias.
+    penalty = repeated_dense_penalty(
         K_metric,
         repeats=3,
         zero_pad_size=2,
-        epsilon=eps,
     )
 
     c_flow_guess = max(production(k_0) - delta * k_0, DOMAIN_EPS)
@@ -190,20 +186,21 @@ def neoclassical_growth_kernel(
         jnp.array([c_flow_guess, 1.0 / c_flow_guess], dtype=dtype),
     )
 
-    solver = LevenbergMarquardt(
+    solver = RidgeLevenbergMarquardt(
         residual_fn,
+        penalty=penalty,
+        ridge=lm_set.ridge,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         linear_solve_dtype=jnp.float64,
-        metric_solve_dtype=jnp.float64,
-        metric=metric,
     )
 
     start = time.perf_counter()
     result = solver.solve(
         theta_0,
         max_steps=lm_set.max_steps,
+        gtol=lm_set.gtol,
         atol=lm_set.residual_atol,
         max_steps_is_success=False,
     )
@@ -305,7 +302,7 @@ def neoclassical_growth_kernel(
         "b_2": b_2_value,
         "use_kinked_production": use_kinked_production,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "metric_dtype": "float64",
+        "linear_solve_dtype": "float64",
         "kernel": kernel,
         "ell": ell,
         "sigma": sigma,
@@ -329,8 +326,9 @@ def neoclassical_growth_kernel(
         "wall_time": elapsed,
         "solver": "nlls-gram",
         "linear_solver": "auto",
-        "metric_eps": eps,
-        "train_loss": float(result.info.loss),
+        "ridge": lm_set.ridge,
+        "gtol": lm_set.gtol,
+        "train_loss": float(result.info.resid_loss),
         "final_damping": float(result.lm_state.damping),
         "steps": steps,
         "stopping_reason": STATUS_TO_REASON.get(status, "unknown"),

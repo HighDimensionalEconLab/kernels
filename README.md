@@ -84,12 +84,19 @@ The main kernel modules are:
   formulation, with the country consumption and investment FOCs substituted.
 
 Unqualified kernel filenames refer to the NLLS formulation; `_uno` identifies
-the constrained comparison. Where algebraic DAE
-blocks are retained, the kernel metric acts on their RKHS paths as well as the
-dynamic paths and selects among the underdetermined solutions. The small
-systems use dense kernel matrices, a float64 metric solve, and the library's
-default linear solver. `nlls_gram.repeated_shifted_dense_metric` constructs
-every NLLS metric as
+the constrained comparison. The simple ODE drivers (`asset_pricing_kernel`,
+`neoclassical_growth_kernel` and its concave-convex wrapper,
+`optimal_advertising_kernel`) use `nlls_gram.RidgeLevenbergMarquardt`: the
+objective `||r||^2 + ridge * q(theta)` with the block penalty
+`q = sum_j alpha_j' K alpha_j` from `nlls_gram.repeated_dense_penalty`
+(structural scalars unpenalized, no epsilon shift), a fixed small `ridge`,
+and the conjunctive `gtol`/`residual_atol` stopping rule -- the minimizer is
+the min-RKHS-norm interpolant up to an O(ridge) bias, and the selection is
+resolved to `gtol / ridge` (the asset driver's free `p_0` needs
+`gtol ~ 1e-3 * ridge`). The remaining DAE drivers use the metric-damped
+`LevenbergMarquardt`: where algebraic blocks are retained, the kernel metric
+acts on their RKHS paths as well as the dynamic paths, built by
+`nlls_gram.repeated_shifted_dense_metric` as
 `blockdiag(repeat(K, r), 0_s) + metric_eps * I`, sharing one kernel factor
 across all `r` paths without materializing the full block matrix. For the
 reduced multicountry model, the common

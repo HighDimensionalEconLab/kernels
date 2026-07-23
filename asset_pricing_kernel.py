@@ -68,9 +68,10 @@ class SolverSettings:
     # exact interpolation, unlike the metric formulation whose affine solve
     # reached float64 roundoff. gtol bounds the ridge stationarity
     # ||J'r + ridge K a||; convergence requires gtol AND residual_atol
-    # (conjunctive). The one-dimensional null space here runs along the
-    # weakly penalized p_0 mixture, and the selection is resolved only to
-    # gtol / ridge -- gtol must sit ~3 orders below ridge or p_0 drifts
+    # (conjunctive). The one-dimensional null space runs along the weakly
+    # penalized p_0 mixture, and gtol follows the
+    # ~1e-3 * ridge * info.penalty_grad_norm calibration recipe exactly:
+    # ridge*||K a|| is ~1e-10 at convergence, so 1e-13 resolves p_0 to ~0.1%
     # (measured: gtol = 1e-9 leaves p_0 off by O(1); 1e-13 matches the
     # metric selection). Tuning:
     # https://highdimensionaleconlab.github.io/nlls_gram/ridge_lm/
@@ -145,7 +146,6 @@ def asset_pricing_kernel(
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
-        linear_solve_dtype=jnp.float64,
     )
     theta_0 = (
         jnp.zeros(n_train, dtype=dtype),
@@ -229,7 +229,6 @@ def asset_pricing_kernel(
         "g": g,
         "x_0": x_0,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "linear_solve_dtype": "float64",
         "kernel": kernel,
         "ell": ell,
         "sigma": sigma,

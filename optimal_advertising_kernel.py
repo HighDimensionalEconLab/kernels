@@ -57,7 +57,9 @@ class SolverSettings:
     damping_increase: float = 4.0
     max_steps: int = 50
     # Conjunctive stopping: gtol bounds the ridge stationarity
-    # ||J'r + ridge K alpha||, residual_atol additionally demands the scaled
+    # ||J'r + ridge K alpha|| (calibrated per the
+    # ~1e-3 * ridge * info.penalty_grad_norm recipe: ridge*||L'L theta|| is
+    # ~6e-12 at convergence), residual_atol additionally demands the scaled
     # residual norm solved. The converged residual floor is
     # O(ridge * ||dual||), so residual_atol must sit above it; the ridge
     # keeps the minimizer O(ridge) from the pure RKHS-seminorm interpolant
@@ -153,7 +155,6 @@ def optimal_advertising_kernel(
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
-        linear_solve_dtype=jnp.float64,
     )
 
     start = time.perf_counter()
@@ -240,7 +241,6 @@ def optimal_advertising_kernel(
         "x_0": x_0,
         "gamma": gamma,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "linear_solve_dtype": "float64",
         "kernel": kernel,
         "ell": ell,
         "sigma": sigma,

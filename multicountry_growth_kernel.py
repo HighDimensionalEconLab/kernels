@@ -9,6 +9,9 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from nlls_gram import (
+    LSMR,
+    QR,
+    Auto,
     LMStatus,
     RidgeLevenbergMarquardt,
     identity_right_preconditioner,
@@ -91,6 +94,14 @@ class SolverSettings:
     iterative_maxiter: int = 4000
     geodesic_acceleration: bool = True
     ridge: float = 3e-12
+    # gtol here is a MEASURED noise-floor constant, not the
+    # ~1e-3 * ridge * info.penalty_grad_norm calibration recipe: at
+    # ridge = 3e-12 that recipe would ask for ~2.5e-15, below the float64
+    # stationarity floor (~5e-14, conditioning-limited at this ridge), so
+    # gtol sits just above the floor instead. The extra resolution the
+    # recipe would demand changes the solution by nothing measurable
+    # (verified: solving 4.6x longer to grad ~9e-14 moves every quality
+    # metric only in the sixth significant digit).
     gtol: float = 1e-11
     # ridge_init=None solves at the fixed ridge above; a value enables ridge
     # continuation annealed from ridge_init down to `ridge` (the floor) by
@@ -283,16 +294,18 @@ def multicountry_growth_kernel(
         jnp.zeros(n_train, dtype=dtype),
         jnp.zeros(num_initial_values, dtype=dtype),
     )
-    # The lsmr path is matrix-free, so the dense-only linear_solve_dtype
-    # promotion does not apply there (the whole driver is float64 anyway);
-    # identity_right_preconditioner() opts out of right preconditioning.
-    solver_options = {"linear_solve_dtype": jnp.float64}
+    # CLI string -> typed solver config; identity_right_preconditioner()
+    # opts out of right preconditioning on the matrix-free path.
     if lm_set.linear_solver == "lsmr":
-        solver_options = {
-            "iterative_tol": lm_set.iterative_tol,
-            "iterative_maxiter": lm_set.iterative_maxiter,
-            "lsmr_preconditioner": identity_right_preconditioner(),
-        }
+        linear_solver = LSMR(
+            identity_right_preconditioner(),
+            tol=lm_set.iterative_tol,
+            maxiter=lm_set.iterative_maxiter,
+        )
+    elif lm_set.linear_solver == "qr":
+        linear_solver = QR()
+    else:
+        linear_solver = Auto()
     if lm_set.ridge_init is None:
         initial_ridge = lm_set.ridge
         continuation_options = {}
@@ -309,12 +322,11 @@ def multicountry_growth_kernel(
         residual_fn,
         penalty=penalty,
         ridge=initial_ridge,
-        linear_solver=lm_set.linear_solver,
+        linear_solver=linear_solver,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         geodesic_acceleration=lm_set.geodesic_acceleration,
-        **solver_options,
     )
 
     solve_start = time.perf_counter()
@@ -475,7 +487,6 @@ def multicountry_growth_kernel(
         "installation_elasticity": parameters.installation_elasticity,
         "num_countries": num_countries,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "linear_solve_dtype": "float64",
         "kernel": kernel,
         "ell": kernel_set.ell,
         "sigma": kernel_set.sigma,

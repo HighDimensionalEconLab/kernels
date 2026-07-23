@@ -741,14 +741,6 @@ class KernelSmokeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             asset_pricing_kernel(lm_set=SolverSettings(ridge=0.0))
 
-    def test_float32_residuals_use_float64_linear_solves(self):
-        results, frames = asset_pricing_kernel(use_float64=False)
-
-        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
-        self.assertEqual(results["residual_dtype"], "float32")
-        self.assertEqual(results["linear_solve_dtype"], "float64")
-        self.assertEqual(set(frames["train_df"].dtypes.astype(str)), {"float32"})
-
     def test_optimal_advertising_kernel_smoke(self):
         results, extras = optimal_advertising_kernel()
 

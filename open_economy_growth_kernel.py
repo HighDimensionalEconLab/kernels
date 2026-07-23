@@ -9,6 +9,9 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from nlls_gram import (
+    QR,
+    Auto,
+    Cholesky,
     LMStatus,
     RidgeLevenbergMarquardt,
     repeated_dense_penalty,
@@ -80,13 +83,17 @@ class SolverSettings:
     # O(ridge * ||dual||), so residual_atol sits above it). The ridge keeps
     # the minimizer O(ridge) from the pure RKHS-seminorm interpolant with
     # the free offsets unpenalized (no epsilon shift anywhere).
-    # The conjunctive stopping pair is calibrated to the continuation
-    # schedule: gtol sits above the WORST measured stationarity floor across
-    # the driver's parameter variants (the achievable gradient scales with
-    # the path magnitudes, ~2e-8 for the nonstationary-consumption case),
-    # while residual_atol sits BETWEEN the ridge-floor residual (~1.3-2.9e-7
-    # scaled across variants) and the last intermediate continuation level's
-    # (~9e-7), so the solve can only stop at the floor.
+    # gtol here is a MEASURED noise-floor constant, not the
+    # ~1e-3 * ridge * info.penalty_grad_norm calibration recipe: at
+    # ridge ~ 3e-12 the float64 stationarity noise floor
+    # (cond([J; sqrt(ridge)L]) grows ~ 1/sqrt(ridge); the DAE Jacobian's
+    # scale spread makes it worse) sits 15-780x ABOVE ridge * ||L'L theta||
+    # across the parameter variants -- measured gradient floors 7e-11
+    # (default) to 9.7e-9 (r*=0.05) vs recipe values ~5e-15 -- so gtol sits
+    # just above the WORST variant floor instead, while residual_atol sits
+    # BETWEEN the ridge-floor residual (~1.3-2.9e-7 scaled across variants)
+    # and the last intermediate continuation level's (~9e-7), so the solve
+    # can only stop at the floor.
     residual_atol: float = 5e-7
     ridge: float = 3e-12
     gtol: float = 5e-8
@@ -287,11 +294,12 @@ def open_economy_growth_kernel(
         residual_fn,
         penalty=penalty,
         ridge=initial_ridge,
-        linear_solver=lm_set.linear_solver,
+        linear_solver={"auto": Auto(), "cholesky": Cholesky(), "qr": QR()}[
+            lm_set.linear_solver
+        ],
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
-        linear_solve_dtype=jnp.float64,
     )
 
     solve_start = time.perf_counter()
@@ -477,7 +485,6 @@ def open_economy_growth_kernel(
         "a_0": a_0,
         "a_0_over_output_ss": a_0 / float(output_scale),
         "residual_dtype": str(jnp.dtype(dtype)),
-        "linear_solve_dtype": "float64",
         "kernel": kernel,
         "ell": kernel_set.ell,
         "sigma": kernel_set.sigma,

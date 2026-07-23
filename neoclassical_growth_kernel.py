@@ -74,8 +74,11 @@ class SolverSettings:
     # unchanged (the null space is 2-dimensional and steeply penalized) while
     # meeting the same atol as the metric formulation in 5 steps. gtol bounds
     # the ridge stationarity ||J'r + ridge K alpha||; convergence requires
-    # gtol AND residual_atol (conjunctive). Tuning:
-    # https://highdimensionaleconlab.github.io/nlls_gram/ridge_lm/
+    # gtol AND residual_atol (conjunctive). Calibration (the
+    # ~1e-3 * ridge * info.penalty_grad_norm recipe): ridge*||L'L theta|| is
+    # ~4.6e-11 at convergence, so 1e-9 resolves the selection well below the
+    # quality gates while sitting far above the ~1e-14 gradient floor.
+    # Tuning: https://highdimensionaleconlab.github.io/nlls_gram/ridge_lm/
     ridge: float = 1e-10
     gtol: float = 1e-9
 
@@ -193,7 +196,6 @@ def neoclassical_growth_kernel(
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
-        linear_solve_dtype=jnp.float64,
     )
 
     start = time.perf_counter()
@@ -302,7 +304,6 @@ def neoclassical_growth_kernel(
         "b_2": b_2_value,
         "use_kinked_production": use_kinked_production,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "linear_solve_dtype": "float64",
         "kernel": kernel,
         "ell": ell,
         "sigma": sigma,

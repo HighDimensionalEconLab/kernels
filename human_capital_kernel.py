@@ -107,8 +107,10 @@ class SolverSettings:
     damping_increase: float = 4.0
     max_steps: int = 100
     # Conjunctive stopping: gtol bounds the ridge stationarity
-    # ||J'r + ridge K alpha||, residual_atol additionally demands the scaled
-    # residual norm solved. The converged residual floors at
+    # ||J'r + ridge K alpha|| (calibrated per the
+    # ~1e-3 * ridge * info.penalty_grad_norm recipe: ridge*||L'L theta|| is
+    # ~1.6e-11 at convergence), residual_atol additionally demands the
+    # scaled residual norm solved. The converged residual floors at
     # O(ridge * ||dual||), so residual_atol sits above it; the ridge keeps
     # the minimizer O(ridge) from the pure RKHS-seminorm interpolant with
     # the free initial values unpenalized (no epsilon shift anywhere).
@@ -257,7 +259,6 @@ def human_capital_kernel(
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
-        linear_solve_dtype=jnp.float64,
     )
 
     start = time.perf_counter()
@@ -377,7 +378,6 @@ def human_capital_kernel(
         "k_0": k_0,
         "h_0": h_0,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "linear_solve_dtype": "float64",
         "kernel": kernel,
         "ell": ell,
         "sigma": sigma,

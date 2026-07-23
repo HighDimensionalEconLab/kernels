@@ -198,7 +198,7 @@ class KernelSmokeTests(unittest.TestCase):
     def test_multicountry_growth_kernel_smoke(self):
         results, extras = multicountry_growth_kernel(a_0=(-0.5, 0.5))
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
-        self.assertEqual(results["linear_solver"], "auto")
+        self.assertEqual(results["linear_solver"], "qr")
         self.assertEqual(results["iterative_preconditioner"], "none")
         self.assertTrue(results["benchmark_match"])
         self.assertEqual(results["terminal_residual_count"], 0)
@@ -215,7 +215,7 @@ class KernelSmokeTests(unittest.TestCase):
             results["global_closure"],
             "explicit_assets_and_algebraic_clearing",
         )
-        self.assertEqual(results["selection"], "minimum_shifted_rkhs_metric")
+        self.assertEqual(results["selection"], "minimum_rkhs_norm_ridge")
         self.assertEqual(results["stable_roots"], 2)
         self.assertEqual(results["unstable_roots"], 3)
         self.assertEqual(results["center_roots"], 1)
@@ -455,7 +455,7 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertEqual(results["algebraic_rkhs_function_count"], 1)
         self.assertEqual(results["free_initial_value_count"], 3)
         self.assertEqual(results["metric_selection_dimension"], 3)
-        self.assertEqual(results["selection"], "minimum_shifted_rkhs_metric")
+        self.assertEqual(results["selection"], "minimum_rkhs_norm_ridge")
         self.assertEqual(results["initialization"], "zero_coordinate")
         self.assertLess(results["max_train_residual"], 1e-5)
         self.assertLess(results["max_validation_residual"], 5e-3)
@@ -472,9 +472,6 @@ class KernelSmokeTests(unittest.TestCase):
             + results["rkhs_norm_c"]
             + results["rkhs_norm_mu"],
             places=10,
-        )
-        self.assertGreaterEqual(
-            results["shifted_metric_norm_squared"], results["rkhs_norm_total"]
         )
         self.assertTrue((extras["test_df"]["k"] > 0.0).all())
         self.assertTrue((extras["test_df"]["q"] > 0.0).all())

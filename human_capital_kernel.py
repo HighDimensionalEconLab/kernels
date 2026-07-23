@@ -11,7 +11,8 @@ import pandas as pd
 from nlls_gram import (
     LevenbergMarquardt,
     LMStatus,
-    repeated_shifted_dense_metric,
+    RidgeLevenbergMarquardt,
+    repeated_dense_penalty,
 )
 
 from kernels import (
@@ -105,8 +106,15 @@ class SolverSettings:
     damping_decrease: float = 0.1
     damping_increase: float = 4.0
     max_steps: int = 100
+    # Conjunctive stopping: gtol bounds the ridge stationarity
+    # ||J'r + ridge K alpha||, residual_atol additionally demands the scaled
+    # residual norm solved. The converged residual floors at
+    # O(ridge * ||dual||), so residual_atol sits above it; the ridge keeps
+    # the minimizer O(ridge) from the pure RKHS-seminorm interpolant with
+    # the free initial values unpenalized (no epsilon shift anywhere).
     residual_atol: float = 1e-9
-    metric_eps: float = 1e-7
+    ridge: float = 3e-11
+    gtol: float = 1e-10
 
 
 def human_capital_kernel(
@@ -141,9 +149,6 @@ def human_capital_kernel(
         dtype=dtype,
     )
     n_train = len(train_data)
-    eps = lm_set.metric_eps
-    if eps <= 0.0:
-        raise ValueError("metric_eps must be positive")
 
     metric_data = train_data.astype(jnp.float64)
     K_metric, K_tilde_metric = integrated_kernel_matrices(
@@ -221,11 +226,10 @@ def human_capital_kernel(
             residuals(path_values(theta, K, K_tilde))
         )
 
-    metric = repeated_shifted_dense_metric(
+    penalty = repeated_dense_penalty(
         K_metric,
         repeats=7,
         zero_pad_size=5,
-        epsilon=eps,
     )
     theta_0 = (
         jnp.zeros(n_train, dtype=dtype),
@@ -246,20 +250,21 @@ def human_capital_kernel(
             dtype=dtype,
         ),
     )
-    solver = LevenbergMarquardt(
+    solver = RidgeLevenbergMarquardt(
         residual_fn,
+        penalty=penalty,
+        ridge=lm_set.ridge,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         linear_solve_dtype=jnp.float64,
-        metric_solve_dtype=jnp.float64,
-        metric=metric,
     )
 
     start = time.perf_counter()
     result = solver.solve(
         theta_0,
         max_steps=lm_set.max_steps,
+        gtol=lm_set.gtol,
         atol=lm_set.residual_atol,
         max_steps_is_success=False,
     )
@@ -372,7 +377,7 @@ def human_capital_kernel(
         "k_0": k_0,
         "h_0": h_0,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "metric_dtype": "float64",
+        "linear_solve_dtype": "float64",
         "kernel": kernel,
         "ell": ell,
         "sigma": sigma,
@@ -399,8 +404,10 @@ def human_capital_kernel(
         "wall_time": elapsed,
         "solver": "nlls-gram",
         "linear_solver": "auto",
-        "metric_eps": eps,
-        "train_loss": float(result.info.loss),
+        "ridge": lm_set.ridge,
+        "gtol": lm_set.gtol,
+        "train_loss": float(result.info.resid_loss),
+        "final_grad_norm": float(result.info.grad_norm),
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),

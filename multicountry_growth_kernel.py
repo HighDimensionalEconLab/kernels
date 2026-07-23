@@ -9,9 +9,11 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from nlls_gram import (
-    LevenbergMarquardt,
     LMStatus,
-    repeated_shifted_dense_metric,
+    RidgeLevenbergMarquardt,
+    identity_right_preconditioner,
+    repeated_dense_penalty,
+    ridge_continuation,
 )
 
 from kernels import (
@@ -74,12 +76,31 @@ class SolverSettings:
     damping_decrease: float = 0.1
     damping_increase: float = 4.0
     max_steps: int = 80
+    # Conjunctive stopping: gtol bounds the ridge stationarity
+    # ||J'r + ridge K alpha||, residual_atol additionally demands the scaled
+    # residual norm solved (the converged residual floors at
+    # O(ridge * ||dual||), so residual_atol sits above it). The ridge keeps
+    # the minimizer O(ridge) from the pure RKHS-seminorm interpolant with
+    # the free initial values unpenalized (no epsilon shift anywhere).
     residual_atol: float = 5e-8
-    linear_solver: str = "auto"
+    # "qr" factors the augmented stack directly (condition number the square
+    # root of the assembled normal system's) -- required at these ridge
+    # levels, where the cholesky path's squared conditioning exceeds float64.
+    linear_solver: str = "qr"
     iterative_tol: float = 1e-12
     iterative_maxiter: int = 4000
     geodesic_acceleration: bool = True
-    metric_eps: float = 1e-7
+    ridge: float = 3e-12
+    gtol: float = 1e-11
+    # ridge_init=None solves at the fixed ridge above; a value enables ridge
+    # continuation annealed from ridge_init down to `ridge` (the floor) by
+    # factors of `ridge_decrease` on inner stationarity.
+    ridge_init: float | None = 1e-7
+    ridge_decrease: float = 0.01
+    # Relative stationarity threshold that triggers the next ridge level:
+    # looser anneals faster (fewer steps per level), tighter solves each
+    # level out more completely before descending.
+    ridge_grad_rtol: float = 1e-3
 
 
 def make_train_grid(data_set):
@@ -135,11 +156,9 @@ def multicountry_growth_kernel(
         raise ValueError("k_0 must contain one positive capital stock per country")
     if len(a_0) != num_countries:
         raise ValueError("a_0 must contain one NFA position per country")
-    if lm_set.metric_eps <= 0.0:
-        raise ValueError("metric_eps must be positive")
     if lm_set.iterative_tol < 0.0 or lm_set.iterative_maxiter <= 0:
         raise ValueError("iterative_tol must be nonnegative and maxiter positive")
-    supported_linear_solvers = ("auto", "lsmr")
+    supported_linear_solvers = ("auto", "qr", "lsmr")
     if lm_set.linear_solver not in supported_linear_solvers:
         raise ValueError(f"linear_solver must be one of {supported_linear_solvers}")
 
@@ -170,7 +189,6 @@ def multicountry_growth_kernel(
     marginal_wealth_reference = multicountry_reference_marginal_wealth(
         parameters, k_0_array.dtype
     )
-    eps = lm_set.metric_eps
 
     metric_data = train_data.astype(jnp.float64)
     K_metric, K_tilde_metric = integrated_kernel_matrices(
@@ -252,11 +270,10 @@ def multicountry_growth_kernel(
     num_dynamic_functions = 4 * num_countries
     num_rkhs_functions = num_dynamic_functions + 1
     num_initial_values = 2 * num_countries + 1
-    metric = repeated_shifted_dense_metric(
+    penalty = repeated_dense_penalty(
         K_metric,
         repeats=num_rkhs_functions,
         zero_pad_size=num_initial_values,
-        epsilon=eps,
     )
     theta_0 = (
         jnp.zeros((num_countries, n_train), dtype=dtype),
@@ -266,32 +283,48 @@ def multicountry_growth_kernel(
         jnp.zeros(n_train, dtype=dtype),
         jnp.zeros(num_initial_values, dtype=dtype),
     )
-    iterative_options = {}
+    # The lsmr path is matrix-free, so the dense-only linear_solve_dtype
+    # promotion does not apply there (the whole driver is float64 anyway);
+    # identity_right_preconditioner() opts out of right preconditioning.
+    solver_options = {"linear_solve_dtype": jnp.float64}
     if lm_set.linear_solver == "lsmr":
-        iterative_options = {
+        solver_options = {
             "iterative_tol": lm_set.iterative_tol,
             "iterative_maxiter": lm_set.iterative_maxiter,
+            "lsmr_preconditioner": identity_right_preconditioner(),
         }
+    if lm_set.ridge_init is None:
+        initial_ridge = lm_set.ridge
+        continuation_options = {}
+    else:
+        initial_ridge = lm_set.ridge_init
+        callback, user_state0 = ridge_continuation(
+            ridge_floor=lm_set.ridge,
+            decrease=lm_set.ridge_decrease,
+            grad_rtol=lm_set.ridge_grad_rtol,
+        )
+        continuation_options = {"callback": callback, "user_state": user_state0}
 
-    solver = LevenbergMarquardt(
+    solver = RidgeLevenbergMarquardt(
         residual_fn,
+        penalty=penalty,
+        ridge=initial_ridge,
         linear_solver=lm_set.linear_solver,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
-        linear_solve_dtype=jnp.float64,
-        metric_solve_dtype=jnp.float64,
-        metric=metric,
         geodesic_acceleration=lm_set.geodesic_acceleration,
-        **iterative_options,
+        **solver_options,
     )
 
     solve_start = time.perf_counter()
     result = solver.solve(
         theta_0,
         max_steps=lm_set.max_steps,
+        gtol=lm_set.gtol,
         atol=lm_set.residual_atol,
         max_steps_is_success=False,
+        **continuation_options,
     )
     jax.block_until_ready(result)
     solve_time = time.perf_counter() - solve_start
@@ -433,13 +466,6 @@ def multicountry_growth_kernel(
     }
     rkhs_norm_rate = rkhs_norm_squared(theta[4], K_metric)
     rkhs_norm_total = sum(rkhs_norms.values()) + rkhs_norm_rate
-    shifted_metric_norm_squared = rkhs_norm_total + eps * (
-        sum(
-            coefficients @ coefficients for group in theta[:4] for coefficients in group
-        )
-        + theta[4] @ theta[4]
-        + theta[5] @ theta[5]
-    )
 
     results = {
         "alpha": parameters.alpha,
@@ -449,7 +475,7 @@ def multicountry_growth_kernel(
         "installation_elasticity": parameters.installation_elasticity,
         "num_countries": num_countries,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "metric_dtype": "float64",
+        "linear_solve_dtype": "float64",
         "kernel": kernel,
         "ell": kernel_set.ell,
         "sigma": kernel_set.sigma,
@@ -477,7 +503,7 @@ def multicountry_growth_kernel(
         "algebraic_rkhs_function_count": 1,
         "free_initial_value_count": num_initial_values,
         "metric_selection_dimension": 2 * num_countries,
-        "selection": "minimum_shifted_rkhs_metric",
+        "selection": "minimum_rkhs_norm_ridge",
         "initialization": "zero_coordinate",
         "global_closure": "explicit_assets_and_algebraic_clearing",
         "ex_post_k_log_gap": float(jnp.max(tail["k_log_gap"])),
@@ -489,7 +515,6 @@ def multicountry_growth_kernel(
         "ex_post_capital_tvc": float(jnp.max(tvc["capital_tvc"])),
         "rkhs_norm_total": float(rkhs_norm_total),
         "rkhs_norm_interest_rate": float(rkhs_norm_rate),
-        "shifted_metric_norm_squared": float(shifted_metric_norm_squared),
         "solve_time": solve_time,
         "wall_time": solve_time,
         "solver": "nlls-gram",
@@ -499,8 +524,10 @@ def multicountry_growth_kernel(
         "iterative_maxiter": lm_set.iterative_maxiter,
         "iterative_preconditioner": "none",
         "geodesic_acceleration": lm_set.geodesic_acceleration,
-        "metric_eps": eps,
-        "train_loss": float(result.info.loss),
+        "ridge": lm_set.ridge,
+        "gtol": lm_set.gtol,
+        "train_loss": float(result.info.resid_loss),
+        "final_grad_norm": float(result.info.grad_norm),
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),

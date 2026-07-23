@@ -9,9 +9,10 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from nlls_gram import (
-    LevenbergMarquardt,
     LMStatus,
-    repeated_shifted_dense_metric,
+    RidgeLevenbergMarquardt,
+    repeated_dense_penalty,
+    ridge_continuation,
 )
 
 from kernels import (
@@ -73,8 +74,37 @@ class SolverSettings:
     damping_decrease: float = 0.1
     damping_increase: float = 4.0
     max_steps: int = 100
-    residual_atol: float = 1e-6
-    metric_eps: float = 1e-7
+    # Conjunctive stopping: gtol bounds the ridge stationarity
+    # ||J'r + ridge K alpha||, residual_atol additionally demands the scaled
+    # residual norm solved (the converged residual floors at
+    # O(ridge * ||dual||), so residual_atol sits above it). The ridge keeps
+    # the minimizer O(ridge) from the pure RKHS-seminorm interpolant with
+    # the free offsets unpenalized (no epsilon shift anywhere).
+    # The conjunctive stopping pair is calibrated to the continuation
+    # schedule: gtol sits above the WORST measured stationarity floor across
+    # the driver's parameter variants (the achievable gradient scales with
+    # the path magnitudes, ~2e-8 for the nonstationary-consumption case),
+    # while residual_atol sits BETWEEN the ridge-floor residual (~1.3-2.9e-7
+    # scaled across variants) and the last intermediate continuation level's
+    # (~9e-7), so the solve can only stop at the floor.
+    residual_atol: float = 5e-7
+    ridge: float = 3e-12
+    gtol: float = 5e-8
+    # ridge_init=None solves at the fixed ridge above; a value enables ridge
+    # continuation annealed from ridge_init down to `ridge` (the floor) by
+    # factors of `ridge_decrease` on inner stationarity.
+    ridge_init: float | None = 1e-7
+    ridge_decrease: float = 0.01
+    # Relative stationarity threshold that triggers the next ridge level:
+    # looser anneals faster (fewer steps per level), tighter solves each
+    # level out more completely before descending.
+    ridge_grad_rtol: float = 1e-2
+    # "qr" factors [J; sqrt(ridge) L] directly (condition number the square
+    # root of the assembled normal system's) -- the DAE Jacobian's spread
+    # makes the cholesky path's squared conditioning exceed float64 at small
+    # ridge, where steps stay descent directions but lose their Gauss-Newton
+    # accuracy and progress stalls.
+    linear_solver: str = "qr"
 
 
 def open_economy_growth_kernel(
@@ -91,9 +121,6 @@ def open_economy_growth_kernel(
     dtype = jnp.float64 if use_float64 else jnp.float32
     if k_0 <= 0.0:
         raise ValueError("k_0 must be positive")
-    if lm_set.metric_eps <= 0.0:
-        raise ValueError("metric_eps must be positive")
-
     kernel = normalize_kernel(kernel_set.kernel)
     if data_set.train_points_list is None:
         if data_set.sampling == "uniform":
@@ -141,7 +168,6 @@ def open_economy_growth_kernel(
     steady = steady_state(parameters)
     output_scale = steady["output"]
     consumption_scale = steady["g"]
-    eps = lm_set.metric_eps
 
     metric_data = train_data.astype(jnp.float64)
     K_metric, K_tilde_metric = integrated_kernel_matrices(
@@ -228,12 +254,11 @@ def open_economy_growth_kernel(
         )
 
     # There are 5n DAE equations in 5n + 3 unknowns. No terminal equation is
-    # appended: the metric supplies the three-dimensional selection.
-    metric = repeated_shifted_dense_metric(
+    # appended: the ridge penalty supplies the three-dimensional selection.
+    penalty = repeated_dense_penalty(
         K_metric,
         repeats=5,
         zero_pad_size=3,
-        epsilon=eps,
     )
 
     # The zero coordinate contains no saddle-path or present-value information:
@@ -247,22 +272,36 @@ def open_economy_growth_kernel(
         jnp.zeros(3, dtype=dtype),
     )
 
-    solver = LevenbergMarquardt(
+    if lm_set.ridge_init is None:
+        initial_ridge = lm_set.ridge
+        continuation_options = {}
+    else:
+        initial_ridge = lm_set.ridge_init
+        callback, user_state0 = ridge_continuation(
+            ridge_floor=lm_set.ridge,
+            decrease=lm_set.ridge_decrease,
+            grad_rtol=lm_set.ridge_grad_rtol,
+        )
+        continuation_options = {"callback": callback, "user_state": user_state0}
+    solver = RidgeLevenbergMarquardt(
         residual_fn,
+        penalty=penalty,
+        ridge=initial_ridge,
+        linear_solver=lm_set.linear_solver,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         linear_solve_dtype=jnp.float64,
-        metric_solve_dtype=jnp.float64,
-        metric=metric,
     )
 
     solve_start = time.perf_counter()
     result = solver.solve(
         theta_0,
         max_steps=lm_set.max_steps,
+        gtol=lm_set.gtol,
         atol=lm_set.residual_atol,
         max_steps_is_success=False,
+        **continuation_options,
     )
     jax.block_until_ready(result)
     solve_time = time.perf_counter() - solve_start
@@ -418,16 +457,6 @@ def open_economy_growth_kernel(
     rkhs_norm_total = (
         rkhs_norm_mu + rkhs_norm_c + rkhs_norm_k + rkhs_norm_a + rkhs_norm_q
     )
-    shifted_metric_norm_squared = rkhs_norm_total + eps * (
-        alpha_mu @ alpha_mu
-        + alpha_c @ alpha_c
-        + alpha_k @ alpha_k
-        + alpha_a @ alpha_a
-        + alpha_q @ alpha_q
-        + c_offset**2
-        + mu_offset**2
-        + q_offset**2
-    )
 
     @jax.jit
     def kernel_solution(points):
@@ -448,7 +477,7 @@ def open_economy_growth_kernel(
         "a_0": a_0,
         "a_0_over_output_ss": a_0 / float(output_scale),
         "residual_dtype": str(jnp.dtype(dtype)),
-        "metric_dtype": "float64",
+        "linear_solve_dtype": "float64",
         "kernel": kernel,
         "ell": kernel_set.ell,
         "sigma": kernel_set.sigma,
@@ -475,7 +504,7 @@ def open_economy_growth_kernel(
         "algebraic_rkhs_function_count": 1,
         "free_initial_value_count": 3,
         "metric_selection_dimension": 3,
-        "selection": "minimum_shifted_rkhs_metric",
+        "selection": "minimum_rkhs_norm_ridge",
         "initialization": "zero_coordinate",
         "k_relative_error_max": float(jnp.max(k_relative_error)),
         "q_relative_error_max": float(jnp.max(q_relative_error)),
@@ -504,13 +533,14 @@ def open_economy_growth_kernel(
         "rkhs_norm_a": float(rkhs_norm_a),
         "rkhs_norm_q": float(rkhs_norm_q),
         "rkhs_norm_total": float(rkhs_norm_total),
-        "shifted_metric_norm_squared": float(shifted_metric_norm_squared),
         "solve_time": solve_time,
         "wall_time": solve_time,
         "solver": "nlls-gram",
-        "linear_solver": "auto",
-        "metric_eps": eps,
-        "train_loss": float(result.info.loss),
+        "linear_solver": lm_set.linear_solver,
+        "ridge": lm_set.ridge,
+        "gtol": lm_set.gtol,
+        "train_loss": float(result.info.resid_loss),
+        "final_grad_norm": float(result.info.grad_norm),
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),

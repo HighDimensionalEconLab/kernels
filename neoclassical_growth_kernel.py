@@ -11,13 +11,13 @@ import pandas as pd
 from nlls_gram import (
     LevenbergMarquardt,
     LMStatus,
+    repeated_shifted_dense_metric,
 )
 
 from kernels import (
     integrated_kernel_matrices,
     normalize_kernel,
     rkhs_norm_squared,
-    shifted_kernel_coefficient_metric,
 )
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
 
@@ -173,10 +173,10 @@ def neoclassical_growth_kernel(
     # metric M = blockdiag(K, K, K, 0) + eps I selects the interpolant
     # minimizing the summed RKHS norms (the original objective) with free
     # initial values (c_0, mu_0), up to an O(eps) selection shift.
-    metric = shifted_kernel_coefficient_metric(
+    metric = repeated_shifted_dense_metric(
         K_metric,
         repeats=3,
-        free_size=2,
+        zero_pad_size=2,
         epsilon=eps,
     )
 

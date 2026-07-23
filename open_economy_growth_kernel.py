@@ -11,13 +11,13 @@ import pandas as pd
 from nlls_gram import (
     LevenbergMarquardt,
     LMStatus,
+    repeated_shifted_dense_metric,
 )
 
 from kernels import (
     integrated_kernel_matrices,
     normalize_kernel,
     rkhs_norm_squared,
-    shifted_kernel_coefficient_metric,
 )
 from open_economy_growth import (
     ModelParameters,
@@ -229,10 +229,10 @@ def open_economy_growth_kernel(
 
     # There are 5n DAE equations in 5n + 3 unknowns. No terminal equation is
     # appended: the metric supplies the three-dimensional selection.
-    metric = shifted_kernel_coefficient_metric(
+    metric = repeated_shifted_dense_metric(
         K_metric,
         repeats=5,
-        free_size=3,
+        zero_pad_size=3,
         epsilon=eps,
     )
 

@@ -9,12 +9,12 @@ import numpy as np
 from jax.flatten_util import ravel_pytree
 from nlls_gram import (
     LevenbergMarquardt,
+    repeated_shifted_dense_metric,
 )
 
 from kernels import (
     integrated_kernel_matrices,
     normalize_kernel,
-    shifted_kernel_coefficient_metric,
 )
 from multicountry_growth_kernel import make_train_grid
 from trade_growth.kernel import (
@@ -435,10 +435,10 @@ def build_multicountry_trade_comparative_statics(
         return residual, statistics(values, runtime)
 
     num_dynamic_functions = 4 * num_countries
-    metric = shifted_kernel_coefficient_metric(
+    metric = repeated_shifted_dense_metric(
         K,
         repeats=num_dynamic_functions,
-        free_size=algebraic_size,
+        zero_pad_size=algebraic_size,
         epsilon=eps,
     )
     initial_algebraic = jnp.concatenate(

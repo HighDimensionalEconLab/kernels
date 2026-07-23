@@ -11,6 +11,7 @@ import pandas as pd
 from nlls_gram import (
     LevenbergMarquardt,
     LMStatus,
+    repeated_shifted_dense_metric,
 )
 
 from asset_pricing_benchmark import mu_f_array
@@ -18,7 +19,6 @@ from kernels import (
     integrated_kernel_matrices,
     normalize_kernel,
     rkhs_norm_squared,
-    shifted_kernel_coefficient_metric,
 )
 
 if __name__ == "__main__":
@@ -133,10 +133,10 @@ def asset_pricing_kernel(
     # metric M = blockdiag(K, 0) + eps I: the min-RKHS-norm selection (the
     # original a'Ka objective with p_0 free) up to an O(eps) selection shift
     # in all parameters.
-    metric = shifted_kernel_coefficient_metric(
+    metric = repeated_shifted_dense_metric(
         K_metric,
         repeats=1,
-        free_size=1,
+        zero_pad_size=1,
         epsilon=eps,
     )
 

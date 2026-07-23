@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import scipy.integrate
+from nlls_gram import repeated_shifted_dense_metric
 
 from asset_pricing_kernel import KernelSettings as APKernelSettings
 from asset_pricing_kernel import SolverSettings, asset_pricing_kernel
@@ -17,7 +18,6 @@ from kernels import (
     matern_kernel_1p5,
     matern_kernel_2p5,
     normalize_kernel,
-    shifted_kernel_coefficient_metric,
 )
 from multicountry_growth import (
     MulticountryParameters,
@@ -84,10 +84,10 @@ class KernelSmokeTests(unittest.TestCase):
         epsilon = 0.2
         repeats = 3
         free_size = 2
-        metric = shifted_kernel_coefficient_metric(
+        metric = repeated_shifted_dense_metric(
             gram,
             repeats=repeats,
-            free_size=free_size,
+            zero_pad_size=free_size,
             epsilon=epsilon,
         )
         shifted_block = gram + epsilon * jnp.eye(gram.shape[0])

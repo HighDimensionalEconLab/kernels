@@ -11,13 +11,13 @@ import pandas as pd
 from nlls_gram import (
     LevenbergMarquardt,
     LMStatus,
+    repeated_shifted_dense_metric,
 )
 
 from kernels import (
     integrated_kernel_matrices,
     normalize_kernel,
     rkhs_norm_squared,
-    shifted_kernel_coefficient_metric,
 )
 
 if __name__ == "__main__":
@@ -129,10 +129,10 @@ def optimal_advertising_kernel(
             residuals(path_values(theta, K, K_tilde))
         )
 
-    metric = shifted_kernel_coefficient_metric(
+    metric = repeated_shifted_dense_metric(
         K_metric,
         repeats=3,
-        free_size=2,
+        zero_pad_size=2,
         epsilon=eps,
     )
     u_0_guess = max(beta * x_0 / max(1.0 - x_0, DOMAIN_EPS), DOMAIN_EPS)

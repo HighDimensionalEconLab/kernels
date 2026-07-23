@@ -11,12 +11,12 @@ import pandas as pd
 from nlls_gram import (
     LevenbergMarquardt,
     LMStatus,
+    repeated_shifted_dense_metric,
 )
 
 from kernels import (
     integrated_kernel_matrices,
     normalize_kernel,
-    shifted_kernel_coefficient_metric,
 )
 
 if __name__ == "__main__":
@@ -221,10 +221,10 @@ def human_capital_kernel(
             residuals(path_values(theta, K, K_tilde))
         )
 
-    metric = shifted_kernel_coefficient_metric(
+    metric = repeated_shifted_dense_metric(
         K_metric,
         repeats=7,
-        free_size=5,
+        zero_pad_size=5,
         epsilon=eps,
     )
     theta_0 = (

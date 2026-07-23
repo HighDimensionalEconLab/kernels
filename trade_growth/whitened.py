@@ -137,12 +137,12 @@ def whitening_root(K, eps):
     """Per-dynamic-function whitening factor ``S_alpha`` with ``S_alpha S_alpha' =
     (K + eps I)^{-1}``.
 
-    MUST match the metric the LM whitens with: the driver/testbed metric is
-    ``metric_from_cholesky(chol(K+eps I))``, whose ``inv_sqrt`` is the Cholesky
-    ``L^{-T}`` (verified equal to ``metric.inv_sqrt`` to machine zero), NOT the
-    symmetric ``M^{-1/2}``. Both satisfy ``S S' = M^{-1}`` and give the same
-    (min-M-norm) LM step, but ``B = J S`` and this preconditioner must use the SAME
-    ``S`` -- mixing them corrupts ``B'B`` in the rank-2N near-null directions.
+    MUST match the metric the LM whitens with: the dynamic block of
+    ``repeated_shifted_dense_metric`` uses ``chol(K + eps I)`` and its
+    ``inv_sqrt`` is ``L^{-T}``, not the symmetric ``M^{-1/2}``. Both satisfy
+    ``S S' = M^{-1}`` and give the same minimum-M-norm LM step, but ``B = J S``
+    and this preconditioner must use the same ``S`` -- mixing them corrupts
+    ``B'B`` in the rank-2N near-null directions.
     """
 
     n_train = K.shape[0]

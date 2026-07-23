@@ -88,8 +88,8 @@ the constrained comparison. Where algebraic DAE
 blocks are retained, the kernel metric acts on their RKHS paths as well as the
 dynamic paths and selects among the underdetermined solutions. The small
 systems use dense kernel matrices, a float64 metric solve, and the library's
-default linear solver. `shifted_kernel_coefficient_metric` constructs every
-NLLS metric as
+default linear solver. `nlls_gram.repeated_shifted_dense_metric` constructs
+every NLLS metric as
 `blockdiag(repeat(K, r), 0_s) + metric_eps * I`, sharing one kernel factor
 across all `r` paths without materializing the full block matrix. For the
 reduced multicountry model, the common
@@ -130,8 +130,10 @@ uv run python multicountry_growth_kernel.py \
 uv run python multicountry_growth_nn.py --a_0 '[-0.5, 0.5]' --seed 0
 ```
 
-The verified 50-country LSMR configuration additionally uses
-`lm_set.iterative_tol=1e-13` and `lm_set.iterative_maxiter=6000`.
+The exercised 50-country LSMR stress configuration additionally uses
+`lm_set.iterative_tol=1e-13` and `lm_set.iterative_maxiter=6000`. It verifies
+that the matrix-free path runs at that size; the current 80-step default need
+not satisfy the deterministic acceptance threshold.
 
 or import directly:
 

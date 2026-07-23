@@ -18,13 +18,13 @@ from nlls_gram import (
     PreconditionerFactory,
     RecycleConfig,
     WhitenedPreconditioner,
+    repeated_shifted_dense_metric,
 )
 
 from kernels import (
     integrated_kernel_matrices,
     normalize_kernel,
     rkhs_norm_squared,
-    shifted_kernel_coefficient_metric,
 )
 from multicountry_growth_kernel import make_train_grid
 from trade_growth.model import (
@@ -272,10 +272,10 @@ def multicountry_trade_growth_kernel(
         return multicountry_trade_dae_residual(values, log_static, parameters)
 
     num_dynamic_functions = 4 * num_countries
-    metric = shifted_kernel_coefficient_metric(
+    metric = repeated_shifted_dense_metric(
         K_metric,
         repeats=num_dynamic_functions,
-        free_size=algebraic_size,
+        zero_pad_size=algebraic_size,
         epsilon=eps,
     )
     initial_algebraic = jnp.concatenate(

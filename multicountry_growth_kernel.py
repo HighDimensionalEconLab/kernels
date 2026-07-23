@@ -11,13 +11,13 @@ import pandas as pd
 from nlls_gram import (
     LevenbergMarquardt,
     LMStatus,
+    repeated_shifted_dense_metric,
 )
 
 from kernels import (
     integrated_kernel_matrices,
     normalize_kernel,
     rkhs_norm_squared,
-    shifted_kernel_coefficient_metric,
 )
 from multicountry_growth import (
     MulticountryParameters,
@@ -252,10 +252,10 @@ def multicountry_growth_kernel(
     num_dynamic_functions = 4 * num_countries
     num_rkhs_functions = num_dynamic_functions + 1
     num_initial_values = 2 * num_countries + 1
-    metric = shifted_kernel_coefficient_metric(
+    metric = repeated_shifted_dense_metric(
         K_metric,
         repeats=num_rkhs_functions,
-        free_size=num_initial_values,
+        zero_pad_size=num_initial_values,
         epsilon=eps,
     )
     theta_0 = (

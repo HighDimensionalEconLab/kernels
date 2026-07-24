@@ -10,11 +10,10 @@ import numpy as np
 import pandas as pd
 from nlls_gram import (
     QR,
-    Auto,
     Cholesky,
     LMStatus,
+    RepeatedFactorMetric,
     RidgeLevenbergMarquardt,
-    repeated_block_whitener,
     ridge_continuation,
 )
 
@@ -77,14 +76,13 @@ class SolverSettings:
     damping_decrease: float = 0.1
     damping_increase: float = 4.0
     max_steps: int = 100
-    # Conjunctive stopping under the WHITENED penalty (repeated_block_whitener
-    # poses the subproblem on y = L_bar theta): gtol bounds the whitened
-    # stationarity ||L_bar^{-T} J'r + ridge [y_head; 0]||, residual_atol
-    # additionally demands the scaled residual norm solved (the converged
-    # residual floors at O(ridge * ||dual||), so residual_atol sits above
-    # it). The ridge keeps the minimizer O(ridge) from the pure
-    # RKHS-seminorm interpolant with the free offsets unpenalized (no
-    # epsilon shift anywhere).
+    # Conjunctive stopping in the whitened variable y = F_bar theta the
+    # solver works in: gtol bounds the whitened stationarity
+    # ||J~'r + ridge [y_m; 0]||, residual_atol additionally demands the
+    # scaled residual norm solved (the converged residual floors at
+    # O(ridge * ||dual||), so residual_atol sits above it). The ridge keeps
+    # the minimizer O(ridge) from the pure RKHS-seminorm interpolant with
+    # the free offsets unpenalized (no epsilon shift anywhere).
     # The whitened calibration recipe reads
     # gtol ~ 1e-3 * ridge * sqrt(rkhs_norm_total) ~ 1e-14 at ridge 3e-12
     # (sqrt(q) ~ 3.7); the retained 5e-8 is a much looser MEASURED value
@@ -99,7 +97,7 @@ class SolverSettings:
     gtol: float = 5e-8
     # ridge_init=None solves at the fixed ridge above; a value enables ridge
     # continuation annealed from ridge_init down to `ridge` (the floor) by
-    # factors of `ridge_decrease` on inner stationarity. The whitener's
+    # factors of `ridge_decrease` on inner stationarity. The metric's
     # factorization never involves the ridge, so the anneal composes
     # unchanged.
     ridge_init: float | None = 1e-7
@@ -265,12 +263,12 @@ def open_economy_growth_kernel(
 
     # There are 5n DAE equations in 5n + 3 unknowns. No terminal equation is
     # appended: the ridge penalty supplies the three-dimensional selection.
-    # The Whitener variant makes every linear solver work on the whitened
-    # subproblem (the offsets stay unpenalized and untransformed).
-    penalty = repeated_block_whitener(
-        K_metric,
+    # Every linear solver works on the whitened subproblem; the metric takes
+    # the upper Cholesky factor F with K = F'F and the trailing offsets stay
+    # in the unpenalized free block, untransformed.
+    metric = RepeatedFactorMetric(
+        jnp.linalg.cholesky(K_metric, upper=True).astype(dtype),
         repeats=5,
-        zero_pad_size=3,
     )
 
     # The zero coordinate contains no saddle-path or present-value information:
@@ -293,13 +291,14 @@ def open_economy_growth_kernel(
             ridge_floor=lm_set.ridge,
             decrease=lm_set.ridge_decrease,
             grad_rtol=lm_set.ridge_grad_rtol,
+            dtype=dtype,
         )
         continuation_options = {"callback": callback, "user_state": user_state0}
     solver = RidgeLevenbergMarquardt(
         residual_fn,
-        penalty=penalty,
+        metric=metric,
         ridge=initial_ridge,
-        linear_solver={"auto": Auto(), "cholesky": Cholesky(), "qr": QR()}[
+        linear_solver={"auto": Cholesky(), "cholesky": Cholesky(), "qr": QR()}[
             lm_set.linear_solver
         ],
         init_damping=lm_set.init_damping,

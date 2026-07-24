@@ -199,7 +199,6 @@ class KernelSmokeTests(unittest.TestCase):
         results, extras = multicountry_growth_kernel(a_0=(-0.5, 0.5))
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertEqual(results["linear_solver"], "auto")
-        self.assertEqual(results["iterative_preconditioner"], "none")
         self.assertTrue(results["benchmark_match"])
         self.assertEqual(results["terminal_residual_count"], 0)
         self.assertEqual(
@@ -255,7 +254,7 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertTrue((extras["test_df"]["c_2"] > 0.0).all())
         self.assertLess(extras["test_df"]["asset_clearing_residual"].abs().max(), 5e-5)
 
-    def test_multicountry_growth_lsmr_configuration(self):
+    def test_multicountry_growth_qr_configuration(self):
         parameters = MulticountryParameters(
             populations=(1.0, 1.0, 1.0),
             productivities=(1.0, 1.0, 1.0),
@@ -273,9 +272,7 @@ class KernelSmokeTests(unittest.TestCase):
         )
         lm_set = MulticountrySolverSettings(
             max_steps=2,
-            linear_solver="lsmr",
-            iterative_tol=1e-8,
-            iterative_maxiter=10,
+            linear_solver="qr",
             geodesic_acceleration=False,
         )
         results, _ = multicountry_growth_kernel(
@@ -284,11 +281,8 @@ class KernelSmokeTests(unittest.TestCase):
             data_set=data_set,
             lm_set=lm_set,
         )
-        self.assertEqual(results["linear_solver"], "lsmr")
-        self.assertEqual(results["iterative_preconditioner"], "none")
+        self.assertEqual(results["linear_solver"], "qr")
         self.assertEqual(results["residual_atol"], lm_set.residual_atol)
-        self.assertEqual(results["iterative_tol"], 1e-8)
-        self.assertEqual(results["iterative_maxiter"], 10)
         self.assertFalse(results["solution_accepted"])
         self.assertIn("solver_status", results["rejection_reason"])
 
@@ -668,7 +662,7 @@ class KernelSmokeTests(unittest.TestCase):
     def test_neoclassical_growth_kernel_smoke(self):
         results, extras = neoclassical_growth_kernel(data_set=FAST_GROWTH_DATA)
 
-        self.assertEqual(results["linear_solver"], "auto")
+        self.assertEqual(results["linear_solver"], "cholesky")
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertLess(results["max_train_residual"], 1e-8)
         self.assertLess(results["k_rel_error_mean"], 2e-2)
@@ -694,7 +688,7 @@ class KernelSmokeTests(unittest.TestCase):
     def test_asset_pricing_kernel_smoke(self):
         reference, extras = asset_pricing_kernel()
 
-        self.assertEqual(reference["linear_solver"], "auto")
+        self.assertEqual(reference["linear_solver"], "cholesky")
         self.assertTrue(reference["solution_accepted"], reference["rejection_reason"])
         self.assertLess(reference["max_train_residual"], 1e-10)
         self.assertLess(reference["p_rel_error_mean"], 5e-3)
@@ -714,7 +708,7 @@ class KernelSmokeTests(unittest.TestCase):
             with self.subTest(kernel=name):
                 results, _ = asset_pricing_kernel(kernel_set=kernel_set)
 
-                self.assertEqual(results["linear_solver"], "auto")
+                self.assertEqual(results["linear_solver"], "cholesky")
                 self.assertTrue(
                     results["solution_accepted"], results["rejection_reason"]
                 )

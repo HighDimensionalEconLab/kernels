@@ -10,8 +10,8 @@ import numpy as np
 import pandas as pd
 from nlls_gram import (
     LMStatus,
+    RepeatedFactorMetric,
     RidgeLevenbergMarquardt,
-    repeated_dense_penalty,
 )
 
 from kernels import (
@@ -172,11 +172,12 @@ def neoclassical_growth_kernel(
     # 3n nonlinear residuals in 3n + 2 unknowns: ridge LM on
     # ||r||^2 + ridge * (a_mu'K a_mu + a_c'K a_c + a_k'K a_k) selects the
     # interpolant minimizing the summed RKHS norms (the original objective)
-    # with free initial values (c_0, mu_0), up to an O(ridge) bias.
-    penalty = repeated_dense_penalty(
-        K_metric,
+    # with the trailing (c_0, mu_0) in the unpenalized free block. The metric
+    # takes the upper Cholesky factor F with K = F'F, computed in float64 and
+    # cast to the residual dtype.
+    metric = RepeatedFactorMetric(
+        jnp.linalg.cholesky(K_metric, upper=True).astype(dtype),
         repeats=3,
-        zero_pad_size=2,
     )
 
     c_flow_guess = max(production(k_0) - delta * k_0, DOMAIN_EPS)
@@ -191,7 +192,7 @@ def neoclassical_growth_kernel(
 
     solver = RidgeLevenbergMarquardt(
         residual_fn,
-        penalty=penalty,
+        metric=metric,
         ridge=lm_set.ridge,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
@@ -326,7 +327,7 @@ def neoclassical_growth_kernel(
         "solve_time": elapsed,
         "wall_time": elapsed,
         "solver": "nlls-gram",
-        "linear_solver": "auto",
+        "linear_solver": "cholesky",
         "ridge": lm_set.ridge,
         "gtol": lm_set.gtol,
         "train_loss": float(result.info.resid_loss),

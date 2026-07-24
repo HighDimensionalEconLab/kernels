@@ -86,30 +86,32 @@ The main kernel modules are:
 Unqualified kernel filenames refer to the NLLS formulation; `_uno` identifies
 the constrained comparison. Every driver except `trade_growth` uses
 `nlls_gram.RidgeLevenbergMarquardt`: the objective
-`||r||^2 + ridge * q(theta)` with the block penalty
-`q = sum_j alpha_j' K alpha_j` from `nlls_gram.repeated_dense_penalty`
-(structural scalars unpenalized, no epsilon shift) -- the minimizer is the
-min-RKHS-norm interpolant up to an O(ridge) bias, and where algebraic DAE
-blocks are retained the penalty acts on their RKHS paths as well as the
-dynamic paths (the reduced multicountry model's common algebraic interest
-rate is an RKHS path with the same kernel penalty). The simple ODE drivers
+`||r||^2 + ridge * q(theta)` with the block seminorm
+`q = sum_j alpha_j' K alpha_j` supplied as a positive-definite
+`nlls_gram.RepeatedFactorMetric` on the upper Cholesky factor of `K`
+(structural scalars live in the unpenalized free block, no epsilon shift
+anywhere) -- the minimizer is the min-RKHS-norm interpolant up to an
+O(ridge) bias, and where algebraic DAE blocks are retained the metric acts
+on their RKHS paths as well as the dynamic paths (the reduced multicountry
+model's common algebraic interest rate is an RKHS path with the same kernel
+metric). The solver runs entirely in the whitened variable, where the
+normal matrix keeps a clean spectral floor at the ridge, so every driver
+defaults to the dense `Cholesky()` path: the simple ODE drivers
 (`asset_pricing_kernel`, `neoclassical_growth_kernel` and its concave-convex
 wrapper, `optimal_advertising_kernel`, `human_capital_kernel`) solve at a
-fixed small `ridge` on the dense cholesky path; the harder DAE drivers
-(`open_economy_growth_kernel`, `multicountry_growth_kernel`) use
-`linear_solver="qr"` (their Jacobian conditioning exceeds the squared normal
-equations at small ridge) with `nlls_gram.ridge_continuation` annealing the
-ridge to a small floor. Stopping is the conjunctive `gtol`/`residual_atol`
-rule; the selection is resolved to `gtol / ridge` (the asset driver's free
-`p_0` needs `gtol ~ 1e-3 * ridge`, and the DAE drivers' atol is calibrated
-between the ridge-floor residual and the last continuation level's so the
-solve can only stop at the floor). `multicountry`'s
-`lm_set.linear_solver=lsmr` switches to a matrix-free solve without custom
-Jacobian or coordinate rescaling. `trade_growth` keeps the metric-damped
-`LevenbergMarquardt` (`repeated_shifted_dense_metric`): its two-phase
-gram-CG + whitened-LSMR endgame builds Schur and time-block preconditioners
-in the metric's whitened coordinates, a migration deferred until those are
-re-derived for the ridge geometry.
+fixed small `ridge`, while the harder DAE drivers
+(`open_economy_growth_kernel`, `multicountry_growth_kernel`) add
+`nlls_gram.ridge_continuation` annealing the ridge to a small floor, with
+`QR()` retained as the extreme-conditioning fallback. Stopping is the
+conjunctive `gtol`/`residual_atol` rule; the selection is resolved to
+`gtol / ridge` (the asset driver's free `p_0` needs `gtol ~ 1e-3 * ridge`,
+and the DAE drivers' atol is calibrated between the ridge-floor residual and
+the last continuation level's so the solve can only stop at the floor).
+`trade_growth` keeps the metric-damped `LevenbergMarquardt`
+(`repeated_shifted_dense_metric`): its two-phase gram-CG + whitened-LSMR
+endgame builds Schur and time-block preconditioners in the metric's whitened
+coordinates, a migration deferred until those are re-derived for the ridge
+geometry.
 
 UNO comparisons are CPU/float64 reference solves. Their native optimization
 state and derivative buffers are host-side float64 arrays; NLLS and NN are the

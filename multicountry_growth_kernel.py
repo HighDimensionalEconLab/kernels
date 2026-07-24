@@ -9,13 +9,11 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from nlls_gram import (
-    LSMR,
     QR,
-    Auto,
+    Cholesky,
     LMStatus,
+    RepeatedFactorMetric,
     RidgeLevenbergMarquardt,
-    identity_right_preconditioner,
-    repeated_block_whitener,
     ridge_continuation,
 )
 
@@ -93,24 +91,20 @@ class SolverSettings:
     damping_decrease: float = 0.1
     damping_increase: float = 4.0
     max_steps: int = 80
-    # Conjunctive stopping under the WHITENED penalty (repeated_block_whitener
-    # poses the subproblem on y = L_bar theta): gtol bounds the whitened
-    # stationarity ||L_bar^{-T} J'r + ridge [y_head; 0]||, residual_atol
-    # additionally demands the scaled residual norm solved (the converged
-    # residual floors at O(ridge * ||dual||), so residual_atol sits above
-    # it). The ridge keeps the minimizer O(ridge) from the pure
-    # RKHS-seminorm interpolant with the free initial values unpenalized
-    # (no epsilon shift anywhere).
+    # Conjunctive stopping in the whitened variable y = F_bar theta the
+    # solver works in: gtol bounds the whitened stationarity
+    # ||J~'r + ridge [y_m; 0]||, residual_atol additionally demands the
+    # scaled residual norm solved (the converged residual floors at
+    # O(ridge * ||dual||), so residual_atol sits above it). The ridge keeps
+    # the minimizer O(ridge) from the pure RKHS-seminorm interpolant with
+    # the free initial values unpenalized (no epsilon shift anywhere).
     residual_atol: float = 5e-8
     # "auto" (whitened cholesky) is the default: the whitened normal matrix
     # J~'J~ + ridge*I_head has its spectral floor at the ridge, so the
     # cholesky path keeps float64 accuracy at this ridge -- measured ~2x
     # faster wall-clock than the previously required "qr" at identical
-    # solution quality. "qr" and "lsmr" remain valid (all paths run
-    # whitened).
+    # solution quality. "qr" remains valid (all paths run whitened).
     linear_solver: str = "auto"
-    iterative_tol: float = 1e-12
-    iterative_maxiter: int = 4000
     geodesic_acceleration: bool = True
     ridge: float = 3e-12
     # The whitened calibration recipe reads
@@ -187,9 +181,7 @@ def multicountry_growth_kernel(
         raise ValueError("k_0 must contain one positive capital stock per country")
     if len(a_0) != num_countries:
         raise ValueError("a_0 must contain one NFA position per country")
-    if lm_set.iterative_tol < 0.0 or lm_set.iterative_maxiter <= 0:
-        raise ValueError("iterative_tol must be nonnegative and maxiter positive")
-    supported_linear_solvers = ("auto", "qr", "lsmr")
+    supported_linear_solvers = ("auto", "qr")
     if lm_set.linear_solver not in supported_linear_solvers:
         raise ValueError(f"linear_solver must be one of {supported_linear_solvers}")
 
@@ -301,12 +293,12 @@ def multicountry_growth_kernel(
     num_dynamic_functions = 4 * num_countries
     num_rkhs_functions = num_dynamic_functions + 1
     num_initial_values = 2 * num_countries + 1
-    # The Whitener variant makes every linear solver work on the whitened
-    # subproblem (the initial values stay unpenalized and untransformed).
-    penalty = repeated_block_whitener(
-        K_metric,
+    # Every linear solver works on the whitened subproblem; the metric takes
+    # the upper Cholesky factor F with K = F'F and the trailing initial
+    # values stay in the unpenalized free block, untransformed.
+    metric = RepeatedFactorMetric(
+        jnp.linalg.cholesky(K_metric, upper=True).astype(dtype),
         repeats=num_rkhs_functions,
-        zero_pad_size=num_initial_values,
     )
     theta_0 = (
         jnp.zeros((num_countries, n_train), dtype=dtype),
@@ -316,18 +308,12 @@ def multicountry_growth_kernel(
         jnp.zeros(n_train, dtype=dtype),
         jnp.zeros(num_initial_values, dtype=dtype),
     )
-    # CLI string -> typed solver config; identity_right_preconditioner()
-    # opts out of right preconditioning on the matrix-free path.
-    if lm_set.linear_solver == "lsmr":
-        linear_solver = LSMR(
-            identity_right_preconditioner(),
-            tol=lm_set.iterative_tol,
-            maxiter=lm_set.iterative_maxiter,
-        )
-    elif lm_set.linear_solver == "qr":
+    # CLI string -> typed solver config ("auto" = the whitened cholesky
+    # default).
+    if lm_set.linear_solver == "qr":
         linear_solver = QR()
     else:
-        linear_solver = Auto()
+        linear_solver = Cholesky()
     if lm_set.ridge_init is None:
         initial_ridge = lm_set.ridge
         continuation_options = {}
@@ -337,12 +323,13 @@ def multicountry_growth_kernel(
             ridge_floor=lm_set.ridge,
             decrease=lm_set.ridge_decrease,
             grad_rtol=lm_set.ridge_grad_rtol,
+            dtype=dtype,
         )
         continuation_options = {"callback": callback, "user_state": user_state0}
 
     solver = RidgeLevenbergMarquardt(
         residual_fn,
-        penalty=penalty,
+        metric=metric,
         ridge=initial_ridge,
         linear_solver=linear_solver,
         init_damping=lm_set.init_damping,
@@ -554,9 +541,6 @@ def multicountry_growth_kernel(
         "linear_solver": lm_set.linear_solver,
         "residual_atol": lm_set.residual_atol,
         "train_residual_tol": tolerance_set.train_residual,
-        "iterative_tol": lm_set.iterative_tol,
-        "iterative_maxiter": lm_set.iterative_maxiter,
-        "iterative_preconditioner": "none",
         "geodesic_acceleration": lm_set.geodesic_acceleration,
         "ridge": lm_set.ridge,
         "gtol": lm_set.gtol,

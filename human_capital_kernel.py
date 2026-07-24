@@ -11,8 +11,8 @@ import pandas as pd
 from nlls_gram import (
     LevenbergMarquardt,
     LMStatus,
+    RepeatedFactorMetric,
     RidgeLevenbergMarquardt,
-    repeated_dense_penalty,
 )
 
 from kernels import (
@@ -228,10 +228,9 @@ def human_capital_kernel(
             residuals(path_values(theta, K, K_tilde))
         )
 
-    penalty = repeated_dense_penalty(
-        K_metric,
+    metric = RepeatedFactorMetric(
+        jnp.linalg.cholesky(K_metric, upper=True).astype(dtype),
         repeats=7,
-        zero_pad_size=5,
     )
     theta_0 = (
         jnp.zeros(n_train, dtype=dtype),
@@ -254,7 +253,7 @@ def human_capital_kernel(
     )
     solver = RidgeLevenbergMarquardt(
         residual_fn,
-        penalty=penalty,
+        metric=metric,
         ridge=lm_set.ridge,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
@@ -403,7 +402,7 @@ def human_capital_kernel(
         "solve_time": elapsed,
         "wall_time": elapsed,
         "solver": "nlls-gram",
-        "linear_solver": "auto",
+        "linear_solver": "cholesky",
         "ridge": lm_set.ridge,
         "gtol": lm_set.gtol,
         "train_loss": float(result.info.resid_loss),

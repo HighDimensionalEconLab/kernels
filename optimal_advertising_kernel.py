@@ -10,8 +10,8 @@ import numpy as np
 import pandas as pd
 from nlls_gram import (
     LMStatus,
+    RepeatedFactorMetric,
     RidgeLevenbergMarquardt,
-    repeated_dense_penalty,
 )
 
 from kernels import (
@@ -135,10 +135,9 @@ def optimal_advertising_kernel(
             residuals(path_values(theta, K, K_tilde))
         )
 
-    penalty = repeated_dense_penalty(
-        K_metric,
+    metric = RepeatedFactorMetric(
+        jnp.linalg.cholesky(K_metric, upper=True).astype(dtype),
         repeats=3,
-        zero_pad_size=2,
     )
     u_0_guess = max(beta * x_0 / max(1.0 - x_0, DOMAIN_EPS), DOMAIN_EPS)
     mu_0_guess = max(gamma / (rho_hat + beta + u_0_guess), DOMAIN_EPS)
@@ -150,7 +149,7 @@ def optimal_advertising_kernel(
     )
     solver = RidgeLevenbergMarquardt(
         residual_fn,
-        penalty=penalty,
+        metric=metric,
         ridge=lm_set.ridge,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
@@ -257,7 +256,7 @@ def optimal_advertising_kernel(
         "solve_time": elapsed,
         "wall_time": elapsed,
         "solver": "nlls-gram",
-        "linear_solver": "auto",
+        "linear_solver": "cholesky",
         "ridge": lm_set.ridge,
         "gtol": lm_set.gtol,
         "train_loss": float(result.info.resid_loss),

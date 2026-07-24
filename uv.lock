@@ -591,7 +591,7 @@ wheels = [
 
 [[package]]
 name = "nlls-gram"
-version = "2.5.0"
+version = "2.6.0"
 source = { editable = "../nlls_gram" }
 dependencies = [
     { name = "jax" },

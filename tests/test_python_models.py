@@ -1,3 +1,4 @@
+import dataclasses
 import math
 import unittest
 
@@ -20,7 +21,9 @@ from kernels import (
     normalize_kernel,
 )
 from multicountry_growth import (
+    InitialConditionSettings,
     MulticountryParameters,
+    draw_initial_conditions,
     multicountry_allocations,
     multicountry_path_values,
     multicountry_reference_marginal_wealth,
@@ -231,6 +234,31 @@ class KernelSmokeTests(unittest.TestCase):
         # one (the sign of the drift depends on the drawn capital
         # heterogeneity, so no ordering is asserted).
         self.assertNotAlmostEqual(results["long_run_a_1"], results["a_0_1"], places=2)
+        # By t=100 the paths are flat and at the theory steady state
+        # (bounds are 3-5x the measured values at this draw).
+        self.assertLess(results["long_run_c_flatness"], 0.01)
+        self.assertLess(results["long_run_k_flatness"], 0.02)
+        self.assertLess(results["long_run_a_flatness"], 0.01)
+        self.assertLess(results["long_run_k_theory_gap"], 0.03)
+        self.assertLess(results["long_run_mpk_equalization_gap"], 0.02)
+        self.assertLess(results["long_run_interest_rate_gap"], 0.03)
+        # Exact one-good invariants at solver accuracy: constant consumption
+        # ratios (common Euler drift) and consumption proportional to
+        # initial total wealth a_0 + PV(resources).
+        self.assertLess(results["long_run_consumption_ratio_drift"], 1e-5)
+        self.assertLess(results["long_run_wealth_proportionality_gap"], 1e-3)
+        self.assertTrue(results["long_run_c_rank_matches_wealth"])
+        self.assertEqual(results["long_run_wealth_rank_violation"], 0.0)
+        # At this draw the k_0 heterogeneity dominates the debt draw:
+        # country 1 holds MORE initial debt yet higher total wealth, so its
+        # long-run consumption is higher -- the a_0-only consumption
+        # ordering fails while the wealth ordering is exact. The long-run
+        # NFA ranking still follows the initial debt ranking here.
+        self.assertLess(results["a_0_1"], results["a_0_2"])
+        self.assertGreater(results["initial_wealth_1"], results["initial_wealth_2"])
+        self.assertGreater(results["long_run_c_1"], results["long_run_c_2"])
+        self.assertFalse(results["long_run_c_rank_matches_a_0"])
+        self.assertTrue(results["long_run_terminal_a_rank_matches_a_0"])
         self.assertGreater(results["minimum_rate_denominator"], 0.0)
         self.assertLess(results["max_train_residual"], 1e-5)
         self.assertLess(abs(results["initial_resource_drift_residual"]), 1e-5)
@@ -329,6 +357,7 @@ class KernelSmokeTests(unittest.TestCase):
                 parameters=parameters,
                 data_set=data_set,
                 lm_set=MulticountrySolverSettings(linear_solver=solver_name),
+                sensitivity_time=10.0,
             )
             self.assertTrue(results["solution_accepted"], results["rejection_reason"])
             outputs[solver_name] = results
@@ -341,6 +370,140 @@ class KernelSmokeTests(unittest.TestCase):
             outputs["auto"]["rkhs_norm_total"],
             delta=1e-6 * max(outputs["auto"]["rkhs_norm_total"], 1.0),
         )
+        # The implicit-AD comparative statics agree across the dense and
+        # matrix-free AD paths (the cg tangent/cotangent solve runs the
+        # block-eigen-preconditioned CG to tolerance at zero damping).
+        for name in ("alpha", "gamma", "delta", "rho", "installation_elasticity"):
+            self.assertAlmostEqual(
+                cg[f"d_rate_d_{name}"],
+                outputs["auto"][f"d_rate_d_{name}"],
+                delta=max(1e-6, 1e-3 * abs(outputs["auto"][f"d_rate_d_{name}"])),
+            )
+        for country in (1, 2, 3):
+            for name in ("productivity", "population", "k_0"):
+                self.assertAlmostEqual(
+                    cg[f"d_rate_d_{name}_{country}"],
+                    outputs["auto"][f"d_rate_d_{name}_{country}"],
+                    delta=max(
+                        1e-6,
+                        1e-3 * abs(outputs["auto"][f"d_rate_d_{name}_{country}"]),
+                    ),
+                )
+
+    def test_multicountry_growth_sensitivity(self):
+        # Implicit-AD comparative statics of the global rate at t=10 with
+        # respect to every structural parameter and initial condition,
+        # validated against central finite differences of full re-solves.
+        # The AD-vs-FD gap is the Gauss-Newton implicit-sensitivity bias at
+        # a NON-interpolating stationary point (the dropped curvature terms
+        # scale with the collocation residual: measured 7e-3 relative at
+        # max_train ~ 9e-7 on this grid, collapsing to 3e-4 at ~1e-8 on a
+        # near-steady problem), so the bound is 2e-2 -- FD itself is stable
+        # to ~1e-4 across a 50x step range.
+        parameters = MulticountryParameters(
+            populations=(1.0, 1.4),
+            productivities=(1.05, 0.95),
+        )
+        k_0, a_0 = draw_initial_conditions(InitialConditionSettings(), parameters)
+        data_set = MulticountryDataSettings(
+            train_T=40.0,
+            train_points=36,
+            dense_T=20.0,
+            tail_points=8,
+            test_T=20.0,
+            test_points=21,
+            validation_points=31,
+            benchmark_T=50.0,
+            benchmark_points=51,
+        )
+
+        def rate_at_10(**overrides):
+            call = dict(k_0=k_0, a_0=a_0, parameters=parameters, data_set=data_set)
+            call.update(overrides)
+            _, extras = multicountry_growth_kernel(**call)
+            return float(extras["model"](jnp.asarray([10.0]))["interest_rate"][0])
+
+        results, extras = multicountry_growth_kernel(
+            k_0=k_0,
+            a_0=a_0,
+            parameters=parameters,
+            data_set=data_set,
+            sensitivity_time=10.0,
+        )
+        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+        self.assertEqual(results["sensitivity_time"], 10.0)
+        self.assertGreater(results["interest_rate_at_sensitivity_time"], 0.0)
+        sensitivity_df = extras["sensitivity_df"]
+        self.assertEqual(len(sensitivity_df), 5 + 4 * 2)
+        self.assertTrue(np.all(np.isfinite(sensitivity_df["value"])))
+
+        # Central FD of full re-solves against the reverse-mode values.
+        h_rho = 4e-4
+        fd_rho = (
+            rate_at_10(
+                parameters=dataclasses.replace(parameters, rho=parameters.rho + h_rho)
+            )
+            - rate_at_10(
+                parameters=dataclasses.replace(parameters, rho=parameters.rho - h_rho)
+            )
+        ) / (2.0 * h_rho)
+        self.assertAlmostEqual(
+            results["d_rate_d_rho"], fd_rho, delta=2e-2 * abs(fd_rho)
+        )
+        h_productivity = 1e-3
+        fd_productivity = (
+            rate_at_10(
+                parameters=dataclasses.replace(
+                    parameters, productivities=(1.05 + h_productivity, 0.95)
+                )
+            )
+            - rate_at_10(
+                parameters=dataclasses.replace(
+                    parameters, productivities=(1.05 - h_productivity, 0.95)
+                )
+            )
+        ) / (2.0 * h_productivity)
+        self.assertAlmostEqual(
+            results["d_rate_d_productivity_1"],
+            fd_productivity,
+            delta=2e-2 * abs(fd_productivity),
+        )
+        h_capital = 1e-3 * k_0[0]
+        fd_capital = (
+            rate_at_10(k_0=(k_0[0] + h_capital, k_0[1]))
+            - rate_at_10(k_0=(k_0[0] - h_capital, k_0[1]))
+        ) / (2.0 * h_capital)
+        self.assertAlmostEqual(
+            results["d_rate_d_k_0_1"], fd_capital, delta=2e-2 * abs(fd_capital)
+        )
+
+        # Redistribution neutrality: identical homothetic preferences make
+        # the global rate invariant to feasible reshuffles of the initial
+        # NFA positions, so the projected a_0 gradient is ~0 (five orders
+        # below the other sensitivities) and sums to zero exactly by the
+        # demeaning projection. The FD check runs along a feasible
+        # direction (population-weighted sum preserved).
+        self.assertLess(abs(results["d_rate_d_a_0_1"]), 1e-5)
+        self.assertLess(abs(results["d_rate_d_a_0_2"]), 1e-5)
+        self.assertAlmostEqual(
+            results["d_rate_d_a_0_1"] + results["d_rate_d_a_0_2"], 0.0, places=12
+        )
+        h_asset = 1e-3
+        direction = (1.0, -1.0 / 1.4)
+        fd_asset = (
+            rate_at_10(
+                a_0=(a_0[0] + h_asset * direction[0], a_0[1] + h_asset * direction[1])
+            )
+            - rate_at_10(
+                a_0=(a_0[0] - h_asset * direction[0], a_0[1] - h_asset * direction[1])
+            )
+        ) / (2.0 * h_asset)
+        ad_asset = (
+            results["d_rate_d_a_0_1"] * direction[0]
+            + results["d_rate_d_a_0_2"] * direction[1]
+        )
+        self.assertLess(abs(fd_asset), 2e-5)
+        self.assertLess(abs(ad_asset), 2e-5)
 
     def test_multicountry_growth_nn_smoke(self):
         parameters = MulticountryParameters(
@@ -444,9 +607,18 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertLess(results["max_train_residual"], 1e-5)
         self.assertLess(results["max_validation_residual"], 5e-3)
         self.assertLess(results["max_asset_clearing_residual"], 5e-5)
-        # Countries 2 and 3 share a_0 but draw different k_0, so their
-        # welfare weights must be positive and genuinely distinct (the old
-        # equality held only under identical initial capital).
+        # Long-run validity at t=100: theory steady state reached, exact
+        # sharing invariants at solver accuracy, consumption ranked by
+        # initial total wealth.
+        self.assertLess(results["long_run_k_theory_gap"], 0.03)
+        self.assertLess(results["long_run_consumption_ratio_drift"], 1e-5)
+        self.assertLess(results["long_run_wealth_proportionality_gap"], 1e-3)
+        self.assertTrue(results["long_run_c_rank_matches_wealth"])
+        self.assertEqual(results["long_run_wealth_rank_violation"], 0.0)
+        self.assertTrue(results["long_run_terminal_a_rank_matches_a_0"])
+        # Drawn k_0 and a_0 differ across countries, so the welfare weights
+        # must be positive and genuinely distinct (the old equality held
+        # only under identical initial conditions).
         self.assertGreater(results["relative_weight_2"], 0.0)
         self.assertGreater(results["relative_weight_3"], 0.0)
         self.assertNotAlmostEqual(

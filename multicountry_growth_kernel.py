@@ -29,7 +29,9 @@ from multicountry_growth import (
     InitialConditionSettings,
     MulticountryParameters,
     draw_initial_conditions,
+    multicountry_long_run_diagnostics,
     multicountry_output_scale,
+    multicountry_parameter_values,
     multicountry_path_values,
     multicountry_reference_marginal_wealth,
     multicountry_steady_state,
@@ -92,6 +94,11 @@ class DataSettings:
     validation_points: int = 401
     benchmark_T: float = 200.0
     benchmark_points: int = 241
+    # Long-run validity checks are evaluated at t ~ long_run_check_T (flat
+    # consumption/capital/debt, capital at the theory steady state, r ~ rho),
+    # with flatness measured against t = long_run_check_T - long_run_window.
+    long_run_check_T: float = 100.0
+    long_run_window: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -198,6 +205,7 @@ def multicountry_growth_kernel(
     data_set: DataSettings = DataSettings(),
     lm_set: SolverSettings = SolverSettings(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
+    sensitivity_time: float | None = None,
 ):
     if not jax.config.jax_enable_x64:
         raise RuntimeError("enable jax_enable_x64 in the process entry point")
@@ -226,6 +234,10 @@ def multicountry_growth_kernel(
         raise ValueError("test_T must not exceed the training horizon")
     if data_set.benchmark_T < max(data_set.test_T, float(train_data[-1])):
         raise ValueError("benchmark_T must cover the train and test horizons")
+    if sensitivity_time is not None and not (
+        0.0 <= sensitivity_time <= float(train_data[-1])
+    ):
+        raise ValueError("sensitivity_time must lie within the training horizon")
     test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     validation_data = jnp.linspace(
         0.0, float(train_data[-1]), data_set.validation_points, dtype=dtype
@@ -260,25 +272,51 @@ def multicountry_growth_kernel(
     K = K_metric.astype(dtype)
     K_tilde = K_tilde_metric.astype(dtype)
 
-    def path_coordinates(theta, K_eval, K_tilde_eval):
+    # The structural parameters and initial conditions ride in the solver's
+    # `p` argument so the solved paths are implicitly differentiable with
+    # respect to every one of them (nlls-gram's implicit JVP/VJP at the
+    # ridge stationary point). All parameter-dependent quantities the paths
+    # consume are recomputed from p inside.
+    p = {
+        "parameters": multicountry_parameter_values(parameters, dtype),
+        "k_0": k_0_array,
+        "a_0": a_0_array,
+    }
+
+    def path_coordinates(theta, K_eval, K_tilde_eval, p):
+        parameters_p = p["parameters"]
+        populations_p = parameters_p.populations
+        k_0_p = p["k_0"]
+        # Population demeaning is a no-op at the primal point (the inputs
+        # already clear) and projects AD perturbations of a_0 onto the
+        # feasible clearing set, so every direction is meaningful.
+        a_0_p = p["a_0"] - jnp.sum(populations_p * p["a_0"]) / jnp.sum(populations_p)
+        output_scale_p = multicountry_output_scale(parameters_p, k_0_p.dtype)
+        marginal_wealth_reference_p = multicountry_reference_marginal_wealth(
+            parameters_p, k_0_p.dtype
+        )
         alpha_k, alpha_a, alpha_q, alpha_m, alpha_r, initial = theta
         q_offsets = initial[:num_countries]
         marginal_wealth_offsets = initial[num_countries : 2 * num_countries]
         interest_rate_offset = initial[-1]
-        log_k = jnp.log(k_0_array) + K_tilde_eval @ alpha_k.T
-        a = a_0_array + output_scale * (K_tilde_eval @ alpha_a.T)
-        log_q = jnp.log(q_reference) + q_offsets + K_tilde_eval @ alpha_q.T
+        log_k = jnp.log(k_0_p) + K_tilde_eval @ alpha_k.T
+        a = a_0_p + output_scale_p * (K_tilde_eval @ alpha_a.T)
+        log_q = (
+            -jnp.log(parameters_p.installation_elasticity)
+            + q_offsets
+            + K_tilde_eval @ alpha_q.T
+        )
         log_marginal_wealth = (
-            jnp.log(marginal_wealth_reference)
+            jnp.log(marginal_wealth_reference_p)
             + marginal_wealth_offsets
             + K_tilde_eval @ alpha_m.T
         )
         dlog_k_dt = K_eval @ alpha_k.T
-        da_dt = output_scale * (K_eval @ alpha_a.T)
+        da_dt = output_scale_p * (K_eval @ alpha_a.T)
         dlog_q_dt = K_eval @ alpha_q.T
         dlog_marginal_wealth_dt = K_eval @ alpha_m.T
         interest_rate = jnp.exp(
-            jnp.log(parameters.rho) + interest_rate_offset + K_tilde_eval @ alpha_r
+            jnp.log(parameters_p.rho) + interest_rate_offset + K_tilde_eval @ alpha_r
         )
         return {
             "k": jnp.exp(log_k),
@@ -296,9 +334,10 @@ def multicountry_growth_kernel(
         theta,
         K_eval,
         K_tilde_eval,
+        p,
     ):
-        coordinates = path_coordinates(theta, K_eval, K_tilde_eval)
-        return multicountry_path_values(**coordinates, parameters=parameters)
+        coordinates = path_coordinates(theta, K_eval, K_tilde_eval, p)
+        return multicountry_path_values(**coordinates, parameters=p["parameters"])
 
     residual_count = (4 * num_countries + 1) * n_train + 1
     residual_scale = 1.0 / jnp.sqrt(float(residual_count))
@@ -311,9 +350,11 @@ def multicountry_growth_kernel(
     total_population = jnp.sum(populations)
 
     # args carries only the cg preconditioner state (None on the dense
-    # paths); the model equations never read it.
-    def residual_fn(theta, _):
-        values = evaluate_coordinates(theta, K, K_tilde)
+    # paths); the model equations never read it. p carries the structural
+    # parameters and initial conditions for implicit differentiation.
+    def residual_fn(theta, _, p):
+        values = evaluate_coordinates(theta, K, K_tilde, p)
+        total_population_p = jnp.sum(p["parameters"].populations)
         # The level-clearing equation at t=0 is fixed by a_0 and has a zero
         # Jacobian. G(0) = 0 replaces that row, while G_dot(0) = 0 supplies the
         # index-consistency equation that identifies the initial algebraic rate.
@@ -325,7 +366,7 @@ def multicountry_growth_kernel(
                     values["asset_clearing"][1:],
                 ]
             )
-            / total_population
+            / total_population_p
         )
         return residual_scale * jnp.concatenate(
             [
@@ -360,14 +401,25 @@ def multicountry_growth_kernel(
     # operator, the block-eigen preconditioner state riding in args).
     if lm_set.linear_solver == "qr":
         linear_solver = QR()
+        ad_solver = None
     elif lm_set.linear_solver == "cg":
         linear_solver = CG(
             BlockEigenPreconditioner(),
             tol=lm_set.cg_tol,
             maxiter=lm_set.cg_maxiter,
         )
+        # The implicit tangent/cotangent CG must be preconditioned
+        # explicitly (ad_solver=None would run it unpreconditioned) and run
+        # to tolerance; it reads the block-eigen state from result.args at
+        # zero damping.
+        ad_solver = CG(
+            BlockEigenPreconditioner(),
+            tol=lm_set.cg_tol,
+            maxiter=lm_set.cg_maxiter,
+        )
     else:
         linear_solver = Cholesky()
+        ad_solver = None
     if lm_set.linear_solver == "cg":
         permutation = jnp.asarray(block_eigen_permutation(num_countries, n_train))
 
@@ -430,20 +482,25 @@ def multicountry_growth_kernel(
         metric=metric,
         ridge=initial_ridge,
         linear_solver=linear_solver,
+        ad_solver=ad_solver,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
         geodesic_acceleration=lm_set.geodesic_acceleration,
+    )
+    solve_options = dict(
+        max_steps=lm_set.max_steps,
+        gtol=lm_set.gtol,
+        atol=lm_set.residual_atol,
+        max_steps_is_success=False,
     )
 
     solve_start = time.perf_counter()
     result = solver.solve(
         theta_0,
         args,
-        max_steps=lm_set.max_steps,
-        gtol=lm_set.gtol,
-        atol=lm_set.residual_atol,
-        max_steps_is_success=False,
+        p=p,
+        **solve_options,
         **continuation_options,
     )
     jax.block_until_ready(result)
@@ -458,7 +515,7 @@ def multicountry_growth_kernel(
             kernel_set.sigma,
             kernel_set.ell,
         )
-        return evaluate_coordinates(theta, K_eval, K_tilde_eval)
+        return evaluate_coordinates(theta, K_eval, K_tilde_eval, p)
 
     train_eval = evaluate_grid(train_data)
     validation_eval = evaluate_grid(validation_data)
@@ -581,6 +638,14 @@ def multicountry_growth_kernel(
     )
     tail = multicountry_tail_diagnostics(validation_eval, parameters)
     tvc = multicountry_tvc_diagnostics(validation_data, validation_eval, parameters)
+    long_run = multicountry_long_run_diagnostics(
+        validation_data,
+        validation_eval,
+        a_0_array,
+        parameters,
+        check_T=data_set.long_run_check_T,
+        window=data_set.long_run_window,
+    )
     relative_weights = test_eval["relative_welfare_weights"][0]
     log_relative_weights = jnp.log(relative_weights)
     coefficient_groups = {
@@ -596,6 +661,65 @@ def multicountry_growth_kernel(
     }
     rkhs_norm_rate = rkhs_norm_squared(theta[4], K_metric)
     rkhs_norm_total = sum(rkhs_norms.values()) + rkhs_norm_rate
+
+    sensitivity_df = None
+    if sensitivity_time is not None:
+        K_sens, K_tilde_sens = integrated_kernel_matrices(
+            jnp.asarray([sensitivity_time], dtype=dtype),
+            train_data,
+            kernel,
+            kernel_set.sigma,
+            kernel_set.ell,
+        )
+
+        # One reverse-mode pass through the solve yields the comparative
+        # static of the global rate with respect to every structural
+        # parameter and initial condition together: the implicit dependence
+        # of the solved coefficients on p plus the direct dependence of the
+        # rate evaluation. The a_0 gradient is the projected one (demeaning
+        # inside path_coordinates), so it measures feasible redistributions.
+        def rate_at_sensitivity_time(p_value):
+            sensitivity_result = solver.solve(
+                theta_0,
+                args,
+                p=p_value,
+                **solve_options,
+                **continuation_options,
+            )
+            coordinates = path_coordinates(
+                sensitivity_result.x, K_sens, K_tilde_sens, p_value
+            )
+            return coordinates["interest_rate"][0]
+
+        rate_value, rate_grads = jax.value_and_grad(rate_at_sensitivity_time)(p)
+        jax.block_until_ready(rate_grads)
+        gradient_parameters = rate_grads["parameters"]
+        scalar_sensitivities = {
+            "alpha": float(gradient_parameters.alpha),
+            "gamma": float(gradient_parameters.gamma),
+            "delta": float(gradient_parameters.delta),
+            "rho": float(gradient_parameters.rho),
+            "installation_elasticity": float(
+                gradient_parameters.installation_elasticity
+            ),
+        }
+        country_sensitivities = {
+            "productivity": np.asarray(gradient_parameters.productivities),
+            "population": np.asarray(gradient_parameters.populations),
+            "k_0": np.asarray(rate_grads["k_0"]),
+            "a_0": np.asarray(rate_grads["a_0"]),
+        }
+        sensitivity_df = pd.DataFrame(
+            [
+                {"name": name, "country": 0, "value": value}
+                for name, value in scalar_sensitivities.items()
+            ]
+            + [
+                {"name": name, "country": country + 1, "value": float(values[country])}
+                for name, values in country_sensitivities.items()
+                for country in range(num_countries)
+            ]
+        )
 
     results = {
         "alpha": parameters.alpha,
@@ -639,6 +763,22 @@ def multicountry_growth_kernel(
         "selection": "minimum_rkhs_norm_ridge",
         "initialization": "zero_coordinate",
         "global_closure": "explicit_assets_and_algebraic_clearing",
+        "long_run_check_T": data_set.long_run_check_T,
+        "long_run_window": data_set.long_run_window,
+        "long_run_c_flatness": float(long_run["c_flatness"]),
+        "long_run_k_flatness": float(long_run["k_flatness"]),
+        "long_run_a_flatness": float(long_run["a_flatness"]),
+        "long_run_k_theory_gap": float(long_run["k_theory_gap"]),
+        "long_run_mpk_equalization_gap": float(long_run["mpk_equalization_gap"]),
+        "long_run_interest_rate_gap": float(long_run["interest_rate_gap"]),
+        "long_run_consumption_ratio_drift": float(long_run["consumption_ratio_drift"]),
+        "long_run_wealth_proportionality_gap": float(
+            long_run["wealth_proportionality_gap"]
+        ),
+        "long_run_wealth_rank_violation": float(long_run["wealth_rank_violation"]),
+        "long_run_c_rank_matches_wealth": long_run["c_rank_matches_wealth"],
+        "long_run_c_rank_matches_a_0": long_run["c_rank_matches_a_0"],
+        "long_run_terminal_a_rank_matches_a_0": long_run["terminal_a_rank_matches_a_0"],
         "ex_post_k_log_gap": float(jnp.max(tail["k_log_gap"])),
         "ex_post_q_log_gap": float(jnp.max(tail["q_log_gap"])),
         "ex_post_asset_scaled_gap": float(jnp.max(tail["asset_scaled_gap"])),
@@ -688,12 +828,28 @@ def multicountry_growth_kernel(
                 f"log_relative_weight_{suffix}": float(log_relative_weights[country]),
                 f"terminal_a_{suffix}": float(validation_eval["a"][-1, country]),
                 f"long_run_a_{suffix}": float(resolved_steady["a"][country]),
+                f"long_run_c_{suffix}": float(resolved_steady["c"][country]),
+                f"initial_wealth_{suffix}": float(long_run["initial_wealth"][country]),
                 **{
                     f"rkhs_norm_{name}_{suffix}": float(rkhs_norms[f"{name}_{suffix}"])
                     for name in coefficient_groups
                 },
             }
         )
+    if sensitivity_time is not None:
+        results["sensitivity_time"] = sensitivity_time
+        results["interest_rate_at_sensitivity_time"] = float(rate_value)
+        results.update(
+            {f"d_rate_d_{name}": value for name, value in scalar_sensitivities.items()}
+        )
+        for country in range(num_countries):
+            suffix = country + 1
+            results.update(
+                {
+                    f"d_rate_d_{name}_{suffix}": float(values[country])
+                    for name, values in country_sensitivities.items()
+                }
+            )
     if benchmark_available:
         results.update(
             {
@@ -790,13 +946,14 @@ def multicountry_growth_kernel(
             kernel_set.sigma,
             kernel_set.ell,
         )
-        return evaluate_coordinates(theta, K_eval, K_tilde_eval)
+        return evaluate_coordinates(theta, K_eval, K_tilde_eval, p)
 
     return results, {
         "model": kernel_solution,
         "train_df": train_df,
         "validation_df": validation_df,
         "test_df": test_df,
+        "sensitivity_df": sensitivity_df,
         "hyperparameters": hyperparameters,
     }
 

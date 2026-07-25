@@ -109,8 +109,9 @@ analytically assembled per-country/rate/free blocks
 (`multicountry_growth_preconditioner.py`) from the residual `args`,
 rebuilt by the continuation callback at each ridge-level advance; it
 crosses over the dense path around N≈15 countries
-(`multicountry_growth_scaling.py` is the N=2–50 ladder, 26 s at N=50 on
-CPU float64 vs minutes for dense Cholesky). Stopping is the
+(`multicountry_growth_scaling.py` is the N=2–50 ladder, ~2 minutes at
+N=50 on CPU float64 vs minutes for a single dense Cholesky
+factorization). Stopping is the
 conjunctive `gtol`/`residual_atol` rule; the selection is resolved to
 `gtol / ridge` (the asset driver's free `p_0` needs `gtol ~ 1e-3 * ridge`,
 and the DAE drivers' atol is calibrated between the ridge-floor residual and
@@ -149,6 +150,7 @@ uv run python multicountry_growth_kernel.py \
   --parameters.productivities '[1.0, 1.0, 1.0]' \
   --lm_set.linear_solver cg \
   --initial_set.seed 3
+uv run python multicountry_growth_kernel.py --sensitivity_time 10
 uv run python multicountry_growth_nn.py --a_0 '[-0.5, 0.5]' --seed 0
 ```
 
@@ -162,7 +164,33 @@ dispersed `a_0`, with the seed and dispersions on the CLI
 populations, productivities, AND initial conditions (nothing symmetric
 anywhere): every rung passes the deterministic acceptance gates, N=50 in
 ~2 minutes on CPU float64 via `linear_solver="cg"` where the dense
-Cholesky factorization alone takes several minutes per solve.
+Cholesky factorization alone takes several minutes per solve. On top of
+the residual gates, every rung must pass the long-run economic validity
+bars at t=100: flat consumption, capital, and debt; capital at the theory
+steady state with MPK equalized across countries at `delta + rho/e`;
+`r -> rho`; and the exact one-good sharing invariants — constant
+consumption ratios and consumption levels proportional to initial total
+wealth `a_0 + PV(resources)`. The wealth ordering of long-run consumption
+is gated through the largest wealth separation among misordered pairs
+(exact rank equality is tie-fragile once 50 drawn wealths land within the
+proportionality spread of each other); the a_0-only ranking is reported
+but not gated, since drawn `k_0` and productivity heterogeneity
+legitimately break it.
+
+`multicountry_growth_kernel.py` threads every structural parameter and
+initial condition through the solver's implicit-AD `p` argument, so
+`--sensitivity_time 10` reports the comparative statics of the global
+interest rate at t=10 with respect to all of them from ONE reverse-mode
+pass (`d_rate_d_*` result keys and `extras["sensitivity_df"]`), on the
+dense and matrix-free paths alike (the `cg` implicit tangent runs the
+block-eigen-preconditioned CG at zero damping). The `a_0` gradient is
+projected onto the feasible clearing set; identical homothetic
+preferences make the rate exactly neutral to such redistributions, and
+the reported gradient confirms it at ~1e-11. The reverse-mode values
+carry the Gauss-Newton implicit-sensitivity bias of a non-interpolating
+collocation solution — verified ~0.7% against central finite differences
+of full re-solves, shrinking proportionally with the collocation
+residual.
 
 or import directly:
 

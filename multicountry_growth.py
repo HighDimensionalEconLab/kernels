@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,44 @@ class InitialConditionSettings:
     # typical draws near the +-0.5 the hand-calibrated experiments used and
     # reaches past +-1 in the tails.
     a_0_sigma: float = 0.6
+
+
+# Differentiable duck-type of MulticountryParameters: a pytree whose leaves
+# can carry tracers, for implicit-AD comparative statics through the
+# solver's `p` argument. The model functions only use attribute access, so
+# either container works; this one skips the float-only validation.
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class MulticountryParameterValues:
+    alpha: jax.Array
+    gamma: jax.Array
+    delta: jax.Array
+    rho: jax.Array
+    installation_elasticity: jax.Array
+    populations: jax.Array
+    productivities: jax.Array
+
+    @property
+    def num_countries(self):
+        return self.populations.shape[-1]
+
+    @property
+    def installation_efficiency(self):
+        return self.delta ** (1.0 - self.installation_elasticity)
+
+
+def multicountry_parameter_values(parameters, dtype=jnp.float64):
+    return MulticountryParameterValues(
+        alpha=jnp.asarray(parameters.alpha, dtype=dtype),
+        gamma=jnp.asarray(parameters.gamma, dtype=dtype),
+        delta=jnp.asarray(parameters.delta, dtype=dtype),
+        rho=jnp.asarray(parameters.rho, dtype=dtype),
+        installation_elasticity=jnp.asarray(
+            parameters.installation_elasticity, dtype=dtype
+        ),
+        populations=jnp.asarray(parameters.populations, dtype=dtype),
+        productivities=jnp.asarray(parameters.productivities, dtype=dtype),
+    )
 
 
 def draw_initial_conditions(initial_set, parameters, dtype=jnp.float64):
@@ -303,4 +342,103 @@ def multicountry_tail_diagnostics(values, parameters):
         "asset_scaled_gap": jnp.abs(values["a"][-1] - steady["a"]) / scale,
         "marginal_wealth_drift": jnp.abs(parameters.rho - values["interest_rate"][-1]),
         "interest_rate_gap": jnp.abs(values["interest_rate"][-1] - parameters.rho),
+    }
+
+
+def multicountry_long_run_diagnostics(
+    t,
+    values,
+    a_0,
+    parameters,
+    check_T=100.0,
+    window=10.0,
+):
+    # Long-run validity of the solved paths, checked at t ~ check_T (well
+    # before the training horizon): flatness of consumption, capital, and
+    # debt; per-country convergence of capital to the THEORY steady state
+    # (k_ss_i ~ A_i^(1/(1-alpha)) -- equal across countries only under equal
+    # productivities, the general invariant is MPK equalization); r -> rho;
+    # and the exact one-good sharing structure -- consumption RATIOS are
+    # constant in t (common Euler drift), consumption LEVELS are
+    # proportional to initial total wealth a_0_i + PV(resources_i) (with
+    # decreasing returns V != qk, so the PV is integrated numerically along
+    # the solved rate path with a steady-state tail), and long-run
+    # consumption therefore ranks with initial wealth. The a_0-only rank
+    # comparisons hold when k_0 and productivities are homogeneous and are
+    # reported as ungated diagnostics.
+    a_0 = jnp.asarray(a_0, dtype=values["k"].dtype)
+    i_check = int(jnp.argmin(jnp.abs(t - check_T)))
+    i_before = int(jnp.argmin(jnp.abs(t - (check_T - window))))
+    steady = multicountry_steady_state(values["marginal_wealth"][-1], parameters)
+    scale = multicountry_output_scale(parameters, values["k"].dtype)
+    productivities = jnp.asarray(parameters.productivities, dtype=values["k"].dtype)
+    mpk_steady = parameters.delta + parameters.rho / parameters.installation_elasticity
+    mpk_check = marginal_product(values["k"][i_check], productivities, parameters)
+    rate = values["interest_rate"]
+    consumption_ratios = values["c"] / values["c"][:, :1]
+    cumulative_rate = jnp.concatenate(
+        [
+            jnp.zeros(1, dtype=rate.dtype),
+            jnp.cumsum(0.5 * (rate[1:] + rate[:-1]) * jnp.diff(t)),
+        ]
+    )
+    discount = jnp.exp(-cumulative_rate)
+    resource_pv = (
+        jnp.trapezoid(discount[:, None] * values["resources"], t, axis=0)
+        + discount[-1] * steady["resources"] / parameters.rho
+    )
+    initial_wealth = a_0 + resource_pv
+    consumption_wealth_shares = values["c"][0] / initial_wealth
+    a_0_order = np.argsort(np.asarray(a_0))
+    # Exact rank equality is tie-fragile at large N: the proportionality
+    # spread bounds how close two wealth levels can be before their
+    # consumption ordering is numerically undetermined. The gated quantity
+    # is therefore the largest relative wealth separation among misordered
+    # pairs -- zero when the ranking is exact, and at tie scale when an
+    # exact-rank mismatch is a numerical tie rather than a violation.
+    wealth_scaled = initial_wealth / jnp.mean(initial_wealth)
+    wealth_differences = wealth_scaled[:, None] - wealth_scaled[None, :]
+    consumption_differences = steady["c"][:, None] - steady["c"][None, :]
+    wealth_rank_violation = jnp.max(
+        jnp.where(
+            wealth_differences * consumption_differences < 0.0,
+            jnp.abs(wealth_differences),
+            0.0,
+        )
+    )
+    return {
+        "c_flatness": jnp.max(
+            jnp.abs(values["c"][i_check] / values["c"][i_before] - 1.0)
+        ),
+        "k_flatness": jnp.max(
+            jnp.abs(jnp.log(values["k"][i_check] / values["k"][i_before]))
+        ),
+        "a_flatness": jnp.max(
+            jnp.abs(values["a"][i_check] - values["a"][i_before]) / scale
+        ),
+        "k_theory_gap": jnp.max(jnp.abs(jnp.log(values["k"][i_check] / steady["k"]))),
+        "mpk_equalization_gap": jnp.max(jnp.abs(mpk_check - mpk_steady)) / mpk_steady,
+        "interest_rate_gap": jnp.abs(rate[i_check] - parameters.rho) / parameters.rho,
+        "consumption_ratio_drift": jnp.max(
+            jnp.abs(consumption_ratios / consumption_ratios[0] - 1.0)
+        ),
+        "wealth_proportionality_gap": jnp.max(
+            jnp.abs(
+                consumption_wealth_shares / jnp.mean(consumption_wealth_shares) - 1.0
+            )
+        ),
+        "initial_wealth": initial_wealth,
+        "wealth_rank_violation": wealth_rank_violation,
+        "c_rank_matches_wealth": bool(
+            np.array_equal(
+                np.argsort(np.asarray(steady["c"])),
+                np.argsort(np.asarray(initial_wealth)),
+            )
+        ),
+        "c_rank_matches_a_0": bool(
+            np.array_equal(np.argsort(np.asarray(steady["c"])), a_0_order)
+        ),
+        "terminal_a_rank_matches_a_0": bool(
+            np.array_equal(np.argsort(np.asarray(values["a"][-1])), a_0_order)
+        ),
     }

@@ -17,11 +17,11 @@ multicountry trade-growth project lives in
 uv sync
 ```
 
-The numerical stack requires Python 3.13, `nlls-gram>=2.4.0`, and
+The numerical stack requires Python 3.13, `nlls-gram>=2.6.0`, and
 `tinydiffeq>=2.2.0`. Small kernel and NN examples use `nlls-gram`'s automatic
 linear-solver choice. The reduced one-good multicountry kernel also exposes a
-matrix-free LSMR path for large country counts; the specialized trade-growth
-project retains its own explicit solver settings.
+matrix-free preconditioned-CG path for large country counts; the specialized
+trade-growth project retains its own explicit solver settings.
 
 ## Main replication
 

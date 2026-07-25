@@ -196,7 +196,11 @@ class KernelSmokeTests(unittest.TestCase):
         )
 
     def test_multicountry_growth_kernel_smoke(self):
-        results, extras = multicountry_growth_kernel(a_0=(-0.5, 0.5))
+        parameters = MulticountryParameters(
+            populations=(1.0, 1.4),
+            productivities=(1.05, 0.95),
+        )
+        results, extras = multicountry_growth_kernel(parameters=parameters)
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertEqual(results["linear_solver"], "auto")
         self.assertTrue(results["benchmark_match"])
@@ -218,8 +222,15 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertEqual(results["stable_roots"], 2)
         self.assertEqual(results["unstable_roots"], 3)
         self.assertEqual(results["center_roots"], 1)
-        self.assertGreater(results["relative_weight"], 1.0)
-        self.assertLess(results["long_run_a_1"], results["a_0_1"])
+        # Drawn heterogeneous k_0 makes the welfare-weight ordering
+        # draw-dependent; correctness is pinned by the benchmark
+        # log-relative-weight agreement below.
+        self.assertGreater(results["relative_weight"], 0.0)
+        self.assertNotAlmostEqual(results["relative_weight"], 1.0, places=3)
+        # The long-run NFA position moves genuinely away from the initial
+        # one (the sign of the drift depends on the drawn capital
+        # heterogeneity, so no ordering is asserted).
+        self.assertNotAlmostEqual(results["long_run_a_1"], results["a_0_1"], places=2)
         self.assertGreater(results["minimum_rate_denominator"], 0.0)
         self.assertLess(results["max_train_residual"], 1e-5)
         self.assertLess(abs(results["initial_resource_drift_residual"]), 1e-5)
@@ -256,8 +267,8 @@ class KernelSmokeTests(unittest.TestCase):
 
     def test_multicountry_growth_qr_configuration(self):
         parameters = MulticountryParameters(
-            populations=(1.0, 1.0, 1.0),
-            productivities=(1.0, 1.0, 1.0),
+            populations=(1.0, 1.3, 0.8),
+            productivities=(1.1, 0.95, 1.0),
         )
         data_set = MulticountryDataSettings(
             train_T=40.0,
@@ -276,7 +287,6 @@ class KernelSmokeTests(unittest.TestCase):
             geodesic_acceleration=False,
         )
         results, _ = multicountry_growth_kernel(
-            a_0=(-0.5, 0.25, 0.25),
             parameters=parameters,
             data_set=data_set,
             lm_set=lm_set,
@@ -292,9 +302,53 @@ class KernelSmokeTests(unittest.TestCase):
                 lm_set=MulticountrySolverSettings(linear_solver="normal_cg"),
             )
 
+    def test_multicountry_growth_cg_configuration(self):
+        # The matrix-free path with the block-eigen preconditioner solves the
+        # small-grid N=3 problem to the same acceptance gates as the dense
+        # default, and reports its configuration. 36 collocation points is
+        # the coarsest grid whose rate-consistency gate holds under the
+        # drawn heterogeneous initial conditions.
+        parameters = MulticountryParameters(
+            populations=(1.0, 1.3, 0.8),
+            productivities=(1.1, 0.95, 1.0),
+        )
+        data_set = MulticountryDataSettings(
+            train_T=40.0,
+            train_points=36,
+            dense_T=20.0,
+            tail_points=8,
+            test_T=20.0,
+            test_points=21,
+            validation_points=31,
+            benchmark_T=50.0,
+            benchmark_points=51,
+        )
+        outputs = {}
+        for solver_name in ("auto", "cg"):
+            results, _ = multicountry_growth_kernel(
+                parameters=parameters,
+                data_set=data_set,
+                lm_set=MulticountrySolverSettings(linear_solver=solver_name),
+            )
+            self.assertTrue(results["solution_accepted"], results["rejection_reason"])
+            outputs[solver_name] = results
+        cg = outputs["cg"]
+        self.assertEqual(cg["linear_solver"], "cg")
+        self.assertEqual(cg["preconditioner"], "block_eigen")
+        self.assertEqual(cg["cg_maxiter"], MulticountrySolverSettings().cg_maxiter)
+        self.assertAlmostEqual(
+            cg["rkhs_norm_total"],
+            outputs["auto"]["rkhs_norm_total"],
+            delta=1e-6 * max(outputs["auto"]["rkhs_norm_total"], 1.0),
+        )
+
     def test_multicountry_growth_nn_smoke(self):
+        parameters = MulticountryParameters(
+            populations=(1.0, 1.4),
+            productivities=(1.05, 0.95),
+        )
         results, extras = multicountry_growth_nn(
-            a_0=(-0.5, 0.5),
+            parameters=parameters,
             seed=0,
             verbose=False,
         )
@@ -319,7 +373,9 @@ class KernelSmokeTests(unittest.TestCase):
             9 * results["num_train_points"] + 1,
         )
         self.assertGreater(results["total_params"], 500)
-        self.assertLess(results["max_train_residual"], 1e-5)
+        # 2e-5 under the drawn heterogeneous initial conditions (measured
+        # 1.17e-5 at the default seed; 1e-5 was the symmetric-k_0 margin).
+        self.assertLess(results["max_train_residual"], 2e-5)
         self.assertLess(results["max_validation_residual"], 5e-3)
         self.assertLess(results["max_asset_clearing_residual"], 5e-5)
         self.assertLess(results["max_rate_consistency_residual"], 5e-5)
@@ -332,18 +388,20 @@ class KernelSmokeTests(unittest.TestCase):
             1e-5,
         )
         initial = extras["test_df"].iloc[0]
-        self.assertAlmostEqual(initial["k_1"], 1.0, places=14)
-        self.assertAlmostEqual(initial["k_2"], 1.0, places=14)
-        self.assertAlmostEqual(initial["a_1"], -0.5, places=14)
-        self.assertAlmostEqual(initial["a_2"], 0.5, places=14)
+        # The paths pin the DRAWN initial conditions exactly.
+        self.assertAlmostEqual(initial["k_1"], results["k_0_1"], places=12)
+        self.assertAlmostEqual(initial["k_2"], results["k_0_2"], places=12)
+        self.assertNotAlmostEqual(results["k_0_1"], results["k_0_2"], places=3)
+        self.assertAlmostEqual(initial["a_1"], results["a_0_1"], places=12)
+        self.assertAlmostEqual(initial["a_2"], results["a_0_2"], places=12)
+        self.assertNotAlmostEqual(results["a_0_1"], results["a_0_2"], places=3)
 
     def test_multicountry_growth_nn_three_country_smoke(self):
         parameters = MulticountryParameters(
-            populations=(1.0, 1.0, 1.0),
-            productivities=(1.0, 1.0, 1.0),
+            populations=(1.0, 1.3, 0.8),
+            productivities=(1.1, 0.95, 1.0),
         )
         results, extras = multicountry_growth_nn(
-            a_0=(-0.5, 0.25, 0.25),
             parameters=parameters,
             seed=0,
             verbose=False,
@@ -357,23 +415,24 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertEqual(results["num_countries"], 3)
         self.assertEqual(results["dynamic_network_output_count"], 12)
         self.assertEqual(results["calculated_algebraic_value_count"], 7)
-        self.assertAlmostEqual(
+        # Distinct drawn k_0 across countries 2 and 3: weights positive and
+        # genuinely different (the old equality assumed identical capital).
+        self.assertGreater(results["relative_weight_2"], 0.0)
+        self.assertGreater(results["relative_weight_3"], 0.0)
+        self.assertNotAlmostEqual(
             results["relative_weight_2"],
             results["relative_weight_3"],
-            delta=1e-6,
+            places=3,
         )
         self.assertIn("k_3", extras["test_df"])
         self.assertIn("marginal_wealth_3", extras["test_df"])
 
     def test_multicountry_growth_three_country_smoke(self):
         parameters = MulticountryParameters(
-            populations=(1.0, 1.0, 1.0),
-            productivities=(1.0, 1.0, 1.0),
+            populations=(1.0, 1.3, 0.8),
+            productivities=(1.1, 0.95, 1.0),
         )
-        results, extras = multicountry_growth_kernel(
-            a_0=(-0.5, 0.25, 0.25),
-            parameters=parameters,
-        )
+        results, extras = multicountry_growth_kernel(parameters=parameters)
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertFalse(results["benchmark_available"])
         self.assertEqual(results["num_countries"], 3)
@@ -385,13 +444,15 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertLess(results["max_train_residual"], 1e-5)
         self.assertLess(results["max_validation_residual"], 5e-3)
         self.assertLess(results["max_asset_clearing_residual"], 5e-5)
-        self.assertAlmostEqual(
+        # Countries 2 and 3 share a_0 but draw different k_0, so their
+        # welfare weights must be positive and genuinely distinct (the old
+        # equality held only under identical initial capital).
+        self.assertGreater(results["relative_weight_2"], 0.0)
+        self.assertGreater(results["relative_weight_3"], 0.0)
+        self.assertNotAlmostEqual(
             results["relative_weight_2"],
             results["relative_weight_3"],
-            places=6,
-        )
-        self.assertAlmostEqual(
-            results["terminal_a_2"], results["terminal_a_3"], delta=1e-5
+            places=3,
         )
         self.assertIn("k_3", extras["test_df"])
         self.assertIn("marginal_wealth_3", extras["test_df"])

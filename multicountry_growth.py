@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import jax
 import jax.numpy as jnp
 
 
@@ -41,6 +42,38 @@ class MulticountryParameters:
     @property
     def installation_efficiency(self):
         return self.delta ** (1.0 - self.installation_elasticity)
+
+
+# Identical initial conditions across countries make the multicountry
+# dynamics degenerate (no cross-country variation to solve for), so the
+# drivers DRAW heterogeneous defaults from these seeded distributions
+# whenever k_0/a_0 are not passed explicitly.
+@dataclass(frozen=True)
+class InitialConditionSettings:
+    seed: int = 0
+    # k_0 = exp(k_0_log_sigma * z), z ~ N(0, 1): strictly positive with
+    # ~k_0_log_sigma relative dispersion around 1.
+    k_0_log_sigma: float = 0.25
+    # a_0 = a_0_sigma * z, population-demeaned so the weighted NFA positions
+    # clear exactly at t = 0. Debt positions want real dispersion: 0.6 puts
+    # typical draws near the +-0.5 the hand-calibrated experiments used and
+    # reaches past +-1 in the tails.
+    a_0_sigma: float = 0.6
+
+
+def draw_initial_conditions(initial_set, parameters, dtype=jnp.float64):
+    key_k, key_a = jax.random.split(jax.random.key(initial_set.seed))
+    num_countries = parameters.num_countries
+    k_0 = jnp.exp(
+        initial_set.k_0_log_sigma
+        * jax.random.normal(key_k, (num_countries,), dtype=dtype)
+    )
+    populations = jnp.asarray(parameters.populations, dtype=dtype)
+    raw = initial_set.a_0_sigma * jax.random.normal(
+        key_a, (num_countries,), dtype=dtype
+    )
+    a_0 = raw - jnp.sum(populations * raw) / jnp.sum(populations)
+    return tuple(float(value) for value in k_0), tuple(float(value) for value in a_0)
 
 
 def production(k, z, parameters):

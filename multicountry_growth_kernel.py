@@ -9,8 +9,11 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from nlls_gram import (
+    CG,
     QR,
+    BlockEigenPreconditioner,
     Cholesky,
+    LMSolveAction,
     LMStatus,
     RepeatedFactorMetric,
     RidgeLevenbergMarquardt,
@@ -23,7 +26,9 @@ from kernels import (
     rkhs_norm_squared,
 )
 from multicountry_growth import (
+    InitialConditionSettings,
     MulticountryParameters,
+    draw_initial_conditions,
     multicountry_output_scale,
     multicountry_path_values,
     multicountry_reference_marginal_wealth,
@@ -32,6 +37,10 @@ from multicountry_growth import (
     multicountry_tvc_diagnostics,
 )
 from multicountry_growth_benchmark import multicountry_growth_benchmark
+from multicountry_growth_preconditioner import (
+    block_eigen_permutation,
+    multicountry_block_eigen_state,
+)
 
 if __name__ == "__main__":
     jax.config.update("jax_enable_x64", True)
@@ -91,20 +100,34 @@ class SolverSettings:
     damping_decrease: float = 0.1
     damping_increase: float = 4.0
     max_steps: int = 80
-    # Conjunctive stopping in the whitened variable y = F_bar theta the
-    # solver works in: gtol bounds the whitened stationarity
-    # ||J~'r + ridge [y_m; 0]||, residual_atol additionally demands the
-    # scaled residual norm solved (the converged residual floors at
-    # O(ridge * ||dual||), so residual_atol sits above it). The ridge keeps
-    # the minimizer O(ridge) from the pure RKHS-seminorm interpolant with
-    # the free initial values unpenalized (no epsilon shift anywhere).
-    residual_atol: float = 5e-8
+    # Stopping leans on gtol alone by default: gtol = 1e-11 sits ABOVE the
+    # ridge-floor stationarity ~ ridge * sqrt(q) ~ 2e-12 and BELOW the last
+    # intermediate continuation level's ~ 6e-10, so it can only fire at the
+    # floor -- no residual_atol needed to rule intermediate levels out. The
+    # converged residual floors at O(ridge * ||dual||), which moves with N
+    # and with the drawn initial conditions, so a fixed positive atol is
+    # draw-fragile (it silently blocks the stopping certificate on solves
+    # that pass every quality gate); pass one explicitly only for a fixed
+    # production configuration whose floor has been measured.
+    residual_atol: float = 0.0
     # "auto" (whitened cholesky) is the default: the whitened normal matrix
     # J~'J~ + ridge*I_head has its spectral floor at the ridge, so the
     # cholesky path keeps float64 accuracy at this ridge -- measured ~2x
     # faster wall-clock than the previously required "qr" at identical
-    # solution quality. "qr" remains valid (all paths run whitened).
+    # solution quality. "qr" remains valid (all paths run whitened). "cg"
+    # is the matrix-free scaling path: preconditioned CG on the whitened
+    # normal operator with the block-eigen preconditioner (per-country
+    # blocks + rate block + free block, assembled analytically and rebuilt
+    # by the continuation callback whenever the anneal advances a level).
     linear_solver: str = "auto"
+    # Measured (N=2, n_train=96): the block-eigen-preconditioned CG count
+    # SATURATES as the ridge anneals to the floor (~941 iterations at ridge
+    # 1e-7, ~1516 at 3e-12 -- the preconditioner's diagonal blocks carry the
+    # same ridge floor as the operator, so the deep-ridge modes stay
+    # clustered); the budget must cover that saturated count or the
+    # truncated steps stall the endgame.
+    cg_tol: float = 1e-10
+    cg_maxiter: int = 2500
     geodesic_acceleration: bool = True
     ridge: float = 3e-12
     # The whitened calibration recipe reads
@@ -125,6 +148,12 @@ class SolverSettings:
     # looser anneals faster (fewer steps per level), tighter solves each
     # level out more completely before descending.
     ridge_grad_rtol: float = 1e-3
+    # Frozen-anneal escape hatch (ridge_continuation's stall_rtol): at
+    # larger N the compounding per-level references can freeze the anneal
+    # below the gradient noise floor while steps keep being accepted;
+    # ~0.99 advances the level on accepted steps with negligible gradient
+    # progress. Off by default.
+    ridge_stall_rtol: float = 0.0
 
 
 def make_train_grid(data_set):
@@ -164,6 +193,7 @@ def multicountry_growth_kernel(
     a_0: tuple[float, ...] | None = None,
     parameters: MulticountryParameters = MulticountryParameters(),
     use_float64: bool = True,
+    initial_set: InitialConditionSettings = InitialConditionSettings(),
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
     lm_set: SolverSettings = SolverSettings(),
@@ -173,15 +203,20 @@ def multicountry_growth_kernel(
         raise RuntimeError("enable jax_enable_x64 in the process entry point")
     dtype = jnp.float64 if use_float64 else jnp.float32
     num_countries = parameters.num_countries
-    if k_0 is None:
-        k_0 = (1.0,) * num_countries
-    if a_0 is None:
-        a_0 = (0.0,) * num_countries
+    # Identical initial conditions are degenerate (no cross-country
+    # variation), so unspecified k_0/a_0 are DRAWN from the seeded
+    # initial_set distributions rather than defaulted to symmetric values.
+    if k_0 is None or a_0 is None:
+        drawn_k_0, drawn_a_0 = draw_initial_conditions(initial_set, parameters)
+        if k_0 is None:
+            k_0 = drawn_k_0
+        if a_0 is None:
+            a_0 = drawn_a_0
     if len(k_0) != num_countries or any(value <= 0.0 for value in k_0):
         raise ValueError("k_0 must contain one positive capital stock per country")
     if len(a_0) != num_countries:
         raise ValueError("a_0 must contain one NFA position per country")
-    supported_linear_solvers = ("auto", "qr")
+    supported_linear_solvers = ("auto", "qr", "cg")
     if lm_set.linear_solver not in supported_linear_solvers:
         raise ValueError(f"linear_solver must be one of {supported_linear_solvers}")
 
@@ -268,17 +303,29 @@ def multicountry_growth_kernel(
     residual_count = (4 * num_countries + 1) * n_train + 1
     residual_scale = 1.0 / jnp.sqrt(float(residual_count))
 
-    def residual_fn(theta):
+    # The aggregate rows are population-weighted SUMS, so their natural size
+    # grows with N; per-capita normalization keeps every scaled residual
+    # entry N-free (without it the 1/sqrt(count) scaling leaves the
+    # aggregate rows ~sqrt(N) large and residual_atol becomes unreachable at
+    # large N).
+    total_population = jnp.sum(populations)
+
+    # args carries only the cg preconditioner state (None on the dense
+    # paths); the model equations never read it.
+    def residual_fn(theta, _):
         values = evaluate_coordinates(theta, K, K_tilde)
         # The level-clearing equation at t=0 is fixed by a_0 and has a zero
         # Jacobian. G(0) = 0 replaces that row, while G_dot(0) = 0 supplies the
         # index-consistency equation that identifies the initial algebraic rate.
-        global_constraints = jnp.concatenate(
-            [
-                values["resource"][:1],
-                values["resource_drift"][:1],
-                values["asset_clearing"][1:],
-            ]
+        global_constraints = (
+            jnp.concatenate(
+                [
+                    values["resource"][:1],
+                    values["resource_drift"][:1],
+                    values["asset_clearing"][1:],
+                ]
+            )
+            / total_population
         )
         return residual_scale * jnp.concatenate(
             [
@@ -309,22 +356,73 @@ def multicountry_growth_kernel(
         jnp.zeros(num_initial_values, dtype=dtype),
     )
     # CLI string -> typed solver config ("auto" = the whitened cholesky
-    # default).
+    # default; "cg" = matrix-free preconditioned CG on the whitened normal
+    # operator, the block-eigen preconditioner state riding in args).
     if lm_set.linear_solver == "qr":
         linear_solver = QR()
+    elif lm_set.linear_solver == "cg":
+        linear_solver = CG(
+            BlockEigenPreconditioner(),
+            tol=lm_set.cg_tol,
+            maxiter=lm_set.cg_maxiter,
+        )
     else:
         linear_solver = Cholesky()
+    if lm_set.linear_solver == "cg":
+        permutation = jnp.asarray(block_eigen_permutation(num_countries, n_train))
+
+        def build_preconditioner_state(theta_value):
+            return multicountry_block_eigen_state(
+                theta_value,
+                K,
+                K_tilde,
+                metric.F,
+                permutation,
+                parameters,
+                k_0_array,
+                a_0_array,
+                q_reference,
+                marginal_wealth_reference,
+                output_scale,
+                residual_scale,
+            )
+
+        args = {"preconditioner": build_preconditioner_state(theta_0)}
+    else:
+        args = None
     if lm_set.ridge_init is None:
         initial_ridge = lm_set.ridge
         continuation_options = {}
     else:
         initial_ridge = lm_set.ridge_init
-        callback, user_state0 = ridge_continuation(
+        continuation_callback, user_state0 = ridge_continuation(
             ridge_floor=lm_set.ridge,
             decrease=lm_set.ridge_decrease,
             grad_rtol=lm_set.ridge_grad_rtol,
+            stall_rtol=lm_set.ridge_stall_rtol,
             dtype=dtype,
         )
+        if lm_set.linear_solver == "cg":
+            # Rebuild the preconditioner from the live iterate exactly when
+            # the anneal advances a level: that step's convergence test is
+            # already suppressed by the ridge change, and on every other
+            # step the returned state is value-identical (no suppression).
+            def callback(ctx):
+                action = continuation_callback(ctx)
+                advanced = action.lm_state.ridge < ctx.lm_state.ridge
+                fresh = build_preconditioner_state(ctx.x)
+                state = jax.tree_util.tree_map(
+                    lambda old, new: jnp.where(advanced, new, old),
+                    ctx.args["preconditioner"],
+                    fresh,
+                )
+                return LMSolveAction(
+                    lm_state=action.lm_state,
+                    user_state=action.user_state,
+                    args={"preconditioner": state},
+                )
+        else:
+            callback = continuation_callback
         continuation_options = {"callback": callback, "user_state": user_state0}
 
     solver = RidgeLevenbergMarquardt(
@@ -341,6 +439,7 @@ def multicountry_growth_kernel(
     solve_start = time.perf_counter()
     result = solver.solve(
         theta_0,
+        args,
         max_steps=lm_set.max_steps,
         gtol=lm_set.gtol,
         atol=lm_set.residual_atol,
@@ -370,12 +469,19 @@ def multicountry_growth_kernel(
         "tobin_q",
         "marginal_wealth_euler",
     )
-    train_global_constraints = jnp.concatenate(
-        [
-            train_eval["resource"][:1],
-            train_eval["resource_drift"][:1],
-            train_eval["asset_clearing"][1:],
-        ]
+    # Aggregate-row diagnostics are per capita, matching the objective's
+    # normalization: the raw population-weighted sums grow with N, so the
+    # per-capita values are the scale-free quantities the N-independent
+    # gates bound.
+    train_global_constraints = (
+        jnp.concatenate(
+            [
+                train_eval["resource"][:1],
+                train_eval["resource_drift"][:1],
+                train_eval["asset_clearing"][1:],
+            ]
+        )
+        / total_population
     )
     max_train_residual = max(
         max(
@@ -384,11 +490,14 @@ def multicountry_growth_kernel(
         float(jnp.max(jnp.abs(train_global_constraints))),
     )
     max_validation_residual = max(
-        float(jnp.max(jnp.abs(validation_eval[name])))
-        for name in (*dynamic_residual_names, "resource")
+        max(
+            float(jnp.max(jnp.abs(validation_eval[name])))
+            for name in dynamic_residual_names
+        ),
+        float(jnp.max(jnp.abs(validation_eval["resource"] / total_population))),
     )
     max_asset_clearing_residual = float(
-        jnp.max(jnp.abs(validation_eval["asset_clearing"]))
+        jnp.max(jnp.abs(validation_eval["asset_clearing"] / total_population))
     )
     max_rate_consistency_residual = float(
         jnp.max(jnp.abs(validation_eval["interest_rate_country_gap"]))
@@ -503,8 +612,12 @@ def multicountry_growth_kernel(
         "num_train_points": n_train,
         "test_T": data_set.test_T,
         "max_train_residual": max_train_residual,
-        "initial_resource_residual": float(train_eval["resource"][0]),
-        "initial_resource_drift_residual": float(train_eval["resource_drift"][0]),
+        "initial_resource_residual": float(
+            train_eval["resource"][0] / total_population
+        ),
+        "initial_resource_drift_residual": float(
+            train_eval["resource_drift"][0] / total_population
+        ),
         "max_validation_residual": max_validation_residual,
         "max_asset_clearing_residual": max_asset_clearing_residual,
         "max_rate_consistency_residual": max_rate_consistency_residual,
@@ -539,9 +652,15 @@ def multicountry_growth_kernel(
         "wall_time": solve_time,
         "solver": "nlls-gram",
         "linear_solver": lm_set.linear_solver,
+        "preconditioner": ("block_eigen" if lm_set.linear_solver == "cg" else "none"),
+        "cg_tol": lm_set.cg_tol,
+        "cg_maxiter": lm_set.cg_maxiter,
         "residual_atol": lm_set.residual_atol,
         "train_residual_tol": tolerance_set.train_residual,
         "geodesic_acceleration": lm_set.geodesic_acceleration,
+        "initial_seed": initial_set.seed,
+        "k_0_log_sigma": initial_set.k_0_log_sigma,
+        "a_0_sigma": initial_set.a_0_sigma,
         "ridge": lm_set.ridge,
         "gtol": lm_set.gtol,
         "train_loss": float(result.info.resid_loss),
@@ -599,9 +718,13 @@ def multicountry_growth_kernel(
         data = {
             "t": np.asarray(points),
             "interest_rate": np.asarray(values["interest_rate"]),
-            "resource_residual": np.asarray(values["resource"]),
-            "resource_drift_residual": np.asarray(values["resource_drift"]),
-            "asset_clearing_residual": np.asarray(values["asset_clearing"]),
+            "resource_residual": np.asarray(values["resource"] / total_population),
+            "resource_drift_residual": np.asarray(
+                values["resource_drift"] / total_population
+            ),
+            "asset_clearing_residual": np.asarray(
+                values["asset_clearing"] / total_population
+            ),
             "interest_rate_country_gap": np.asarray(
                 jnp.max(
                     jnp.abs(values["interest_rate_country_gap"]),

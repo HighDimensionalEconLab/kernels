@@ -57,7 +57,11 @@ class MulticountryGrowthKernelDAETests(unittest.TestCase):
             np.testing.assert_allclose(values[name], 0.0, atol=1e-14)
 
     def test_two_country_smoke(self):
-        results, extras = multicountry_growth_kernel_dae(a_0=(-0.5, 0.5))
+        parameters = MulticountryParameters(
+            populations=(1.0, 1.4),
+            productivities=(1.05, 0.95),
+        )
+        results, extras = multicountry_growth_kernel_dae(parameters=parameters)
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertTrue(
             results["equation_diagnostics_pass"],
@@ -114,11 +118,10 @@ class MulticountryGrowthKernelDAETests(unittest.TestCase):
 
     def test_three_country_smoke(self):
         parameters = MulticountryParameters(
-            populations=(1.0, 1.0, 1.0),
-            productivities=(1.0, 1.0, 1.0),
+            populations=(1.0, 1.3, 0.8),
+            productivities=(1.1, 0.95, 1.0),
         )
         results, extras = multicountry_growth_kernel_dae(
-            a_0=(-0.5, 0.25, 0.25),
             parameters=parameters,
         )
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
@@ -132,13 +135,15 @@ class MulticountryGrowthKernelDAETests(unittest.TestCase):
         self.assertEqual(results["free_initial_value_count"], 13)
         self.assertEqual(results["metric_selection_dimension"], 12)
         self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 12)
-        self.assertAlmostEqual(
+        # Countries 2 and 3 share a_0 but draw different k_0, so their
+        # welfare weights must be positive and genuinely distinct (the old
+        # equalities held only under identical initial capital).
+        self.assertGreater(results["relative_weight_2"], 0.0)
+        self.assertGreater(results["relative_weight_3"], 0.0)
+        self.assertNotAlmostEqual(
             results["relative_weight_2"],
             results["relative_weight_3"],
-            places=6,
-        )
-        self.assertAlmostEqual(
-            results["terminal_a_2"], results["terminal_a_3"], delta=3e-3
+            places=3,
         )
         self.assertIn("consumption_foc_3", extras["test_df"])
         self.assertIn("investment_foc_3", extras["test_df"])

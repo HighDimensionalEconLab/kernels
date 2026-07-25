@@ -21,7 +21,9 @@ from kernels import (
     rkhs_norm_squared,
 )
 from multicountry_growth import (
+    InitialConditionSettings,
     MulticountryParameters,
+    draw_initial_conditions,
     marginal_product,
     multicountry_output_scale,
     multicountry_reference_marginal_wealth,
@@ -212,6 +214,7 @@ def multicountry_growth_kernel_dae(
     a_0: tuple[float, ...] | None = None,
     parameters: MulticountryParameters = MulticountryParameters(),
     use_float64: bool = True,
+    initial_set: InitialConditionSettings = InitialConditionSettings(),
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
     lm_set: SolverSettings = SolverSettings(),
@@ -220,10 +223,15 @@ def multicountry_growth_kernel_dae(
         raise RuntimeError("enable jax_enable_x64 in the process entry point")
     dtype = jnp.float64 if use_float64 else jnp.float32
     num_countries = parameters.num_countries
-    if k_0 is None:
-        k_0 = (1.0,) * num_countries
-    if a_0 is None:
-        a_0 = (0.0,) * num_countries
+    # Identical initial conditions are degenerate (no cross-country
+    # variation), so unspecified k_0/a_0 are DRAWN from the seeded
+    # initial_set distributions rather than defaulted to symmetric values.
+    if k_0 is None or a_0 is None:
+        drawn_k_0, drawn_a_0 = draw_initial_conditions(initial_set, parameters)
+        if k_0 is None:
+            k_0 = drawn_k_0
+        if a_0 is None:
+            a_0 = drawn_a_0
     if len(k_0) != num_countries or any(value <= 0.0 for value in k_0):
         raise ValueError("k_0 must contain one positive capital stock per country")
     if len(a_0) != num_countries:

@@ -102,7 +102,15 @@ wrapper, `optimal_advertising_kernel`, `human_capital_kernel`) solve at a
 fixed small `ridge`, while the harder DAE drivers
 (`open_economy_growth_kernel`, `multicountry_growth_kernel`) add
 `nlls_gram.ridge_continuation` annealing the ridge to a small floor, with
-`QR()` retained as the extreme-conditioning fallback. Stopping is the
+`QR()` retained as the extreme-conditioning fallback. `multicountry`'s
+`lm_set.linear_solver="cg"` switches to matrix-free preconditioned CG on
+the whitened normal operator: `nlls_gram.BlockEigenPreconditioner` reads
+analytically assembled per-country/rate/free blocks
+(`multicountry_growth_preconditioner.py`) from the residual `args`,
+rebuilt by the continuation callback at each ridge-level advance; it
+crosses over the dense path around N≈15 countries
+(`multicountry_growth_scaling.py` is the N=2–50 ladder, 26 s at N=50 on
+CPU float64 vs minutes for dense Cholesky). Stopping is the
 conjunctive `gtol`/`residual_atol` rule; the selection is resolved to
 `gtol / ridge` (the asset driver's free `p_0` needs `gtol ~ 1e-3 * ridge`,
 and the DAE drivers' atol is calibrated between the ridge-floor residual and
@@ -137,19 +145,24 @@ uv run python neoclassical_growth_kernel.py --kernel_set.ell 5.0
 uv run python neoclassical_growth_nn_recursive.py --seed 3 --data_set.train_steps 48
 uv run python multicountry_growth_kernel.py --a_0 '[-0.5, 0.5]'
 uv run python multicountry_growth_kernel.py \
-  --a_0 '[-0.5, 0.25, 0.25]' \
   --parameters.populations '[1.0, 1.0, 1.0]' \
   --parameters.productivities '[1.0, 1.0, 1.0]' \
-  --lm_set.linear_solver lsmr \
-  --lm_set.residual_atol 7.5e-7 \
-  --lm_set.geodesic_acceleration false
+  --lm_set.linear_solver cg \
+  --initial_set.seed 3
 uv run python multicountry_growth_nn.py --a_0 '[-0.5, 0.5]' --seed 0
 ```
 
-The exercised 50-country LSMR stress configuration additionally uses
-`lm_set.iterative_tol=1e-13` and `lm_set.iterative_maxiter=6000`. It verifies
-that the matrix-free path runs at that size; the current 80-step default need
-not satisfy the deterministic acceptance threshold.
+The multicountry drivers DRAW heterogeneous initial conditions whenever
+`k_0`/`a_0` are not passed explicitly (identical countries make the
+cross-country dynamics degenerate): lognormal `k_0` and population-demeaned
+dispersed `a_0`, with the seed and dispersions on the CLI
+(`--initial_set.seed`, `--initial_set.k_0_log_sigma`,
+`--initial_set.a_0_sigma`). The 50-country stress configuration is
+`multicountry_growth_scaling.py` — the N=2-50 ladder with drawn
+populations, productivities, AND initial conditions (nothing symmetric
+anywhere): every rung passes the deterministic acceptance gates, N=50 in
+~2 minutes on CPU float64 via `linear_solver="cg"` where the dense
+Cholesky factorization alone takes several minutes per solve.
 
 or import directly:
 

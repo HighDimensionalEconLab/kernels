@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import time
 from dataclasses import asdict, dataclass
 
@@ -11,13 +12,12 @@ import pandas as pd
 from nlls_gram import (
     CG,
     QR,
+    AnnealRidge,
     BlockEigenPreconditioner,
     Cholesky,
-    LMSolveAction,
     LMStatus,
     RepeatedFactorMetric,
     RidgeLevenbergMarquardt,
-    ridge_continuation,
 )
 
 from kernels import (
@@ -41,7 +41,7 @@ from multicountry_growth import (
 from multicountry_growth_benchmark import multicountry_growth_benchmark
 from multicountry_growth_preconditioner import (
     block_eigen_permutation,
-    multicountry_block_eigen_state,
+    multicountry_block_eigen_families,
 )
 
 if __name__ == "__main__":
@@ -155,7 +155,7 @@ class SolverSettings:
     # looser anneals faster (fewer steps per level), tighter solves each
     # level out more completely before descending.
     ridge_grad_rtol: float = 1e-3
-    # Frozen-anneal escape hatch (ridge_continuation's stall_rtol): at
+    # Frozen-anneal escape hatch (AnnealRidge's stall_rtol): at
     # larger N the compounding per-level references can freeze the anneal
     # below the gradient noise floor while steps keep being accepted;
     # ~0.99 advances the level on accepted steps with negligible gradient
@@ -349,9 +349,8 @@ def multicountry_growth_kernel(
     # large N).
     total_population = jnp.sum(populations)
 
-    # args carries only the cg preconditioner state (None on the dense
-    # paths); the model equations never read it. p carries the structural
-    # parameters and initial conditions for implicit differentiation.
+    # p carries the structural parameters and initial conditions for
+    # implicit differentiation; the model equations never read args.
     def residual_fn(theta, _, p):
         values = evaluate_coordinates(theta, K, K_tilde, p)
         total_population_p = jnp.sum(p["parameters"].populations)
@@ -398,84 +397,80 @@ def multicountry_growth_kernel(
     )
     # CLI string -> typed solver config ("auto" = the whitened cholesky
     # default; "cg" = matrix-free preconditioned CG on the whitened normal
-    # operator, the block-eigen preconditioner state riding in args).
+    # operator, the block-eigen eigenbasis riding in the carried
+    # preconditioner instance).
+    args = None
     if lm_set.linear_solver == "qr":
         linear_solver = QR()
         ad_solver = None
     elif lm_set.linear_solver == "cg":
+        permutation = jnp.asarray(block_eigen_permutation(num_countries, n_train))
+
+        def build_preconditioner(theta_value):
+            return BlockEigenPreconditioner(
+                multicountry_block_eigen_families(
+                    theta_value,
+                    K,
+                    K_tilde,
+                    metric.F,
+                    parameters,
+                    k_0_array,
+                    a_0_array,
+                    q_reference,
+                    marginal_wealth_reference,
+                    output_scale,
+                    residual_scale,
+                ),
+                permutation,
+            )
+
         linear_solver = CG(
-            BlockEigenPreconditioner(),
+            build_preconditioner(theta_0),
             tol=lm_set.cg_tol,
             maxiter=lm_set.cg_maxiter,
         )
-        # The implicit tangent/cotangent CG must be preconditioned
-        # explicitly (ad_solver=None would run it unpreconditioned) and run
-        # to tolerance; it reads the block-eigen state from result.args at
-        # zero damping.
-        ad_solver = CG(
-            BlockEigenPreconditioner(),
-            tol=lm_set.cg_tol,
-            maxiter=lm_set.cg_maxiter,
-        )
+        # The implicit tangent/cotangent CG inherits the carried
+        # (callback-refreshed) preconditioner at the solution, at the same
+        # pinned tolerance and budget.
+        ad_solver = CG(None, tol=lm_set.cg_tol, maxiter=lm_set.cg_maxiter)
     else:
         linear_solver = Cholesky()
         ad_solver = None
-    if lm_set.linear_solver == "cg":
-        permutation = jnp.asarray(block_eigen_permutation(num_countries, n_train))
-
-        def build_preconditioner_state(theta_value):
-            return multicountry_block_eigen_state(
-                theta_value,
-                K,
-                K_tilde,
-                metric.F,
-                permutation,
-                parameters,
-                k_0_array,
-                a_0_array,
-                q_reference,
-                marginal_wealth_reference,
-                output_scale,
-                residual_scale,
-            )
-
-        args = {"preconditioner": build_preconditioner_state(theta_0)}
-    else:
-        args = None
     if lm_set.ridge_init is None:
         initial_ridge = lm_set.ridge
         continuation_options = {}
     else:
         initial_ridge = lm_set.ridge_init
-        continuation_callback, user_state0 = ridge_continuation(
+        anneal = AnnealRidge(
             ridge_floor=lm_set.ridge,
             decrease=lm_set.ridge_decrease,
             grad_rtol=lm_set.ridge_grad_rtol,
             stall_rtol=lm_set.ridge_stall_rtol,
-            dtype=dtype,
         )
         if lm_set.linear_solver == "cg":
-            # Rebuild the preconditioner from the live iterate exactly when
-            # the anneal advances a level: that step's convergence test is
-            # already suppressed by the ridge change, and on every other
-            # step the returned state is value-identical (no suppression).
+            # Refresh the preconditioner from the live iterate exactly when
+            # the anneal advances a level; lax.cond pays the
+            # eigendecomposition only when it fires.
             def callback(ctx):
-                action = continuation_callback(ctx)
+                action = anneal(ctx)
                 advanced = action.lm_state.ridge < ctx.lm_state.ridge
-                fresh = build_preconditioner_state(ctx.x)
-                state = jax.tree_util.tree_map(
-                    lambda old, new: jnp.where(advanced, new, old),
-                    ctx.args["preconditioner"],
-                    fresh,
+                precond = jax.lax.cond(
+                    advanced,
+                    lambda: build_preconditioner(ctx.x),
+                    lambda: ctx.lm_state.preconditioner,
                 )
-                return LMSolveAction(
-                    lm_state=action.lm_state,
-                    user_state=action.user_state,
-                    args={"preconditioner": state},
+                return dataclasses.replace(
+                    action,
+                    lm_state=dataclasses.replace(
+                        action.lm_state, preconditioner=precond
+                    ),
                 )
         else:
-            callback = continuation_callback
-        continuation_options = {"callback": callback, "user_state": user_state0}
+            callback = anneal
+        continuation_options = {
+            "callback": callback,
+            "user_state": anneal.init_state(dtype),
+        }
 
     solver = RidgeLevenbergMarquardt(
         residual_fn,

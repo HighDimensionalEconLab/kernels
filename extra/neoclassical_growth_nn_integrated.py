@@ -343,7 +343,6 @@ def neoclassical_growth_nn_integrated(
         damping_increase=lm_set.damping_increase,
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
-        linear_solve_dtype=jnp.float64,
     )
 
     # solve()'s atol is on the residual norm; the settings threshold is on
@@ -431,7 +430,6 @@ def neoclassical_growth_nn_integrated(
         "use_kinked_production": use_kinked_production,
         "seed": seed,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "linear_solve_dtype": "float64",
         "solver": "nlls-gram",
         "ansatz": "integrated_derivative",
         "train_loss": train_loss,

@@ -38,7 +38,6 @@ import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jsp_linalg
 import numpy as np
-from nlls_gram import block_eigen_state
 
 from multicountry_growth import multicountry_path_values
 
@@ -48,7 +47,7 @@ def block_eigen_permutation(num_countries, n_train):
 
     Orders the whitened coordinates as per-country (k_i, a_i, q_i, m_i)
     groups, then the rate block, then the free initial values -- the family
-    layout ``multicountry_block_eigen_state`` packs.
+    layout ``multicountry_block_eigen_families`` packs.
     """
 
     order = []
@@ -63,12 +62,11 @@ def block_eigen_permutation(num_countries, n_train):
     return np.asarray(order, dtype=np.int32)
 
 
-def multicountry_block_eigen_state(
+def multicountry_block_eigen_families(
     theta,
     K,
     K_tilde,
     F,
-    permutation,
     parameters,
     k_0_array,
     a_0_array,
@@ -77,14 +75,15 @@ def multicountry_block_eigen_state(
     output_scale,
     residual_scale,
 ):
-    """Assemble the ``nlls_gram.block_eigen_state`` at linearization point
-    ``theta``.
+    """Assemble the ``BlockEigenPreconditioner`` families at linearization
+    point ``theta``: ``(blocks, ridge_weight)`` pairs in the family-major
+    order of :func:`block_eigen_permutation`.
 
     ``K``/``K_tilde`` are the (derivative, integrated) kernel matrices on
     the train grid at the residual dtype, ``F`` the metric's upper Cholesky
     factor of ``K``. Fully traceable, so the driver's solve callback can
-    rebuild the state from the live iterate when ridge continuation
-    advances a level.
+    construct a fresh preconditioner from the live iterate when ridge
+    continuation advances a level.
     """
 
     num_countries = k_0_array.shape[0]
@@ -213,7 +212,4 @@ def multicountry_block_eigen_state(
 
     free_block = jnp.einsum("trf,trg->fg", U, U)[None]
 
-    return block_eigen_state(
-        [(country, 1.0), (rate, 1.0), (free_block, 0.0)],
-        jnp.asarray(permutation),
-    )
+    return [(country, 1.0), (rate, 1.0), (free_block, 0.0)]

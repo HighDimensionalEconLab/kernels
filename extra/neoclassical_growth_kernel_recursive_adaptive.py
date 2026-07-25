@@ -14,7 +14,7 @@ from flax import struct
 from jax.scipy.linalg import solve_triangular
 from nlls_gram import (
     LevenbergMarquardt,
-    LMSolveAction,
+    LMAction,
     LMStatus,
 )
 from tinydiffeq import (
@@ -381,7 +381,6 @@ def neoclassical_growth_kernel_recursive_adaptive(
         damping_increase=lm_set.damping_increase,
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
-        linear_solve_dtype=metric_dtype,
     )
 
     def center_callback(ctx):
@@ -495,7 +494,7 @@ def neoclassical_growth_kernel_recursive_adaptive(
                 ctx.user_state["max_num_points"],
             ),
         }
-        return LMSolveAction(x=new_beta, args=new_args, user_state=user_state)
+        return LMAction(x=new_beta, args=new_args, user_state=user_state)
 
     user_state_0 = {
         "refresh_count": jnp.asarray(0, jnp.int32),

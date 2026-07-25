@@ -314,8 +314,8 @@ def neoclassical_growth_kernel(
         "test_points": data_set.test_points,
         "c_0": float(c_0),
         "mu_0": float(mu_0),
-        # Jitter-free alpha' K alpha, matching the IPOPT report (the metric
-        # norm includes the nugget).
+        # Unshifted alpha' K alpha, matching the IPOPT report (the metric
+        # norm includes the epsilon shift).
         "rkhs_norm_k": float(rkhs_norm_squared(alpha_k, K_metric)),
         "rkhs_norm_c": float(rkhs_norm_squared(alpha_c, K_metric)),
         "rkhs_norm_mu": float(rkhs_norm_squared(alpha_mu, K_metric)),

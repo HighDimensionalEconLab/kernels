@@ -238,7 +238,7 @@ def asset_pricing_kernel(
         "test_points": data_set.test_points,
         "p_0": float(p_0),
         "horizon_bias_p0": horizon_bias_p0,
-        # Jitter-free alpha' K alpha (the metric norm includes the nugget).
+        # Unshifted alpha' K alpha (the metric norm includes the epsilon shift).
         "rkhs_norm_p": float(rkhs_norm_squared(alpha, K_metric)),
         "max_train_residual": max_train_residual,
         "train_residual_tolerance": train_residual_tolerance,

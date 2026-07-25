@@ -195,10 +195,14 @@ of full re-solves, shrinking proportionally with the collocation
 residual. For observables beyond the built-in rate sensitivity,
 `extras["parametric_model"]` re-solves at any `p` and evaluates the
 paths, so `jax.jvp`/`jax.grad` through it differentiates anything:
-`multicountry_growth_gini.py` is the worked example — the
-population-weighted consumption Gini on a coarse time grid and
-`d Gini / d gamma` from one forward tangent pass, both flat in t because
-the common Euler drift fixes the consumption ratios along the path.
+`multicountry_growth_transitions.py` is the worked example — the world
+saving rate, interest rate, output Gini (sigma-convergence), and NFA
+dispersion on a coarse time grid with every `d/d gamma` path from ONE
+forward tangent pass, plus the high-dimensional redistribution Jacobian
+from one `jax.jacrev` — the consumption Gini and terminal NFA dispersion
+respond country-by-country to the initial bond and capital positions
+while the r(t=10) row confirms bond-redistribution neutrality at machine
+zero.
 
 or import directly:
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 import jax
 import jax.numpy as jnp
@@ -70,8 +70,12 @@ class DataSettings:
 
 @dataclass(frozen=True)
 class SequentialNNSettings:
-    width: int = 32
-    depth: int = 3
+    # None resolves width/depth from the country count inside the driver
+    # (verified through N=10; the NN is the small/moderate-N baseline and
+    # the kernel cg path is the scaling vehicle); explicit values pin the
+    # architecture exactly.
+    width: int | None = None
+    depth: int | None = None
     hidden_activation: str = "tanh"
     input_scale: float = 40.0
     head_scale: float = 1e-3
@@ -272,6 +276,27 @@ def multicountry_growth_nn(
         raise ValueError("k_0 must contain one positive capital stock per country")
     if len(a_0) != num_countries:
         raise ValueError("a_0 must contain one NFA position per country")
+    # Unpinned capacity resolves from the country count over the NN's
+    # intended small/moderate-N domain, where "enough" means the fixed
+    # 2e-5 train gate. Measured (seed 0, drawn ICs, symmetric parameters):
+    # 32/3 passes N<=3 but reaches 2.03e-5 at N=10, and 32/4 passes N=10
+    # at 1.42e-5. The NN baseline is deliberately NOT the large-N vehicle:
+    # past N~10 the rms early stop caps quality below the max-residual
+    # gate (measured 2.06e-5 at N=25 even at width 48), the dense LM cost
+    # grows with the iterate-dependent Jacobian (9,697 x 12,052 at N=25
+    # width 48), and no kernel-style preconditioner structure exists --
+    # use the kernel driver's cg path for scale, and pin width/depth
+    # explicitly to experiment beyond this range.
+    if nn_set.width is None or nn_set.depth is None:
+        nn_set = replace(
+            nn_set,
+            width=nn_set.width if nn_set.width is not None else 32,
+            depth=(
+                nn_set.depth
+                if nn_set.depth is not None
+                else (3 if num_countries <= 3 else 4)
+            ),
+        )
     if nn_set.width <= 0 or nn_set.depth <= 0:
         raise ValueError("NN width and depth must be positive")
     if nn_set.input_scale <= 0.0 or nn_set.head_scale <= 0.0:

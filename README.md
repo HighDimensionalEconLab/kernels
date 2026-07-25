@@ -136,7 +136,12 @@ The main NN modules are deliberately limited:
   consumption, investment, and the common rate are calculated from its four
   country path blocks inside the residual evaluation.
   `--long_run_diagnostics true` reports the same long-run validity metrics
-  as the kernel driver.
+  as the kernel driver. Unpinned width/depth resolve from the country
+  count (verified through N=10, where the drawn heterogeneous initial
+  conditions need depth 4); the NN is the small/moderate-N baseline —
+  its dense LM works on an iterate-dependent Jacobian with no
+  kernel-style preconditioner structure, so the kernel driver's `cg`
+  path is the large-N vehicle.
 
 Shared activation and transform helpers are in `utilities.py`.
 

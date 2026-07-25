@@ -514,6 +514,7 @@ class KernelSmokeTests(unittest.TestCase):
             parameters=parameters,
             seed=0,
             verbose=False,
+            long_run_diagnostics=True,
         )
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertTrue(
@@ -522,6 +523,15 @@ class KernelSmokeTests(unittest.TestCase):
         )
         self.assertTrue(results["benchmark_match"])
         self.assertEqual(results["stopping_reason"], "early_stopping_met")
+        # Optional long-run diagnostics mirror the kernel driver's: theory
+        # steady state reached by t=100 and the sharing invariants hold
+        # (the ratio drift is looser than the kernel's, tracking the NN's
+        # higher train residual; measured 2e-5 at this seed).
+        self.assertLess(results["long_run_k_theory_gap"], 0.03)
+        self.assertLess(results["long_run_consumption_ratio_drift"], 1e-4)
+        self.assertLess(results["long_run_wealth_proportionality_gap"], 1e-3)
+        self.assertTrue(results["long_run_c_rank_matches_wealth"])
+        self.assertEqual(results["long_run_wealth_rank_violation"], 0.0)
         self.assertEqual(results["attempt"], 1)
         self.assertEqual(results["linear_solver"], "auto")
         self.assertEqual(results["nn_width"], 32)

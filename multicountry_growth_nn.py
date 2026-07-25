@@ -17,6 +17,7 @@ from multicountry_growth import (
     InitialConditionSettings,
     MulticountryParameters,
     draw_initial_conditions,
+    multicountry_long_run_diagnostics,
     multicountry_output_scale,
     multicountry_path_values,
     multicountry_reference_marginal_wealth,
@@ -60,6 +61,11 @@ class DataSettings:
     validation_points: int = 401
     benchmark_T: float = 200.0
     benchmark_points: int = 241
+    # Long-run validity checks (enabled by the long_run_diagnostics flag)
+    # are evaluated at t ~ long_run_check_T, with flatness measured against
+    # t = long_run_check_T - long_run_window.
+    long_run_check_T: float = 100.0
+    long_run_window: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -246,6 +252,7 @@ def multicountry_growth_nn(
     nn_set: SequentialNNSettings = SequentialNNSettings(),
     lm_set: SolverSettings = SolverSettings(),
     stop_set: StoppingCriteria = StoppingCriteria(),
+    long_run_diagnostics: bool = False,
     verbose: bool = True,
 ):
     if not jax.config.jax_enable_x64:
@@ -494,6 +501,18 @@ def multicountry_growth_nn(
     )
     tail = multicountry_tail_diagnostics(validation_eval, parameters)
     tvc = multicountry_tvc_diagnostics(validation_data, validation_eval, parameters)
+    long_run = (
+        multicountry_long_run_diagnostics(
+            validation_data,
+            validation_eval,
+            a_0_array,
+            parameters,
+            check_T=data_set.long_run_check_T,
+            window=data_set.long_run_window,
+        )
+        if long_run_diagnostics
+        else None
+    )
     relative_weights = test_eval["relative_welfare_weights"][0]
     log_relative_weights = jnp.log(relative_weights)
     theta_initial, _ = ravel_pytree(theta_0)
@@ -584,6 +603,41 @@ def multicountry_growth_nn(
                 f"long_run_a_{suffix}": float(resolved_steady["a"][country]),
             }
         )
+    if long_run is not None:
+        results.update(
+            {
+                "long_run_check_T": data_set.long_run_check_T,
+                "long_run_window": data_set.long_run_window,
+                "long_run_c_flatness": float(long_run["c_flatness"]),
+                "long_run_k_flatness": float(long_run["k_flatness"]),
+                "long_run_a_flatness": float(long_run["a_flatness"]),
+                "long_run_k_theory_gap": float(long_run["k_theory_gap"]),
+                "long_run_mpk_equalization_gap": float(
+                    long_run["mpk_equalization_gap"]
+                ),
+                "long_run_interest_rate_gap": float(long_run["interest_rate_gap"]),
+                "long_run_consumption_ratio_drift": float(
+                    long_run["consumption_ratio_drift"]
+                ),
+                "long_run_wealth_proportionality_gap": float(
+                    long_run["wealth_proportionality_gap"]
+                ),
+                "long_run_wealth_rank_violation": float(
+                    long_run["wealth_rank_violation"]
+                ),
+                "long_run_c_rank_matches_wealth": long_run["c_rank_matches_wealth"],
+                "long_run_c_rank_matches_a_0": long_run["c_rank_matches_a_0"],
+                "long_run_terminal_a_rank_matches_a_0": long_run[
+                    "terminal_a_rank_matches_a_0"
+                ],
+            }
+        )
+        for country in range(num_countries):
+            suffix = country + 1
+            results[f"long_run_c_{suffix}"] = float(resolved_steady["c"][country])
+            results[f"initial_wealth_{suffix}"] = float(
+                long_run["initial_wealth"][country]
+            )
     if benchmark_available:
         results.update(
             {

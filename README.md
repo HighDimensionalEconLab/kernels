@@ -135,6 +135,8 @@ The main NN modules are deliberately limited:
 - `multicountry_growth_nn.py`: the reduced one-good multicountry sequential NN;
   consumption, investment, and the common rate are calculated from its four
   country path blocks inside the residual evaluation.
+  `--long_run_diagnostics true` reports the same long-run validity metrics
+  as the kernel driver.
 
 Shared activation and transform helpers are in `utilities.py`.
 

@@ -7,7 +7,7 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 import jax
 import jsonargparse
 
-import trade_growth.kernel as trade_growth_kernel
+import extra.trade_growth.kernel as trade_growth_kernel
 from replication.utilities import (
     enable_compilation_cache,
     ensemble,

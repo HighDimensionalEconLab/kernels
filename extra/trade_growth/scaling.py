@@ -6,7 +6,7 @@
 # (Mac M-series CPU, float64, steady-state): N=4 2.5s / N=10 3.7s / N=25 8.0s
 # / N=50 18.5s with phase1_steps=18-20.
 #
-#   JAX_PLATFORMS=cpu uv run python -m trade_growth.scaling \
+#   JAX_PLATFORMS=cpu uv run python -m extra.trade_growth.scaling \
 #     --country_counts '[4,10,25,50]' --phase1_steps 20
 
 from __future__ import annotations
@@ -21,11 +21,11 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import jax
 import jsonargparse
 
-from trade_growth.kernel import (
+from extra.trade_growth.kernel import (
     SolverSettings,
     multicountry_trade_growth_kernel,
 )
-from trade_growth.model import TradeGrowthParameters
+from extra.trade_growth.model import TradeGrowthParameters
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")

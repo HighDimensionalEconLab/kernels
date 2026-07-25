@@ -15,12 +15,12 @@ import numpy as np
 import pandas as pd
 from jax.flatten_util import ravel_pytree
 
-from replication.utilities import enable_compilation_cache
-from trade_growth.comparative_statics import (
+from extra.trade_growth.comparative_statics import (
     build_multicountry_trade_comparative_statics,
     full_structural_jacobian,
 )
-from trade_growth.model import TradeGrowthParameters
+from extra.trade_growth.model import TradeGrowthParameters
+from replication.utilities import enable_compilation_cache
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")

@@ -12,17 +12,12 @@ from nlls_gram import (
     repeated_shifted_dense_metric,
 )
 
-from kernels import (
-    integrated_kernel_matrices,
-    normalize_kernel,
-)
-from multicountry_growth_kernel import make_train_grid
-from trade_growth.kernel import (
+from extra.trade_growth.kernel import (
     DataSettings,
     KernelSettings,
     SolverSettings,
 )
-from trade_growth.model import (
+from extra.trade_growth.model import (
     STATIC_BLOCK_NAMES,
     TradeGrowthParameters,
     consumption_basket_log_price,
@@ -30,6 +25,11 @@ from trade_growth.model import (
     multicountry_trade_path_values,
     static_trade_equilibrium,
 )
+from kernels import (
+    integrated_kernel_matrices,
+    normalize_kernel,
+)
+from multicountry_growth_kernel import make_train_grid
 
 
 @dataclass(frozen=True)

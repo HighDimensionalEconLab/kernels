@@ -15,20 +15,20 @@ import jax.numpy as jnp
 import numpy as np
 from jax.flatten_util import ravel_pytree
 
-from kernels import integrated_kernel_matrices
-from trade_growth.model import (
+from extra.trade_growth.model import (
     STATIC_BLOCK_NAMES,
     TradeGrowthParameters,
     multicountry_trade_dae_residual,
     multicountry_trade_path_values,
 )
-from trade_growth.preconditioners import (
+from extra.trade_growth.preconditioners import (
     assemble_time_diagonal_blocks,
     build_trade_growth_preconditioner_pieces,
     build_trade_growth_time_block_preconditioner,
     residual_time_permutation,
     trade_growth_reference_state,
 )
+from kernels import integrated_kernel_matrices
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")

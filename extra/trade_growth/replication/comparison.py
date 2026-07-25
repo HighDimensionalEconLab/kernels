@@ -8,15 +8,15 @@ import jax
 import jsonargparse
 import pandas as pd
 
-import trade_growth.kernel as trade_growth_kernel
-import trade_growth.nn as trade_growth_nn
+import extra.trade_growth.kernel as trade_growth_kernel
+import extra.trade_growth.nn as trade_growth_nn
+from extra.trade_growth.model import symmetric_trade_growth_parameters
 from replication.utilities import (
     compare_residual_norm_frames,
     enable_compilation_cache,
     save_experiment,
     write_summary,
 )
-from trade_growth.model import symmetric_trade_growth_parameters
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")

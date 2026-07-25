@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import time
 from dataclasses import asdict, dataclass
 
@@ -10,9 +9,12 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from nlls_gram import (
-    LevenbergMarquardt,
+    QR,
+    AnnealRidge,
+    Cholesky,
     LMStatus,
-    repeated_shifted_dense_metric,
+    RepeatedFactorMetric,
+    RidgeLevenbergMarquardt,
 )
 
 from kernels import (
@@ -160,10 +162,28 @@ class SolverSettings:
     init_damping: float = 1e-8
     damping_decrease: float = 0.1
     damping_increase: float = 4.0
-    max_steps: int = 100
-    train_loss_threshold: float = 1e-13
+    max_steps: int = 120
+    # Stopping mirrors the primal driver: gtol alone, calibrated between the
+    # ridge-floor stationarity and the last intermediate continuation
+    # level's. The algebraic FOC rows leave per-level stationarity lower
+    # than the primal driver's (measured ~1e-12 at ridge 1e-11), so the
+    # primal 1e-11 fires a level early and strands the train residual above
+    # its gate at larger N; 5e-13 sits below every intermediate level's
+    # stationarity and above the floor's ~1.5e-13 (measured through N=5).
+    # The converged residual floor moves with N and the drawn initial
+    # conditions, so a fixed positive atol is draw-fragile.
+    residual_atol: float = 0.0
+    gtol: float = 5e-13
+    # "auto" (whitened cholesky) or "qr"; both dense paths run whitened.
     linear_solver: str = "auto"
-    metric_eps: float = 1e-7
+    geodesic_acceleration: bool = True
+    ridge: float = 3e-12
+    # ridge_init=None solves at the fixed ridge above; a value enables ridge
+    # continuation annealed from ridge_init down to `ridge` (the floor).
+    ridge_init: float | None = 1e-7
+    ridge_decrease: float = 0.01
+    ridge_grad_rtol: float = 1e-3
+    ridge_stall_rtol: float = 0.0
 
 
 def make_train_grid(data_set, dtype):
@@ -236,10 +256,6 @@ def multicountry_growth_kernel_dae(
         raise ValueError("k_0 must contain one positive capital stock per country")
     if len(a_0) != num_countries:
         raise ValueError("a_0 must contain one NFA position per country")
-    if lm_set.metric_eps <= 0.0:
-        raise ValueError("metric_eps must be positive")
-    if lm_set.train_loss_threshold <= 0.0:
-        raise ValueError("train_loss_threshold must be positive")
 
     kernel = normalize_kernel(kernel_set.kernel)
     train_data = make_train_grid(data_set, dtype)
@@ -283,8 +299,6 @@ def multicountry_growth_kernel_dae(
         parameters.delta,
         dtype=dtype,
     )
-    eps = lm_set.metric_eps
-
     metric_data = train_data.astype(jnp.float64)
     K_metric, K_tilde_metric = integrated_kernel_matrices(
         metric_data,
@@ -382,11 +396,11 @@ def multicountry_growth_kernel_dae(
 
     num_rkhs_functions = 6 * num_countries + 1
     num_initial_values = 4 * num_countries + 1
-    metric = repeated_shifted_dense_metric(
-        K_metric,
+    # The metric takes the upper Cholesky factor F with K = F'F; the finite
+    # initial offsets stay in the unpenalized free block.
+    metric = RepeatedFactorMetric(
+        jnp.linalg.cholesky(K_metric, upper=True).astype(dtype),
         repeats=num_rkhs_functions,
-        zero_pad_size=num_initial_values,
-        epsilon=eps,
     )
     coefficient_0 = jnp.zeros((num_countries, n_train), dtype=dtype)
     theta_0 = (
@@ -399,23 +413,42 @@ def multicountry_growth_kernel_dae(
         jnp.zeros(n_train, dtype=dtype),
         jnp.zeros(num_initial_values, dtype=dtype),
     )
-    solver = LevenbergMarquardt(
+    if lm_set.ridge_init is None:
+        initial_ridge = lm_set.ridge
+        continuation_options = {}
+    else:
+        initial_ridge = lm_set.ridge_init
+        anneal = AnnealRidge(
+            ridge_floor=lm_set.ridge,
+            decrease=lm_set.ridge_decrease,
+            grad_rtol=lm_set.ridge_grad_rtol,
+            stall_rtol=lm_set.ridge_stall_rtol,
+        )
+        continuation_options = {
+            "callback": anneal,
+            "user_state": anneal.init_state(dtype),
+        }
+    solver = RidgeLevenbergMarquardt(
         residual_fn,
-        linear_solver=lm_set.linear_solver,
+        metric=metric,
+        ridge=initial_ridge,
+        linear_solver={"auto": Cholesky(), "cholesky": Cholesky(), "qr": QR()}[
+            lm_set.linear_solver
+        ],
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
-        linear_solve_dtype=jnp.float64,
-        metric_solve_dtype=jnp.float64,
-        metric=metric,
+        geodesic_acceleration=lm_set.geodesic_acceleration,
     )
 
     solve_start = time.perf_counter()
     result = solver.solve(
         theta_0,
         max_steps=lm_set.max_steps,
-        atol=math.sqrt(lm_set.train_loss_threshold),
+        gtol=lm_set.gtol,
+        atol=lm_set.residual_atol,
         max_steps_is_success=False,
+        **continuation_options,
     )
     jax.block_until_ready(result)
     solve_time = time.perf_counter() - solve_start
@@ -571,13 +604,6 @@ def multicountry_growth_kernel_dae(
     }
     rkhs_norm_r = rkhs_norm_squared(theta[6], K_metric)
     rkhs_norm_total = sum(rkhs_norms.values()) + rkhs_norm_r
-    shifted_metric_norm_squared = rkhs_norm_total + eps * (
-        sum(
-            coefficients @ coefficients for group in theta[:6] for coefficients in group
-        )
-        + theta[6] @ theta[6]
-        + theta[7] @ theta[7]
-    )
 
     initial = theta[7]
     q_offsets = initial[:num_countries]
@@ -588,7 +614,6 @@ def multicountry_growth_kernel_dae(
         **asdict(parameters),
         "num_countries": num_countries,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "metric_dtype": "float64",
         "kernel": kernel,
         "ell": kernel_set.ell,
         "sigma": kernel_set.sigma,
@@ -627,7 +652,7 @@ def multicountry_growth_kernel_dae(
         "rkhs_function_count": num_rkhs_functions,
         "free_initial_value_count": num_initial_values,
         "metric_selection_dimension": 4 * num_countries,
-        "selection": "minimum_shifted_rkhs_metric",
+        "selection": "minimum_rkhs_norm_ridge",
         "initialization": "zero_coordinate",
         "global_closure": "explicit_assets_and_index_consistent_clearing",
         "ex_post_k_log_gap": float(jnp.max(tail["k_log_gap"])),
@@ -639,13 +664,15 @@ def multicountry_growth_kernel_dae(
         "ex_post_capital_tvc": float(jnp.max(tvc["capital_tvc"])),
         "rkhs_norm_r": float(rkhs_norm_r),
         "rkhs_norm_total": float(rkhs_norm_total),
-        "shifted_metric_norm_squared": float(shifted_metric_norm_squared),
         "solve_time": solve_time,
         "wall_time": solve_time,
         "solver": "nlls-gram",
         "linear_solver": lm_set.linear_solver,
-        "metric_eps": eps,
-        "train_loss": float(result.info.loss),
+        "ridge": lm_set.ridge,
+        "gtol": lm_set.gtol,
+        "final_ridge": float(result.lm_state.ridge),
+        "train_loss": float(result.info.resid_loss),
+        "final_grad_norm": float(result.info.grad_norm),
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),

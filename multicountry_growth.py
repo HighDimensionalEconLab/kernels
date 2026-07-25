@@ -138,6 +138,23 @@ def relative_welfare_weights(marginal_wealth):
     return marginal_wealth[..., :1] / marginal_wealth
 
 
+def consumption_gini(consumption, populations):
+    # Population-weighted consumption Gini across countries (each country a
+    # mass of identical consumers at its per-capita consumption):
+    # sum_ij w_i w_j |c_i - c_j| / (2 mu) over the trailing country axis,
+    # vectorized over any leading (time) axes. Scale-invariant, so with the
+    # common Euler drift (constant consumption ratios) it is constant along
+    # an exact solution path. Differentiable away from exact consumption
+    # ties.
+    consumption = jnp.asarray(consumption)
+    weights = jnp.asarray(populations, dtype=consumption.dtype)
+    weights = weights / jnp.sum(weights)
+    mean = jnp.sum(weights * consumption, axis=-1)
+    differences = jnp.abs(consumption[..., :, None] - consumption[..., None, :])
+    dispersion = jnp.einsum("i,j,...ij->...", weights, weights, differences)
+    return dispersion / (2.0 * mean)
+
+
 def multicountry_allocations(
     k,
     tobin_q,

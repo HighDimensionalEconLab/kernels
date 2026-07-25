@@ -23,6 +23,7 @@ from kernels import (
 from multicountry_growth import (
     InitialConditionSettings,
     MulticountryParameters,
+    consumption_gini,
     draw_initial_conditions,
     multicountry_allocations,
     multicountry_path_values,
@@ -121,6 +122,30 @@ class KernelSmokeTests(unittest.TestCase):
             rtol=1e-13,
             atol=1e-13,
         )
+
+    def test_consumption_gini(self):
+        # Hand values: equal weights on c=(1,3) give dispersion 1 and mean
+        # 2, so Gini 1/4; weights (2,1) on c=(1,2) give 4/9 over 8/3 = 1/6.
+        self.assertAlmostEqual(
+            float(consumption_gini(jnp.array([1.0, 3.0]), (1.0, 1.0))), 0.25, places=14
+        )
+        self.assertAlmostEqual(
+            float(consumption_gini(jnp.array([1.0, 2.0]), (2.0, 1.0))),
+            1.0 / 6.0,
+            places=14,
+        )
+        # Scale invariance and time-axis vectorization: paths with constant
+        # cross-country ratios have a constant Gini.
+        consumption = jnp.array([1.0, 2.0, 4.0])
+        self.assertAlmostEqual(
+            float(consumption_gini(7.0 * consumption, (1.0, 2.0, 0.5))),
+            float(consumption_gini(consumption, (1.0, 2.0, 0.5))),
+            places=14,
+        )
+        growth = jnp.exp(0.03 * jnp.arange(5.0))[:, None]
+        path_gini = consumption_gini(growth * consumption, (1.0, 2.0, 0.5))
+        self.assertEqual(path_gini.shape, (5,))
+        np.testing.assert_allclose(path_gini, path_gini[0], rtol=1e-13)
 
     def test_multicountry_growth_math(self):
         parameters = MulticountryParameters(

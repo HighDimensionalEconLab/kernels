@@ -192,7 +192,13 @@ the reported gradient confirms it at ~1e-11. The reverse-mode values
 carry the Gauss-Newton implicit-sensitivity bias of a non-interpolating
 collocation solution — verified ~0.7% against central finite differences
 of full re-solves, shrinking proportionally with the collocation
-residual.
+residual. For observables beyond the built-in rate sensitivity,
+`extras["parametric_model"]` re-solves at any `p` and evaluates the
+paths, so `jax.jvp`/`jax.grad` through it differentiates anything:
+`multicountry_growth_gini.py` is the worked example — the
+population-weighted consumption Gini on a coarse time grid and
+`d Gini / d gamma` from one forward tangent pass, both flat in t because
+the common Euler drift fixes the consumption ratios along the path.
 
 or import directly:
 

@@ -948,8 +948,32 @@ def multicountry_growth_kernel(
         )
         return evaluate_coordinates(theta, K_eval, K_tilde_eval, p)
 
+    # The full parametric solution map for implicit-AD functionals beyond
+    # the built-in rate sensitivity: re-solves at p_value and evaluates the
+    # paths, so jax.jvp/jax.grad through it differentiates any observable
+    # of the solution with respect to the structural parameters and initial
+    # conditions carried in p (the primal pytree is exposed alongside).
+    def parametric_model(points, p_value):
+        solved = solver.solve(
+            theta_0,
+            args,
+            p=p_value,
+            **solve_options,
+            **continuation_options,
+        )
+        K_eval, K_tilde_eval = integrated_kernel_matrices(
+            points,
+            train_data,
+            kernel,
+            kernel_set.sigma,
+            kernel_set.ell,
+        )
+        return evaluate_coordinates(solved.x, K_eval, K_tilde_eval, p_value)
+
     return results, {
         "model": kernel_solution,
+        "parametric_model": parametric_model,
+        "p": p,
         "train_df": train_df,
         "validation_df": validation_df,
         "test_df": test_df,

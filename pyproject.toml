@@ -13,12 +13,13 @@ dependencies = [
     "pandas>=2.3.2",
     "pyarrow>=24.0.0",
     "scipy>=1.18.0",
-    "tinydiffeq>=2.2.0",
+    "tinydiffeq>=2.3.0",
     "unopy>=0.4.10",
 ]
 
 [dependency-groups]
 dev = [
+    "pytest>=8",
     "ruff>=0.15.20",
 ]
 gpu = [
@@ -36,5 +37,3 @@ target-version = "py313"
 select = ["E", "F", "I", "W"]
 ignore = ["E501"]
 
-[tool.uv.sources]
-nlls-gram = { path = "../nlls_gram", editable = true }

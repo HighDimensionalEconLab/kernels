@@ -21,13 +21,7 @@ from nlls_gram import (
     repeated_shifted_dense_metric,
 )
 
-from kernels import (
-    integrated_kernel_matrices,
-    normalize_kernel,
-    rkhs_norm_squared,
-)
-from multicountry_growth_kernel import make_train_grid
-from trade_growth.model import (
+from extra.trade_growth.model import (
     STATIC_BLOCK_NAMES,
     TradeGrowthParameters,
     consumption_basket_log_price,
@@ -38,12 +32,18 @@ from trade_growth.model import (
     multicountry_trade_tvc_diagnostics,
     static_trade_equilibrium,
 )
-from trade_growth.preconditioners import (
+from extra.trade_growth.preconditioners import (
     build_trade_growth_time_block_preconditioner,
     residual_time_permutation,
     trade_growth_preconditioner_apply,
 )
-from trade_growth.whitened import build_schur_preconditioner
+from extra.trade_growth.whitened import build_schur_preconditioner
+from kernels import (
+    integrated_kernel_matrices,
+    normalize_kernel,
+    rkhs_norm_squared,
+)
+from multicountry_growth_kernel import make_train_grid
 
 if __name__ == "__main__":
     jax.config.update("jax_enable_x64", True)

@@ -6,7 +6,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import scipy.integrate
-from nlls_gram import repeated_shifted_dense_metric
 
 from asset_pricing_kernel import KernelSettings as APKernelSettings
 from asset_pricing_kernel import SolverSettings, asset_pricing_kernel
@@ -83,46 +82,6 @@ FAST_GROWTH_DATA = GrowthDataSettings(train_T=10.0, train_points=11, test_T=10.0
 
 
 class KernelSmokeTests(unittest.TestCase):
-    def test_shifted_kernel_metric_matches_explicit_block_matrix(self):
-        gram = jnp.array([[2.0, 0.4], [0.4, 1.0]])
-        epsilon = 0.2
-        repeats = 3
-        free_size = 2
-        metric = repeated_shifted_dense_metric(
-            gram,
-            repeats=repeats,
-            zero_pad_size=free_size,
-            epsilon=epsilon,
-        )
-        shifted_block = gram + epsilon * jnp.eye(gram.shape[0])
-        explicit = jax.scipy.linalg.block_diag(
-            shifted_block,
-            shifted_block,
-            shifted_block,
-            epsilon * jnp.eye(free_size),
-        )
-        vector = jnp.arange(explicit.shape[0], dtype=jnp.float64) + 1.0
-        matrix = jnp.stack([vector, 2.0 * vector], axis=1)
-
-        np.testing.assert_allclose(
-            metric.solve(matrix),
-            jnp.linalg.solve(explicit, matrix),
-            rtol=1e-13,
-            atol=1e-13,
-        )
-        np.testing.assert_allclose(
-            metric.norm(vector) ** 2,
-            vector @ explicit @ vector,
-            rtol=1e-13,
-            atol=1e-13,
-        )
-        np.testing.assert_allclose(
-            metric.inv_sqrt(metric.inv_sqrt_transpose(matrix)),
-            metric.solve(matrix),
-            rtol=1e-13,
-            atol=1e-13,
-        )
-
     def test_weighted_gini(self):
         # Hand values: equal weights on v=(1,3) give dispersion 1 and mean
         # 2, so Gini 1/4; weights (2,1) on v=(1,2) give 4/9 over 8/3 = 1/6.

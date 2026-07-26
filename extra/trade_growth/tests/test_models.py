@@ -4,15 +4,15 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from trade_growth.comparative_statics import (
+from extra.trade_growth.comparative_statics import (
     build_multicountry_trade_comparative_statics,
 )
-from trade_growth.kernel import (
+from extra.trade_growth.kernel import (
     DataSettings,
     SolverSettings,
     multicountry_trade_growth_kernel,
 )
-from trade_growth.model import (
+from extra.trade_growth.model import (
     STATIC_BLOCK_NAMES,
     TradeGrowthParameters,
     multicountry_trade_allocations,
@@ -20,9 +20,9 @@ from trade_growth.model import (
     static_trade_equilibrium,
     symmetric_trade_growth_parameters,
 )
-from trade_growth.nn import DataSettings as MulticountryTradeNNDataSettings
-from trade_growth.nn import SequentialNNSettings, multicountry_trade_growth_nn
-from trade_growth.nn import SolverSettings as NNSolverSettings
+from extra.trade_growth.nn import DataSettings as MulticountryTradeNNDataSettings
+from extra.trade_growth.nn import SequentialNNSettings, multicountry_trade_growth_nn
+from extra.trade_growth.nn import SolverSettings as NNSolverSettings
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")

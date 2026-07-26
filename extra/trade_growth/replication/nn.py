@@ -7,14 +7,14 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 import jax
 import jsonargparse
 
-import trade_growth.nn as trade_growth_nn
+import extra.trade_growth.nn as trade_growth_nn
+from extra.trade_growth.replication.kernel import THREE_COUNTRY_PARAMETERS
 from replication.utilities import (
     enable_compilation_cache,
     ensemble,
     save_experiment,
     write_summary,
 )
-from trade_growth.replication.kernel import THREE_COUNTRY_PARAMETERS
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")

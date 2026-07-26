@@ -199,7 +199,6 @@ def asset_pricing_nn(
 
     solver = LevenbergMarquardt(
         residual_fn,
-        linear_solve_dtype=jnp.float64,
     )
     atol = math.sqrt(stop_set.train_loss_threshold)
     draw = DrawNNXModule(PricePolicyNN, nn_set, dtype=dtype)
@@ -234,7 +233,6 @@ def asset_pricing_nn(
         "x_0": x_0,
         "seed": seed,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "linear_solve_dtype": "float64",
         "solver": "nlls-gram",
         "ansatz": "sequential_time_level_nn",
         "metric": "identity_parameter_metric",

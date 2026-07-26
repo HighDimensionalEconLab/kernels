@@ -477,7 +477,6 @@ def open_economy_growth_nn_recursive(
         damping_increase=lm_set.damping_increase,
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
-        linear_solve_dtype=jnp.float64,
     )
     atol = math.sqrt(stop_set.train_loss_threshold)
     train_start = time.perf_counter()
@@ -637,7 +636,6 @@ def open_economy_growth_nn_recursive(
         "a_0": a_0,
         "seed": seed,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "linear_solve_dtype": "float64",
         "solver": "nlls-gram",
         "ansatz": "sequential_investment_current_account_levels",
         "selection": "minimum_identity_metric_parameter_step",

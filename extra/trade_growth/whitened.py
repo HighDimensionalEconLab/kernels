@@ -26,7 +26,7 @@ import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jsp_linalg
 
-from trade_growth.model import (
+from extra.trade_growth.model import (
     DYNAMIC_RESIDUAL_NAMES,
     STATIC_BLOCK_NAMES,
     consumption_basket_log_price,

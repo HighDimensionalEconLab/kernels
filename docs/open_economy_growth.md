@@ -1231,7 +1231,7 @@ The final model keeps the same dynamic shell but replaces one-good production wi
 implicit static trade equilibrium at each time.
 
 The mechanics are implemented separately in
-[`trade_growth/model.py`](../trade_growth/model.py). The existing
+[`trade_growth/model.py`](../extra/trade_growth/model.py). The existing
 [multicountry_growth.py](../multicountry_growth.py) and its kernel solver remain the
 standalone one-good example; the trade extension does not mutate or specialize them.
 

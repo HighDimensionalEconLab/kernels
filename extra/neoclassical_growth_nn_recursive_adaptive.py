@@ -347,7 +347,6 @@ def neoclassical_growth_nn_recursive_adaptive(
         damping_increase=lm_set.damping_increase,
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
-        linear_solve_dtype=jnp.float64,
     )
     _, theta_0, _ = nnx.split(
         InvestmentPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(init_key)),
@@ -481,7 +480,6 @@ def neoclassical_growth_nn_recursive_adaptive(
         "use_kinked_production": use_kinked_production,
         "seed": seed,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "linear_solve_dtype": "float64",
         "metric": "identity_parameter_metric",
         "selection": "minimum_identity_metric_parameter_step",
         "train_loss": float(result.info.loss),

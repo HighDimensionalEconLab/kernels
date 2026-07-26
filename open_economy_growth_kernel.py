@@ -10,11 +10,11 @@ import numpy as np
 import pandas as pd
 from nlls_gram import (
     QR,
+    AnnealRidge,
     Cholesky,
     LMStatus,
     RepeatedFactorMetric,
     RidgeLevenbergMarquardt,
-    ridge_continuation,
 )
 
 from kernels import (
@@ -287,13 +287,15 @@ def open_economy_growth_kernel(
         continuation_options = {}
     else:
         initial_ridge = lm_set.ridge_init
-        callback, user_state0 = ridge_continuation(
+        callback = AnnealRidge(
             ridge_floor=lm_set.ridge,
             decrease=lm_set.ridge_decrease,
             grad_rtol=lm_set.ridge_grad_rtol,
-            dtype=dtype,
         )
-        continuation_options = {"callback": callback, "user_state": user_state0}
+        continuation_options = {
+            "callback": callback,
+            "user_state": callback.init_state(dtype),
+        }
     solver = RidgeLevenbergMarquardt(
         residual_fn,
         metric=metric,

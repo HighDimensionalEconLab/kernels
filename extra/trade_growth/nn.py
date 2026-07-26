@@ -12,8 +12,7 @@ from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import LevenbergMarquardt, LMStatus
 
-from multicountry_growth_kernel import make_train_grid
-from trade_growth.model import (
+from extra.trade_growth.model import (
     STATIC_BLOCK_NAMES,
     TradeGrowthParameters,
     consumption_basket_log_price,
@@ -24,6 +23,7 @@ from trade_growth.model import (
     multicountry_trade_tvc_diagnostics,
     static_trade_equilibrium,
 )
+from multicountry_growth_kernel import make_train_grid
 from utilities import ACTIVATIONS, unit_softplus
 
 if __name__ == "__main__":

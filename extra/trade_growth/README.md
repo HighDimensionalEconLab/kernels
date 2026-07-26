@@ -25,19 +25,19 @@ recycling. Its optional endgame switches to whitened LSMR and uses the released
 Run modules from the repository root:
 
 ```bash
-uv run python -m trade_growth.replication.kernel --output_dir .results-trade
-uv run python -m trade_growth.replication.kernel_figures \
+uv run python -m extra.trade_growth.replication.kernel --output_dir .results-trade
+uv run python -m extra.trade_growth.replication.kernel_figures \
   --output_dir .results-trade
-uv run python -m trade_growth.replication.nn --output_dir .results-trade
-uv run python -m trade_growth.replication.comparison \
+uv run python -m extra.trade_growth.replication.nn --output_dir .results-trade
+uv run python -m extra.trade_growth.replication.comparison \
   --output_dir .results-trade
-uv run python -m trade_growth.replication.comparative_statics \
+uv run python -m extra.trade_growth.replication.comparative_statics \
   --output_dir .results-trade
-uv run python -m trade_growth.scaling --country_counts '[4,10,25,50]'
+uv run python -m extra.trade_growth.scaling --country_counts '[4,10,25,50]'
 ```
 
 Tests:
 
 ```bash
-uv run python -m unittest discover -s trade_growth/tests -v
+uv run python -m unittest discover -s extra/trade_growth/tests -v
 ```

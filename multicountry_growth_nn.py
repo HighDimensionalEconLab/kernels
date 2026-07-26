@@ -11,7 +11,14 @@ import numpy as np
 import pandas as pd
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
-from nlls_gram import DrawNNXModule, LevenbergMarquardt, LMStatus, MultiStart
+from nlls_gram import (
+    QR,
+    Cholesky,
+    DrawNNXModule,
+    LevenbergMarquardt,
+    LMStatus,
+    MultiStart,
+)
 
 from multicountry_growth import (
     InitialConditionSettings,
@@ -373,8 +380,9 @@ def multicountry_growth_nn(
         damping_increase=lm_set.damping_increase,
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
-        linear_solver=lm_set.linear_solver,
-        linear_solve_dtype=jnp.float64,
+        linear_solver={"auto": Cholesky(), "cholesky": Cholesky(), "qr": QR()}[
+            lm_set.linear_solver
+        ],
     )
     draw = DrawNNXModule(
         MulticountryGrowthNN,
@@ -548,7 +556,6 @@ def multicountry_growth_nn(
         "num_countries": num_countries,
         "seed": seed,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "linear_solve_dtype": "float64",
         "solver": "nlls-gram",
         "linear_solver": lm_set.linear_solver,
         "ansatz": "reduced_sequential_time_level_nn",

@@ -94,7 +94,7 @@ class MulticountryGrowthKernelDAETests(unittest.TestCase):
         self.assertEqual(results["free_initial_value_count"], 9)
         self.assertEqual(results["metric_selection_dimension"], 8)
         self.assertEqual(results["linear_solver"], "auto")
-        self.assertEqual(results["selection"], "minimum_shifted_rkhs_metric")
+        self.assertEqual(results["selection"], "minimum_rkhs_norm_ridge")
         self.assertEqual(
             results["global_closure"],
             "explicit_assets_and_index_consistent_clearing",

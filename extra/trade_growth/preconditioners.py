@@ -42,8 +42,7 @@ import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jsp_linalg
 
-from kernels import integrated_kernel_matrices, normalize_kernel
-from trade_growth.model import (
+from extra.trade_growth.model import (
     DYNAMIC_RESIDUAL_NAMES,
     STATIC_BLOCK_NAMES,
     TradeGrowthParameters,
@@ -51,6 +50,7 @@ from trade_growth.model import (
     multicountry_trade_path_values,
     static_trade_equilibrium,
 )
+from kernels import integrated_kernel_matrices, normalize_kernel
 
 NUM_STATIC_BLOCKS = len(STATIC_BLOCK_NAMES)
 

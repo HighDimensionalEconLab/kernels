@@ -39,23 +39,31 @@ The core pipeline covers:
 - `neoclassical_growth_kernel_uno.py`
 - `neoclassical_growth_concave_convex_kernel.py`
 - `neoclassical_growth_concave_convex_kernel_uno.py`
+- `neoclassical_growth_concave_convex_nn.py`
+- `neoclassical_growth_concave_convex_nn_recursive.py`
 - `asset_pricing_kernel.py`
 - `asset_pricing_kernel_uno.py`
 - `asset_pricing_nn.py`
 - `optimal_advertising_kernel.py`
 - `human_capital_kernel.py`
+- `neoclassical_growth_nn.py`
 - `neoclassical_growth_nn_recursive.py`
 - `open_economy_growth_kernel.py`
 - `open_economy_growth_kernel_uno.py`
+- `open_economy_growth_nn.py`
 - `open_economy_growth_nn_recursive.py`
 - `multicountry_growth_kernel.py`
 - `multicountry_growth_nn.py`
 
 Each driver in `replication/` writes Parquet data and summary JSON. Figure
 drivers read those saved results, and `replication/collect_json.py` assembles
-the authoritative paper-number file. Core NN baselines use 100 seeds, except
+the authoritative paper-number file. Core NN baselines use 100 seeds, except the open-economy sequence-space NN
+(21 seeds, at roughly two seconds per solve) and
 the multicountry NN replication, which uses five seeds and also pins a
 10-country width-32/depth-4 experiment without changing the solver defaults.
+Every NN driver allows each seed up to five multi-start restarts
+(`stop_set.num_attempts`), so `frac_accepted` measures acceptance within that
+restart budget rather than first-try robustness.
 The two open-economy paths included only
 for the transition figure use one displayed seed each. A deterministic kernel
 specification is solved five times with the persistent JAX cache enabled; its
@@ -73,7 +81,14 @@ The main kernel modules are:
 - `neoclassical_growth_kernel.py`: smooth or kinked neoclassical growth.
 - `neoclassical_growth_kernel_uno.py`: constrained growth kernel comparison.
 - `neoclassical_growth_concave_convex_kernel.py`: the butterfly-production
-  threshold experiment.
+  threshold experiment. `neoclassical_growth_concave_convex_nn.py` and
+  `neoclassical_growth_concave_convex_nn_recursive.py` run the same 70-point
+  `k_0` sweep with the two NN formulations. Basin correctness is scored
+  independently of solver acceptance in all four: a sequence-space solution
+  (kernel, UNO, sequential NN) may still be in motion at `test_T` and is
+  classified by the side it ends on plus the direction of its tail, while the
+  recursive policy is settled to `settle_T` and classified by the steady-state
+  ball it lands in. Neither test feeds back into the solve.
 - `optimal_advertising_kernel.py`: optimal advertising.
 - `human_capital_kernel.py`: the two-capital human-capital model.
 - `open_economy_growth_kernel.py`: the one-country open-economy DAE.
@@ -134,6 +149,14 @@ The main NN modules are deliberately limited:
   investment-share representation on `log(k) - log(z)`. The main paper driver
   retains its legacy `g=0`, single-path defaults; the optional fixed-kernel
   comparison uses positive growth and held-out initial-condition draws.
+- `open_economy_growth_nn.py`: the open-economy sequence-space MLP. It carries
+  the same five RKHS paths the kernel does as network outputs of `t`, imposes
+  the same five DAE residuals on the same front-loaded collocation grid, and
+  anchors `k(0) = k_0` and `a(0) = a_0` on the network's own value at zero --
+  leaving `c`, `mu`, and `q` free there, the NN counterpart of the kernel's
+  three unpenalized offsets. Saddle-path selection is the solver's
+  minimum-parameter-step bias from a near-zero head, with no ridge or RKHS
+  norm; the stable-manifold gap is reported ex post rather than imposed.
 - `open_economy_growth_nn_recursive.py`: the open-economy state-space policy.
 - `multicountry_growth_nn.py`: the reduced one-good multicountry sequential NN;
   consumption, investment, and the common rate are calculated from its four

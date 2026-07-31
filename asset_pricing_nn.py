@@ -50,7 +50,7 @@ class PricePolicySettings:
 class StoppingCriteria:
     max_steps: int = 400
     train_loss_threshold: float = 1e-15
-    num_attempts: int = 1
+    num_attempts: int = 5
 
 
 @struct.dataclass

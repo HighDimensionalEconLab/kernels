@@ -72,7 +72,9 @@ class StoppingCriteria:
     # discounted value of capital in marginal-utility units is below its O(1)
     # scale (saddle: -rho_hat t + O(1) << 0; a bubble is far positive).
     log_tvc_threshold: float = 0.0
-    num_attempts: int = 1  # single attempt: frac_accepted measures first-try robustness
+    # frac_accepted measures acceptance within the restart budget, not first-try
+    # robustness: a seed that stalls short of the loss threshold is redrawn.
+    num_attempts: int = 5
 
 
 # Local 8-seed grid: dec 0.5 / inc 2.0 is ~25% faster than 0.35/8.0 at the

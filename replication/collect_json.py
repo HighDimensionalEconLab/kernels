@@ -498,6 +498,69 @@ def human_capital_kernel(out):
     }
 
 
+def neoclassical_growth_nn(out):
+    prefix = "neoclassical_growth_nn"
+
+    # Medians over ACCEPTED seeds only, matching the recursive NN contract.
+    baseline_json = load(out, f"{prefix}_baseline")
+    baseline_df = pd.read_parquet(out / f"{prefix}_baseline_results.parquet")
+    accepted = baseline_df[baseline_df["solution_accepted"]]
+    if accepted.empty:
+        raise RuntimeError("sequence-space growth NN has no accepted seeds")
+    hp = load(out, f"{prefix}_baseline_hyperparameters")
+
+    return {
+        "parameters": hp["parameters"],
+        "initial_conditions": hp["initial_conditions"],
+        "data": hp["data_set"],
+        "architecture": {
+            "width": hp["nn_set"]["width"],
+            "depth": hp["nn_set"]["depth"],
+            "hidden_activation": hp["nn_set"]["hidden_activation"],
+            "total_params": int(med(baseline_json["total_params"])),
+        },
+        "stopping": {
+            "train_loss_threshold": hp["stop_set"]["train_loss_threshold"],
+            "max_steps": hp["stop_set"]["max_steps"],
+            "num_attempts": hp["stop_set"]["num_attempts"],
+            "log_tvc_threshold": hp["stop_set"]["log_tvc_threshold"],
+        },
+        "n_seeds": int(baseline_json["n_seeds"]),
+        "experiments": {
+            "baseline": {
+                "frac_accepted": sig(baseline_json["frac_accepted"]),
+                "test_mean_abs_k_rel_error_median": sci(
+                    float(accepted["test_mean_abs_k_rel_error"].median())
+                ),
+                "test_mean_abs_c_rel_error_median": sci(
+                    float(accepted["test_mean_abs_c_rel_error"].median())
+                ),
+                "test_resource_mean_abs_median": sci(
+                    float(accepted["test_resource_mean_abs"].median())
+                ),
+                "test_euler_mean_abs_median": sci(
+                    float(accepted["test_euler_mean_abs"].median())
+                ),
+                "max_train_residual_median": sci(
+                    float(accepted["max_train_residual"].median())
+                ),
+                # Post-hoc saddle check at test_tvc_T: negative and O(1)-scaled
+                # away from zero is the no-bubble side.
+                "log_tvc_residual_median": sig(
+                    float(accepted["log_tvc_residual"].median()), 4
+                ),
+                "frac_transversality_ok": sig(
+                    float(accepted["transversality_ok"].mean())
+                ),
+                "train_time_median": sig(float(accepted["train_time"].median())),
+                "steps_median": sig(float(accepted["steps"].median())),
+                **final_damping_summary(accepted),
+                "num_train_points": int(med(baseline_json["num_train_points"])),
+            }
+        },
+    }
+
+
 def neoclassical_growth_nn_recursive(out):
     prefix = "neoclassical_growth_nn_recursive"
 
@@ -606,8 +669,9 @@ def open_economy_growth_kernel(
     }
 
 
-def open_economy_growth_nn_recursive(out):
-    prefix = "open_economy_growth_nn_recursive"
+def open_economy_growth_nn_recursive(out, prefix="open_economy_growth_nn_recursive"):
+    # Shared by the sequence-space driver: identical experiments, result
+    # columns, and architecture block.
     hp = load(out, f"{prefix}_baseline_hyperparameters")
 
     def experiment(name):
@@ -813,9 +877,9 @@ def performance_comparisons(out):
 
     growth_kernel = load(out, "neoclassical_growth_kernel_baseline")
     growth_uno = load(out, "neoclassical_growth_kernel_uno_baseline")
-    growth_nn = accepted("neoclassical_growth_nn_recursive")
+    growth_sequential_nn = accepted("neoclassical_growth_nn")
+    growth_recursive_nn = accepted("neoclassical_growth_nn_recursive")
     growth_kernel_time = med(growth_kernel["wall_time"])
-    growth_nn_time = float(growth_nn["train_time"].median())
     growth_kernel_error = max(
         med(growth_kernel["k_rel_error_mean"]),
         med(growth_kernel["c_rel_error_mean"]),
@@ -825,20 +889,33 @@ def performance_comparisons(out):
         med(growth_uno["k_rel_error_mean"]),
         med(growth_uno["c_rel_error_mean"]),
     )
-    growth_nn_error = max(
-        float(growth_nn["test_mean_abs_k_rel_error"].median()),
-        float(growth_nn["test_mean_abs_c_rel_error"].median()),
-    )
+
+    # Both NN formulations against the same sequence-space kernel baseline: the
+    # sequential MLP shares the kernel's t -> (k, c) ansatz, the recursive one
+    # learns a state-space policy rolled forward by RK4.
+    def growth_nn_stats(frame):
+        return (
+            float(frame["train_time"].median()),
+            max(
+                float(frame["test_mean_abs_k_rel_error"].median()),
+                float(frame["test_mean_abs_c_rel_error"].median()),
+            ),
+        )
 
     open_kernel = load(out, "open_economy_growth_kernel_baseline")
     open_uno = load(out, "open_economy_growth_kernel_uno_baseline")
-    open_nn = accepted("open_economy_growth_nn_recursive")
+    open_sequential_nn = accepted("open_economy_growth_nn")
+    open_recursive_nn = accepted("open_economy_growth_nn_recursive")
     open_kernel_time = med(open_kernel["wall_time"])
     open_uno_time = med(open_uno["wall_time"])
-    open_nn_time = float(open_nn["train_time"].median())
     open_kernel_error = med(open_kernel["max_benchmark_error"])
     open_uno_error = med(open_uno["max_benchmark_error"])
-    open_nn_error = float(open_nn["max_benchmark_error"].median())
+
+    def open_nn_stats(frame):
+        return (
+            float(frame["train_time"].median()),
+            float(frame["max_benchmark_error"].median()),
+        )
 
     multicountry_kernel = load(out, "multicountry_growth_kernel_initial_debt")
     multicountry_nn_frame = accepted("multicountry_growth_nn")
@@ -847,22 +924,29 @@ def performance_comparisons(out):
     multicountry_kernel_error = med(multicountry_kernel["max_benchmark_error"])
     multicountry_nn_error = float(multicountry_nn_frame["max_benchmark_error"].median())
 
+    # nn_variants maps a key prefix to (time, error). A lone "nn" entry keeps the
+    # flat nn_* keys; neoclassical growth carries sequential and recursive
+    # side by side against the one kernel baseline.
     def comparison(
         kernel_time,
-        nn_time,
         kernel_error,
-        nn_error,
+        nn_variants,
         uno_time=None,
         uno_error=None,
     ):
         values = {
             "kernel_solve_time_median": sig(kernel_time),
-            "nn_solve_time_median": sig(nn_time),
-            "nn_to_kernel_time_ratio": sig(nn_time / kernel_time),
             "kernel_error": sci(kernel_error),
-            "nn_error_median": sci(nn_error),
-            "nn_to_kernel_error_ratio": sig(nn_error / kernel_error),
         }
+        for name, (nn_time, nn_error) in nn_variants.items():
+            values.update(
+                {
+                    f"{name}_solve_time_median": sig(nn_time),
+                    f"{name}_to_kernel_time_ratio": sig(nn_time / kernel_time),
+                    f"{name}_error_median": sci(nn_error),
+                    f"{name}_to_kernel_error_ratio": sig(nn_error / kernel_error),
+                }
+            )
         if uno_time is not None:
             values.update(
                 {
@@ -870,10 +954,15 @@ def performance_comparisons(out):
                     "uno_to_kernel_time_ratio": sig(uno_time / kernel_time),
                     "uno_error": sci(uno_error),
                     "uno_to_kernel_error_ratio": sig(uno_error / kernel_error),
-                    "nn_to_uno_time_ratio": sig(nn_time / uno_time),
-                    "nn_to_uno_error_ratio": sig(nn_error / uno_error),
                 }
             )
+            for name, (nn_time, nn_error) in nn_variants.items():
+                values.update(
+                    {
+                        f"{name}_to_uno_time_ratio": sig(nn_time / uno_time),
+                        f"{name}_to_uno_error_ratio": sig(nn_error / uno_error),
+                    }
+                )
         return values
 
     return {
@@ -881,39 +970,43 @@ def performance_comparisons(out):
             "kernel": "median of five cached deterministic solves",
             "uno": "median of five cached deterministic constrained solves",
             "nn": (
-                "median across accepted seeds from 100 initializations; "
-                "five for multicountry growth"
+                "median across accepted seeds from 100 initializations "
+                "(21 for the open-economy sequence-space NN, five for "
+                "multicountry growth), each seed allowed up to five "
+                "multi-start restarts"
             ),
         },
         "asset_pricing": comparison(
             asset_kernel_time,
-            asset_nn_time,
             asset_kernel_error,
-            asset_nn_error,
+            {"nn": (asset_nn_time, asset_nn_error)},
             asset_uno_time,
             asset_uno_error,
         ),
         "neoclassical_growth": comparison(
             growth_kernel_time,
-            growth_nn_time,
             growth_kernel_error,
-            growth_nn_error,
+            {
+                "sequential_nn": growth_nn_stats(growth_sequential_nn),
+                "recursive_nn": growth_nn_stats(growth_recursive_nn),
+            },
             growth_uno_time,
             growth_uno_error,
         ),
         "open_economy_growth": comparison(
             open_kernel_time,
-            open_nn_time,
             open_kernel_error,
-            open_nn_error,
+            {
+                "sequential_nn": open_nn_stats(open_sequential_nn),
+                "recursive_nn": open_nn_stats(open_recursive_nn),
+            },
             open_uno_time,
             open_uno_error,
         ),
         "multicountry_growth": comparison(
             multicountry_kernel_time,
-            multicountry_nn_time,
             multicountry_kernel_error,
-            multicountry_nn_error,
+            {"nn": (multicountry_nn_time, multicountry_nn_error)},
         ),
     }
 
@@ -921,7 +1014,9 @@ def performance_comparisons(out):
 def validate_replication_contract(out):
     nn_seed_counts = {
         "asset_pricing_nn": 100,
+        "neoclassical_growth_nn": 100,
         "neoclassical_growth_nn_recursive": 100,
+        "open_economy_growth_nn": 21,
         "open_economy_growth_nn_recursive": 100,
         "multicountry_growth_nn": 5,
     }
@@ -984,6 +1079,23 @@ def collect(output_dir: str = ".results"):
                     require_all=False,
                 )
             ),
+            # require_all=False for both NNs: solver acceptance is scored
+            # separately from basin correctness, so a rejected grid point is
+            # data rather than a pipeline failure.
+            "neoclassical_growth_concave_convex_nn": (
+                neoclassical_growth_concave_convex_kernel(
+                    out,
+                    prefix="neoclassical_growth_concave_convex_nn",
+                    require_all=False,
+                )
+            ),
+            "neoclassical_growth_concave_convex_nn_recursive": (
+                neoclassical_growth_concave_convex_kernel(
+                    out,
+                    prefix="neoclassical_growth_concave_convex_nn_recursive",
+                    require_all=False,
+                )
+            ),
             "asset_pricing_kernel": asset_pricing_kernel(out),
             "asset_pricing_kernel_uno": asset_pricing_kernel(
                 out, prefix="asset_pricing_kernel_uno"
@@ -991,12 +1103,16 @@ def collect(output_dir: str = ".results"):
             "asset_pricing_nn": asset_pricing_nn(out),
             "optimal_advertising_kernel": optimal_advertising_kernel(out),
             "human_capital_kernel": human_capital_kernel(out),
+            "neoclassical_growth_nn": neoclassical_growth_nn(out),
             "neoclassical_growth_nn_recursive": neoclassical_growth_nn_recursive(out),
             "open_economy_growth_kernel": open_economy_growth_kernel(out),
             "open_economy_growth_kernel_uno": open_economy_growth_kernel(
                 out,
                 prefix="open_economy_growth_kernel_uno",
                 selection="minimum_rkhs_norm_constrained",
+            ),
+            "open_economy_growth_nn": open_economy_growth_nn_recursive(
+                out, prefix="open_economy_growth_nn"
             ),
             "open_economy_growth_nn_recursive": open_economy_growth_nn_recursive(out),
             "multicountry_growth_kernel": multicountry_growth_kernel(out),

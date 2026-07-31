@@ -755,7 +755,7 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertTrue(results["benchmark_match"])
         self.assertEqual(results["terminal_residual_count"], 0)
         self.assertEqual(results["num_training_trajectories"], 1)
-        self.assertTrue(results["fixed_collocation_exact"])
+        self.assertEqual(results["point_rule"], "fixed_accepted_steps")
         self.assertEqual(results["dae_residual_count"], 2 * results["num_train_points"])
         self.assertEqual(results["domain_residual_count"], results["num_train_points"])
         self.assertEqual(results["residual_count"], 3 * results["num_train_points"])

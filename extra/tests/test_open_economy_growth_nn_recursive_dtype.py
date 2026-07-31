@@ -23,8 +23,7 @@ class OpenEconomyRecursiveDtypeTests(unittest.TestCase):
         dtype = jnp.float32
         data_set = recursive.DataSettings(
             train_T=2.0,
-            train_points=3,
-            rollout_steps=4,
+            train_points=5,
             test_T=2.0,
             test_points=3,
             diagnostic_T=2.0,
@@ -43,11 +42,13 @@ class OpenEconomyRecursiveDtypeTests(unittest.TestCase):
             rngs=nnx.Rngs(0),
         )
         graphdef, theta, fixed_state = nnx.split(model, nnx.Param, ...)
-        train_t = recursive.make_train_t_grid(data_set, dtype)
+        train_steps = data_set.train_points - 1
+        train_t = jnp.linspace(
+            0.0, data_set.train_T, data_set.train_points, dtype=dtype
+        )
         args = recursive.ResidualArgs(
             graphdef=graphdef,
             fixed_state=fixed_state,
-            train_t=train_t,
             data_set=data_set,
         )
         p = recursive.ResidualParameters(
@@ -59,18 +60,17 @@ class OpenEconomyRecursiveDtypeTests(unittest.TestCase):
         initial_k = jnp.reshape(p.k_0, (1,))
         solution = recursive.collocation_rollout(
             policy,
-            train_t,
             initial_k,
             parameters,
             data_set,
         )
 
-        self.assertEqual(solution.ts.shape, (1, 3))
-        self.assertEqual(solution.xs.shape, (1, 3, 2))
+        self.assertEqual(solution.ts.shape, (1, data_set.train_points))
+        self.assertEqual(solution.xs.shape, (1, data_set.train_points, 2))
         self.assertEqual(solution.ok.shape, (1,))
         self.assertTrue(bool(solution.ok[0]))
-        self.assertEqual(int(solution.num_steps[0]), data_set.rollout_steps)
-        self.assertEqual(int(solution.num_accepted[0]), data_set.rollout_steps)
+        self.assertEqual(int(solution.num_steps[0]), train_steps)
+        self.assertEqual(int(solution.num_accepted[0]), train_steps)
         np.testing.assert_array_equal(solution.ts[0], train_t)
 
         residual = recursive.residual_fn(theta, args, p)
@@ -98,14 +98,13 @@ class OpenEconomyRecursiveDtypeTests(unittest.TestCase):
         )
         rollout_jaxpr = str(
             jax.make_jaxpr(
-                lambda value, times, capital: recursive.collocation_rollout(
+                lambda value, capital: recursive.collocation_rollout(
                     value,
-                    times,
                     capital,
                     parameters,
                     data_set,
                 )
-            )(policy, train_t, initial_k)
+            )(policy, initial_k)
         )
         self.assertNotIn("f64", residual_jaxpr)
         self.assertNotIn("f64", vjp_jaxpr)

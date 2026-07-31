@@ -194,7 +194,6 @@ class BalancedGrowthRecursiveNNTests(unittest.TestCase):
     def test_multiple_initial_conditions_are_vmapped_and_stacked(self):
         data_set = DataSettings(
             train_T=20.0,
-            train_steps=16,
             train_points=33,
             train_tvc_T=50.0,
             test_T=10.0,

@@ -49,8 +49,10 @@ STATUS_TO_REASON = {
 class DataSettings:
     collocation_source: Literal["exact_path"] = "exact_path"
     train_T: float = 100.0
+    # Number of fixed RKHS centers placed along the exact path. Unlike the
+    # recursive NN, nothing is integrated during training, so this is a
+    # representation size rather than a collocation grid over a rollout.
     train_points: int = 65
-    train_steps: int = 128
     dt: float = 1.0
     ode_solver: Literal["rk4", "euler"] = "rk4"
     tvc_steps: int = 256
@@ -102,8 +104,8 @@ class ResidualArgs:
 def validate_settings(data_set, kernel_set, lm_set, ic_set):
     if data_set.collocation_source != "exact_path":
         raise ValueError(f"unknown collocation_source: {data_set.collocation_source!r}")
-    if data_set.train_points < 2 or data_set.train_steps < 1:
-        raise ValueError("train_points must be at least two and train_steps positive")
+    if data_set.train_points < 2:
+        raise ValueError("train_points must be at least two")
     if data_set.train_T <= 0.0 or data_set.test_T <= 0.0:
         raise ValueError("train_T and test_T must be positive")
     if data_set.dt <= 0.0 or data_set.tvc_steps < 1:
@@ -493,8 +495,6 @@ def neoclassical_growth_kernel_recursive(
         "test_kappa_0_max": float(test_kappa_0.max()),
         "test_log_variance": ic_set.test_log_variance,
         "train_point_dt": data_set.train_T / (data_set.train_points - 1),
-        "nn_train_internal_dt": data_set.train_T / data_set.train_steps,
-        "train_steps": data_set.train_steps,
         "dt": data_set.dt,
         "train_T": data_set.train_T,
         "test_T": test_T,

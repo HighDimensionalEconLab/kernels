@@ -114,7 +114,6 @@ def run(
     test_log_variance: float = 0.0025,
     train_T: float = 100.0,
     train_points: int = 65,
-    train_steps: int = 128,
     train_tvc_T: float = 200.0,
     tvc_steps: int = 256,
     test_T: float = 40.0,
@@ -132,7 +131,6 @@ def run(
         "num_test_trajectories": num_test_trajectories,
         "train_T": train_T,
         "train_points": train_points,
-        "train_steps": train_steps,
         "train_tvc_T": train_tvc_T,
         "tvc_steps": tvc_steps,
         "test_T": test_T,
@@ -153,6 +151,8 @@ def run(
         "ic_set": ic_set,
         "verbose": verbose,
     }
+    # ``train_points`` means the same count on both sides: the NN's rollout
+    # knots and the kernel's fixed centers land on the same dates.
     meta = {
         "n_nn_seeds": n_nn_seeds,
         "data_seed": data_seed,

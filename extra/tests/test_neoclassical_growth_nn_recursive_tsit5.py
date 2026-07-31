@@ -69,8 +69,6 @@ class RecursiveGrowthTsit5Tests(unittest.TestCase):
             data_set=DataSettings(
                 ode_solver="tsit5",
                 train_T=8.0,
-                train_steps=16,
-                train_points=17,
                 adaptive_attempt_budget=32,
                 train_tvc_T=20.0,
                 tvc_steps=32,
@@ -189,9 +187,10 @@ class RecursiveGrowthTsit5Tests(unittest.TestCase):
         data_set = DataSettings(
             ode_solver="rk4",
             train_T=8.0,
-            train_steps=8,
-            train_points=5,
+            train_points=9,
         )
+        expected_states = data_set.train_points
+        expected_steps = expected_states - 1
         for initial_conditions in (
             ((1.0,), (1.0,)),
             ((1.0, 1.02, 0.98), (1.0, 0.98, 1.02)),
@@ -215,7 +214,7 @@ class RecursiveGrowthTsit5Tests(unittest.TestCase):
             expected_times = jnp.linspace(
                 jnp.asarray(0.0, dtype=jnp.float32),
                 jnp.asarray(data_set.train_T, dtype=jnp.float32),
-                data_set.train_points,
+                expected_states,
                 dtype=jnp.float32,
             )
 
@@ -227,19 +226,19 @@ class RecursiveGrowthTsit5Tests(unittest.TestCase):
             self.assertTrue(bool(jnp.isfinite(cotangent)))
             self.assertEqual(
                 solution.ts.shape,
-                (len(initial_conditions[0]), data_set.train_points),
+                (len(initial_conditions[0]), expected_states),
             )
             self.assertEqual(
                 solution.xs.shape,
-                (len(initial_conditions[0]), data_set.train_points, 2),
+                (len(initial_conditions[0]), expected_states, 2),
             )
             self.assertTrue(bool(jnp.all(solution.ok)))
-            self.assertTrue(bool(jnp.all(solution.num_steps == data_set.train_steps)))
+            self.assertTrue(bool(jnp.all(solution.num_steps == expected_steps)))
             np.testing.assert_array_equal(
                 np.asarray(solution.ts),
                 np.broadcast_to(
                     np.asarray(expected_times),
-                    (len(initial_conditions[0]), data_set.train_points),
+                    (len(initial_conditions[0]), expected_states),
                 ),
             )
 

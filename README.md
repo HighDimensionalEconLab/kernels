@@ -147,11 +147,13 @@ The main NN modules are deliberately limited:
 - `neoclassical_growth_nn.py`: direct sequence-space MLP.
 - `neoclassical_growth_nn_recursive.py`: recursive NN with separate TFP and
   capital states, exogenous `dz/dt = g z`, and a homothetic investment-share
-  representation on `log(k) - log(z)`. Training collocation can use exact
-  aligned knots from the fixed RK4 rollout or Tsit5's genuinely adaptive
-  accepted internal states; both modes retain static residual shapes through an
-  accepted-prefix mask and use the same fixed RK4 held-out evaluator. The main
-  paper driver retains its legacy `g=0`, single-path and fixed-RK4 defaults;
+  representation on `log(k) - log(z)`. Training collocation is always the
+  integrator's own accepted states -- `train_points` knots from the fixed RK4
+  rollout, or Tsit5's genuinely adaptive accepted internal states -- so nothing
+  is interpolated inside the differentiated residual. Both modes retain static
+  residual shapes through an accepted-prefix mask and use the same fixed RK4
+  held-out evaluator. The main paper driver retains its legacy `g=0`,
+  single-path and fixed-RK4 defaults;
   `neoclassical_growth_kernel_recursive.py` is the kernel counterpart on the
   same state-space formulation, with positive growth and held-out
   initial-condition draws.
@@ -182,7 +184,7 @@ Every solver returns `(results, extras)`, writes nothing itself, and exposes a
 
 ```bash
 uv run python neoclassical_growth_kernel.py --kernel_set.ell 5.0
-uv run python neoclassical_growth_nn_recursive.py --seed 3 --data_set.train_steps 48
+uv run python neoclassical_growth_nn_recursive.py --seed 3 --data_set.train_points 49
 uv run python neoclassical_growth_nn_recursive.py --seed 3 \
   --data_set.ode_solver tsit5
 uv run python multicountry_growth_kernel.py --a_0 '[-0.5, 0.5]'

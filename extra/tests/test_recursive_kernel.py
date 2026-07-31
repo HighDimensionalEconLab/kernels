@@ -16,6 +16,9 @@ from neoclassical_growth_kernel_recursive import (
     residual_fn,
 )
 from neoclassical_growth_nn_recursive import (
+    DataSettings as NNDataSettings,
+)
+from neoclassical_growth_nn_recursive import (
     StructuralParameters,
     draw_test_initial_conditions,
     initial_condition_array,
@@ -47,8 +50,13 @@ class FixedRecursiveKernelTests(unittest.TestCase):
         np.testing.assert_allclose(states[0, :, 0], np.exp(0.02 * train_t[0]))
         self.assertTrue(np.all(states > 0.0))
         self.assertTrue(np.all(np.asarray(train_c) > 0.0))
-        self.assertEqual(data_set.train_steps, 128)
-        self.assertAlmostEqual(data_set.train_T / data_set.train_steps, 0.78125)
+        # The recursive NN collocates on its own rollout knots, so equal
+        # train_points puts both methods on exactly the same dates.
+        nn_data_set = NNDataSettings(
+            train_T=data_set.train_T, train_points=data_set.train_points
+        )
+        nn_knots = np.linspace(0.0, nn_data_set.train_T, nn_data_set.train_points)
+        np.testing.assert_allclose(np.asarray(train_t[0]), nn_knots, atol=1e-12)
 
     def test_test_draws_keep_z_and_k_separate(self):
         data_set = DataSettings(num_test_trajectories=12)

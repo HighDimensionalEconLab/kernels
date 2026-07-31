@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, replace
 from functools import partial
 from typing import Literal
 
@@ -61,18 +61,21 @@ STATUS_TO_REASON = {
 
 @dataclass(frozen=True)
 class DataSettings:
+    # Training collocation is the integrator's own accepted states. A
+    # fixed-step solve takes exactly ``train_points - 1`` steps of
+    # ``train_T / (train_points - 1)`` and collocates on every knot, so nothing
+    # is interpolated inside the differentiated residual.
     dt: float = 1.0
-    # The default fixed-step grid uses every RK4 knot, avoiding interpolation
-    # inside the differentiated residual.
+    train_points: int = 65
     ode_solver: Literal["tsit5", "rk4", "euler", "rodas5p"] = "rk4"
-    rollout_steps: int = 64
+    # Attempt budget for adaptive training solvers; accepted-state capacity is
+    # the budget plus one.
+    adaptive_attempt_budget: int = 80
     diagnostic_steps: int = 160
     rtol: float = 6.3e-7
     atol: float = 2.2e-7
     adaptive_dt_min: float | None = None
     train_T: float = 40.0
-    train_points: int = 65
-    train_points_list: list[float] | None = field(default=None, hash=False)
     test_T: float = 50.0
     test_points: int = 51
     diagnostic_T: float = 160.0
@@ -114,7 +117,6 @@ class SequentialPolicySettings:
 class ResidualArgs:
     graphdef: nnx.GraphDef
     fixed_state: nnx.State
-    train_t: jax.Array
     data_set: DataSettings = struct.field(pytree_node=False)
 
 
@@ -222,20 +224,10 @@ class DrawSequentialPolicy:
         )
 
 
-def make_train_t_grid(data_set, dtype):
-    if data_set.train_points_list is None:
-        values = np.linspace(
-            0.0,
-            data_set.train_T,
-            data_set.train_points,
-            dtype=np.float64,
-        ).tolist()
-    else:
-        values = list(data_set.train_points_list)
-    values = sorted({0.0, *(float(value) for value in values)})
-    if values[0] < 0.0 or values[-1] > data_set.train_T:
-        raise ValueError("training times must lie in [0, train_T]")
-    return jnp.asarray(values, dtype=dtype)
+def collocation_budget(data_set):
+    if data_set.ode_solver in ("rk4", "euler"):
+        return data_set.train_points - 1
+    return data_set.adaptive_attempt_budget
 
 
 def policy_values(policy, k, a, parameters):
@@ -358,63 +350,66 @@ def states_from_solution(solution, k_0, a_0, flow_scale):
 
 
 @partial(jax.jit, static_argnames=("data_set",))
-def collocation_rollout(policy, train_t, initial_k, parameters, data_set):
-    train_t = jnp.asarray(train_t, dtype=initial_k.dtype)
-    default_uniform_grid = data_set.train_points_list is None
-    aligned_fixed_grid = (
-        data_set.ode_solver in ("rk4", "euler")
-        and default_uniform_grid
-        and data_set.train_points > 1
-        and data_set.rollout_steps % (data_set.train_points - 1) == 0
-    )
-    save_at = SaveAt(ts=train_t, exact=aligned_fixed_grid)
-
+def collocation_rollout(policy, initial_k, parameters, data_set):
     def solve_one(k_0):
         return rollout(
             policy,
             data_set.train_T,
-            data_set.rollout_steps,
+            collocation_budget(data_set),
             k_0,
             parameters,
             data_set,
-            save_at=save_at,
+            save_at=SaveAt(steps=True),
         )
 
     return jax.vmap(solve_one)(initial_k)
 
 
-def collocation_states(policy, train_t, k_0, a_0, parameters, data_set):
+def collocation_states(policy, k_0, a_0, parameters, data_set):
+    """Return collocation states, the active-state mask, and the raw solution.
+
+    An adaptive controller accepts a variable number of steps, so the buffer is
+    padded to capacity. Padding repeats the last accepted state and is removed
+    from the objective and its derivatives by ``active``.
+    """
     initial_k = jnp.reshape(k_0, (1,))
     initial_a = jnp.reshape(a_0, (1,))
-    solution = collocation_rollout(
-        policy,
-        train_t,
-        initial_k,
-        parameters,
-        data_set,
-    )
-    return jax.vmap(states_from_solution, in_axes=(0, 0, 0, None))(
+    solution = collocation_rollout(policy, initial_k, parameters, data_set)
+    states = jax.vmap(states_from_solution, in_axes=(0, 0, 0, None))(
         solution,
         initial_k,
         initial_a,
         policy.flow_scale[...],
     )
+    safe_states = jnp.where(
+        solution.accepted[..., None],
+        states,
+        jnp.stack([initial_k, initial_a], axis=1)[:, None, :],
+    )
+    return safe_states, solution.accepted, solution
 
 
 def residual_fn(theta, args, p):
     policy = nnx.merge(args.graphdef, theta, args.fixed_state)
-    states = collocation_states(
+    states, active, solution = collocation_states(
         policy,
-        args.train_t,
         p.k_0,
         p.a_0,
         p.model,
         args.data_set,
     )
     values = path_values(policy, states.reshape(-1, 2), p.model)
-    residual = jnp.concatenate([values["q_euler"], values["c_euler"]])
-    residual_count = jnp.asarray(residual.size, dtype=residual.dtype)
-    return residual / jnp.sqrt(residual_count)
+    euler = jnp.stack([values["q_euler"], values["c_euler"]], axis=-1)
+    euler = euler.reshape(active.shape + (2,))
+    active_count = jnp.asarray(jnp.maximum(jnp.sum(active), 1), dtype=euler.dtype)
+    residual = jnp.where(active[..., None], euler, jnp.zeros_like(euler)) / jnp.sqrt(
+        2.0 * active_count
+    )
+    # A budget-exhausted trajectory did not cover the requested economic
+    # horizon. Make that a loud optimizer failure instead of fitting a prefix.
+    return jnp.where(
+        solution.ok[:, None, None], residual, jnp.full_like(residual, jnp.inf)
+    ).reshape(-1)
 
 
 @partial(jax.jit, static_argnames=("budget",))
@@ -470,6 +465,8 @@ def open_economy_growth_nn_recursive(
         stop_set = replace(stop_set, train_loss_threshold=threshold)
     if k_0 <= 0.0:
         raise ValueError("k_0 must be positive")
+    if data_set.train_points < 2:
+        raise ValueError("train_points must be at least two")
     if data_set.diagnostic_T < max(data_set.train_T, data_set.test_T):
         raise ValueError("diagnostic_T must cover the train and test horizons")
     if data_set.benchmark_T < data_set.test_T:
@@ -494,7 +491,8 @@ def open_economy_growth_nn_recursive(
         investment_anchor=max(parameters.delta * k_0, DOMAIN_EPS),
         k_0_ref=k_0,
     )
-    train_t = make_train_t_grid(data_set, dtype)
+    train_steps = data_set.train_points - 1
+    train_t = jnp.linspace(0.0, data_set.train_T, data_set.train_points, dtype=dtype)
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     diagnostic_t = jnp.linspace(
         0.0,
@@ -508,7 +506,6 @@ def open_economy_growth_nn_recursive(
     residual_args = ResidualArgs(
         graphdef=graphdef,
         fixed_state=fixed_state,
-        train_t=train_t,
         data_set=data_set,
     )
     residual_parameters = ResidualParameters(
@@ -548,7 +545,7 @@ def open_economy_growth_nn_recursive(
     train_eval = evaluate_path(
         policy,
         train_t,
-        data_set.rollout_steps,
+        train_steps,
         k_0_jax,
         a_0_jax,
         parameters,
@@ -749,11 +746,10 @@ def open_economy_growth_nn_recursive(
         "train_T": data_set.train_T,
         "num_train_points": int(train_t.size),
         "num_training_trajectories": 1,
-        "fixed_collocation_exact": (
-            data_set.ode_solver in ("rk4", "euler")
-            and data_set.train_points_list is None
-            and data_set.train_points > 1
-            and data_set.rollout_steps % (data_set.train_points - 1) == 0
+        "point_rule": (
+            "fixed_accepted_steps"
+            if data_set.ode_solver in ("rk4", "euler")
+            else "adaptive_accepted_steps"
         ),
         "test_T": data_set.test_T,
         "diagnostic_T": data_set.diagnostic_T,

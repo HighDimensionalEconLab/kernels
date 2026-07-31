@@ -93,11 +93,11 @@ test-path, TVC, train-Euler, and benchmark-error gates.
 | fixed RK4 requested dates (historical interpolated-save path) | 65 | 41 | 1.058 | 1.21e-6 | 7.31e-7 | 1.57e-6 |
 | Tsit5 accepted states | 67 | 32 | 1.833 | 8.28e-7 | 5.53e-7 | 6.62e-7 |
 
-The fixed-row timing predates Tinydiffeq's exact-knot save path. Those residual
-dates already coincided with every second RK4 knot, but the old implementation
-still passed through its interpolated output machinery. Treat the fixed timing
-and the adaptive-to-fixed speed ratio as historical until this comparison is
-regenerated with `SaveAt(exact=True)`.
+The fixed row is historical: it predates collocating directly on the
+integrator's accepted states. Both modes now save with `SaveAt(steps=True)`, so
+the fixed mode takes `train_points - 1` steps and places a residual on every
+knot with nothing interpolated. Treat the fixed timing and the
+adaptive-to-fixed speed ratio as stale until this comparison is regenerated.
 
 Tsit5's accepted step sizes ranged from about 0.158 to 13.87, with median
 0.657, so this is genuinely adaptive rather than a disguised fixed grid. It is

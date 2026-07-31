@@ -58,15 +58,16 @@ class StructuralParameters:
 
 @dataclass(frozen=True)
 class DataSettings:
-    # ``ode_solver`` selects the training collocation rule. Tsit5 contributes
-    # its accepted internal states rather than interpolating onto a fixed grid.
-    # Held-out, TVC, and settling paths use ``evaluation_ode_solver`` so method
+    # Training collocation is always the integrator's own accepted states.
+    # A fixed-step solve therefore takes exactly ``train_points - 1`` steps of
+    # ``train_T / (train_points - 1)`` and collocates on every knot; Tsit5
+    # contributes whatever states its controller accepts. Held-out, TVC, and
+    # settling paths use ``evaluation_ode_solver`` at ``dt`` so method
     # comparisons share exactly the same evaluation discretization.
     dt: float = 1.0
+    train_points: int = 65
     ode_solver: Literal["rk4", "euler", "tsit5"] = "rk4"
     evaluation_ode_solver: Literal["rk4", "euler"] = "rk4"
-    train_steps: int = 128
-    train_points: int = 65
     # This is an attempt budget, so accepted-state capacity is budget + 1.
     # It leaves validated rejection headroom above the roughly 65 accepted
     # states targeted by the T=100 calibration without executing a long padded
@@ -388,23 +389,9 @@ def collocation_rollout(policy, p, data_set):
     if data_set.ode_solver == "tsit5":
         budget = data_set.adaptive_attempt_budget
         dt_0 = data_set.adaptive_dt_0
-        save_at = SaveAt(steps=True)
     else:
-        budget = data_set.train_steps
-        dt_0 = data_set.train_T / data_set.train_steps
-        time_dtype = p.a.dtype
-        train_ts = jnp.linspace(
-            jnp.asarray(0.0, dtype=time_dtype),
-            jnp.asarray(data_set.train_T, dtype=time_dtype),
-            data_set.train_points,
-            dtype=time_dtype,
-        )
-        # In the baseline calibration these dates are every
-        # ``train_steps / (train_points - 1)`` internal steps. Gather those RK
-        # states directly; retain interpolation for a user-supplied grid that
-        # does not divide the integration mesh.
-        exact_grid = data_set.train_steps % (data_set.train_points - 1) == 0
-        save_at = SaveAt(ts=train_ts, exact=exact_grid)
+        budget = data_set.train_points - 1
+        dt_0 = data_set.train_T / budget
     return batched_rollout(
         policy,
         initial_log_states,
@@ -413,7 +400,7 @@ def collocation_rollout(policy, p, data_set):
         dt_0,
         p,
         data_set,
-        save_at,
+        SaveAt(steps=True),
         training=True,
     )
 
@@ -443,10 +430,7 @@ def collocation_log_states(policy, p, data_set):
     ``active``.
     """
     solution = collocation_rollout(policy, p, data_set)
-    if data_set.ode_solver == "tsit5":
-        active = solution.accepted
-    else:
-        active = jnp.ones(solution.ts.shape, dtype=bool)
+    active = solution.accepted
     initial_log_states = jnp.log(jnp.stack([p.z_0, p.k_0], axis=1))
     safe_log_states = jnp.where(
         active[..., None], solution.xs, initial_log_states[:, None, :]
@@ -756,8 +740,8 @@ def neoclassical_growth_nn_recursive(
         )
     if data_set.train_T <= 0.0:
         raise ValueError("train_T must be positive")
-    if data_set.train_steps < 1 or data_set.train_points < 2:
-        raise ValueError("train_steps must be positive and train_points at least two")
+    if data_set.train_points < 2:
+        raise ValueError("train_points must be at least two")
     if data_set.ode_solver not in {"rk4", "euler", "tsit5"}:
         raise ValueError(f"unknown ode_solver: {data_set.ode_solver!r}")
     if data_set.evaluation_ode_solver not in {"rk4", "euler"}:
@@ -917,11 +901,7 @@ def neoclassical_growth_nn_recursive(
     train_df["point_rule"] = (
         "adaptive_accepted_steps"
         if data_set.ode_solver == "tsit5"
-        else (
-            "fixed_exact_knots"
-            if data_set.train_steps % (data_set.train_points - 1) == 0
-            else "fixed_requested_times"
-        )
+        else "fixed_accepted_steps"
     )
     collocation_diagnostics = collocation_step_diagnostics(
         train_solution.ts, train_active
@@ -1018,11 +998,7 @@ def neoclassical_growth_nn_recursive(
         "point_rule": (
             "adaptive_accepted_steps"
             if data_set.ode_solver == "tsit5"
-            else (
-                "fixed_exact_knots"
-                if data_set.train_steps % (data_set.train_points - 1) == 0
-                else "fixed_requested_times"
-            )
+            else "fixed_accepted_steps"
         ),
         "collocation_capacity_per_trajectory": int(train_active.shape[1]),
         "train_kappa_0_min": float(train_kappa_0.min()),
@@ -1033,16 +1009,11 @@ def neoclassical_growth_nn_recursive(
         "ode_solver": data_set.ode_solver,
         "collocation_ode_solver": data_set.ode_solver,
         "evaluation_ode_solver": data_set.evaluation_ode_solver,
-        "train_steps": data_set.train_steps,
         "train_points": data_set.train_points,
-        "fixed_collocation_exact": (
-            data_set.ode_solver != "tsit5"
-            and data_set.train_steps % (data_set.train_points - 1) == 0
-        ),
         "integrator_attempt_budget": (
             data_set.adaptive_attempt_budget
             if data_set.ode_solver == "tsit5"
-            else data_set.train_steps
+            else data_set.train_points - 1
         ),
         "adaptive_attempt_budget": data_set.adaptive_attempt_budget,
         "adaptive_dt_0": data_set.adaptive_dt_0,

@@ -82,10 +82,10 @@ class ResidualArgs:
     train_data: jax.Array
     k_0: jax.Array
     a_0: jax.Array
-    q_reference: jax.Array
-    marginal_wealth_reference: jax.Array
+    q_scale: jax.Array
+    marginal_wealth_scale: jax.Array
     output_scale: jax.Array
-    static_reference_log: jax.Array
+    static_center_log: jax.Array
     parameters: TradeGrowthParameters = struct.field(pytree_node=False)
     num_countries: int = struct.field(pytree_node=False)
     n_train: int = struct.field(pytree_node=False)
@@ -137,8 +137,8 @@ def dynamic_coordinates(
     points,
     k_0,
     a_0,
-    q_reference,
-    marginal_wealth_reference,
+    q_scale,
+    marginal_wealth_scale,
     output_scale,
 ):
     def decoded_path(t):
@@ -147,8 +147,8 @@ def dynamic_coordinates(
         return (
             k_0 * jnp.exp(time_coordinate * raw[0]),
             a_0 + output_scale * time_coordinate * raw[1],
-            q_reference * unit_softplus(raw[2]),
-            marginal_wealth_reference * unit_softplus(raw[3]),
+            q_scale * unit_softplus(raw[2]),
+            marginal_wealth_scale * unit_softplus(raw[3]),
         )
 
     values, derivatives = jax.vmap(
@@ -175,15 +175,15 @@ def residual_fn(theta, args):
         args.train_data,
         args.k_0,
         args.a_0,
-        args.q_reference,
-        args.marginal_wealth_reference,
+        args.q_scale,
+        args.marginal_wealth_scale,
         args.output_scale,
     )
     raw = jax.vmap(policy)(args.train_data)
     interest_rate = args.parameters.rho * (1.0 + raw[:, 4 * args.num_countries])
-    log_static = args.static_reference_log + raw[
-        :, 4 * args.num_countries + 1 :
-    ].reshape(args.n_train, len(STATIC_BLOCK_NAMES), args.num_countries)
+    log_static = args.static_center_log + raw[:, 4 * args.num_countries + 1 :].reshape(
+        args.n_train, len(STATIC_BLOCK_NAMES), args.num_countries
+    )
     values = multicountry_trade_path_values(
         **coordinates,
         interest_rate=interest_rate,
@@ -258,16 +258,16 @@ def multicountry_trade_growth_nn(
         consumption_basket_log_price(base_static["log_static"], parameters)
     )
     price_scale = 1.0 / basket_price
-    q_reference = price_scale * base_q
-    marginal_wealth_reference = base_m / price_scale
-    static_reference, static_reference_diagnostics = static_trade_equilibrium(
+    q_scale = price_scale * base_q
+    marginal_wealth_scale = base_m / price_scale
+    static_center, static_center_diagnostics = static_trade_equilibrium(
         k_0_array,
-        q_reference,
-        marginal_wealth_reference,
+        q_scale,
+        marginal_wealth_scale,
         parameters,
         log_initial=base_static["log_static"] + jnp.log(price_scale),
     )
-    output_scale = static_reference["world_gdp"] / jnp.sum(populations)
+    output_scale = static_center["world_gdp"] / jnp.sum(populations)
 
     model = MulticountryTransitionNN(
         num_countries,
@@ -276,7 +276,7 @@ def multicountry_trade_growth_nn(
         rngs=nnx.Rngs(jax.random.key(seed)),
     )
     graphdef, theta_0, fixed_state = nnx.split(model, nnx.Param, ...)
-    static_reference_log = static_reference["log_static"]
+    static_center_log = static_center["log_static"]
 
     residual_count = (12 * num_countries + 1) * n_train
     residual_args = ResidualArgs(
@@ -285,10 +285,10 @@ def multicountry_trade_growth_nn(
         train_data=train_data,
         k_0=k_0_array,
         a_0=a_0_array,
-        q_reference=q_reference,
-        marginal_wealth_reference=marginal_wealth_reference,
+        q_scale=q_scale,
+        marginal_wealth_scale=marginal_wealth_scale,
         output_scale=output_scale,
-        static_reference_log=static_reference_log,
+        static_center_log=static_center_log,
         parameters=parameters,
         num_countries=num_countries,
         n_train=n_train,
@@ -301,7 +301,6 @@ def multicountry_trade_growth_nn(
         damping_increase=lm_set.damping_increase,
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
-        linear_solve_dtype=jnp.float64,
     )
     solve_start = time.perf_counter()
     result = solver.solve(
@@ -322,13 +321,13 @@ def multicountry_trade_growth_nn(
             points,
             k_0_array,
             a_0_array,
-            q_reference,
-            marginal_wealth_reference,
+            q_scale,
+            marginal_wealth_scale,
             output_scale,
         )
         raw = jax.vmap(policy)(points)
         interest_rate = parameters.rho * (1.0 + raw[:, 4 * num_countries])
-        log_static = static_reference_log + raw[:, 4 * num_countries + 1 :].reshape(
+        log_static = static_center_log + raw[:, 4 * num_countries + 1 :].reshape(
             len(points),
             len(STATIC_BLOCK_NAMES),
             num_countries,
@@ -357,8 +356,8 @@ def multicountry_trade_growth_nn(
         train_data[:1],
         k_0_array,
         a_0_array,
-        q_reference,
-        marginal_wealth_reference,
+        q_scale,
+        marginal_wealth_scale,
         output_scale,
     )
     max_initial_residual = max(
@@ -505,7 +504,7 @@ def multicountry_trade_growth_nn(
         "ansatz": "sequential_time_level_nn_with_algebraic_trade_values",
         "selection": "minimum_identity_metric_parameter_step",
         "metric": "identity_parameter_metric",
-        "initialization": "normalized_static_reference_near_zero_head",
+        "initialization": "normalized_static_center_near_zero_head",
         "backend": jax.default_backend(),
         "device": str(jax.devices()[0]),
         "dtype": str(jnp.dtype(dtype)),
@@ -541,7 +540,7 @@ def multicountry_trade_growth_nn(
         "rejection_reason": (
             "accepted" if not rejection_reasons else ",".join(rejection_reasons)
         ),
-        "static_reference_max_residual": static_reference_diagnostics["max_residual"],
+        "static_center_max_residual": static_center_diagnostics["max_residual"],
         "nn_width": nn_set.width,
         "nn_depth": nn_set.depth,
     }

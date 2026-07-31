@@ -1,328 +1,453 @@
-"""Self-contained tests for the trade-growth time-block preconditioner.
-
-The dense dual reference ``D = J M^{-1} J'`` is built directly from the model
-physics and the explicit shifted-RKHS metric -- no solver dependency -- so the
-assembly gate is validated against an independent construction of the operator.
-"""
-
 from __future__ import annotations
 
-import math
+import os
 import unittest
+from types import SimpleNamespace
+
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import scipy.linalg
 from jax.flatten_util import ravel_pytree
 
-from extra.trade_growth.model import (
-    STATIC_BLOCK_NAMES,
-    TradeGrowthParameters,
-    multicountry_trade_dae_residual,
-    multicountry_trade_path_values,
+from extra.trade_growth.kernel import (
+    DataSettings,
+    SolverSettings,
+    multicountry_trade_growth_kernel,
 )
 from extra.trade_growth.preconditioners import (
-    assemble_time_diagonal_blocks,
-    build_trade_growth_preconditioner_pieces,
-    build_trade_growth_time_block_preconditioner,
-    residual_time_permutation,
-    trade_growth_reference_state,
+    TradeGrowthEquationBlockPreconditioner,
+    TradeGrowthHybridPreconditioner,
+    TradeGrowthTimeBlockPreconditioner,
+    helmert_country_modes,
+    trade_growth_equation_blocks,
+    trade_growth_mode_blocks,
+    trade_growth_time_blocks,
 )
-from kernels import integrated_kernel_matrices
+from extra.trade_growth.scaling import draw_trade_growth_parameters
+from multicountry_growth import InitialConditionSettings, draw_initial_conditions
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
 
-METRIC_EPS = 1e-7
-NUM_STATIC = len(STATIC_BLOCK_NAMES)
 
-
-def heterogeneous_inputs(num_countries, seed=0, heterogeneity=0.06):
-    """Deterministic heterogeneous parameters matching the offline random regime."""
-
-    keys = jax.random.split(jax.random.key(seed), 10)
-
-    def positive(key, center=1.0):
-        return center * jnp.exp(
-            heterogeneity * jax.random.normal(key, (num_countries,))
+class BalancedModePreconditioner(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.num_countries = 3
+        cls.n_train = 6
+        parameters = draw_trade_growth_parameters(cls.num_countries, seed=0)
+        k_0, a_0 = draw_initial_conditions(
+            InitialConditionSettings(seed=0),
+            parameters,
+            dtype=jnp.float64,
         )
-
-    def share(key, center):
-        logit = math.log(center / (1.0 - center))
-        return jax.nn.sigmoid(
-            logit + heterogeneity * jax.random.normal(key, (num_countries,))
-        )
-
-    populations = positive(keys[0])
-    trade_noise = jax.random.normal(keys[7], (num_countries, num_countries))
-    center = math.log(math.expm1(0.45))
-    off = 1.0 + jax.nn.softplus(center + heterogeneity * trade_noise)
-    trade_costs = jnp.where(jnp.eye(num_countries, dtype=bool), 1.0, off)
-    k_0 = jnp.exp(0.12 * jax.random.normal(keys[8], (num_countries,)))
-    free = 0.10 * jax.random.normal(keys[9], (num_countries - 1,))
-    aggregate = jnp.concatenate([free, -jnp.sum(free, keepdims=True)])
-    a_0 = aggregate / populations
-
-    def host(v):
-        return tuple(float(x) for x in np.asarray(v))
-
-    parameters = TradeGrowthParameters(
-        populations=host(populations),
-        intermediate_productivities=host(positive(keys[1])),
-        consumption_productivities=host(positive(keys[2])),
-        investment_productivities=host(positive(keys[3])),
-        consumption_value_added_shares=host(share(keys[4], 0.75)),
-        intermediate_value_added_shares=host(share(keys[5], 0.50)),
-        investment_value_added_shares=host(share(keys[6], 0.50)),
-        trade_costs=tuple(host(row) for row in np.asarray(trade_costs)),
-    )
-    return parameters, host(k_0), host(a_0)
-
-
-def reference_theta(parameters, n_train, reference_state, dtype=jnp.float64):
-    num_countries = parameters.num_countries
-    zeros = jnp.zeros((num_countries, n_train), dtype=dtype)
-    algebraic = jnp.concatenate(
-        [
-            jnp.zeros(n_train + 2 * num_countries, dtype=dtype),
-            jnp.broadcast_to(
-                reference_state["log_static_reference"],
-                (n_train, NUM_STATIC, num_countries),
-            ).reshape(-1),
-        ]
-    )
-    return (zeros, zeros, zeros, zeros, algebraic)
-
-
-def perturb_theta(theta, seed=1, scale=0.05):
-    flat, unravel = ravel_pytree(theta)
-    noise = scale * jax.random.normal(
-        jax.random.key(seed), flat.shape, dtype=flat.dtype
-    )
-    return unravel(flat + noise)
-
-
-def dense_dual_reference(parameters, k_0, a_0, train_data, theta, eps, reference_state):
-    """Independent dense ``D = J M^{-1} J'`` from the model physics + explicit metric."""
-
-    num_countries = parameters.num_countries
-    n_train = train_data.shape[0]
-    K, K_tilde = integrated_kernel_matrices(
-        train_data, train_data, "matern52", 1.0, 10.0
-    )
-    K = 0.5 * (K + K.T)
-    k_0_array = reference_state["k_0_array"]
-    a_0_array = reference_state["a_0_array"]
-    q_reference = reference_state["q_reference"]
-    marginal_wealth_reference = reference_state["marginal_wealth_reference"]
-    output_scale = reference_state["output_scale"]
-    rho = parameters.rho
-    flat, unravel = ravel_pytree(theta)
-
-    def residual_from_flat(theta_flat):
-        alpha_k, alpha_a, alpha_q, alpha_m, algebraic = unravel(theta_flat)
-        rate = algebraic[:n_train]
-        q_off = algebraic[n_train : n_train + num_countries]
-        m_off = algebraic[n_train + num_countries : n_train + 2 * num_countries]
-        log_static = algebraic[n_train + 2 * num_countries :].reshape(
-            n_train, NUM_STATIC, num_countries
-        )
-        log_k = jnp.log(k_0_array) + K_tilde @ alpha_k.T
-        a = a_0_array + output_scale * (K_tilde @ alpha_a.T)
-        log_q = jnp.log(q_reference) + q_off + K_tilde @ alpha_q.T
-        log_m = jnp.log(marginal_wealth_reference) + m_off + K_tilde @ alpha_m.T
-        values = multicountry_trade_path_values(
-            k=jnp.exp(log_k),
-            a=a,
-            tobin_q=jnp.exp(log_q),
-            marginal_wealth=jnp.exp(log_m),
-            interest_rate=rho * (1.0 + rate),
-            log_static=log_static,
-            dlog_k_dt=K @ alpha_k.T,
-            da_dt=output_scale * (K @ alpha_a.T),
-            dlog_q_dt=K @ alpha_q.T,
-            dlog_marginal_wealth_dt=K @ alpha_m.T,
-            parameters=parameters,
-        )
-        return multicountry_trade_dae_residual(values, log_static, parameters)
-
-    jacobian = jax.jacfwd(residual_from_flat)(flat)
-    n_dyn = 4 * num_countries * n_train
-    kernel_inverse = jnp.linalg.inv(K + eps * jnp.eye(n_train))
-    metric_inverse_dyn = jnp.kron(jnp.eye(4 * num_countries), kernel_inverse)
-    dyn = jacobian[:, :n_dyn]
-    alg = jacobian[:, n_dyn:]
-    dual = dyn @ metric_inverse_dyn @ dyn.T + (1.0 / eps) * (alg @ alg.T)
-    return 0.5 * (dual + dual.T), K, K_tilde
-
-
-class AssemblyGate(unittest.TestCase):
-    def _check(self, num_countries, train_points, theta_kind, dampings):
-        parameters, k_0, a_0 = heterogeneous_inputs(num_countries, seed=0)
-        train_data = jnp.linspace(0.0, 20.0, train_points, dtype=jnp.float64)
-        reference_state = trade_growth_reference_state(parameters, k_0, a_0)
-        theta = reference_theta(parameters, train_points, reference_state)
-        if theta_kind == "perturbed":
-            theta = perturb_theta(theta)
-        eps = METRIC_EPS
-
-        dual, K, K_tilde = dense_dual_reference(
-            parameters, k_0, a_0, train_data, theta, eps, reference_state
-        )
-        _, full_block, _, _, _, _ = assemble_time_diagonal_blocks(
-            theta, K, K_tilde, reference_state, parameters, eps
-        )
-        full_block = np.asarray(full_block)
-        time_perm = np.asarray(
-            residual_time_permutation(num_countries, train_points)[0]
-        )
-        dual = np.asarray(dual)[np.ix_(time_perm, time_perm)]
-        block = 12 * num_countries + 1
-
-        for damping in dampings:
-            worst = 0.0
-            for t in range(train_points):
-                sl = slice(t * block, (t + 1) * block)
-                reference_block = dual[sl, sl] + damping * np.eye(block)
-                mine = full_block[t] + damping * np.eye(block)
-                scale = max(np.max(np.abs(reference_block)), 1e-300)
-                worst = max(worst, np.max(np.abs(mine - reference_block)) / scale)
-            self.assertLess(
-                worst,
-                1e-8,
-                f"N={num_countries} nt={train_points} {theta_kind} "
-                f"damping={damping}: rel err {worst:.2e}",
-            )
-
-    def test_lm0_n2_nt5(self):
-        self._check(2, 5, "reference", (0.0, 1e-4))
-
-    def test_perturbed_n2_nt5(self):
-        self._check(2, 5, "perturbed", (0.0, 1e-4))
-
-    def test_lm0_n3_nt5(self):
-        self._check(3, 5, "reference", (0.0, 1e-4))
-
-
-class PreconditionerApply(unittest.TestCase):
-    def _build(self, num_countries=2, train_points=5, theta_kind="reference"):
-        parameters, k_0, a_0 = heterogeneous_inputs(num_countries, seed=0)
-        train_data = jnp.linspace(0.0, 20.0, train_points, dtype=jnp.float64)
-        pieces = build_trade_growth_preconditioner_pieces(
-            parameters=parameters,
+        results, extra = multicountry_trade_growth_kernel(
             k_0=k_0,
             a_0=a_0,
-            train_data=train_data,
-            metric_eps=METRIC_EPS,
-            theta=reference_theta(
-                parameters,
-                train_points,
-                trade_growth_reference_state(parameters, k_0, a_0),
+            parameters=parameters,
+            data_set=DataSettings(
+                train_T=15.0,
+                train_points=cls.n_train,
+                sampling="front_loaded",
+                dense_T=7.5,
+                tail_points=2,
+                test_T=7.5,
+                test_points=13,
+                validation_points=25,
+                quality_T=15.0,
             ),
+            lm_set=SolverSettings(linear_solver="auto", max_steps=100),
         )
-        reference_state = pieces["reference_state"]
-        theta = reference_theta(parameters, train_points, reference_state)
-        if theta_kind == "perturbed":
-            theta = perturb_theta(theta)
-        pre = build_trade_growth_time_block_preconditioner(
-            theta,
-            pieces["K"],
-            pieces["K_tilde"],
-            reference_state,
-            parameters,
-            pieces["eps"],
-            pieces["time_permutation"],
-            pieces["native_permutation"],
+        if not results["solution_accepted"]:
+            raise RuntimeError(results["rejection_reason"])
+        cls.results = results
+        cls.extra = extra
+        cls.ridge = jnp.asarray(results["final_ridge"])
+        cls.preconditioner = extra["build_preconditioner"](
+            extra["theta"],
+            extra["p"],
+            cls.ridge,
         )
-        m = (12 * num_countries + 1) * train_points
-        return pre, m
+        cls.context = SimpleNamespace(lm_state=SimpleNamespace(ridge=cls.ridge))
 
-    def test_spd_apply(self):
-        pre, m = self._build()
-        damping = jnp.asarray(1e-4)
-        key = jax.random.key(3)
-        for i in range(8):
-            v = jax.random.normal(jax.random.fold_in(key, i), (m,), dtype=jnp.float64)
-            quad = float(v @ pre.dual_preconditioner(v, damping))
-            self.assertGreater(
-                quad, 0.0, "preconditioner apply must be positive definite"
+        theta_flat, unravel_theta = ravel_pytree(extra["theta"])
+        jacobian = np.asarray(
+            jax.jacrev(
+                lambda flat: extra["residual_fn"](
+                    unravel_theta(flat),
+                    None,
+                    extra["p"],
+                )
+            )(theta_flat)
+        )
+        metric_size = extra["metric"].size
+        jacobian_transpose = jnp.asarray(jacobian.T)
+        whitened_jacobian_transpose = np.asarray(
+            jnp.concatenate(
+                [
+                    extra["metric"].factor_solve_transpose(
+                        jacobian_transpose[:metric_size],
+                        None,
+                    ),
+                    jacobian_transpose[metric_size:],
+                ],
+                axis=0,
+            )
+        )
+        normal = whitened_jacobian_transpose @ whitened_jacobian_transpose.T
+        normal[np.arange(metric_size), np.arange(metric_size)] += float(cls.ridge)
+        cls.normal = 0.5 * (normal + normal.T)
+        (
+            cls.mode_matrix,
+            cls.aggregate_block,
+            cls.idiosyncratic_blocks,
+            cls.aggregate_cross,
+        ) = trade_growth_mode_blocks(
+            extra["theta"],
+            extra["K"],
+            extra["K_tilde"],
+            extra["metric"].F,
+            extra["p"],
+            extra["residual_scale"],
+            cls.ridge,
+        )
+
+        num_countries = cls.num_countries
+        n_train = cls.n_train
+        mode_matrix = cls.mode_matrix
+
+        def native_to_modes(v):
+            country_size = 12 * num_countries * n_train
+            free_start = (12 * num_countries + 1) * n_train
+            country_coefficients = v[:country_size].reshape(
+                12,
+                num_countries,
+                n_train,
+            )
+            rate_coefficients = v[country_size:free_start]
+            country_initials = v[free_start : free_start + 10 * num_countries].reshape(
+                10, num_countries
+            )
+            coefficient_modes = jnp.einsum(
+                "tna,nm->tma",
+                country_coefficients,
+                mode_matrix,
+            )
+            initial_modes = jnp.einsum(
+                "tn,nm->tm",
+                country_initials,
+                mode_matrix,
+            )
+            aggregate = jnp.concatenate(
+                [
+                    coefficient_modes[:, 0, :].reshape(-1),
+                    rate_coefficients,
+                    initial_modes[:, 0],
+                    v[-1:],
+                ]
+            )
+            idiosyncratic = jnp.concatenate(
+                [
+                    jnp.transpose(
+                        coefficient_modes[:, 1:, :],
+                        (1, 0, 2),
+                    ).reshape(num_countries - 1, 12 * n_train),
+                    initial_modes[:, 1:].T,
+                ],
+                axis=1,
+            )
+            return jnp.concatenate([aggregate, idiosyncratic.reshape(-1)])
+
+        cls.mode_transform = np.asarray(
+            jax.vmap(native_to_modes, in_axes=1, out_axes=1)(
+                jnp.eye(cls.normal.shape[0], dtype=jnp.float64)
+            )
+        )
+
+    def inverse_matrix(self, damping):
+        identity = jnp.eye(self.normal.shape[0], dtype=jnp.float64)
+        inverse = jax.vmap(
+            lambda column: self.preconditioner.apply(
+                column,
+                jnp.asarray(damping),
+                self.context,
+            ),
+            in_axes=1,
+            out_axes=1,
+        )(identity)
+        return np.asarray(inverse)
+
+    def test_helmert_modes_are_orthonormal_and_country_symmetric(self):
+        modes = np.asarray(helmert_country_modes(self.num_countries, jnp.float64))
+        np.testing.assert_allclose(modes.T @ modes, np.eye(3), atol=2e-15)
+        np.testing.assert_allclose(
+            modes[:, 0],
+            np.ones(3) / np.sqrt(3.0),
+            atol=2e-15,
+        )
+        np.testing.assert_allclose(
+            np.sum(modes[:, 1:], axis=0),
+            0.0,
+            atol=2e-15,
+        )
+
+    def test_local_assembly_matches_dense_whitened_normal_blocks(self):
+        transform = self.mode_transform
+        np.testing.assert_allclose(
+            transform @ transform.T,
+            np.eye(transform.shape[0]),
+            atol=5e-15,
+        )
+        normal_modes = transform @ self.normal @ transform.T
+        aggregate_size = self.aggregate_block.shape[0]
+        idiosyncratic_size = self.idiosyncratic_blocks.shape[1]
+        np.testing.assert_allclose(
+            self.aggregate_block,
+            normal_modes[:aggregate_size, :aggregate_size],
+            rtol=3e-10,
+            atol=3e-11,
+        )
+        for mode in range(self.num_countries - 1):
+            selection = slice(
+                aggregate_size + mode * idiosyncratic_size,
+                aggregate_size + (mode + 1) * idiosyncratic_size,
+            )
+            np.testing.assert_allclose(
+                self.idiosyncratic_blocks[mode],
+                normal_modes[selection, selection],
+                rtol=3e-10,
+                atol=3e-11,
+            )
+            np.testing.assert_allclose(
+                self.aggregate_cross[mode],
+                normal_modes[:aggregate_size, selection],
+                rtol=3e-10,
+                atol=3e-11,
             )
 
-    def test_self_adjoint_apply(self):
-        pre, m = self._build()
-        damping = jnp.asarray(1e-4)
-        u = jax.random.normal(jax.random.key(4), (m,), dtype=jnp.float64)
-        v = jax.random.normal(jax.random.key(5), (m,), dtype=jnp.float64)
-        left = float(u @ pre.dual_preconditioner(v, damping))
-        right = float(v @ pre.dual_preconditioner(u, damping))
-        self.assertLess(abs(left - right) / max(abs(left), 1e-300), 1e-9)
+    def test_apply_is_spd_and_self_adjoint_at_live_dampings(self):
+        for damping in (0.0, 1e-8, 1e-4):
+            with self.subTest(damping=damping):
+                inverse = self.inverse_matrix(damping)
+                scale = max(float(np.max(np.abs(inverse))), 1.0)
+                self.assertLess(
+                    float(np.max(np.abs(inverse - inverse.T))) / scale,
+                    1e-7 if damping == 0.0 else 3e-9,
+                )
+                eigenvalues = np.linalg.eigvalsh(0.5 * (inverse + inverse.T))
+                self.assertGreater(eigenvalues[0], 0.0)
 
-    def test_implicit_is_lambda_zero_path(self):
-        pre, m = self._build()
-        v = jax.random.normal(jax.random.key(6), (m,), dtype=jnp.float64)
-        implicit = pre.implicit_preconditioner(v)
-        explicit = pre.dual_preconditioner(
-            v, jnp.asarray(pre.implicit_damping, dtype=v.dtype)
-        )
-        self.assertLess(
-            float(jnp.linalg.norm(implicit - explicit))
-            / float(jnp.linalg.norm(explicit)),
-            1e-12,
-        )
-
-    def test_woodbury_matches_dense_inverse(self):
-        num_countries, train_points = 2, 5
-        parameters, k_0, a_0 = heterogeneous_inputs(num_countries, seed=0)
-        train_data = jnp.linspace(0.0, 20.0, train_points, dtype=jnp.float64)
-        reference_state = trade_growth_reference_state(parameters, k_0, a_0)
-        theta = reference_theta(parameters, train_points, reference_state)
-        eps = METRIC_EPS
-        dual, K, K_tilde = dense_dual_reference(
-            parameters, k_0, a_0, train_data, theta, eps, reference_state
-        )
-        pre, full_block = build_trade_growth_time_block_preconditioner(
-            theta,
-            K,
-            K_tilde,
-            reference_state,
-            parameters,
-            eps,
-            *residual_time_permutation(num_countries, train_points),
-            return_blocks=True,
-        )
-        # dense C3 = blockdiag_time(full D_tt) + off-time-diagonal (1/eps) U_t U_t''
-        block = 12 * num_countries + 1
-        m = block * train_points
-        time_perm = np.asarray(
-            residual_time_permutation(num_countries, train_points)[0]
-        )
-        _, _, offset_u, _, _, _ = assemble_time_diagonal_blocks(
-            theta, K, K_tilde, reference_state, parameters, eps
-        )
-        offset_u = np.asarray(offset_u)
+    def test_apply_includes_damping_in_every_mode_block(self):
         damping = 1e-4
-        c3 = np.zeros((m, m))
-        u_full = np.zeros((m, offset_u.shape[2]))
-        for t in range(train_points):
-            sl = slice(t * block, (t + 1) * block)
-            c3[sl, sl] = np.asarray(full_block[t]) + damping * np.eye(block)
-            u_full[sl] = offset_u[t]
-        global_g = (1.0 / eps) * (u_full @ u_full.T)
-        for t in range(train_points):
-            sl = slice(t * block, (t + 1) * block)
-            global_g[sl, sl] = 0.0
-        c3 = c3 + global_g
-        c3_inverse = np.linalg.inv(0.5 * (c3 + c3.T))
-
-        native_perm = np.asarray(
-            residual_time_permutation(num_countries, train_points)[1]
+        aggregate = np.asarray(self.aggregate_block)
+        idiosyncratic = np.asarray(self.idiosyncratic_blocks)
+        cross = np.concatenate(np.asarray(self.aggregate_cross), axis=1)
+        aggregate_inverse = np.linalg.inv(
+            aggregate + damping * np.eye(aggregate.shape[0])
         )
-        probe = jax.random.normal(jax.random.key(7), (m,), dtype=jnp.float64)
-        mine = np.asarray(pre.dual_preconditioner(probe, jnp.asarray(damping)))
-        # c3 is in time-major order; map the native-order probe/result through the perms
-        exact = (c3_inverse @ np.asarray(probe)[time_perm])[native_perm]
-        rel = np.linalg.norm(mine - exact) / np.linalg.norm(exact)
-        self.assertLess(rel, 1e-6, f"woodbury apply vs dense C3^-1 rel err {rel:.2e}")
+        idiosyncratic_inverse = scipy.linalg.block_diag(
+            *(
+                np.linalg.inv(block + damping * np.eye(block.shape[0]))
+                for block in idiosyncratic
+            )
+        )
+        upper_right = -aggregate_inverse @ cross @ idiosyncratic_inverse
+        balanced_modes = np.block(
+            [
+                [
+                    aggregate_inverse
+                    + aggregate_inverse
+                    @ cross
+                    @ idiosyncratic_inverse
+                    @ cross.T
+                    @ aggregate_inverse,
+                    upper_right,
+                ],
+                [upper_right.T, idiosyncratic_inverse],
+            ]
+        )
+        expected = self.mode_transform.T @ balanced_modes @ self.mode_transform
+        actual = self.inverse_matrix(damping)
+        relative_error = np.linalg.norm(actual - expected) / np.linalg.norm(expected)
+        self.assertLess(relative_error, 2e-10)
+
+    def test_preconditioner_reduces_the_positive_spectrum_condition_number(self):
+        normal_eigenvalues = np.linalg.eigvalsh(self.normal)
+        normal_floor = (
+            np.finfo(self.normal.dtype).eps
+            * self.normal.shape[0]
+            * normal_eigenvalues[-1]
+        )
+        normal_positive = normal_eigenvalues[normal_eigenvalues > normal_floor]
+        normal_condition = normal_positive[-1] / normal_positive[0]
+        inverse = self.inverse_matrix(0.0)
+        inverse = 0.5 * (inverse + inverse.T)
+        inverse_factor = scipy.linalg.cholesky(inverse, lower=True)
+        preconditioned = inverse_factor.T @ self.normal @ inverse_factor
+        preconditioned_eigenvalues = scipy.linalg.eigvalsh(
+            0.5 * (preconditioned + preconditioned.T)
+        )
+        preconditioned_floor = (
+            np.finfo(preconditioned.dtype).eps
+            * preconditioned.shape[0]
+            * preconditioned_eigenvalues[-1]
+        )
+        preconditioned_positive = preconditioned_eigenvalues[
+            preconditioned_eigenvalues > preconditioned_floor
+        ]
+        preconditioned_condition = (
+            preconditioned_positive[-1] / preconditioned_positive[0]
+        )
+        self.assertLess(preconditioned_condition, 0.01 * normal_condition)
+
+
+class MetricDualPreconditioners(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.num_countries = 2
+        cls.n_train = 6
+        parameters = draw_trade_growth_parameters(cls.num_countries, seed=0)
+        k_0, a_0 = draw_initial_conditions(
+            InitialConditionSettings(seed=0), parameters, dtype=jnp.float64
+        )
+        results, extra = multicountry_trade_growth_kernel(
+            k_0=k_0,
+            a_0=a_0,
+            parameters=parameters,
+            data_set=DataSettings(
+                train_T=15.0,
+                train_points=cls.n_train,
+                sampling="front_loaded",
+                dense_T=7.5,
+                tail_points=2,
+                test_T=7.5,
+                test_points=13,
+                validation_points=25,
+                quality_T=15.0,
+            ),
+            lm_set=SolverSettings(
+                optimizer="metric_lm",
+                metric_eps=1e-7,
+                linear_solver="auto",
+                preconditioner="hybrid_blocks",
+                init_damping=1e-4,
+                geodesic_acceleration=False,
+                asset_homotopy_steps=0,
+                max_steps=100,
+            ),
+        )
+        if not results["solution_accepted"]:
+            raise RuntimeError(results["rejection_reason"])
+        cls.extra = extra
+        metric = extra["metric"]
+        theta_flat, unravel_theta = ravel_pytree(extra["theta"])
+        jacobian = jax.jacrev(
+            lambda flat: extra["residual_fn"](unravel_theta(flat), None, extra["p"])
+        )(theta_flat)
+        jacobian_transpose = jacobian.T
+        whitened_transpose = jnp.concatenate(
+            [
+                metric.factor_solve_transpose(jacobian_transpose[: metric.size], None),
+                jacobian_transpose[metric.size :] / jnp.sqrt(metric.free_scale),
+            ],
+            axis=0,
+        )
+        cls.dual = np.asarray(whitened_transpose.T @ whitened_transpose)
+        coefficient_blocks, initial_jacobian = trade_growth_time_blocks(
+            extra["theta"],
+            extra["K"],
+            extra["K_tilde"],
+            metric.F,
+            extra["p"],
+            extra["residual_scale"],
+            metric.free_scale,
+        )
+        equation_blocks = trade_growth_equation_blocks(
+            extra["theta"],
+            extra["K"],
+            extra["K_tilde"],
+            metric.F,
+            extra["p"],
+            extra["residual_scale"],
+            metric.free_scale,
+        )
+        cls.coefficient_blocks = np.asarray(coefficient_blocks)
+        cls.initial_jacobian = np.asarray(initial_jacobian)
+        cls.equation_blocks = np.asarray(equation_blocks)
+        cls.time_preconditioner = TradeGrowthTimeBlockPreconditioner(
+            coefficient_blocks=coefficient_blocks,
+            initial_jacobian=initial_jacobian,
+            num_countries=cls.num_countries,
+        )
+        cls.equation_preconditioner = TradeGrowthEquationBlockPreconditioner(
+            blocks=equation_blocks,
+            num_countries=cls.num_countries,
+        )
+        cls.hybrid = TradeGrowthHybridPreconditioner(
+            time_blocks=cls.time_preconditioner,
+            equation_blocks=cls.equation_preconditioner,
+        )
+
+    def test_time_and_equation_assemblies_match_dense_dual_blocks(self):
+        size = self.dual.shape[0]
+        transform = np.asarray(
+            jax.vmap(
+                self.time_preconditioner._to_time_order,
+                in_axes=1,
+                out_axes=2,
+            )(jnp.eye(size, dtype=jnp.float64))
+        ).reshape(size, size)
+        np.testing.assert_allclose(transform @ transform.T, np.eye(size), atol=0.0)
+        dual_time = transform @ self.dual @ transform.T
+        rows = 12 * self.num_countries + 1
+        dual_four = dual_time.reshape(self.n_train, rows, self.n_train, rows)
+        for time_index in range(self.n_train):
+            expected = self.coefficient_blocks[time_index] + (
+                self.initial_jacobian[time_index] @ self.initial_jacobian[time_index].T
+            )
+            np.testing.assert_allclose(
+                expected,
+                dual_four[time_index, :, time_index, :],
+                rtol=3e-10,
+                atol=3e-11,
+            )
+        for row in range(rows):
+            np.testing.assert_allclose(
+                self.equation_blocks[row],
+                dual_four[:, row, :, row],
+                rtol=3e-10,
+                atol=3e-11,
+            )
+
+    def test_hybrid_apply_is_spd_and_improves_the_damped_spectrum(self):
+        size = self.dual.shape[0]
+        identity = jnp.eye(size, dtype=jnp.float64)
+        context = SimpleNamespace(lm_state=SimpleNamespace(ridge=None))
+        damping = 1e-8
+        inverse = np.asarray(
+            jax.vmap(
+                lambda column: self.hybrid.apply(column, jnp.asarray(damping), context),
+                in_axes=1,
+                out_axes=1,
+            )(identity)
+        )
+        inverse = 0.5 * (inverse + inverse.T)
+        eigenvalues = np.linalg.eigvalsh(inverse)
+        self.assertGreater(eigenvalues[0], 0.0)
+        factor = scipy.linalg.cholesky(inverse, lower=True)
+        system = self.dual + damping * np.eye(size)
+        preconditioned = factor.T @ system @ factor
+        preconditioned_eigenvalues = scipy.linalg.eigvalsh(
+            0.5 * (preconditioned + preconditioned.T)
+        )
+        preconditioned_condition = (
+            preconditioned_eigenvalues[-1] / preconditioned_eigenvalues[0]
+        )
+        self.assertLess(preconditioned_condition, 2e4)
+        self.assertLess(preconditioned_condition, 1e-4 * np.linalg.cond(system))
 
 
 if __name__ == "__main__":

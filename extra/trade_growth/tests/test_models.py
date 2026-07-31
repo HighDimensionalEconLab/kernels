@@ -1,438 +1,54 @@
+from __future__ import annotations
+
+import dataclasses
+import os
 import unittest
+
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import jax
 import jax.numpy as jnp
+import jax.scipy.linalg as jsp_linalg
 import numpy as np
+from jax.flatten_util import ravel_pytree
 
-from extra.trade_growth.comparative_statics import (
-    build_multicountry_trade_comparative_statics,
-)
 from extra.trade_growth.kernel import (
     DataSettings,
     SolverSettings,
     multicountry_trade_growth_kernel,
 )
 from extra.trade_growth.model import (
+    DYNAMIC_RESIDUAL_NAMES,
     STATIC_BLOCK_NAMES,
     TradeGrowthParameters,
     multicountry_trade_allocations,
     multicountry_trade_path_values,
     static_trade_equilibrium,
-    symmetric_trade_growth_parameters,
 )
-from extra.trade_growth.nn import DataSettings as MulticountryTradeNNDataSettings
-from extra.trade_growth.nn import SequentialNNSettings, multicountry_trade_growth_nn
-from extra.trade_growth.nn import SolverSettings as NNSolverSettings
+from extra.trade_growth.scaling import draw_trade_growth_parameters
+from multicountry_growth import InitialConditionSettings, draw_initial_conditions
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
 
 
-class KernelSmokeTests(unittest.TestCase):
-    def test_multicountry_trade_static_equilibrium(self):
-        for num_countries in (2, 3):
-            parameters = symmetric_trade_growth_parameters(num_countries)
-            k = jnp.ones(num_countries)
-            tobin_q = jnp.full(num_countries, 1.0 / parameters.installation_elasticity)
-            marginal_wealth = jnp.ones(num_countries)
-            values, diagnostics = static_trade_equilibrium(
-                k,
-                tobin_q,
-                marginal_wealth,
-                parameters,
-            )
-            self.assertLess(diagnostics["max_residual"], 1e-10)
-            self.assertGreater(diagnostics["minimum_jacobian_singular_value"], 1e-3)
-            np.testing.assert_allclose(
-                values["trade_shares"].sum(axis=1), 1.0, atol=1e-13
-            )
-            np.testing.assert_allclose(values["budget_trade_gap"], 0.0, atol=1e-13)
-            np.testing.assert_allclose(values["world_trade_balance"], 0.0, atol=1e-13)
-            np.testing.assert_allclose(values["wage"], values["wage"][0], atol=1e-13)
-            np.testing.assert_allclose(
-                values["sector_capital"].sum(axis=0),
-                k * jnp.asarray(parameters.populations),
-                atol=1e-12,
-            )
-            np.testing.assert_allclose(
-                values["sector_labor"].sum(axis=0),
-                parameters.populations,
-                atol=1e-12,
-            )
-            self.assertTrue(
-                np.all(np.diag(values["trade_shares"]) > values["trade_shares"][0, -1])
-            )
+def small_data(rank_audit=False):
+    return DataSettings(
+        train_T=15.0,
+        train_points=6,
+        sampling="front_loaded",
+        dense_T=7.5,
+        tail_points=2,
+        test_T=7.5,
+        test_points=13,
+        validation_points=25,
+        quality_T=15.0,
+        rank_audit=rank_audit,
+    )
 
-    def test_multicountry_trade_dynamic_shell(self):
-        parameters = symmetric_trade_growth_parameters(3)
-        k = jnp.ones(3)
-        tobin_q = jnp.full(3, 1.0 / parameters.installation_elasticity)
-        marginal_wealth = jnp.ones(3)
-        static, _ = static_trade_equilibrium(
-            k,
-            tobin_q,
-            marginal_wealth,
-            parameters,
-        )
-        k_path = k[None, :]
-        q_path = tobin_q[None, :]
-        marginal_wealth_path = marginal_wealth[None, :]
-        interest_rate = jnp.asarray((parameters.rho,))
-        log_static = static["log_static"][None, :, :]
-        allocations = multicountry_trade_allocations(
-            k_path,
-            q_path,
-            marginal_wealth_path,
-            interest_rate,
-            log_static,
-            parameters,
-        )
-        a = jnp.zeros((1, 3))
-        da_dt = (
-            interest_rate[:, None] * a
-            + allocations["factor_income"]
-            - allocations["final_expenditure"]
-        )
-        values = multicountry_trade_path_values(
-            k=k_path,
-            a=a,
-            tobin_q=q_path,
-            marginal_wealth=marginal_wealth_path,
-            interest_rate=interest_rate,
-            log_static=log_static,
-            dlog_k_dt=allocations["capital_drift"] / k_path,
-            da_dt=da_dt,
-            dlog_q_dt=allocations["tobin_q_drift"] / q_path,
-            dlog_marginal_wealth_dt=jnp.zeros((1, 3)),
-            parameters=parameters,
-        )
-        for name in (
-            "capital",
-            "assets",
-            "tobin_q",
-            "marginal_wealth_euler",
-            "world_flow",
-            "asset_clearing",
-        ):
-            np.testing.assert_allclose(values[name], 0.0, atol=1e-12)
-        np.testing.assert_allclose(values["static_residuals"], 0.0, atol=1e-12)
-        np.testing.assert_allclose(values["budget_trade_gap"], 0.0, atol=1e-12)
 
-    def test_multicountry_trade_three_country_joint_kernel_solve(self):
-        parameters = symmetric_trade_growth_parameters(3)
-        results, frames = multicountry_trade_growth_kernel(
-            a_0=(-0.2, 0.1, 0.1),
-            parameters=parameters,
-            data_set=DataSettings(
-                train_T=15.0,
-                train_points=6,
-                sampling="uniform",
-                dense_T=8.0,
-                tail_points=2,
-                test_T=8.0,
-                test_points=9,
-                validation_points=13,
-                quality_T=10.0,
-                rank_audit=True,
-            ),
-            lm_set=SolverSettings(
-                max_steps=30,
-                residual_atol=1e-7,
-            ),
-        )
-
-        self.assertTrue(results["solution_accepted"])
-        self.assertEqual(results["terminal_residual_count"], 0)
-        self.assertEqual(results["dynamic_rkhs_function_count"], 12)
-        self.assertEqual(results["metric_selection_dimension"], 6)
-        self.assertEqual(results["unknown_count"] - results["dae_residual_count"], 6)
-        self.assertEqual(results["dae_jacobian_rank"], results["dae_residual_count"])
-        self.assertGreater(results["dae_jacobian_min_singular_value"], 1e-8)
-        self.assertEqual(results["quality_T"], 10.0)
-        self.assertEqual(results["quality_validation_point_count"], 9)
-        self.assertLess(results["max_train_residual"], 1e-8)
-        self.assertLess(results["max_validation_residual"], 1e-3)
-        self.assertGreaterEqual(
-            results["max_full_horizon_validation_residual"],
-            results["max_validation_residual"],
-        )
-        self.assertLess(results["max_asset_clearing_residual"], 5e-8)
-        self.assertGreaterEqual(
-            results["max_full_horizon_asset_clearing_residual"],
-            results["max_asset_clearing_residual"],
-        )
-        self.assertLess(results["max_rate_consistency_residual"], 1e-8)
-        self.assertGreaterEqual(
-            results["max_full_horizon_rate_consistency_residual"],
-            results["max_rate_consistency_residual"],
-        )
-        self.assertEqual(results["backend"], jax.default_backend())
-        self.assertTrue(np.isfinite(results["ex_post_discounted_assets_decay_ratio"]))
-        self.assertTrue(np.isfinite(results["ex_post_asset_tvc_decay_ratio"]))
-        self.assertTrue(np.isfinite(results["ex_post_capital_tvc_decay_ratio"]))
-        self.assertTrue(results["ex_post_discounted_assets_decay_ratio_applicable"])
-        self.assertTrue(results["ex_post_asset_tvc_decay_ratio_applicable"])
-        self.assertTrue(results["ex_post_capital_tvc_decay_ratio_applicable"])
-        self.assertAlmostEqual(results["terminal_a_2"], results["terminal_a_3"], 7)
-        for name in (
-            "capital",
-            "assets",
-            "tobin_q",
-            "marginal_wealth",
-            "consumption",
-            "investment_rate",
-            "trade_balance",
-            "current_account",
-            *STATIC_BLOCK_NAMES,
-        ):
-            self.assertLess(results[f"max_country_2_3_{name}_gap"], 2e-7)
-        self.assertLess(results["max_country_2_3_trade_share_permutation_gap"], 1e-7)
-        self.assertAlmostEqual(
-            results["terminal_steady_trade_gap_1"],
-            results["terminal_current_account_1"],
-            5,
-        )
-        self.assertTrue(np.isfinite(results["plateau_interest_rate_gap"]))
-        quality_frame = frames["validation_df"].query("t <= 10.0")
-        self.assertLess(
-            np.max(np.abs(quality_frame["consumption_basket_log_price"])),
-            1e-4,
-        )
-        for name in (
-            "ode_residual_rms",
-            "algebraic_residual_rms",
-            "dae_residual_rms",
-        ):
-            self.assertTrue(np.isfinite(quality_frame[name]).all())
-            self.assertGreaterEqual(quality_frame[name].min(), 0.0)
-            self.assertAlmostEqual(
-                results[f"max_validation_{name}"], quality_frame[name].max()
-            )
-        np.testing.assert_allclose(
-            quality_frame["dae_residual_rms"] ** 2,
-            (
-                12.0 * quality_frame["ode_residual_rms"] ** 2
-                + 25.0 * quality_frame["algebraic_residual_rms"] ** 2
-            )
-            / 37.0,
-            rtol=1e-12,
-            atol=1e-16,
-        )
-
-    def test_multicountry_trade_iterative_whitened_endgame_api(self):
-        results, _ = multicountry_trade_growth_kernel(
-            a_0=(-0.1, 0.1),
-            parameters=symmetric_trade_growth_parameters(2),
-            data_set=DataSettings(
-                train_T=8.0,
-                train_points=4,
-                sampling="uniform",
-                dense_T=4.0,
-                tail_points=1,
-                test_T=4.0,
-                test_points=5,
-                validation_points=7,
-                quality_T=4.0,
-            ),
-            lm_set=SolverSettings(
-                linear_solver="gram_cg",
-                max_steps=1,
-                residual_atol=1e-7,
-                cg_maxiter_min=20,
-                cg_maxiter_max=50,
-                recycle_rank=4,
-                two_phase_endgame=True,
-                phase2_max_steps=1,
-                phase2_maxiter=100,
-            ),
-        )
-
-        self.assertEqual(results["linear_solver_resolved"], "gram_cg")
-        self.assertTrue(results["two_phase_endgame"])
-        self.assertEqual(results["phase2_steps"], 1)
-        self.assertTrue(np.isfinite(results["phase2_build_time"]))
-        self.assertTrue(np.isfinite(results["phase2_solve_time"]))
-
-    def test_multicountry_trade_structural_parameter_implicit_ad(self):
-        parameters = symmetric_trade_growth_parameters(2)
-        problem = build_multicountry_trade_comparative_statics(
-            k_0=(1.0, 0.9),
-            a_0=(-0.1, 0.1),
-            parameters=parameters,
-            data_set=DataSettings(
-                train_T=10.0,
-                train_points=5,
-                sampling="uniform",
-                dense_T=5.0,
-                tail_points=1,
-                test_T=10.0,
-                test_points=11,
-                validation_points=21,
-                quality_T=10.0,
-            ),
-            lm_set=SolverSettings(
-                init_damping=1e-8,
-                residual_atol=1e-12,
-                max_steps=40,
-            ),
-            statistic_times=(0.0, 5.0, 10.0),
-        )
-        p = problem.structural_parameters
-        p_dot = jax.tree.map(jnp.zeros_like, p)
-        p_dot = {**p_dot, "rho": p["rho"]}
-        result, result_dot = jax.jvp(problem.solve, (p,), (p_dot,))
-
-        def residual(theta, parameters_pytree):
-            return problem.solver.residual_fn(theta, None, parameters_pytree)[0]
-
-        _, linearized_residual = jax.jvp(
-            residual,
-            (result.x, p),
-            (result_dot.x, p_dot),
-        )
-        self.assertEqual(int(result.status), 1)
-        self.assertLess(float(jnp.max(jnp.abs(residual(result.x, p)))), 1e-10)
-        self.assertLess(float(jnp.max(jnp.abs(linearized_residual))), 1e-8)
-        self.assertTrue(bool(jnp.all(jnp.isfinite(result_dot.aux))))
-        self.assertIn("initial_log_capital[1]", problem.parameter_names)
-        self.assertIn("initial_aggregate_assets_free[1]", problem.parameter_names)
-
-        step = 1e-3
-        p_plus = jax.tree.map(lambda value, dot: value + step * dot, p, p_dot)
-        p_minus = jax.tree.map(lambda value, dot: value - step * dot, p, p_dot)
-        theta_plus = jax.tree.map(
-            lambda value, dot: value + step * dot,
-            result.x,
-            result_dot.x,
-        )
-        theta_minus = jax.tree.map(
-            lambda value, dot: value - step * dot,
-            result.x,
-            result_dot.x,
-        )
-        result_plus = problem.solver.solve(
-            theta_plus,
-            p=p_plus,
-            max_steps=40,
-            atol=1e-14,
-            max_steps_is_success=False,
-        )
-        result_minus = problem.solver.solve(
-            theta_minus,
-            p=p_minus,
-            max_steps=40,
-            atol=1e-14,
-            max_steps_is_success=False,
-        )
-        finite_difference = (result_plus.aux - result_minus.aux) / (2.0 * step)
-        relative_error = jnp.linalg.norm(
-            finite_difference - result_dot.aux
-        ) / jnp.linalg.norm(result_dot.aux)
-        self.assertLess(float(relative_error), 1e-4)
-
-    def test_multicountry_trade_three_country_sequential_nn_solve(self):
-        results, frames = multicountry_trade_growth_nn(
-            a_0=(-0.2, 0.1, 0.1),
-            parameters=symmetric_trade_growth_parameters(3),
-            seed=0,
-            data_set=MulticountryTradeNNDataSettings(
-                train_T=15.0,
-                train_points=6,
-                sampling="uniform",
-                dense_T=8.0,
-                tail_points=2,
-                test_T=8.0,
-                test_points=9,
-                validation_points=13,
-                quality_T=10.0,
-            ),
-            nn_set=SequentialNNSettings(
-                width=16,
-                depth=2,
-                input_scale=10.0,
-            ),
-            lm_set=NNSolverSettings(
-                max_steps=60,
-                residual_atol=1e-10,
-            ),
-            verbose=False,
-        )
-
-        self.assertTrue(results["solution_accepted"], results["rejection_reason"])
-        self.assertEqual(results["terminal_residual_count"], 0)
-        self.assertEqual(results["initial_residual_count"], 0)
-        self.assertEqual(results["network_output_count"], 37)
-        self.assertEqual(results["algebraic_network_output_count"], 25)
-        self.assertEqual(results["dae_residual_count"], 37 * 6)
-        self.assertGreater(results["unknown_count"], results["dae_residual_count"])
-        self.assertEqual(
-            results["selection"],
-            "minimum_identity_metric_parameter_step",
-        )
-        self.assertEqual(results["quality_T"], 10.0)
-        self.assertEqual(results["quality_validation_point_count"], 9)
-        self.assertLess(results["max_initial_residual"], 1e-12)
-        self.assertLess(results["max_train_residual"], 1e-8)
-        self.assertLess(results["max_validation_residual"], 1e-3)
-        self.assertGreaterEqual(
-            results["max_full_horizon_validation_residual"],
-            results["max_validation_residual"],
-        )
-        self.assertLess(results["max_asset_clearing_residual"], 5e-5)
-        self.assertGreaterEqual(
-            results["max_full_horizon_asset_clearing_residual"],
-            results["max_asset_clearing_residual"],
-        )
-        self.assertLess(results["max_rate_consistency_residual"], 1e-5)
-        self.assertGreaterEqual(
-            results["max_full_horizon_rate_consistency_residual"],
-            results["max_rate_consistency_residual"],
-        )
-        self.assertTrue(np.isfinite(results["ex_post_discounted_assets"]))
-        self.assertTrue(np.isfinite(results["ex_post_asset_tvc"]))
-        self.assertTrue(np.isfinite(results["ex_post_capital_tvc"]))
-        for name in (
-            "capital",
-            "assets",
-            "tobin_q",
-            "marginal_wealth",
-            "consumption",
-            "investment_rate",
-            "trade_balance",
-            "current_account",
-            *STATIC_BLOCK_NAMES,
-        ):
-            self.assertLess(results[f"max_country_2_3_{name}_gap"], 2e-4)
-        self.assertLess(
-            results["max_country_2_3_trade_share_permutation_gap"],
-            2e-4,
-        )
-        quality_frame = frames["validation_df"].query("t <= 10.0")
-        self.assertLess(
-            np.max(np.abs(quality_frame["consumption_basket_log_price"])), 1e-4
-        )
-        for name in (
-            "ode_residual_rms",
-            "algebraic_residual_rms",
-            "dae_residual_rms",
-        ):
-            self.assertTrue(np.isfinite(quality_frame[name]).all())
-            self.assertGreaterEqual(quality_frame[name].min(), 0.0)
-            self.assertAlmostEqual(
-                results[f"max_validation_{name}"], quality_frame[name].max()
-            )
-        np.testing.assert_allclose(
-            quality_frame["dae_residual_rms"] ** 2,
-            (
-                12.0 * quality_frame["ode_residual_rms"] ** 2
-                + 25.0 * quality_frame["algebraic_residual_rms"] ** 2
-            )
-            / 37.0,
-            rtol=1e-12,
-            atol=1e-16,
-        )
-
-    def test_multicountry_trade_heterogeneous_static_equilibrium(self):
+class TradeGrowthEquations(unittest.TestCase):
+    def test_heterogeneous_static_equilibrium_and_accounting(self):
         parameters = TradeGrowthParameters(
             populations=(1.0, 2.0, 1.5),
             intermediate_productivities=(1.0, 1.1, 0.9),
@@ -455,10 +71,519 @@ class KernelSmokeTests(unittest.TestCase):
         )
         self.assertLess(diagnostics["max_residual"], 1e-10)
         self.assertGreater(diagnostics["minimum_jacobian_singular_value"], 1e-3)
-        np.testing.assert_allclose(values["trade_shares"].sum(axis=1), 1.0, atol=1e-13)
+        np.testing.assert_allclose(
+            values["trade_shares"].sum(axis=1),
+            1.0,
+            atol=1e-13,
+        )
         np.testing.assert_allclose(values["budget_trade_gap"], 0.0, atol=1e-13)
         np.testing.assert_allclose(values["world_trade_balance"], 0.0, atol=1e-13)
         self.assertFalse(np.allclose(values["trade_shares"], values["trade_shares"].T))
+
+    def test_dynamic_residual_signs_match_the_laws_of_motion(self):
+        parameters = draw_trade_growth_parameters(3, seed=11)
+        k = jnp.asarray([[0.9, 1.1, 1.3]])
+        q = jnp.asarray([[0.8, 0.9, 1.0]])
+        marginal_wealth = jnp.asarray([[1.1, 0.95, 1.05]])
+        interest_rate = jnp.asarray([0.04])
+        a = jnp.asarray([[-0.15, 0.02, 0.1]])
+        static, diagnostics = static_trade_equilibrium(
+            k[0],
+            q[0],
+            marginal_wealth[0],
+            parameters,
+        )
+        self.assertLess(diagnostics["max_residual"], 1e-10)
+        log_static = static["log_static"][None, :, :]
+        allocations = multicountry_trade_allocations(
+            k,
+            q,
+            marginal_wealth,
+            interest_rate,
+            log_static,
+            parameters,
+        )
+        budget_drift = (
+            interest_rate[:, None] * a
+            + allocations["factor_income"]
+            - allocations["final_expenditure"]
+        )
+        values = multicountry_trade_path_values(
+            k=k,
+            a=a,
+            tobin_q=q,
+            marginal_wealth=marginal_wealth,
+            interest_rate=interest_rate,
+            log_static=log_static,
+            dlog_k_dt=allocations["capital_drift"] / k,
+            da_dt=budget_drift,
+            dlog_q_dt=allocations["tobin_q_drift"] / q,
+            dlog_marginal_wealth_dt=(parameters.rho - interest_rate[:, None]),
+            parameters=parameters,
+        )
+        for name in DYNAMIC_RESIDUAL_NAMES:
+            self.assertLess(float(jnp.max(jnp.abs(values[name]))), 2e-15)
+        self.assertLess(
+            float(jnp.max(jnp.abs(values["static_residuals"]))),
+            1e-10,
+        )
+
+
+class FullDAEKernel(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.cases = {}
+        for num_countries in (2, 3):
+            parameters = draw_trade_growth_parameters(
+                num_countries,
+                seed=0,
+            )
+            k_0, a_0 = draw_initial_conditions(
+                InitialConditionSettings(seed=0),
+                parameters,
+                dtype=jnp.float64,
+            )
+            dense_results, dense_extra = multicountry_trade_growth_kernel(
+                k_0=k_0,
+                a_0=a_0,
+                parameters=parameters,
+                data_set=small_data(rank_audit=True),
+                lm_set=SolverSettings(linear_solver="auto", max_steps=100),
+            )
+            cg_results, cg_extra = multicountry_trade_growth_kernel(
+                k_0=k_0,
+                a_0=a_0,
+                parameters=parameters,
+                data_set=small_data(),
+                lm_set=SolverSettings(linear_solver="cg", max_steps=100),
+            )
+            cls.cases[num_countries] = {
+                "parameters": parameters,
+                "k_0": k_0,
+                "a_0": a_0,
+                "dense": (dense_results, dense_extra),
+                "cg": (cg_results, cg_extra),
+            }
+
+    def test_two_and_three_country_dae_counts_rank_and_random_initials(self):
+        for num_countries, case in self.cases.items():
+            with self.subTest(num_countries=num_countries):
+                results, extra = case["dense"]
+                n_train = results["num_train_points"]
+                residual_count = (12 * num_countries + 1) * n_train
+                free_count = 10 * num_countries + 1
+                theta_flat, _ = ravel_pytree(extra["theta"])
+                self.assertTrue(
+                    results["solution_accepted"],
+                    results["rejection_reason"],
+                )
+                self.assertFalse(results["asset_homotopy_used"])
+                self.assertEqual(results["linear_solver_resolved"], "cholesky")
+                self.assertEqual(results["dae_residual_count"], residual_count)
+                self.assertEqual(results["free_initial_value_count"], free_count)
+                self.assertEqual(results["unknown_count"], residual_count + free_count)
+                self.assertEqual(extra["metric"].size, residual_count)
+                self.assertEqual(theta_flat.size - extra["metric"].size, free_count)
+                self.assertEqual(results["dae_jacobian_rank"], residual_count)
+                self.assertLess(results["max_train_residual"], 1e-8)
+                self.assertLess(results["max_validation_residual"], 2e-3)
+                self.assertGreater(float(jnp.std(extra["p"]["k_0"])), 1e-3)
+                self.assertGreater(float(jnp.max(jnp.abs(extra["p"]["a_0"]))), 1e-3)
+
+    def test_initial_levels_are_actual_free_unpenalized_unknowns(self):
+        for num_countries, case in self.cases.items():
+            with self.subTest(num_countries=num_countries):
+                _, extra = case["dense"]
+                initial = extra["theta"][-1]
+                values = extra["evaluate_parametric"](
+                    jnp.asarray([0.0]),
+                    extra["theta"],
+                    extra["p"],
+                )
+                np.testing.assert_allclose(
+                    values["q"][0],
+                    jnp.exp(initial[:num_countries]),
+                    rtol=2e-13,
+                )
+                np.testing.assert_allclose(
+                    values["marginal_wealth"][0],
+                    jnp.exp(initial[num_countries : 2 * num_countries]),
+                    rtol=2e-13,
+                )
+                log_static_0 = initial[2 * num_countries : -1].reshape(
+                    len(STATIC_BLOCK_NAMES),
+                    num_countries,
+                )
+                for index, name in enumerate(STATIC_BLOCK_NAMES):
+                    np.testing.assert_allclose(
+                        values[name][0],
+                        jnp.exp(log_static_0[index]),
+                        rtol=2e-13,
+                    )
+                np.testing.assert_allclose(
+                    values["interest_rate"][0],
+                    jnp.exp(initial[-1]),
+                    rtol=2e-13,
+                )
+                theta_flat, _ = ravel_pytree(extra["theta"])
+                metric_size = extra["metric"].size
+                penalty = jnp.vdot(
+                    extra["metric"].factor_apply(
+                        theta_flat[:metric_size],
+                        None,
+                    ),
+                    extra["metric"].factor_apply(
+                        theta_flat[:metric_size],
+                        None,
+                    ),
+                )
+                shifted = theta_flat.at[metric_size:].add(
+                    jnp.linspace(0.1, 0.2, theta_flat.size - metric_size)
+                )
+                shifted_penalty = jnp.vdot(
+                    extra["metric"].factor_apply(shifted[:metric_size], None),
+                    extra["metric"].factor_apply(shifted[:metric_size], None),
+                )
+                self.assertEqual(float(penalty), float(shifted_penalty))
+
+    def test_initial_conditions_and_all_economic_inputs_are_in_p(self):
+        for num_countries, case in self.cases.items():
+            with self.subTest(num_countries=num_countries):
+                _, extra = case["dense"]
+                p = extra["p"]
+                self.assertEqual(set(p), {"parameters", "k_0", "a_0"})
+                np.testing.assert_allclose(p["k_0"], case["k_0"])
+                np.testing.assert_allclose(p["a_0"], case["a_0"])
+                self.assertEqual(
+                    p["parameters"].trade_costs.shape,
+                    (num_countries, num_countries),
+                )
+                self.assertTrue(
+                    all(isinstance(leaf, jax.Array) for leaf in jax.tree.leaves(p))
+                )
+
+    def test_balanced_cg_matches_dense_for_two_and_three_countries(self):
+        names = (
+            "k",
+            "a",
+            "q",
+            "marginal_wealth",
+            "consumption",
+            "investment",
+            "interest_rate",
+            "trade_shares",
+        )
+        points = jnp.linspace(0.0, 10.0, 21)
+        for num_countries, case in self.cases.items():
+            with self.subTest(num_countries=num_countries):
+                dense_results, dense_extra = case["dense"]
+                cg_results, cg_extra = case["cg"]
+                self.assertTrue(
+                    cg_results["solution_accepted"],
+                    cg_results["rejection_reason"],
+                )
+                self.assertEqual(cg_results["linear_solver_resolved"], "cg")
+                self.assertEqual(
+                    cg_results["lm_set"]["preconditioner"],
+                    "balanced_modes",
+                )
+                dense_values = dense_extra["model"](points)
+                cg_values = cg_extra["model"](points)
+                for name in names:
+                    scale = max(
+                        float(jnp.max(jnp.abs(dense_values[name]))),
+                        1.0,
+                    )
+                    error = float(
+                        jnp.max(jnp.abs(cg_values[name] - dense_values[name])) / scale
+                    )
+                    self.assertLess(error, 2e-7, name)
+                self.assertLessEqual(
+                    cg_results["max_validation_residual"],
+                    1.05 * dense_results["max_validation_residual"],
+                )
+
+    def test_dense_implicit_ad_matches_the_gauss_newton_system(self):
+        _, extra = self.cases[2]["dense"]
+        p = extra["p"]
+        zero = jax.tree.map(jnp.zeros_like, p)
+        trade_cost_direction = (
+            jnp.zeros_like(p["parameters"].trade_costs).at[0, 1].set(1.0)
+        )
+        direction = {
+            **zero,
+            "parameters": dataclasses.replace(
+                zero["parameters"],
+                trade_costs=trade_cost_direction,
+            ),
+            "k_0": zero["k_0"].at[0].set(0.2),
+        }
+        points = jnp.asarray([2.5])
+
+        def observable(p_value):
+            solved = extra["solve_parametric"](p_value)
+            values = extra["evaluate_parametric"](
+                points,
+                solved.x,
+                p_value,
+            )
+            return jnp.log(values["consumption"][0, 0])
+
+        value, tangent = jax.jvp(observable, (p,), (direction,))
+        _, pullback = jax.vjp(observable, p)
+        gradient = pullback(jnp.ones_like(value))[0]
+        reverse_directional = sum(
+            jnp.vdot(gradient_leaf, direction_leaf)
+            for gradient_leaf, direction_leaf in zip(
+                jax.tree.leaves(gradient),
+                jax.tree.leaves(direction),
+                strict=True,
+            )
+        )
+        self.assertTrue(bool(jnp.isfinite(tangent)))
+        self.assertLess(
+            float(jnp.abs(tangent - reverse_directional))
+            / max(float(jnp.abs(tangent)), 1e-12),
+            1e-4,
+        )
+
+        solved = extra["solve_parametric"](p)
+        theta_flat, unravel_theta = ravel_pytree(solved.x)
+
+        def residual(flat, p_value):
+            return extra["residual_fn"](
+                unravel_theta(flat),
+                None,
+                p_value,
+            )
+
+        jacobian = jax.jacrev(residual, argnums=0)(theta_flat, p)
+        residual_p_dot = jax.jvp(
+            lambda p_value: residual(theta_flat, p_value),
+            (p,),
+            (direction,),
+        )[1]
+        metric = extra["metric"]
+        metric_size = metric.size
+        jacobian_transpose = jacobian.T
+        whitened_jacobian_transpose = jnp.concatenate(
+            [
+                metric.factor_solve_transpose(
+                    jacobian_transpose[:metric_size],
+                    None,
+                ),
+                jacobian_transpose[metric_size:],
+            ],
+            axis=0,
+        )
+        ridge = solved.lm_state.ridge
+        normal = whitened_jacobian_transpose @ whitened_jacobian_transpose.T
+        diagonal = jnp.arange(metric_size)
+        normal = normal.at[diagonal, diagonal].add(ridge)
+        factor = jsp_linalg.cho_factor(normal)
+        y_dot = jsp_linalg.cho_solve(
+            factor,
+            -(whitened_jacobian_transpose @ residual_p_dot),
+        )
+        theta_dot_flat = jnp.concatenate(
+            [
+                metric.factor_solve(y_dot[:metric_size], None),
+                y_dot[metric_size:],
+            ]
+        )
+
+        def explicit_observable(flat, p_value):
+            values = extra["evaluate_parametric"](
+                points,
+                unravel_theta(flat),
+                p_value,
+            )
+            return jnp.log(values["consumption"][0, 0])
+
+        _, manual_tangent = jax.jvp(
+            explicit_observable,
+            (theta_flat, p),
+            (theta_dot_flat, direction),
+        )
+        self.assertLess(
+            float(jnp.abs(tangent - manual_tangent))
+            / max(float(jnp.abs(tangent)), 1e-12),
+            2e-6,
+        )
+
+    def test_preconditioned_cg_ad_agrees_with_dense_ad(self):
+        dense_extra = self.cases[2]["dense"][1]
+        cg_extra = self.cases[2]["cg"][1]
+        p = dense_extra["p"]
+        zero = jax.tree.map(jnp.zeros_like, p)
+        transfer = (
+            jnp.zeros_like(p["a_0"])
+            .at[0]
+            .set(1.0 / p["parameters"].populations[0])
+            .at[1]
+            .set(-1.0 / p["parameters"].populations[1])
+        )
+        direction = {**zero, "a_0": transfer}
+        points = jnp.asarray([2.5])
+
+        def observable(extra_value, p_value):
+            solved = extra_value["solve_parametric"](p_value)
+            values = extra_value["evaluate_parametric"](
+                points,
+                solved.x,
+                p_value,
+            )
+            return jnp.log(values["consumption"][0, 0])
+
+        dense_tangent = jax.jvp(
+            lambda p_value: observable(dense_extra, p_value),
+            (p,),
+            (direction,),
+        )[1]
+        cg_tangent = jax.jvp(
+            lambda p_value: observable(cg_extra, p_value),
+            (p,),
+            (direction,),
+        )[1]
+        self.assertLess(
+            float(jnp.abs(cg_tangent - dense_tangent))
+            / max(float(jnp.abs(dense_tangent)), 1e-10),
+            2e-5,
+        )
+
+
+class MetricLMKernel(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.parameters = draw_trade_growth_parameters(2, seed=0)
+        cls.k_0, cls.a_0 = draw_initial_conditions(
+            InitialConditionSettings(seed=0),
+            cls.parameters,
+            dtype=jnp.float64,
+        )
+        cls.cases = {}
+        common = {
+            "optimizer": "metric_lm",
+            "metric_eps": 1e-7,
+            "init_damping": 1e-4,
+            "geodesic_acceleration": False,
+            "asset_homotopy_steps": 0,
+            "max_steps": 100,
+            "gtol": 5e-12,
+        }
+        for linear_solver, preconditioner in (
+            ("auto", "balanced_modes"),
+            ("qr", "balanced_modes"),
+            ("gram_cg", "hybrid_blocks"),
+        ):
+            settings = SolverSettings(
+                **common,
+                linear_solver=linear_solver,
+                preconditioner=preconditioner,
+                preconditioner_refresh_steps=(1 if linear_solver == "gram_cg" else 0),
+                cg_tol=1e-8,
+                cg_maxiter=2000,
+            )
+            cls.cases[linear_solver] = multicountry_trade_growth_kernel(
+                k_0=cls.k_0,
+                a_0=cls.a_0,
+                parameters=cls.parameters,
+                data_set=small_data(),
+                lm_set=settings,
+            )
+
+    def test_shifted_metric_is_exact_and_includes_initial_values(self):
+        results, extra = self.cases["auto"]
+        metric = extra["metric"]
+        epsilon = results["metric_epsilon"]
+        np.testing.assert_allclose(
+            metric.F.T @ metric.F,
+            extra["K"] + epsilon * jnp.eye(extra["K"].shape[0]),
+            rtol=2e-13,
+            atol=2e-13,
+        )
+        self.assertEqual(float(metric.free_scale), epsilon)
+        self.assertEqual(results["penalized_coefficient_count"], 0)
+        self.assertEqual(results["unpenalized_initial_value_count"], 0)
+        theta_flat, _ = ravel_pytree(extra["theta"])
+        metric_size = metric.size
+        coefficient_norm = jnp.vdot(
+            metric.factor_apply(theta_flat[:metric_size], None),
+            metric.factor_apply(theta_flat[:metric_size], None),
+        )
+        full_norm = coefficient_norm + metric.free_scale * jnp.vdot(
+            theta_flat[metric_size:], theta_flat[metric_size:]
+        )
+        shifted = theta_flat.at[metric_size:].add(0.1)
+        shifted_norm = coefficient_norm + metric.free_scale * jnp.vdot(
+            shifted[metric_size:], shifted[metric_size:]
+        )
+        self.assertNotEqual(float(full_norm), float(shifted_norm))
+
+    def test_dense_qr_and_gram_cg_paths_agree(self):
+        dense_results, dense_extra = self.cases["auto"]
+        self.assertTrue(
+            dense_results["solution_accepted"],
+            dense_results["rejection_reason"],
+        )
+        points = jnp.linspace(0.0, 10.0, 21)
+        dense_values = dense_extra["model"](points)
+        for linear_solver in ("qr", "gram_cg"):
+            with self.subTest(linear_solver=linear_solver):
+                results, extra = self.cases[linear_solver]
+                self.assertTrue(
+                    results["solution_accepted"], results["rejection_reason"]
+                )
+                values = extra["model"](points)
+                errors = []
+                for name in (
+                    "k",
+                    "a",
+                    "q",
+                    "marginal_wealth",
+                    "consumption",
+                    "investment",
+                    "interest_rate",
+                    "trade_shares",
+                ):
+                    scale = max(float(jnp.max(jnp.abs(dense_values[name]))), 1.0)
+                    errors.append(
+                        float(jnp.max(jnp.abs(values[name] - dense_values[name])))
+                        / scale
+                    )
+                self.assertLess(max(errors), 2e-7)
+
+    def test_metric_implicit_ad_is_finite_and_transpose_consistent(self):
+        _, extra = self.cases["auto"]
+        p = extra["p"]
+        zero = jax.tree.map(jnp.zeros_like, p)
+        direction = {
+            **zero,
+            "parameters": dataclasses.replace(
+                zero["parameters"],
+                trade_costs=zero["parameters"].trade_costs.at[0, 1].set(0.2),
+            ),
+            "k_0": zero["k_0"].at[0].set(0.1),
+        }
+
+        def observable(p_value):
+            solved = extra["solve_parametric"](p_value)
+            values = extra["evaluate_parametric"](jnp.asarray([2.5]), solved.x, p_value)
+            return jnp.log(values["consumption"][0, 0])
+
+        value, tangent = jax.jvp(observable, (p,), (direction,))
+        _, pullback = jax.vjp(observable, p)
+        gradient = pullback(jnp.ones_like(value))[0]
+        reverse_directional = sum(
+            jnp.vdot(gradient_leaf, direction_leaf)
+            for gradient_leaf, direction_leaf in zip(
+                jax.tree.leaves(gradient),
+                jax.tree.leaves(direction),
+                strict=True,
+            )
+        )
+        self.assertTrue(bool(jnp.isfinite(tangent)))
+        self.assertLess(float(jnp.abs(tangent - reverse_directional)), 2e-10)
 
 
 if __name__ == "__main__":

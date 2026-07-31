@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+import jax.scipy as jsp
 import numpy as np
 import scipy.optimize
 
@@ -120,6 +121,73 @@ class TradeGrowthParameters:
     def price_index_constant(self):
         shape = 1.0 + (1.0 - self.variety_elasticity) / self.trade_elasticity
         return math.gamma(shape) ** (1.0 / (1.0 - self.variety_elasticity))
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class TradeGrowthParameterValues:
+    alpha: jax.Array
+    gamma: jax.Array
+    delta: jax.Array
+    rho: jax.Array
+    installation_elasticity: jax.Array
+    trade_elasticity: jax.Array
+    variety_elasticity: jax.Array
+    populations: jax.Array
+    intermediate_productivities: jax.Array
+    consumption_productivities: jax.Array
+    investment_productivities: jax.Array
+    consumption_value_added_shares: jax.Array
+    intermediate_value_added_shares: jax.Array
+    investment_value_added_shares: jax.Array
+    trade_costs: jax.Array
+
+    @property
+    def num_countries(self):
+        return self.populations.shape[-1]
+
+    @property
+    def installation_efficiency(self):
+        return self.delta ** (1.0 - self.installation_elasticity)
+
+    @property
+    def price_index_constant(self):
+        shape = 1.0 + (1.0 - self.variety_elasticity) / self.trade_elasticity
+        return jnp.exp(jsp.special.gammaln(shape) / (1.0 - self.variety_elasticity))
+
+
+def trade_growth_parameter_values(parameters, dtype=jnp.float64):
+    return TradeGrowthParameterValues(
+        alpha=jnp.asarray(parameters.alpha, dtype=dtype),
+        gamma=jnp.asarray(parameters.gamma, dtype=dtype),
+        delta=jnp.asarray(parameters.delta, dtype=dtype),
+        rho=jnp.asarray(parameters.rho, dtype=dtype),
+        installation_elasticity=jnp.asarray(
+            parameters.installation_elasticity, dtype=dtype
+        ),
+        trade_elasticity=jnp.asarray(parameters.trade_elasticity, dtype=dtype),
+        variety_elasticity=jnp.asarray(parameters.variety_elasticity, dtype=dtype),
+        populations=jnp.asarray(parameters.populations, dtype=dtype),
+        intermediate_productivities=jnp.asarray(
+            parameters.intermediate_productivities, dtype=dtype
+        ),
+        consumption_productivities=jnp.asarray(
+            parameters.consumption_productivities, dtype=dtype
+        ),
+        investment_productivities=jnp.asarray(
+            parameters.investment_productivities, dtype=dtype
+        ),
+        consumption_value_added_shares=jnp.asarray(
+            parameters.consumption_value_added_shares, dtype=dtype
+        ),
+        intermediate_value_added_shares=jnp.asarray(
+            parameters.intermediate_value_added_shares, dtype=dtype
+        ),
+        investment_value_added_shares=jnp.asarray(
+            parameters.investment_value_added_shares, dtype=dtype
+        ),
+        trade_costs=jnp.asarray(parameters.trade_costs, dtype=dtype),
+    )
 
 
 def symmetric_trade_growth_parameters(num_countries: int, trade_cost: float = 1.5):

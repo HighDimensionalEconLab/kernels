@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import os
-
-os.environ["JAX_PLATFORMS"] = "cpu"
-
+import dataclasses
 import json
+import os
 import pathlib
 import time
+import timeit
+
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import jax
 import jax.numpy as jnp
@@ -18,7 +19,9 @@ from jax.flatten_util import ravel_pytree
 from extra.trade_growth.comparative_statics import (
     build_multicountry_trade_comparative_statics,
     full_structural_jacobian,
+    trade_growth_statistics,
 )
+from extra.trade_growth.kernel import DataSettings, SolverSettings
 from extra.trade_growth.model import TradeGrowthParameters
 from replication.utilities import enable_compilation_cache
 
@@ -46,118 +49,89 @@ def heterogeneous_four_country_parameters():
     )
 
 
-def _selected_shock_directions(problem):
+def selected_shock_directions(problem):
     p = problem.structural_parameters
+    parameters = p["parameters"]
     zero = jax.tree.map(jnp.zeros_like, p)
+    zero_parameters = zero["parameters"]
+
+    def parameter_direction(**updates):
+        return {
+            **zero,
+            "parameters": dataclasses.replace(zero_parameters, **updates),
+        }
 
     def scalar_proportional(name):
-        return {**zero, name: 0.01 * p[name]}
+        return parameter_direction(**{name: 0.01 * getattr(parameters, name)})
 
     def country_proportional(name, country):
-        direction = zero[name].at[country].set(0.01 * p[name][country])
-        return {**zero, name: direction}
+        values = getattr(parameters, name)
+        return parameter_direction(
+            **{name: jnp.zeros_like(values).at[country].set(0.01 * values[country])}
+        )
 
-    num_countries = p["populations"].shape[0]
-    off_diagonal_pairs = tuple(
-        (importer, exporter)
-        for importer in range(num_countries)
-        for exporter in range(num_countries)
-        if importer != exporter
+    off_diagonal = ~jnp.eye(parameters.num_countries, dtype=bool)
+    all_trade_costs = jnp.where(
+        off_diagonal,
+        0.01 * parameters.trade_costs,
+        0.0,
     )
 
-    def trade_cost_direction(selected_pairs):
-        direction = zero["trade_costs_off_diagonal"]
-        for pair in selected_pairs:
-            index = off_diagonal_pairs.index(pair)
-            direction = direction.at[index].set(
-                0.01 * p["trade_costs_off_diagonal"][index]
+    def trade_cost_direction(pairs):
+        direction = jnp.zeros_like(parameters.trade_costs)
+        for importer, exporter in pairs:
+            direction = direction.at[importer, exporter].set(
+                0.01 * parameters.trade_costs[importer, exporter]
             )
-        return {**zero, "trade_costs_off_diagonal": direction}
+        return parameter_direction(trade_costs=direction)
 
-    initial_capital = zero["initial_log_capital"].at[0].set(0.01)
-    initial_nfa = (
-        zero["initial_aggregate_assets_free"]
+    capital = jnp.zeros_like(p["k_0"]).at[0].set(0.01 * p["k_0"][0])
+    transfer_total = 0.01 * problem.aggregate_income_scale
+    assets = (
+        jnp.zeros_like(p["a_0"])
         .at[0]
-        .set(0.01 * problem.aggregate_income_scale)
+        .set(transfer_total / parameters.populations[0])
+        .at[-1]
+        .set(-transfer_total / parameters.populations[-1])
     )
-    trade_costs = 0.01 * p["trade_costs_off_diagonal"]
     return {
         "rho_up_1pct": scalar_proportional("rho"),
         "delta_up_1pct": scalar_proportional("delta"),
         "gamma_up_1pct": scalar_proportional("gamma"),
-        "installation_elasticity_up_1pp": {
-            **zero,
-            "installation_elasticity": jnp.asarray(0.01, dtype=p["rho"].dtype),
-        },
+        "installation_elasticity_up_1pp": parameter_direction(
+            installation_elasticity=jnp.asarray(
+                0.01,
+                dtype=parameters.rho.dtype,
+            )
+        ),
         "trade_elasticity_up_1pct": scalar_proportional("trade_elasticity"),
-        "all_trade_costs_up_1pct": {
-            **zero,
-            "trade_costs_off_diagonal": trade_costs,
-        },
+        "all_trade_costs_up_1pct": parameter_direction(trade_costs=all_trade_costs),
         "trade_cost_1_from_2_up_1pct": trade_cost_direction(((0, 1),)),
         "trade_cost_2_from_1_up_1pct": trade_cost_direction(((1, 0),)),
         "trade_costs_1_2_both_directions_up_1pct": trade_cost_direction(
             ((0, 1), (1, 0))
         ),
         "country_1_inward_trade_costs_up_1pct": trade_cost_direction(
-            tuple((0, exporter) for exporter in range(1, num_countries))
+            tuple((0, exporter) for exporter in range(1, parameters.num_countries))
         ),
         "country_1_intermediate_productivity_up_1pct": country_proportional(
-            "intermediate_productivities", 0
+            "intermediate_productivities",
+            0,
         ),
         "country_1_consumption_productivity_up_1pct": country_proportional(
-            "consumption_productivities", 0
+            "consumption_productivities",
+            0,
         ),
         "country_1_investment_productivity_up_1pct": country_proportional(
-            "investment_productivities", 0
+            "investment_productivities",
+            0,
         ),
-        "country_1_initial_capital_up_1pct": {
-            **zero,
-            "initial_log_capital": initial_capital,
-        },
+        "country_1_initial_capital_up_1pct": {**zero, "k_0": capital},
         "initial_nfa_transfer_1pct_world_income_country_4_to_1": {
             **zero,
-            "initial_aggregate_assets_free": initial_nfa,
+            "a_0": assets,
         },
     }
-
-
-def _continuation_trade_cost_shock(
-    problem,
-    baseline_solution,
-    selected_pairs,
-    log_change,
-    continuation_steps=20,
-):
-    p = problem.structural_parameters
-    num_countries = p["populations"].shape[0]
-    off_diagonal_pairs = tuple(
-        (importer, exporter)
-        for importer in range(num_countries)
-        for exporter in range(num_countries)
-        if importer != exporter
-    )
-    selected_indices = jnp.asarray(
-        tuple(off_diagonal_pairs.index(pair) for pair in selected_pairs)
-    )
-    baseline_trade_costs = p["trade_costs_off_diagonal"]
-    theta = baseline_solution.x
-    result = baseline_solution
-    for step in range(1, continuation_steps + 1):
-        fraction = step / continuation_steps
-        trade_costs = baseline_trade_costs.at[selected_indices].set(
-            baseline_trade_costs[selected_indices] * jnp.exp(fraction * log_change)
-        )
-        p_step = {**p, "trade_costs_off_diagonal": trade_costs}
-        result = problem.solver.solve(
-            theta,
-            p=p_step,
-            max_steps=problem.max_steps,
-            atol=problem.residual_atol,
-            max_steps_is_success=False,
-        )
-        theta = result.x
-    return result
 
 
 def run(output_dir: str = ".results"):
@@ -167,198 +141,105 @@ def run(output_dir: str = ".results"):
         k_0=(1.0, 0.85, 1.15, 0.95),
         a_0=(-0.20, -0.05, 0.12, 0.145),
         parameters=heterogeneous_four_country_parameters(),
+        data_set=DataSettings(
+            train_T=120.0,
+            train_points=32,
+            dense_T=40.0,
+            tail_points=8,
+            test_T=80.0,
+            test_points=161,
+            validation_points=241,
+            quality_T=100.0,
+        ),
+        lm_set=SolverSettings(max_steps=100),
+        statistic_times=(0.0, 40.0, 100.0),
     )
+    p = problem.structural_parameters
 
-    solve_times = []
-    jacobian_times = []
-    for _ in range(5):
-        solve_start = time.perf_counter()
-        solution = problem.solve()
-        jax.block_until_ready(solution.aux)
-        solve_times.append(time.perf_counter() - solve_start)
+    def timed_statistics():
+        values = problem.statistics()
+        jax.block_until_ready(values)
+        return values
 
-        jacobian_start = time.perf_counter()
-        statistics, jacobian = full_structural_jacobian(problem)
-        jax.block_until_ready(jacobian)
-        jacobian_times.append(time.perf_counter() - jacobian_start)
-    solve_seconds = float(np.median(solve_times))
-    jacobian_seconds = float(np.median(jacobian_times))
+    timed_statistics()
+    solve_times = timeit.repeat(timed_statistics, repeat=3, number=1)
+
+    jacobian_start = time.perf_counter()
+    statistics, jacobian = full_structural_jacobian(problem)
+    jax.block_until_ready(jacobian)
+    jacobian_seconds = time.perf_counter() - jacobian_start
     interpretable_jacobian = jacobian * problem.parameter_coordinate_scales[None, :]
 
-    statistics_array = np.asarray(statistics)
-    jacobian_array = np.asarray(jacobian)
     statistics_frame = pd.DataFrame(
         {
             "statistic": problem.statistic_names,
-            "value": statistics_array,
+            "value": np.asarray(statistics),
         }
     )
     jacobian_frame = pd.DataFrame(
-        jacobian_array,
+        np.asarray(jacobian),
         index=problem.statistic_names,
         columns=problem.parameter_names,
     )
     jacobian_frame.index.name = "statistic"
-    interpretable_jacobian_frame = pd.DataFrame(
+    interpretable_frame = pd.DataFrame(
         np.asarray(interpretable_jacobian),
         index=problem.statistic_names,
         columns=problem.parameter_coordinate_names,
     )
-    interpretable_jacobian_frame.index.name = "statistic"
+    interpretable_frame.index.name = "statistic"
 
-    flat_p, _ = ravel_pytree(problem.structural_parameters)
+    flat_p, _ = ravel_pytree(p)
     direction_columns = {}
-    for name, direction in _selected_shock_directions(problem).items():
+    for name, direction in selected_shock_directions(problem).items():
         flat_direction, _ = ravel_pytree(direction)
         if flat_direction.shape != flat_p.shape:
             raise RuntimeError(f"shock direction {name} has the wrong shape")
-        direction_columns[name] = jacobian @ flat_direction
+        direction_columns[name] = np.asarray(jacobian @ flat_direction)
     shocks_frame = pd.DataFrame(
         direction_columns,
         index=problem.statistic_names,
     )
     shocks_frame.index.name = "statistic"
-    trade_shock_names = (
-        "all_trade_costs_up_1pct",
-        "trade_cost_1_from_2_up_1pct",
-        "trade_cost_2_from_1_up_1pct",
-        "trade_costs_1_2_both_directions_up_1pct",
-        "country_1_inward_trade_costs_up_1pct",
-    )
-    trade_statistic_names = tuple(
-        name
-        for name in problem.statistic_names
-        if name.startswith("log_population_weighted_home_trade_share")
-        or name.startswith("log_population_weighted_import_share")
-        or name.startswith("log_trade_share_")
-    )
-    trade_elasticities_frame = (
-        shocks_frame.loc[
-            trade_statistic_names,
-            trade_shock_names,
-        ]
-        / 0.01
-    )
-    baseline_trade_frame = statistics_frame.set_index("statistic").loc[
-        list(trade_statistic_names)
-    ]
-    baseline_trade_frame = baseline_trade_frame.rename(columns={"value": "log_share"})
-    baseline_trade_frame["share"] = np.exp(baseline_trade_frame["log_share"])
 
-    num_countries = problem.structural_parameters["populations"].shape[0]
-    all_trade_pairs = tuple(
-        (importer, exporter)
-        for importer in range(num_countries)
-        for exporter in range(num_countries)
-        if importer != exporter
-    )
-    discrete_shocks = {
-        "all_trade_costs_down_10pct": (all_trade_pairs, np.log(0.9)),
-        "trade_costs_1_2_both_directions_up_10pct": (
-            ((0, 1), (1, 0)),
-            np.log(1.1),
-        ),
-    }
-    discrete_response_columns = {}
-    discrete_secant_columns = {}
-    discrete_diagnostics = {}
-    for name, (selected_pairs, log_change) in discrete_shocks.items():
-        shocked_solution = _continuation_trade_cost_shock(
-            problem,
-            solution,
-            selected_pairs,
-            log_change,
-        )
-        jax.block_until_ready(shocked_solution.aux)
-        response = shocked_solution.aux - statistics
-        discrete_response_columns[name] = response
-        discrete_secant_columns[name] = response / log_change
-        shocked_residual = problem.solver.residual_fn(
-            shocked_solution.x,
-            None,
-            shocked_solution.p,
-        )[0]
-        discrete_diagnostics[name] = {
-            "final_continuation_steps": int(shocked_solution.steps),
-            "final_damping": float(shocked_solution.lm_state.damping),
-            "max_dae_residual": float(jnp.max(jnp.abs(shocked_residual))),
-            "log_trade_cost_change": float(log_change),
-        }
-    discrete_response_frame = pd.DataFrame(
-        discrete_response_columns,
-        index=problem.statistic_names,
-    )
-    discrete_response_frame.index.name = "statistic"
-    discrete_secant_frame = pd.DataFrame(
-        discrete_secant_columns,
-        index=problem.statistic_names,
-    )
-    discrete_secant_frame.index.name = "statistic"
-
-    residual = problem.solver.residual_fn(
+    solution = problem.baseline_solution
+    residual = problem.residual_fn(solution.x, None, p)
+    baseline_values = problem.evaluate_parametric(
+        problem.statistic_times,
         solution.x,
-        None,
-        problem.structural_parameters,
-    )[0]
+        p,
+    )
+    baseline_statistics = trade_growth_statistics(baseline_values, p)
+    np.testing.assert_allclose(statistics, baseline_statistics, rtol=2e-8, atol=2e-9)
     metadata = {
         "status": int(solution.status),
         "steps": int(solution.steps),
         "final_damping": float(solution.lm_state.damping),
-        "max_dae_residual": float(jnp.max(jnp.abs(residual))),
-        "solve_seconds": solve_seconds,
+        "final_ridge": float(solution.lm_state.ridge),
+        "max_scaled_dae_residual": float(jnp.max(jnp.abs(residual))),
+        "median_warm_solve_seconds": float(np.median(solve_times)),
+        "solve_timing_repetitions": len(solve_times),
         "jacobian_seconds": jacobian_seconds,
-        "timing_repetitions": 5,
         "num_statistics": len(problem.statistic_names),
         "num_parameters": len(problem.parameter_names),
-        "jacobian_method": "nlls_gram_ad_solver_auto_vjp",
-        "terminal_conditions_in_solve": False,
-        "discrete_trade_shocks": discrete_diagnostics,
+        "jacobian_method": "ridge_lm_gauss_newton_implicit_vjp",
+        "parameterization": "full_p_with_initial_conditions_and_trade_cost_matrix",
     }
 
     prefix = out / "multicountry_trade_growth_comparative_statics"
     statistics_frame.to_csv(
-        prefix.with_name(f"{prefix.name}_statistics.csv"), index=False
+        prefix.with_name(f"{prefix.name}_statistics.csv"),
+        index=False,
     )
     jacobian_frame.to_csv(prefix.with_name(f"{prefix.name}_jacobian.csv"))
-    interpretable_jacobian_frame.to_csv(
+    interpretable_frame.to_csv(
         prefix.with_name(f"{prefix.name}_interpretable_jacobian.csv")
     )
     shocks_frame.to_csv(prefix.with_name(f"{prefix.name}_selected_shocks.csv"))
-    trade_elasticities_frame.to_csv(
-        prefix.with_name(f"{prefix.name}_trade_elasticities.csv")
-    )
-    baseline_trade_frame.to_csv(
-        prefix.with_name(f"{prefix.name}_baseline_trade_shares.csv")
-    )
-    discrete_response_frame.to_csv(
-        prefix.with_name(f"{prefix.name}_discrete_trade_shock_responses.csv")
-    )
-    discrete_secant_frame.to_csv(
-        prefix.with_name(f"{prefix.name}_discrete_trade_shock_secants.csv")
-    )
     prefix.with_name(f"{prefix.name}_metadata.json").write_text(
         json.dumps(metadata, indent=2) + "\n"
     )
     print(json.dumps(metadata, indent=2))
-    report_rows = (
-        *(f"log_population_weighted_import_share_t{time}" for time in (0, 40, 100)),
-        *(
-            f"log_trade_share_1_from_{exporter}_t{time}"
-            for time in (0, 40, 100)
-            for exporter in range(1, 5)
-        ),
-        *(
-            f"log_trade_share_2_from_{exporter}_t{time}"
-            for time in (0, 40, 100)
-            for exporter in range(1, 5)
-        ),
-    )
-    print("\nSelected trade elasticities:")
-    print(
-        trade_elasticities_frame.loc[list(report_rows)].to_string(
-            float_format=lambda value: f"{value:.6g}"
-        )
-    )
     return metadata
 
 

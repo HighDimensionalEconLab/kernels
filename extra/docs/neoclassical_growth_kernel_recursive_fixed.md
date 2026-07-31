@@ -90,8 +90,8 @@ t_j=\frac{j}{P-1}T_{\mathrm{train}},
 It retains the separate benchmark states \((z_{mj},k_{mj})\) for the economic
 residual and places kernel centers only on
 \(q_{mj}=\log k_{mj}-\log z_{mj}\). The defaults \(P=65\) and
-\(T_{\mathrm{train}}=40\) exactly match the recursive NN's 65 residual dates,
-with spacing 0.625. The NN's fixed RK4 rollout uses 32 internal steps over the
+\(T_{\mathrm{train}}=100\) exactly match the recursive NN's 65 residual dates,
+with spacing 1.5625. The NN's fixed RK4 rollout uses 128 internal steps over the
 same horizon. With \(M\) training trajectories, the residual contains all
 \(MP\) trajectory-date observations, flattened and scaled by
 \(1/\sqrt{MP}\).
@@ -120,6 +120,14 @@ log value, optimizer time, total fitting time, and held-out benchmark path
 errors. This distinction matters: a short lengthscale can fit the Euler
 equation on the fixed states while generating the wrong transition away from
 those states, so local convergence alone is not acceptance.
+
+At the longer `T_train=100` design, the retained defaults are lengthscale 0.4
+and metric shift (3\times 10^{-5}). With one and two training paths, these
+gave shifted Gram condition numbers (2.1\times 10^6) and
+(4.2\times 10^6), and maximum train Euler residuals (1.04\times 10^{-5})
+and (1.73\times 10^{-5}). The old 0.3 / (10^{-5}) geometry reached
+(1.25\times 10^7) condition number and narrowly failed the two-path Euler
+gate, so it was not retained merely by loosening acceptance.
 
 The benchmark states and Gram matrix are a frozen experimental design. JAX AD
 therefore differentiates the residual and fitted coefficients conditional on

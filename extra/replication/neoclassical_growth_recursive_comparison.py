@@ -24,11 +24,17 @@ PREFIX = "neoclassical_growth_recursive_comparison"
 
 def apply_common_validation(results, train_euler_tolerance, test_error_tolerance):
     results = results.copy()
+    collocation_path_ok = (
+        results["collocation_path_ok"].astype(bool)
+        if "collocation_path_ok" in results
+        else True
+    )
     benchmark_quality_ok = (
         results["test_mean_abs_k_rel_error"] <= test_error_tolerance
     ) & (results["test_mean_abs_c_rel_error"] <= test_error_tolerance)
     common_accepted = (
         results["solver_converged"].astype(bool)
+        & collocation_path_ok
         & (results["max_train_euler"] <= train_euler_tolerance)
         & results["test_path_ok"].astype(bool)
         & results["transversality_ok"].astype(bool)
@@ -106,7 +112,12 @@ def run(
     k_0: float | list[float] = 1.0,
     num_test_trajectories: int = 50,
     test_log_variance: float = 0.0025,
-    test_T: float = 50.0,
+    train_T: float = 100.0,
+    train_points: int = 65,
+    train_steps: int = 128,
+    train_tvc_T: float = 200.0,
+    tvc_steps: int = 256,
+    test_T: float = 40.0,
     dt: float = 1.0,
     data_seed: int = 0,
     train_euler_tolerance: float = 2e-5,
@@ -115,10 +126,19 @@ def run(
 ):
     if n_nn_seeds < 1:
         raise ValueError("n_nn_seeds must be positive")
+    if train_points < 2:
+        raise ValueError("train_points must be at least two")
     data_set = {
         "num_test_trajectories": num_test_trajectories,
+        "train_T": train_T,
+        "train_points": train_points,
+        "train_steps": train_steps,
+        "train_tvc_T": train_tvc_T,
+        "tvc_steps": tvc_steps,
         "test_T": test_T,
         "dt": dt,
+        "benchmark_T": max(200.0, train_T, test_T),
+        "benchmark_points": 801,
     }
     ic_set = {
         "data_seed": data_seed,

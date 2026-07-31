@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from functools import lru_cache, partial
 from typing import Literal
 
@@ -14,7 +14,15 @@ import pandas as pd
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import LevenbergMarquardt, LMStatus, MultiStart
-from tinydiffeq import RK4, ConstantStepSize, Euler, SaveAt, solve_ode
+from tinydiffeq import (
+    RK4,
+    ConstantStepSize,
+    Euler,
+    IController,
+    SaveAt,
+    Tsit5,
+    solve_ode,
+)
 
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from utilities import ACTIVATIONS
@@ -50,19 +58,37 @@ class StructuralParameters:
 
 @dataclass(frozen=True)
 class DataSettings:
+    # ``ode_solver`` selects the training collocation rule. Tsit5 contributes
+    # its accepted internal states rather than interpolating onto a fixed grid.
+    # Held-out, TVC, and settling paths use ``evaluation_ode_solver`` so method
+    # comparisons share exactly the same evaluation discretization.
     dt: float = 1.0
-    ode_solver: Literal["rk4", "euler"] = "rk4"
-    train_steps: int = 32
+    ode_solver: Literal["rk4", "euler", "tsit5"] = "rk4"
+    evaluation_ode_solver: Literal["rk4", "euler"] = "rk4"
+    train_steps: int = 128
     train_points: int = 65
-    tvc_steps: int = 64
-    train_T: float = 40.0
-    train_tvc_T: float = 50.0
-    test_T: float = 50.0
+    # This is an attempt budget, so accepted-state capacity is budget + 1.
+    # It leaves validated rejection headroom above the roughly 65 accepted
+    # states targeted by the T=100 calibration without executing a long padded
+    # tail under vmap.
+    adaptive_attempt_budget: int = 80
+    adaptive_dt_0: float = 1.0
+    # None resolves by state dtype: the calibrated float64 values below and
+    # tinydiffeq's stable defaults for float32.
+    adaptive_rtol: float | None = None
+    adaptive_atol: float | None = None
+    adaptive_dt_min: float = 1e-10
+    adaptive_dt_max: float = math.inf
+    adaptive_step_growth_max: float = 3.0
+    tvc_steps: int = 256
+    train_T: float = 100.0
+    train_tvc_T: float = 200.0
+    test_T: float = 40.0
     num_test_trajectories: int = 50
     settle_T: float = 400.0
     policy_grid_size: int = 100
-    benchmark_T: float = 80.0
-    benchmark_points: int = 300
+    benchmark_T: float = 200.0
+    benchmark_points: int = 801
 
 
 @dataclass(frozen=True)
@@ -281,12 +307,41 @@ def log_state_drift_field(log_state, _, args, p):
     return log_state_drift(policy, log_state, structural)
 
 
-def ode_components(data_set):
-    if data_set.ode_solver == "rk4":
+def fixed_ode_components(ode_solver):
+    if ode_solver == "rk4":
         return RK4(), ConstantStepSize()
-    if data_set.ode_solver == "euler":
+    if ode_solver == "euler":
         return Euler(), ConstantStepSize()
-    raise ValueError(f"unknown ode_solver: {data_set.ode_solver!r}")
+    raise ValueError(f"unknown fixed-step ode_solver: {ode_solver!r}")
+
+
+def training_ode_components(data_set):
+    if data_set.ode_solver == "tsit5":
+        controller = IController(
+            rtol=data_set.adaptive_rtol,
+            atol=data_set.adaptive_atol,
+            dt_min=data_set.adaptive_dt_min,
+            dt_max=data_set.adaptive_dt_max,
+            factor_max=data_set.adaptive_step_growth_max,
+        )
+        return Tsit5(), controller
+    return fixed_ode_components(data_set.ode_solver)
+
+
+def resolve_adaptive_tolerances(data_set, dtype):
+    if jnp.dtype(dtype) == jnp.dtype(jnp.float64):
+        default_rtol, default_atol = 3e-9, 3e-11
+    else:
+        default_rtol, default_atol = 1e-4, 1e-6
+    return replace(
+        data_set,
+        adaptive_rtol=(
+            default_rtol if data_set.adaptive_rtol is None else data_set.adaptive_rtol
+        ),
+        adaptive_atol=(
+            default_atol if data_set.adaptive_atol is None else data_set.adaptive_atol
+        ),
+    )
 
 
 def batched_rollout(
@@ -298,8 +353,17 @@ def batched_rollout(
     p,
     data_set,
     save_at,
+    *,
+    training,
 ):
-    ode_solver, controller = ode_components(data_set)
+    if training:
+        data_set = resolve_adaptive_tolerances(data_set, p.a.dtype)
+        ode_solver, controller = training_ode_components(data_set)
+    else:
+        evaluation_ode_solver = getattr(
+            data_set, "evaluation_ode_solver", data_set.ode_solver
+        )
+        ode_solver, controller = fixed_ode_components(evaluation_ode_solver)
 
     def solve_one(initial_log_state):
         return solve_ode(
@@ -319,17 +383,27 @@ def batched_rollout(
 
 
 @partial(jax.jit, static_argnames=("data_set",))
-def collocation_rollout(policy, p, train_ts, data_set):
+def collocation_rollout(policy, p, data_set):
     initial_log_states = jnp.log(jnp.stack([p.z_0, p.k_0], axis=1))
+    if data_set.ode_solver == "tsit5":
+        budget = data_set.adaptive_attempt_budget
+        dt_0 = data_set.adaptive_dt_0
+        save_at = SaveAt(steps=True)
+    else:
+        budget = data_set.train_steps
+        dt_0 = data_set.train_T / data_set.train_steps
+        train_ts = jnp.linspace(0.0, data_set.train_T, data_set.train_points)
+        save_at = SaveAt(ts=train_ts)
     return batched_rollout(
         policy,
         initial_log_states,
         data_set.train_T,
-        data_set.train_steps,
-        data_set.train_T / data_set.train_steps,
+        budget,
+        dt_0,
         p,
         data_set,
-        SaveAt(ts=train_ts),
+        save_at,
+        training=True,
     )
 
 
@@ -344,21 +418,45 @@ def rollout_steps(policy, initial_log_states, T, budget, dt_0, p, data_set):
         p,
         data_set,
         SaveAt(steps=True),
+        training=False,
     )
 
 
 def collocation_log_states(policy, p, data_set):
-    train_ts = jnp.linspace(0.0, data_set.train_T, data_set.train_points)
-    solution = collocation_rollout(policy, p, train_ts, data_set)
-    ok = solution.ok[:, None, None]
-    return jnp.where(ok, solution.xs, jnp.inf), solution
+    """Return static collocation storage and the active-state mask.
+
+    For adaptive Tsit5, controller decisions and accepted times are discrete
+    and therefore locally frozen under AD by tinydiffeq. The accepted state
+    values remain differentiable through the Tsit5 stages. Padding repeats the
+    last state but is removed from both the objective and its derivatives by
+    ``active``.
+    """
+    solution = collocation_rollout(policy, p, data_set)
+    if data_set.ode_solver == "tsit5":
+        active = solution.accepted
+    else:
+        active = jnp.ones(solution.ts.shape, dtype=bool)
+    initial_log_states = jnp.log(jnp.stack([p.z_0, p.k_0], axis=1))
+    safe_log_states = jnp.where(
+        active[..., None], solution.xs, initial_log_states[:, None, :]
+    )
+    return safe_log_states, active, solution
+
+
+def collocation_residuals(policy, p, data_set):
+    log_states, active, solution = collocation_log_states(policy, p, data_set)
+    euler = euler_residuals(policy, log_states.reshape(-1, 2), p).reshape(active.shape)
+    active_count = jnp.asarray(jnp.maximum(jnp.sum(active), 1), dtype=euler.dtype)
+    active_scale = jnp.sqrt(active_count)
+    residual = jnp.where(active, euler, 0.0) / active_scale
+    # A budget-exhausted trajectory did not cover the requested economic
+    # horizon. Make that a loud optimizer failure instead of fitting a prefix.
+    return jnp.where(solution.ok[:, None], residual, jnp.inf)
 
 
 def residual_fn(theta, args, p):
     policy = nnx.merge(args.graphdef, theta, args.fixed_state)
-    log_states, _ = collocation_log_states(policy, p, args.data_set)
-    residual = euler_residuals(policy, log_states.reshape(-1, 2), p)
-    return residual / jnp.sqrt(residual.size)
+    return collocation_residuals(policy, p, args.data_set).reshape(-1)
 
 
 def log_tvc_residual(policy, initial_log_states, T_start, T_end, p, data_set):
@@ -571,6 +669,35 @@ def trajectory_frame(values, times, initial_conditions):
     return frame
 
 
+def collocation_step_diagnostics(times, active):
+    """Summarize accepted collocation states without crossing trajectories."""
+    times = np.asarray(times)
+    active = np.asarray(active, dtype=bool)
+    counts = active.sum(axis=1)
+    step_sizes = [np.diff(row[mask]) for row, mask in zip(times, active, strict=True)]
+    nonempty_steps = [steps for steps in step_sizes if steps.size]
+    pooled_steps = (
+        np.concatenate(nonempty_steps)
+        if nonempty_steps
+        else np.asarray([], dtype=float)
+    )
+    return {
+        "num_collocation_states": int(counts.sum()),
+        "collocation_states_per_trajectory_min": int(counts.min()),
+        "collocation_states_per_trajectory_median": float(np.median(counts)),
+        "collocation_states_per_trajectory_max": int(counts.max()),
+        "min_accepted_time_step": (
+            float(pooled_steps.min()) if pooled_steps.size else np.nan
+        ),
+        "median_accepted_time_step": (
+            float(np.median(pooled_steps)) if pooled_steps.size else np.nan
+        ),
+        "max_accepted_time_step": (
+            float(pooled_steps.max()) if pooled_steps.size else np.nan
+        ),
+    }
+
+
 def neoclassical_growth_nn_recursive(
     a: float = 1 / 3,
     delta: float = 0.1,
@@ -593,6 +720,8 @@ def neoclassical_growth_nn_recursive(
 ):
     if not jax.config.jax_enable_x64:
         raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    dtype = jnp.float64 if use_float64 else jnp.float32
+    data_set = resolve_adaptive_tolerances(data_set, dtype)
     if not 0.0 < a < 1.0:
         raise ValueError("a must lie strictly between zero and one")
     if sigma_crra <= 0.0:
@@ -615,6 +744,40 @@ def neoclassical_growth_nn_recursive(
         raise ValueError("train_T must be positive")
     if data_set.train_steps < 1 or data_set.train_points < 2:
         raise ValueError("train_steps must be positive and train_points at least two")
+    if data_set.ode_solver not in {"rk4", "euler", "tsit5"}:
+        raise ValueError(f"unknown ode_solver: {data_set.ode_solver!r}")
+    if data_set.evaluation_ode_solver not in {"rk4", "euler"}:
+        raise ValueError(
+            f"unknown evaluation_ode_solver: {data_set.evaluation_ode_solver!r}"
+        )
+    if data_set.adaptive_attempt_budget < 1 or not (
+        math.isfinite(data_set.adaptive_dt_0) and data_set.adaptive_dt_0 > 0.0
+    ):
+        raise ValueError("adaptive_attempt_budget and adaptive_dt_0 must be positive")
+    if not (
+        math.isfinite(data_set.adaptive_rtol)
+        and data_set.adaptive_rtol > 0.0
+        and math.isfinite(data_set.adaptive_atol)
+        and data_set.adaptive_atol > 0.0
+    ):
+        raise ValueError("adaptive_rtol and adaptive_atol must be positive")
+    if not (math.isfinite(data_set.adaptive_dt_min) and data_set.adaptive_dt_min > 0.0):
+        raise ValueError("adaptive_dt_min must be positive")
+    if math.isnan(data_set.adaptive_dt_max) or (
+        data_set.adaptive_dt_max < data_set.adaptive_dt_min
+    ):
+        raise ValueError("adaptive_dt_max must be at least adaptive_dt_min")
+    if not (
+        data_set.adaptive_dt_min <= data_set.adaptive_dt_0 <= data_set.adaptive_dt_max
+    ):
+        raise ValueError(
+            "adaptive_dt_0 must lie between adaptive_dt_min and adaptive_dt_max"
+        )
+    if not (
+        math.isfinite(data_set.adaptive_step_growth_max)
+        and data_set.adaptive_step_growth_max > 1.0
+    ):
+        raise ValueError("adaptive_step_growth_max must exceed one")
     if data_set.dt <= 0.0 or data_set.tvc_steps < 1:
         raise ValueError("dt and tvc_steps must be positive")
     if data_set.train_tvc_T <= data_set.train_T:
@@ -637,7 +800,6 @@ def neoclassical_growth_nn_recursive(
         else float("inf")
     )
 
-    dtype = jnp.float64 if use_float64 else jnp.float32
     train_initial_conditions = initial_condition_array(z_0, k_0, dtype)
     test_initial_conditions = draw_test_initial_conditions(
         train_initial_conditions, data_set, ic_set
@@ -716,12 +878,26 @@ def neoclassical_growth_nn_recursive(
     setup_time = start_time - fit_start
     policy = nnx.merge(graphdef, result.x, fixed_state)
 
-    train_log_states, train_solution = collocation_log_states(policy, p, data_set)
+    train_log_states, train_active, train_solution = collocation_log_states(
+        policy, p, data_set
+    )
     train_values = trajectory_values(policy, train_log_states, p)
     train_df = trajectory_frame(
         train_values,
         train_solution.ts,
         train_initial_conditions,
+    )
+    train_df["accepted"] = np.asarray(train_active).reshape(-1)
+    train_df = train_df.loc[train_df["accepted"]].reset_index(drop=True)
+    train_df["accepted_step_index"] = train_df.groupby("trajectory").cumcount()
+    train_df["previous_dt"] = train_df.groupby("trajectory")["t"].diff()
+    train_df["point_rule"] = (
+        "adaptive_accepted_steps"
+        if data_set.ode_solver == "tsit5"
+        else "fixed_requested_times"
+    )
+    collocation_diagnostics = collocation_step_diagnostics(
+        train_solution.ts, train_active
     )
 
     test_initial_log_states = jnp.log(test_initial_conditions)
@@ -761,7 +937,7 @@ def neoclassical_growth_nn_recursive(
         jnp.all(tvc_ok) and max_log_tvc < stop_set.log_tvc_threshold
     )
     solver_accepted = bool(result.multi_start.accepted)
-    max_train_euler = float(jnp.max(jnp.abs(train_values["euler_residual"])))
+    max_train_euler = float(train_df["euler_residual"].abs().max())
 
     status = int(result.status)
     train_kappa_0 = np.asarray(
@@ -810,16 +986,38 @@ def neoclassical_growth_nn_recursive(
         "solver_converged": solver_accepted,
         "num_train_trajectories": int(train_initial_conditions.shape[0]),
         "num_test_trajectories": data_set.num_test_trajectories,
-        "num_collocation_states": int(
-            train_initial_conditions.shape[0] * data_set.train_points
+        **collocation_diagnostics,
+        "collocation_path_ok": bool(jnp.all(train_solution.ok)),
+        "point_rule": (
+            "adaptive_accepted_steps"
+            if data_set.ode_solver == "tsit5"
+            else "fixed_requested_times"
         ),
+        "collocation_capacity_per_trajectory": int(train_active.shape[1]),
         "train_kappa_0_min": float(train_kappa_0.min()),
         "train_kappa_0_max": float(train_kappa_0.max()),
         "test_kappa_0_min": float(test_kappa_0.min()),
         "test_kappa_0_max": float(test_kappa_0.max()),
         "test_log_variance": ic_set.test_log_variance,
         "ode_solver": data_set.ode_solver,
+        "collocation_ode_solver": data_set.ode_solver,
+        "evaluation_ode_solver": data_set.evaluation_ode_solver,
         "train_steps": data_set.train_steps,
+        "train_points": data_set.train_points,
+        "integrator_attempt_budget": (
+            data_set.adaptive_attempt_budget
+            if data_set.ode_solver == "tsit5"
+            else data_set.train_steps
+        ),
+        "adaptive_attempt_budget": data_set.adaptive_attempt_budget,
+        "adaptive_dt_0": data_set.adaptive_dt_0,
+        "adaptive_rtol": data_set.adaptive_rtol,
+        "adaptive_atol": data_set.adaptive_atol,
+        "adaptive_dt_min": data_set.adaptive_dt_min,
+        "adaptive_dt_max": (
+            None if math.isinf(data_set.adaptive_dt_max) else data_set.adaptive_dt_max
+        ),
+        "adaptive_step_growth_max": data_set.adaptive_step_growth_max,
         "dt": data_set.dt,
         "train_T": data_set.train_T,
         "test_T": test_T,
@@ -943,9 +1141,12 @@ def neoclassical_growth_nn_recursive(
             - (delta + g) * np.asarray(kappa_grid)
         )
 
+    data_hyperparameters = asdict(data_set)
+    if math.isinf(data_hyperparameters["adaptive_dt_max"]):
+        data_hyperparameters["adaptive_dt_max"] = None
     hyperparameters = {
         "nn_set": asdict(nn_set),
-        "data_set": asdict(data_set),
+        "data_set": data_hyperparameters,
         "ic_set": asdict(ic_set),
         "lm_set": asdict(lm_set),
         "stop_set": asdict(stop_set),

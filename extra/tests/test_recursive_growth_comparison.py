@@ -2,6 +2,9 @@ import unittest
 
 import pandas as pd
 
+from extra.replication.neoclassical_growth_nn_recursive_tsit5_comparison import (
+    retained_tolerance_screen,
+)
 from extra.replication.neoclassical_growth_recursive_comparison import (
     apply_common_validation,
     method_summary,
@@ -10,6 +13,18 @@ from extra.replication.neoclassical_growth_recursive_comparison import (
 
 
 class RecursiveGrowthComparisonTests(unittest.TestCase):
+    def test_tsit5_tolerance_screen_retains_rejected_configurations(self):
+        screen = retained_tolerance_screen()
+        selected = screen.loc[screen["selected"]]
+
+        self.assertEqual(len(screen), 8)
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(int(selected.iloc[0]["accepted_states"]), 67)
+        self.assertTrue(screen["collocation_path_ok"].all())
+        self.assertTrue(
+            screen.loc[~screen["selected"], "selection_reason"].notna().all()
+        )
+
     def test_common_gate_rejects_bad_benchmark_path_for_either_method(self):
         results = pd.DataFrame(
             {
@@ -67,6 +82,26 @@ class RecursiveGrowthComparisonTests(unittest.TestCase):
         self.assertEqual(wide.loc[0, "kernel_to_nn_fit_time_ratio"], 0.5)
         self.assertEqual(wide.loc[0, "kernel_to_nn_k_error_ratio"], 2.0)
         self.assertNotIn("method", wide.columns)
+
+    def test_common_gate_rejects_an_incomplete_collocation_path(self):
+        results = pd.DataFrame(
+            {
+                "solution_accepted": [True, True],
+                "solver_converged": [True, True],
+                "collocation_path_ok": [True, False],
+                "max_train_euler": [1e-7, 1e-7],
+                "test_path_ok": [True, True],
+                "transversality_ok": [True, True],
+                "test_mean_abs_k_rel_error": [1e-5, 1e-5],
+                "test_mean_abs_c_rel_error": [1e-5, 1e-5],
+            }
+        )
+
+        validated = apply_common_validation(results, 2e-5, 5e-3)
+
+        self.assertListEqual(
+            validated["common_validation_accepted"].tolist(), [True, False]
+        )
 
 
 if __name__ == "__main__":

@@ -48,26 +48,26 @@ STATUS_TO_REASON = {
 @dataclass(frozen=True)
 class DataSettings:
     collocation_source: Literal["exact_path"] = "exact_path"
-    train_T: float = 40.0
+    train_T: float = 100.0
     train_points: int = 65
-    train_steps: int = 32
+    train_steps: int = 128
     dt: float = 1.0
     ode_solver: Literal["rk4", "euler"] = "rk4"
-    tvc_steps: int = 64
-    train_tvc_T: float = 50.0
-    test_T: float = 50.0
+    tvc_steps: int = 256
+    train_tvc_T: float = 200.0
+    test_T: float = 40.0
     num_test_trajectories: int = 50
     policy_grid_size: int = 100
-    benchmark_T: float = 80.0
-    benchmark_points: int = 300
+    benchmark_T: float = 200.0
+    benchmark_points: int = 801
 
 
 @jax.tree_util.register_static
 @dataclass(frozen=True)
 class StateKernelSettings:
     amplitude: float = 1.0
-    lengthscale: float = 0.3
-    metric_epsilon: float = 1e-5
+    lengthscale: float = 0.4
+    metric_epsilon: float = 3e-5
     initial_investment_share: float = 0.2
 
 

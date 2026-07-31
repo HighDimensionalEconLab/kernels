@@ -43,12 +43,12 @@ class FixedRecursiveKernelTests(unittest.TestCase):
 
         self.assertEqual(train_t.shape, (1, 65))
         self.assertEqual(train_log_states.shape, (1, 65, 2))
-        np.testing.assert_allclose(np.diff(train_t[0]), 0.625, atol=1e-15)
+        np.testing.assert_allclose(np.diff(train_t[0]), 1.5625, atol=1e-15)
         np.testing.assert_allclose(states[0, :, 0], np.exp(0.02 * train_t[0]))
         self.assertTrue(np.all(states > 0.0))
         self.assertTrue(np.all(np.asarray(train_c) > 0.0))
-        self.assertEqual(data_set.train_steps, 32)
-        self.assertAlmostEqual(data_set.train_T / data_set.train_steps, 1.25)
+        self.assertEqual(data_set.train_steps, 128)
+        self.assertAlmostEqual(data_set.train_T / data_set.train_steps, 0.78125)
 
     def test_test_draws_keep_z_and_k_separate(self):
         data_set = DataSettings(num_test_trajectories=12)
@@ -159,7 +159,7 @@ class FixedRecursiveKernelTests(unittest.TestCase):
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertEqual(results["num_collocation_states"], 65)
         self.assertEqual(results["num_test_trajectories"], 8)
-        self.assertAlmostEqual(results["train_point_dt"], 0.625)
+        self.assertAlmostEqual(results["train_point_dt"], 1.5625)
         self.assertTrue(results["transversality_ok"])
         self.assertTrue(results["test_path_ok"])
         self.assertLess(results["max_train_euler"], 2e-5)

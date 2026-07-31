@@ -30,7 +30,7 @@ def run(
     k_0: float | list[float] = 1.0,
     num_test_trajectories: int = 1,
     test_log_variance: float = 0.0,
-    test_T: float = 50.0,
+    test_T: float = 40.0,
     dt: float = 1.0,
     data_seed: int = 0,
     verbose: bool = False,

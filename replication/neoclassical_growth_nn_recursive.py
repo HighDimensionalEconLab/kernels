@@ -25,18 +25,39 @@ def run(
     output_dir: str = ".results",
     n_seeds: int = 100,
     use_float64: bool = True,
+    g: float = 0.0,
+    z_0: float | list[float] = 1.0,
+    k_0: float | list[float] = 1.0,
+    num_test_trajectories: int = 1,
+    test_log_variance: float = 0.0,
+    test_T: float = 50.0,
+    dt: float = 1.0,
+    data_seed: int = 0,
     verbose: bool = False,
 ):
-    common = dict(use_float64=use_float64, verbose=verbose)
+    common = dict(
+        use_float64=use_float64,
+        verbose=verbose,
+        g=g,
+        z_0=z_0,
+        k_0=k_0,
+        data_set={
+            "num_test_trajectories": num_test_trajectories,
+            "test_T": test_T,
+            "dt": dt,
+        },
+        ic_set={
+            "data_seed": data_seed,
+            "test_log_variance": test_log_variance,
+        },
+    )
     meta = dict(
         n_seeds=n_seeds,
         residual_dtype="float64" if use_float64 else "float32",
     )
 
     print(f"baseline: {n_seeds} seeds -> {output_dir}/")
-    results_df, frames, hyperparameters = ensemble(
-        SOLVER, n_seeds, options={**common, "k_0": 1.0}
-    )
+    results_df, frames, hyperparameters = ensemble(SOLVER, n_seeds, options=common)
     save_experiment(
         "baseline",
         results_df,

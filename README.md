@@ -129,8 +129,11 @@ methods intended for float32 or GPU execution.
 The main NN modules are deliberately limited:
 
 - `neoclassical_growth_nn.py`: direct sequence-space MLP.
-- `neoclassical_growth_nn_recursive.py`: fixed-step RK4 state-space investment
-  policy used as the recursive NN baseline.
+- `neoclassical_growth_nn_recursive.py`: fixed-step RK4 recursive NN with
+  separate TFP and capital states, exogenous `dz/dt = g z`, and a homothetic
+  investment-share representation on `log(k) - log(z)`. The main paper driver
+  retains its legacy `g=0`, single-path defaults; the optional fixed-kernel
+  comparison uses positive growth and held-out initial-condition draws.
 - `open_economy_growth_nn_recursive.py`: the open-economy state-space policy.
 - `multicountry_growth_nn.py`: the reduced one-good multicountry sequential NN;
   consumption, investment, and the common rate are calculated from its four
@@ -222,7 +225,8 @@ print(results["k_rel_error_mean"])
 
 [`extra/`](extra/README.md) contains the advertising and human-capital UNO
 comparisons, the integrated-derivative MLP, the separate RFF NN, the adaptive
-recursive kernel and NN, the unreduced one-good multicountry DAE,
+and fixed-center recursive kernels, the adaptive recursive NN, the unreduced
+one-good multicountry DAE,
 method-comparison drivers, and HPO sweep material. None are part of the main
 replication command.
 
@@ -236,6 +240,8 @@ The design and verification record for the open-economy and multicountry
 stepping stones is in [`docs/open_economy_growth.md`](docs/open_economy_growth.md).
 The optional adaptive recursive NN is described in
 [`extra/docs/neoclassical_growth_nn_recursive_adaptive.md`](extra/docs/neoclassical_growth_nn_recursive_adaptive.md).
+The nonadaptive exact-distribution recursive kernel is described in
+[`extra/docs/neoclassical_growth_kernel_recursive_fixed.md`](extra/docs/neoclassical_growth_kernel_recursive_fixed.md).
 
 ## Tests and lint
 

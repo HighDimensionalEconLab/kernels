@@ -18,6 +18,14 @@ NN use the reduced formulation.
 kernel experiment. It moves its RKHS centers to the accepted integrator states
 and transfers the represented policy when that basis changes.
 
+`neoclassical_growth_kernel_recursive_fixed.py` is the nonadaptive
+state-space experiment. It keeps \((z,k)\) as separate economic states, fixes
+65 exact benchmark state pairs on the recursive NN's residual grid, and fits
+the same investment-share Euler equation with an RBF on
+\(\log k-\log z\) and a learned constant mean. The state pairs are never
+adapted. See `docs/neoclassical_growth_kernel_recursive_fixed.md` for the
+equations and validation design.
+
 ## NN variations
 
 - `neoclassical_growth_nn_integrated.py`: an MLP approximates the time
@@ -47,6 +55,9 @@ uv run python -m extra.replication.kernel_vs_nn --output_dir .results-extra
 uv run python -m extra.multicountry_growth_kernel_dae --a_0 '[-0.5, 0.5]'
 uv run python -m extra.replication.neoclassical_growth_method_comparison \
   --output_dir .results-extra
+uv run python -m extra.neoclassical_growth_kernel_recursive_fixed
+uv run python -m extra.replication.neoclassical_growth_recursive_comparison \
+  --output_dir .results_extra
 uv run python -m extra.replication.neoclassical_growth_nn_recursive_adaptive \
   --output_dir .results-extra
 uv run python -m extra.replication.human_capital_kernel_uno \

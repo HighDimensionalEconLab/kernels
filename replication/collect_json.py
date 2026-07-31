@@ -547,7 +547,7 @@ def neoclassical_growth_nn_recursive(out):
                 ),
                 "ode_solver": hp["data_set"]["ode_solver"],
                 "train_steps": hp["data_set"]["train_steps"],
-                "k_ss": sig(med(baseline_json["k_ss"]), 4),
+                "kappa_ss": sig(med(baseline_json["kappa_ss"]), 4),
             }
         },
     }

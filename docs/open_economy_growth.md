@@ -781,7 +781,10 @@ that their cost can dominate.
 The NN implementation follows the best-performing recursive formulation in
 [neoclassical_growth_nn_recursive.py](../neoclassical_growth_nn_recursive.py): it
 learns level policies over the endogenous state rather than paths over time or time
-derivatives. A 32-by-3 GELU trunk maps \(\log(k/k_0)\) to two outputs. The first is
+derivatives. In that baseline, \(z\) and \(k\) remain separate dynamic states while a
+32-by-3 GELU trunk uses the homothetic representation \(\log k-\log z\). The open
+economy model below has no exogenous TFP state, so its trunk maps \(\log(k/k_0)\) to
+two outputs. The first is
 positive investment expenditure through `unit_softplus`; the second is the signed
 current account:
 

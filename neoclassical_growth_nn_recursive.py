@@ -326,7 +326,9 @@ def collocation_residuals(policy, p, data_set):
     euler = euler_residuals(policy, log_states.reshape(-1, 2), p).reshape(
         log_states.shape[:2]
     )
-    count = jnp.asarray(euler.shape[1], dtype=euler.dtype)
+    # Mean squared residual, so the loss threshold means the same thing at any
+    # number of trajectories or collocation points.
+    count = jnp.asarray(euler.size, dtype=euler.dtype)
     # A nonfinite trajectory did not cover the requested economic horizon. Make
     # that a loud optimizer failure instead of fitting a prefix.
     return jnp.where(

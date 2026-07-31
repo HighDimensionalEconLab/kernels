@@ -10,6 +10,7 @@ from neoclassical_growth_nn_recursive import (
     StructuralParameters,
     collocation_residuals,
     collocation_rollout,
+    euler_residuals,
     production,
 )
 
@@ -111,15 +112,16 @@ class RecursiveGrowthCollocationTests(unittest.TestCase):
 
         solution = collocation_rollout(policy, p, data_set)
         residual = collocation_residuals(policy, p, data_set)
-
-        from neoclassical_growth_nn_recursive import euler_residuals
-
         expected = euler_residuals(policy, solution.xs.reshape(-1, 2), p).reshape(
             residual.shape
         )
+
+        self.assertEqual(residual.shape, (2, data_set.train_points))
+        # Normalized by every residual entry, not by the states of one
+        # trajectory, so the loss threshold is trajectory-count invariant.
         np.testing.assert_allclose(
             np.asarray(residual),
-            np.asarray(expected) / np.sqrt(data_set.train_points),
+            np.asarray(expected) / np.sqrt(2 * data_set.train_points),
             rtol=1e-15,
             atol=0.0,
         )

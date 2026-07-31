@@ -1,6 +1,6 @@
 # Fixed-center recursive growth kernel
 
-`extra/neoclassical_growth_kernel_recursive_fixed.py` is the nonadaptive
+`neoclassical_growth_kernel_recursive.py` is the nonadaptive
 kernel counterpart to `neoclassical_growth_nn_recursive.py`. Both solvers keep
 technology and capital as separate economic states. The kernel uses benchmark
 solutions only to choose a fixed set of training states; those states never
@@ -155,7 +155,7 @@ and aggregate accuracy/timing statistics.
 Run the kernel alone with
 
 ```bash
-uv run python -m extra.neoclassical_growth_kernel_recursive_fixed
+uv run python neoclassical_growth_kernel_recursive.py
 ```
 
 Run the apples-to-apples saved comparison with

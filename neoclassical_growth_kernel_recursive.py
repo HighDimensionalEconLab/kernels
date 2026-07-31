@@ -220,7 +220,7 @@ def residual_fn(theta, args, p, kernel_set):
     return residual / jnp.sqrt(residual.size)
 
 
-def neoclassical_growth_kernel_recursive_fixed(
+def neoclassical_growth_kernel_recursive(
     a: float = 1 / 3,
     delta: float = 0.1,
     rho_hat: float = 0.11,
@@ -590,4 +590,4 @@ def neoclassical_growth_kernel_recursive_fixed(
 
 
 if __name__ == "__main__":
-    jsonargparse.CLI(neoclassical_growth_kernel_recursive_fixed)
+    jsonargparse.CLI(neoclassical_growth_kernel_recursive)

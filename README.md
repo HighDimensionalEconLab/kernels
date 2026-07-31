@@ -48,6 +48,7 @@ The core pipeline covers:
 - `human_capital_kernel.py`
 - `neoclassical_growth_nn.py`
 - `neoclassical_growth_nn_recursive.py`
+- `neoclassical_growth_kernel_recursive.py`
 - `open_economy_growth_kernel.py`
 - `open_economy_growth_kernel_uno.py`
 - `open_economy_growth_nn.py`
@@ -150,8 +151,9 @@ The main NN modules are deliberately limited:
   aligned knots from the fixed RK4 rollout or Tsit5's genuinely adaptive
   accepted internal states; both modes retain static residual shapes through an
   accepted-prefix mask and use the same fixed RK4 held-out evaluator. The main
-  paper driver retains its legacy `g=0`, single-path and fixed-RK4 defaults; the
-  optional fixed-kernel comparison uses positive growth and held-out
+  paper driver retains its legacy `g=0`, single-path and fixed-RK4 defaults;
+  `neoclassical_growth_kernel_recursive.py` is the kernel counterpart on the
+  same state-space formulation, with positive growth and held-out
   initial-condition draws.
 - `open_economy_growth_nn.py`: the open-economy sequence-space MLP. It carries
   the same five RKHS paths the kernel does as network outputs of `t`, imposes
@@ -254,7 +256,7 @@ print(results["k_rel_error_mean"])
 
 [`extra/`](extra/README.md) contains the advertising and human-capital UNO
 comparisons, the integrated-derivative MLP, the separate RFF NN, the adaptive
-and fixed-center recursive kernels, the adaptive recursive NN, the unreduced
+recursive kernel, the adaptive recursive NN, the unreduced
 one-good multicountry DAE,
 method-comparison drivers, and HPO sweep material. None are part of the main
 replication command.
@@ -272,8 +274,8 @@ The optional adaptive recursive NN is described in
 The accepted-step Tsit5 mode of the canonical two-state recursive NN, including
 its AD contract and calibration record, is described in
 [`extra/docs/neoclassical_growth_nn_recursive_tsit5.md`](extra/docs/neoclassical_growth_nn_recursive_tsit5.md).
-The nonadaptive exact-distribution recursive kernel is described in
-[`extra/docs/neoclassical_growth_kernel_recursive_fixed.md`](extra/docs/neoclassical_growth_kernel_recursive_fixed.md).
+The recursive (state-space) kernel is described in
+[`docs/neoclassical_growth_kernel_recursive.md`](docs/neoclassical_growth_kernel_recursive.md).
 
 ## Tests and lint
 

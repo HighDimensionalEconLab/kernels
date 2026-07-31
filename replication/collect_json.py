@@ -616,6 +616,46 @@ def neoclassical_growth_nn_recursive(out):
     }
 
 
+def neoclassical_growth_kernel_recursive(out):
+    prefix = "neoclassical_growth_kernel_recursive"
+
+    baseline_json = load(out, f"{prefix}_baseline")
+    hp = load(out, f"{prefix}_baseline_hyperparameters")
+
+    return {
+        "parameters": hp["parameters"],
+        "data": hp["data_set"],
+        "kernel": hp["kernel_set"],
+        "solver": {"ridge": hp["lm_set"]["ridge"]},
+        "experiments": {
+            "baseline": {
+                "frac_accepted": sig(med(baseline_json["frac_accepted"])),
+                "test_mean_abs_k_rel_error": sci(
+                    med(baseline_json["test_mean_abs_k_rel_error"])
+                ),
+                "test_mean_abs_c_rel_error": sci(
+                    med(baseline_json["test_mean_abs_c_rel_error"])
+                ),
+                "test_euler_mean_abs": sci(med(baseline_json["test_euler_mean_abs"])),
+                "max_train_euler": sci(med(baseline_json["max_train_euler"])),
+                "max_log_tvc_residual": sig(
+                    med(baseline_json["max_log_tvc_residual"]), 4
+                ),
+                "solve_time": sig(med(baseline_json["solve_time"])),
+                "steps": int(med(baseline_json["steps"])),
+                "num_collocation_states": int(
+                    med(baseline_json["num_collocation_states"])
+                ),
+                "penalized_parameter_count": int(
+                    med(baseline_json["penalized_parameter_count"])
+                ),
+                "rkhs_norm": sig(med(baseline_json["rkhs_norm"])),
+                "kappa_ss": sig(med(baseline_json["kappa_ss"]), 4),
+            }
+        },
+    }
+
+
 def open_economy_growth_kernel(
     out,
     prefix="open_economy_growth_kernel",
@@ -1105,6 +1145,9 @@ def collect(output_dir: str = ".results"):
             "human_capital_kernel": human_capital_kernel(out),
             "neoclassical_growth_nn": neoclassical_growth_nn(out),
             "neoclassical_growth_nn_recursive": neoclassical_growth_nn_recursive(out),
+            "neoclassical_growth_kernel_recursive": neoclassical_growth_kernel_recursive(
+                out
+            ),
             "open_economy_growth_kernel": open_economy_growth_kernel(out),
             "open_economy_growth_kernel_uno": open_economy_growth_kernel(
                 out,

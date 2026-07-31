@@ -4,8 +4,8 @@ import jax
 import jsonargparse
 import pandas as pd
 
+import neoclassical_growth_kernel_recursive
 import neoclassical_growth_nn_recursive
-from extra import neoclassical_growth_kernel_recursive_fixed
 from replication.utilities import (
     DETERMINISTIC_TIMING_REPETITIONS,
     enable_compilation_cache,
@@ -187,7 +187,7 @@ def run(
     )
 
     kernel_results, kernel_frames, kernel_hyperparameters = ensemble(
-        neoclassical_growth_kernel_recursive_fixed.neoclassical_growth_kernel_recursive_fixed,
+        neoclassical_growth_kernel_recursive.neoclassical_growth_kernel_recursive,
         1,
         options=common,
     )

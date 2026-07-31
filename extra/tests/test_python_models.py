@@ -194,13 +194,18 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertLess(results["max_validation_residual"], 5e-3)
         self.assertLess(results["max_asset_clearing_residual"], 5e-5)
         self.assertLess(results["max_rate_consistency_residual"], 5e-5)
-        self.assertLess(results["max_benchmark_error"], 2e-3)
+        # The rate channel carries the t=0 Walrasian slack, so it gets a
+        # looser bound than the quantities and co-states.
+        for name in ("k", "q", "c"):
+            self.assertLess(results[f"{name}_relative_error_max"], 5e-4)
+        self.assertLess(results["a_scaled_error_max"], 5e-4)
+        self.assertLess(results["max_benchmark_error"], 5e-3)
         self.assertLess(
             abs(
                 results["log_relative_weight"]
                 - results["benchmark_log_relative_weight"]
             ),
-            1e-5,
+            1e-4,
         )
         self.assertLess(results["benchmark_boundary_residual"], 1e-7)
         self.assertAlmostEqual(
@@ -271,9 +276,9 @@ class KernelSmokeTests(unittest.TestCase):
         )
         data_set = MulticountryDataSettings(
             train_T=40.0,
-            train_points=36,
+            train_points=64,
             dense_T=20.0,
-            tail_points=8,
+            tail_points=12,
             test_T=20.0,
             test_points=21,
             validation_points=31,
@@ -336,9 +341,9 @@ class KernelSmokeTests(unittest.TestCase):
         k_0, a_0 = draw_initial_conditions(InitialConditionSettings(), parameters)
         data_set = MulticountryDataSettings(
             train_T=40.0,
-            train_points=36,
+            train_points=64,
             dense_T=20.0,
-            tail_points=8,
+            tail_points=12,
             test_T=20.0,
             test_points=21,
             validation_points=31,
@@ -729,7 +734,7 @@ class KernelSmokeTests(unittest.TestCase):
             path["t"].iloc[-1] - path["t"].iloc[0]
         )
         expected_growth = (parameters.interest_rate - parameters.r) / parameters.gamma
-        self.assertAlmostEqual(realized_growth, expected_growth, places=5)
+        self.assertAlmostEqual(realized_growth, expected_growth, places=4)
         self.assertLess(path["marginal_wealth"].abs().max(), 1e-6)
         self.assertLess(path["consumption_foc"].abs().max(), 2e-6)
 

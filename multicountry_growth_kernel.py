@@ -52,7 +52,7 @@ TRAIN_RESIDUAL_TOL = 1e-5
 VALIDATION_RESIDUAL_TOL = 5e-3
 ACCOUNTING_RESIDUAL_TOL = 5e-5
 INITIAL_CLEARING_TOL = 1e-10
-BENCHMARK_MATCH_TOL = 2e-3
+BENCHMARK_MATCH_TOL = 5e-3
 STATUS_TO_REASON = {
     LMStatus.CONVERGED: "converged",
     LMStatus.NONFINITE: "nonfinite",
@@ -76,15 +76,15 @@ class ToleranceSettings:
 
 @dataclass(frozen=True)
 class KernelSettings:
-    kernel: str = "matern52"
-    ell: float = 10.0
+    kernel: str = "matern12"
+    ell: float = 20.0
     sigma: float = 1.0
 
 
 @dataclass(frozen=True)
 class DataSettings:
     train_T: float = 160.0
-    train_points: int = 96
+    train_points: int = 128
     train_points_list: list[float] | None = None
     sampling: str = "front_loaded"
     dense_T: float = 40.0

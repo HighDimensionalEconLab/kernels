@@ -50,15 +50,15 @@ STATUS_TO_REASON = {
 
 @dataclass(frozen=True)
 class KernelSettings:
-    kernel: str = "matern52"
-    ell: float = 10.0
+    kernel: str = "matern12"
+    ell: float = 40.0
     sigma: float = 1.0
 
 
 @dataclass(frozen=True)
 class DataSettings:
     train_T: float = 160.0
-    train_points: int = 96
+    train_points: int = 192
     train_points_list: list[float] | None = None
     sampling: str = "front_loaded"
     dense_T: float = 40.0

@@ -158,7 +158,7 @@ class FixedRecursiveKernelTests(unittest.TestCase):
         )
 
     def test_balanced_growth_solve_uses_fixed_centers_and_held_out_paths(self):
-        data_set = DataSettings(num_test_trajectories=8, test_T=20.0)
+        data_set = DataSettings(num_test_trajectories=8, test_T=20.0, test_points=21)
         results, extras = neoclassical_growth_kernel_recursive(
             verbose=False,
             data_set=data_set,
@@ -227,7 +227,7 @@ class FixedRecursiveKernelTests(unittest.TestCase):
             z_0=[1.0, 1.0],
             k_0=[0.9, 1.1],
             verbose=False,
-            data_set=DataSettings(num_test_trajectories=4, test_T=10.0),
+            data_set=DataSettings(num_test_trajectories=4, test_T=10.0, test_points=11),
         )
 
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
@@ -239,7 +239,7 @@ class FixedRecursiveKernelTests(unittest.TestCase):
     def test_short_lengthscale_is_rejected_when_path_is_wrong(self):
         results, _ = neoclassical_growth_kernel_recursive(
             verbose=False,
-            data_set=DataSettings(num_test_trajectories=4, test_T=10.0),
+            data_set=DataSettings(num_test_trajectories=4, test_T=10.0, test_points=11),
             kernel_set=StateKernelSettings(lengthscale=0.15),
             stop_set=StoppingCriteria(max_steps=60),
         )

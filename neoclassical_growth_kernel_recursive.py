@@ -23,7 +23,6 @@ from neoclassical_growth_nn_recursive import (
     benchmark_trajectories,
     draw_test_initial_conditions,
     euler_residuals,
-    fixed_step_count,
     initial_condition_array,
     log_tvc_residual,
     positive_policy_grid,
@@ -53,8 +52,10 @@ class DataSettings:
     # recursive NN, nothing is integrated during training, so this is a
     # representation size rather than a collocation grid over a rollout.
     train_points: int = 65
-    dt: float = 1.0
-    ode_solver: Literal["rk4", "euler"] = "rk4"
+    # Held-out paths are fixed-step RK4 read off the integrator's own states:
+    # ``test_points`` points from ``test_points - 1`` steps, initial condition
+    # included, so nothing is interpolated.
+    test_points: int = 41
     tvc_steps: int = 256
     train_tvc_T: float = 200.0
     test_T: float = 40.0
@@ -108,8 +109,8 @@ def validate_settings(data_set, kernel_set, lm_set, ic_set):
         raise ValueError("train_points must be at least two")
     if data_set.train_T <= 0.0 or data_set.test_T <= 0.0:
         raise ValueError("train_T and test_T must be positive")
-    if data_set.dt <= 0.0 or data_set.tvc_steps < 1:
-        raise ValueError("dt and tvc_steps must be positive")
+    if data_set.test_points < 2 or data_set.tvc_steps < 1:
+        raise ValueError("test_points must be at least two and tvc_steps positive")
     if data_set.train_tvc_T <= data_set.train_T:
         raise ValueError("train_tvc_T must exceed train_T")
     if data_set.benchmark_T < max(data_set.train_T, data_set.test_T):
@@ -255,8 +256,8 @@ def neoclassical_growth_kernel_recursive(
     if (delta + rho_hat + sigma_crra * g) / a <= delta + g:
         raise ValueError("balanced-growth consumption per unit of z must be positive")
     validate_settings(data_set, kernel_set, lm_set, ic_set)
-    n_test_steps = fixed_step_count(data_set.test_T, data_set.dt, horizon_name="test_T")
-    test_T = n_test_steps * data_set.dt
+    n_test_steps = data_set.test_points - 1
+    test_T = data_set.test_T
     if data_set.benchmark_T < test_T:
         raise ValueError("benchmark_T must cover the effective test_T")
 
@@ -354,9 +355,8 @@ def neoclassical_growth_kernel_recursive(
         jnp.log(test_initial_conditions),
         test_T,
         n_test_steps,
-        data_set.dt,
+        test_T / n_test_steps,
         p,
-        data_set,
     )
     jax.block_until_ready(test_solution)
     test_log_states = jnp.where(
@@ -495,7 +495,7 @@ def neoclassical_growth_kernel_recursive(
         "test_kappa_0_max": float(test_kappa_0.max()),
         "test_log_variance": ic_set.test_log_variance,
         "train_point_dt": data_set.train_T / (data_set.train_points - 1),
-        "dt": data_set.dt,
+        "test_points": data_set.test_points,
         "train_T": data_set.train_T,
         "test_T": test_T,
         "train_tvc_T": data_set.train_tvc_T,

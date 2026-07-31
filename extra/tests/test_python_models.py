@@ -743,7 +743,6 @@ class KernelSmokeTests(unittest.TestCase):
         data_set = OpenEconomyNNDataSettings(
             diagnostic_T=50.0,
             diagnostic_points=51,
-            diagnostic_steps=50,
         )
         results, extras = open_economy_growth_nn_recursive(
             parameters=parameters,
@@ -755,7 +754,8 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertTrue(results["benchmark_match"])
         self.assertEqual(results["terminal_residual_count"], 0)
         self.assertEqual(results["num_training_trajectories"], 1)
-        self.assertEqual(results["point_rule"], "fixed_accepted_steps")
+        self.assertEqual(results["ode_solver"], "rk4")
+        self.assertEqual(results["train_steps"], results["num_train_points"] - 1)
         self.assertEqual(results["dae_residual_count"], 2 * results["num_train_points"])
         self.assertEqual(results["domain_residual_count"], results["num_train_points"])
         self.assertEqual(results["residual_count"], 3 * results["num_train_points"])
@@ -770,17 +770,15 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertTrue((extras["test_df"]["c"] > 0.0).all())
         self.assertTrue((extras["test_df"]["x"] > 0.0).all())
 
-        times = jnp.linspace(0.0, data_set.test_T, data_set.test_points)
         output_ss = float(open_economy_steady_state(parameters)["output"])
         asset_shift = 0.5 * output_ss
         shifted = evaluate_open_economy_nn(
             extras["model"],
-            times,
-            round(data_set.test_T / data_set.dt),
+            data_set.test_T,
+            data_set.test_points,
             jnp.asarray(1.0),
             jnp.asarray(asset_shift),
             parameters,
-            data_set,
         )
         baseline = extras["test_df"]
         np.testing.assert_allclose(shifted["k"], baseline["k"], atol=1e-12)
@@ -976,7 +974,7 @@ class NNSmokeTests(unittest.TestCase):
         results, extras = neoclassical_growth_nn_recursive(
             verbose=False,
             data_set=RecursiveNNDataSettings(
-                dt=2.0, train_T=20.0, train_tvc_T=100.0, test_T=20.0
+                train_T=20.0, train_tvc_T=100.0, test_T=20.0, test_points=11
             ),
             stop_set=RecursiveNNStoppingCriteria(max_steps=200, num_attempts=1),
         )
@@ -995,11 +993,12 @@ class NNSmokeTests(unittest.TestCase):
             b_2=2.5,
             verbose=False,
             data_set=RecursiveNNDataSettings(
-                dt=2.0,
                 train_T=20.0,
                 train_tvc_T=100.0,
                 test_T=20.0,
+                test_points=11,
                 settle_T=200.0,
+                settle_points=101,
             ),
             stop_set=RecursiveNNStoppingCriteria(max_steps=200, num_attempts=1),
         )

@@ -31,7 +31,7 @@ def run(
     num_test_trajectories: int = 1,
     test_log_variance: float = 0.0,
     test_T: float = 40.0,
-    dt: float = 1.0,
+    test_points: int = 41,
     data_seed: int = 0,
     verbose: bool = False,
 ):
@@ -44,7 +44,7 @@ def run(
         data_set={
             "num_test_trajectories": num_test_trajectories,
             "test_T": test_T,
-            "dt": dt,
+            "test_points": test_points,
         },
         ic_set={
             "data_seed": data_seed,

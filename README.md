@@ -147,13 +147,11 @@ The main NN modules are deliberately limited:
 - `neoclassical_growth_nn.py`: direct sequence-space MLP.
 - `neoclassical_growth_nn_recursive.py`: recursive NN with separate TFP and
   capital states, exogenous `dz/dt = g z`, and a homothetic investment-share
-  representation on `log(k) - log(z)`. Training collocation is always the
-  integrator's own accepted states -- `train_points` knots from the fixed RK4
-  rollout, or Tsit5's genuinely adaptive accepted internal states -- so nothing
-  is interpolated inside the differentiated residual. Both modes retain static
-  residual shapes through an accepted-prefix mask and use the same fixed RK4
-  held-out evaluator. The main paper driver retains its legacy `g=0`,
-  single-path and fixed-RK4 defaults;
+  representation on `log(k) - log(z)`. Every rollout is fixed-step RK4 and
+  training collocation is the integrator's own states: `train_points` knots
+  from `train_points - 1` steps, with nothing interpolated inside the
+  differentiated residual. The main paper driver retains its legacy `g=0`,
+  single-path defaults;
   `neoclassical_growth_kernel_recursive.py` is the kernel counterpart on the
   same state-space formulation, with positive growth and held-out
   initial-condition draws.
@@ -185,8 +183,6 @@ Every solver returns `(results, extras)`, writes nothing itself, and exposes a
 ```bash
 uv run python neoclassical_growth_kernel.py --kernel_set.ell 5.0
 uv run python neoclassical_growth_nn_recursive.py --seed 3 --data_set.train_points 49
-uv run python neoclassical_growth_nn_recursive.py --seed 3 \
-  --data_set.ode_solver tsit5
 uv run python multicountry_growth_kernel.py --a_0 '[-0.5, 0.5]'
 uv run python multicountry_growth_kernel.py \
   --parameters.populations '[1.0, 1.0, 1.0]' \
@@ -271,11 +267,9 @@ the unreduced DAE variation is under `extra/`.
 
 The design and verification record for the open-economy and multicountry
 stepping stones is in [`docs/open_economy_growth.md`](docs/open_economy_growth.md).
-The optional adaptive recursive NN is described in
+Adaptive integration is confined to the optional experiments under `extra/`;
+the recursive NN is described in
 [`extra/docs/neoclassical_growth_nn_recursive_adaptive.md`](extra/docs/neoclassical_growth_nn_recursive_adaptive.md).
-The accepted-step Tsit5 mode of the canonical two-state recursive NN, including
-its AD contract and calibration record, is described in
-[`extra/docs/neoclassical_growth_nn_recursive_tsit5.md`](extra/docs/neoclassical_growth_nn_recursive_tsit5.md).
 The recursive (state-space) kernel is described in
 [`docs/neoclassical_growth_kernel_recursive.md`](docs/neoclassical_growth_kernel_recursive.md).
 

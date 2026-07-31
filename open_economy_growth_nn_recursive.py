@@ -4,7 +4,6 @@ import math
 import time
 from dataclasses import asdict, dataclass, replace
 from functools import partial
-from typing import Literal
 
 import jax
 import jax.numpy as jnp
@@ -14,16 +13,7 @@ import pandas as pd
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import LevenbergMarquardt, LMStatus, MultiStart
-from tinydiffeq import (
-    RK4,
-    ConstantStepSize,
-    Euler,
-    IController,
-    Rodas5P,
-    SaveAt,
-    Tsit5,
-    solve_ode,
-)
+from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 
 from open_economy_growth import (
     ModelParameters,
@@ -61,20 +51,11 @@ STATUS_TO_REASON = {
 
 @dataclass(frozen=True)
 class DataSettings:
-    # Training collocation is the integrator's own accepted states. A
-    # fixed-step solve takes exactly ``train_points - 1`` steps of
-    # ``train_T / (train_points - 1)`` and collocates on every knot, so nothing
-    # is interpolated inside the differentiated residual.
-    dt: float = 1.0
+    # Every rollout is fixed-step RK4 evaluated on the integrator's own states:
+    # ``n`` points come from ``n - 1`` steps of ``T / (n - 1)``, including the
+    # initial condition. Training places a residual on every knot; the held-out
+    # and diagnostic paths read the same states, so nothing is interpolated.
     train_points: int = 65
-    ode_solver: Literal["tsit5", "rk4", "euler", "rodas5p"] = "rk4"
-    # Attempt budget for adaptive training solvers; accepted-state capacity is
-    # the budget plus one.
-    adaptive_attempt_budget: int = 80
-    diagnostic_steps: int = 160
-    rtol: float = 6.3e-7
-    atol: float = 2.2e-7
-    adaptive_dt_min: float | None = None
     train_T: float = 40.0
     test_T: float = 50.0
     test_points: int = 51
@@ -224,12 +205,6 @@ class DrawSequentialPolicy:
         )
 
 
-def collocation_budget(data_set):
-    if data_set.ode_solver in ("rk4", "euler"):
-        return data_set.train_points - 1
-    return data_set.adaptive_attempt_budget
-
-
 def policy_values(policy, k, a, parameters):
     flows, flow_derivatives = jax.jvp(policy, (k,), (jnp.ones_like(k),))
     investment, current_account = flows
@@ -289,52 +264,15 @@ def rollout_field(state, _, parameters, p):
     )
 
 
-def rollout(
-    policy,
-    T,
-    budget,
-    k_0,
-    parameters,
-    data_set,
-    *,
-    save_at,
-    ode_solver_name=None,
-):
-    ode_solver_name = ode_solver_name or data_set.ode_solver
-    if ode_solver_name == "tsit5":
-        ode_solver = Tsit5()
-        controller = IController(
-            rtol=data_set.rtol,
-            atol=data_set.atol,
-            dt_min=data_set.adaptive_dt_min,
-        )
-        dt_0 = data_set.dt
-    elif ode_solver_name == "rodas5p":
-        ode_solver = Rodas5P()
-        controller = IController(
-            rtol=data_set.rtol,
-            atol=data_set.atol,
-            dt_min=data_set.adaptive_dt_min,
-        )
-        dt_0 = data_set.dt
-    elif ode_solver_name == "rk4":
-        ode_solver = RK4()
-        controller = ConstantStepSize()
-        dt_0 = T / budget
-    elif ode_solver_name == "euler":
-        ode_solver = Euler()
-        controller = ConstantStepSize()
-        dt_0 = T / budget
-    else:
-        raise ValueError(f"unknown ode_solver: {ode_solver_name!r}")
+def rollout(policy, T, budget, k_0, parameters, data_set, *, save_at):
     return solve_ode(
         rollout_field,
-        ode_solver,
+        RK4(),
         0.0,
         T,
         jnp.zeros(2, dtype=jnp.asarray(k_0).dtype),
-        dt_0=dt_0,
-        controller=controller,
+        dt_0=T / budget,
+        controller=ConstantStepSize(),
         max_steps=budget,
         save_at=save_at,
         args=parameters,
@@ -355,7 +293,7 @@ def collocation_rollout(policy, initial_k, parameters, data_set):
         return rollout(
             policy,
             data_set.train_T,
-            collocation_budget(data_set),
+            data_set.train_points - 1,
             k_0,
             parameters,
             data_set,
@@ -368,9 +306,8 @@ def collocation_rollout(policy, initial_k, parameters, data_set):
 def collocation_states(policy, k_0, a_0, parameters, data_set):
     """Return collocation states, the active-state mask, and the raw solution.
 
-    An adaptive controller accepts a variable number of steps, so the buffer is
-    padded to capacity. Padding repeats the last accepted state and is removed
-    from the objective and its derivatives by ``active``.
+    Every step of the fixed-step mesh is a collocation point, so the returned
+    mask is full; it is kept so the caller can assert that.
     """
     initial_k = jnp.reshape(k_0, (1,))
     initial_a = jnp.reshape(a_0, (1,))
@@ -413,30 +350,31 @@ def residual_fn(theta, args, p):
 
 
 @partial(jax.jit, static_argnames=("budget",))
-def evaluate_path_jit(policy, times, budget, k_0, a_0, parameters):
+def evaluate_path_jit(policy, T, budget, k_0, a_0, parameters):
     solution = solve_ode(
         rollout_field,
         RK4(),
         0.0,
-        times[-1],
+        T,
         jnp.zeros(2, dtype=jnp.asarray(k_0).dtype),
-        dt_0=times[-1] / budget,
+        dt_0=T / budget,
         max_steps=budget,
-        save_at=SaveAt(ts=times),
+        save_at=SaveAt(steps=True),
         args=parameters,
         p=(policy, k_0),
     )
     states = states_from_solution(solution, k_0, a_0, policy.flow_scale[...])
-    return {"t": times, **path_values(policy, states, parameters)}
+    return {"t": solution.ts, **path_values(policy, states, parameters)}
 
 
-def evaluate_path(policy, times, budget, k_0, a_0, parameters, data_set):
+def evaluate_path(policy, T, n_points, k_0, a_0, parameters):
+    """Evaluate along the integrator's own states: ``n_points`` from n-1 steps."""
     dtype = jnp.asarray(k_0).dtype
     dynamic_parameters = DynamicModelParameters.from_model(parameters, dtype)
     return evaluate_path_jit(
         policy,
-        times,
-        budget,
+        T,
+        n_points - 1,
         k_0,
         a_0,
         dynamic_parameters,
@@ -471,10 +409,6 @@ def open_economy_growth_nn_recursive(
         raise ValueError("diagnostic_T must cover the train and test horizons")
     if data_set.benchmark_T < data_set.test_T:
         raise ValueError("benchmark_T must cover the test horizon")
-    if data_set.adaptive_dt_min is not None and not (
-        math.isfinite(data_set.adaptive_dt_min) and data_set.adaptive_dt_min > 0.0
-    ):
-        raise ValueError("adaptive_dt_min must be positive or None")
     if stop_set.train_loss_threshold is None or not (
         math.isfinite(stop_set.train_loss_threshold)
         and stop_set.train_loss_threshold > 0.0
@@ -490,15 +424,6 @@ def open_economy_growth_nn_recursive(
         flow_scale=flow_scale,
         investment_anchor=max(parameters.delta * k_0, DOMAIN_EPS),
         k_0_ref=k_0,
-    )
-    train_steps = data_set.train_points - 1
-    train_t = jnp.linspace(0.0, data_set.train_T, data_set.train_points, dtype=dtype)
-    test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
-    diagnostic_t = jnp.linspace(
-        0.0,
-        data_set.diagnostic_T,
-        data_set.diagnostic_points,
-        dtype=dtype,
     )
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     model = SequentialPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(init_key))
@@ -544,32 +469,30 @@ def open_economy_growth_nn_recursive(
 
     train_eval = evaluate_path(
         policy,
-        train_t,
-        train_steps,
+        data_set.train_T,
+        data_set.train_points,
         k_0_jax,
         a_0_jax,
         parameters,
-        data_set,
     )
-    test_steps = max(1, round(data_set.test_T / data_set.dt))
     test_eval = evaluate_path(
         policy,
-        test_t,
-        test_steps,
+        data_set.test_T,
+        data_set.test_points,
         k_0_jax,
         a_0_jax,
         parameters,
-        data_set,
     )
     diagnostic_eval = evaluate_path(
         policy,
-        diagnostic_t,
-        data_set.diagnostic_steps,
+        data_set.diagnostic_T,
+        data_set.diagnostic_points,
         k_0_jax,
         a_0_jax,
         parameters,
-        data_set,
     )
+    train_t = train_eval["t"]
+    test_t = test_eval["t"]
     jax.block_until_ready((train_eval, test_eval, diagnostic_eval))
 
     residual_names = ("q_euler", "c_euler")
@@ -746,15 +669,10 @@ def open_economy_growth_nn_recursive(
         "train_T": data_set.train_T,
         "num_train_points": int(train_t.size),
         "num_training_trajectories": 1,
-        "point_rule": (
-            "fixed_accepted_steps"
-            if data_set.ode_solver in ("rk4", "euler")
-            else "adaptive_accepted_steps"
-        ),
         "test_T": data_set.test_T,
         "diagnostic_T": data_set.diagnostic_T,
-        "ode_solver": data_set.ode_solver,
-        "evaluation_ode_solver": "rk4",
+        "ode_solver": "rk4",
+        "train_steps": data_set.train_points - 1,
         "solution_accepted": solution_accepted,
         "rejection_reason": (
             "accepted" if solution_accepted else ",".join(rejection_reasons)

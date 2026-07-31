@@ -28,7 +28,6 @@ class OpenEconomyRecursiveDtypeTests(unittest.TestCase):
             test_points=3,
             diagnostic_T=2.0,
             diagnostic_points=3,
-            diagnostic_steps=2,
             benchmark_T=2.0,
             benchmark_points=3,
             policy_grid_size=3,
@@ -117,7 +116,6 @@ class OpenEconomyRecursiveDtypeTests(unittest.TestCase):
             data_set=recursive.DataSettings(
                 diagnostic_T=50.0,
                 diagnostic_points=51,
-                diagnostic_steps=50,
             ),
             verbose=False,
         )
@@ -152,18 +150,7 @@ class OpenEconomyRecursiveDtypeTests(unittest.TestCase):
                 self.assertEqual(len(captured_atol), 1)
                 self.assertEqual(captured_atol[0], math.sqrt(expected_loss))
 
-    def test_adaptive_dt_min_and_train_loss_threshold_validation(self):
-        for value in (0.0, -1.0, math.nan, math.inf):
-            with self.subTest(adaptive_dt_min=value):
-                with self.assertRaisesRegex(
-                    ValueError, "adaptive_dt_min must be positive or None"
-                ):
-                    recursive.open_economy_growth_nn_recursive(
-                        use_float64=False,
-                        data_set=recursive.DataSettings(adaptive_dt_min=value),
-                        verbose=False,
-                    )
-
+    def test_train_loss_threshold_validation(self):
         for value in (0.0, -1.0, math.nan, math.inf):
             with self.subTest(train_loss_threshold=value):
                 with self.assertRaisesRegex(

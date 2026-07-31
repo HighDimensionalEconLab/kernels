@@ -197,6 +197,7 @@ class BalancedGrowthRecursiveNNTests(unittest.TestCase):
             train_points=33,
             train_tvc_T=50.0,
             test_T=10.0,
+            test_points=11,
             num_test_trajectories=6,
         )
         results, extras = neoclassical_growth_nn_recursive(

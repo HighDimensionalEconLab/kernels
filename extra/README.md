@@ -24,10 +24,9 @@ and transfers the represented policy when that basis changes.
   derivatives and integrates them into paths.
 - `neoclassical_growth_nn_rff.py`: the same integrated-path construction with
   fixed random Fourier features and a trainable linear head.
-- `neoclassical_growth_nn_recursive_adaptive.py`: the historical one-state
-  adaptive policy experiment using Tsit5 or Rodas5P. The canonical two-state
-  solver now has its own fixed-RK4/adaptive-Tsit5 toggle; see
-  `docs/neoclassical_growth_nn_recursive_tsit5.md`.
+- `neoclassical_growth_nn_recursive_adaptive.py`: the one-state adaptive policy
+  experiment using Tsit5 or Rodas5P. The canonical two-state solver is
+  fixed-step RK4 only, so this is where adaptive integration lives.
 - `random_fourier_features.py`: the RFF feature implementation shared by that
   example and its tests.
 
@@ -49,9 +48,6 @@ uv run python -m extra.multicountry_growth_kernel_dae --a_0 '[-0.5, 0.5]'
 uv run python -m extra.replication.neoclassical_growth_method_comparison \
   --output_dir .results-extra
 uv run python -m extra.replication.neoclassical_growth_recursive_comparison \
-  --output_dir .results_extra
-uv run python -m \
-  extra.replication.neoclassical_growth_nn_recursive_tsit5_comparison \
   --output_dir .results_extra
 uv run python -m extra.replication.neoclassical_growth_nn_recursive_adaptive \
   --output_dir .results-extra

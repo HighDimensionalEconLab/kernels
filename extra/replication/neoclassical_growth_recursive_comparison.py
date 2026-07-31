@@ -117,7 +117,7 @@ def run(
     train_tvc_T: float = 200.0,
     tvc_steps: int = 256,
     test_T: float = 40.0,
-    dt: float = 1.0,
+    test_points: int = 41,
     data_seed: int = 0,
     train_euler_tolerance: float = 2e-5,
     test_error_tolerance: float = 5e-3,
@@ -134,7 +134,7 @@ def run(
         "train_tvc_T": train_tvc_T,
         "tvc_steps": tvc_steps,
         "test_T": test_T,
-        "dt": dt,
+        "test_points": test_points,
         "benchmark_T": max(200.0, train_T, test_T),
         "benchmark_points": 801,
     }

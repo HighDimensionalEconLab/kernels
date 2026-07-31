@@ -608,7 +608,7 @@ def neoclassical_growth_nn_recursive(out):
                 "num_collocation_states": int(
                     med(baseline_json["num_collocation_states"])
                 ),
-                "ode_solver": med(baseline_json["ode_solver"]),
+                "ode_solver": str(accepted["ode_solver"].iloc[0]),
                 "train_points": hp["data_set"]["train_points"],
                 "kappa_ss": sig(med(baseline_json["kappa_ss"]), 4),
             }

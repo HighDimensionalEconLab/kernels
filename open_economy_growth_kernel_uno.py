@@ -144,24 +144,24 @@ def open_economy_growth_kernel_uno(
         log_k = jnp.log(k_0) + K_tilde_eval @ alpha_k
         a = a_0 + output_scale * (K_tilde_eval @ alpha_a)
         log_q = jnp.log(steady["q"]) + q_offset + K_tilde_eval @ alpha_q
-        marginal_wealth = jnp.exp(log_mu)
+        mu = jnp.exp(log_mu)
         c = jnp.exp(log_c)
         k = jnp.exp(log_k)
-        tobin_q = jnp.exp(log_q)
-        dlog_marginal_wealth_dt = K_eval @ alpha_mu
+        q = jnp.exp(log_q)
+        dlog_mu_dt = K_eval @ alpha_mu
         dlog_k_dt = K_eval @ alpha_k
         da_dt = output_scale * (K_eval @ alpha_a)
         dlog_q_dt = K_eval @ alpha_q
         return (
             k,
             a,
-            tobin_q,
+            q,
             c,
-            marginal_wealth,
+            mu,
             dlog_k_dt,
             da_dt,
             dlog_q_dt,
-            dlog_marginal_wealth_dt,
+            dlog_mu_dt,
         )
 
     def objective(x):
@@ -180,25 +180,25 @@ def open_economy_growth_kernel_uno(
         (
             k,
             a,
-            tobin_q,
+            q,
             c,
-            marginal_wealth,
+            mu,
             dlog_k_dt,
             da_dt,
             dlog_q_dt,
-            dlog_marginal_wealth_dt,
+            dlog_mu_dt,
         ) = path_values(x, K, K_tilde)
         residuals = path_residuals(
             k,
             a,
-            tobin_q,
+            q,
             c,
-            marginal_wealth,
+            mu,
             jnp.ones_like(k),
             dlog_k_dt,
             da_dt,
             dlog_q_dt,
-            dlog_marginal_wealth_dt,
+            dlog_mu_dt,
             parameters,
         )
         return residual_scale * jnp.concatenate(
@@ -323,36 +323,36 @@ def open_economy_growth_kernel_uno(
         (
             k,
             a,
-            tobin_q,
+            q,
             c,
-            marginal_wealth,
+            mu,
             dlog_k_dt,
             da_dt,
             dlog_q_dt,
-            dlog_marginal_wealth_dt,
+            dlog_mu_dt,
         ) = path_values(x, K_eval, K_tilde_eval)
         z = jnp.ones_like(k)
         residuals = path_residuals(
             k,
             a,
-            tobin_q,
+            q,
             c,
-            marginal_wealth,
+            mu,
             z,
             dlog_k_dt,
             da_dt,
             dlog_q_dt,
-            dlog_marginal_wealth_dt,
+            dlog_mu_dt,
             parameters,
         )
-        investment = investment_expenditure(k, tobin_q, parameters)
+        investment = investment_expenditure(k, q, parameters)
         return {
             "t": points,
             "k": k,
             "a": a,
-            "q": tobin_q,
+            "q": q,
             "c": c,
-            "mu": marginal_wealth,
+            "mu": mu,
             "x": investment,
             "output": production(k, z, parameters),
             "current_account": da_dt,
@@ -477,8 +477,8 @@ def open_economy_growth_kernel_uno(
             kernel_set.sigma,
             kernel_set.ell,
         )
-        k, a, tobin_q, c, *_ = path_values(x, K_eval, K_tilde_eval)
-        return k, a, tobin_q, c
+        k, a, q, c, *_ = path_values(x, K_eval, K_tilde_eval)
+        return k, a, q, c
 
     results = {
         **asdict(parameters),

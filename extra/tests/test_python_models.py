@@ -25,7 +25,7 @@ from multicountry_growth import (
     draw_initial_conditions,
     multicountry_allocations,
     multicountry_path_values,
-    multicountry_reference_marginal_wealth,
+    multicountry_reference_mu,
     multicountry_steady_state,
     weighted_gini,
 )
@@ -111,13 +111,13 @@ class KernelSmokeTests(unittest.TestCase):
             populations=(1.0, 2.0, 1.5),
             productivities=(1.0, 1.1, 0.9),
         )
-        marginal_wealth = multicountry_reference_marginal_wealth(parameters)
-        steady = multicountry_steady_state(marginal_wealth, parameters)
+        mu = multicountry_reference_mu(parameters)
+        steady = multicountry_steady_state(mu, parameters)
         allocations = multicountry_allocations(
             steady["k"],
             steady["q"],
-            marginal_wealth,
-            parameters.rho,
+            mu,
+            parameters.r,
             parameters,
         )
         np.testing.assert_allclose(allocations["capital_drift"], 0.0, atol=1e-14)
@@ -134,25 +134,25 @@ class KernelSmokeTests(unittest.TestCase):
                 [
                     steady["k"] * jnp.asarray((0.9, 1.1, 1.05)),
                     steady["q"] * jnp.asarray((1.1, 0.95, 1.02)),
-                    marginal_wealth * jnp.asarray((0.95, 1.08, 1.03)),
+                    mu * jnp.asarray((0.95, 1.08, 1.03)),
                 ]
             )
         )
         log_direction = jnp.asarray(
             (0.02, -0.01, 0.03, -0.04, 0.01, 0.02, 0.03, -0.02, 0.01)
         )
-        k, q, marginal_wealth_test = jnp.split(jnp.exp(log_state), 3)
+        k, q, mu_test = jnp.split(jnp.exp(log_state), 3)
         dlog_k_dt, dlog_q_dt, dlog_m_dt = jnp.split(log_direction, 3)
         values = multicountry_path_values(
             k=k[None, :],
             a=jnp.zeros((1, 3)),
-            tobin_q=q[None, :],
-            marginal_wealth=marginal_wealth_test[None, :],
-            interest_rate=jnp.asarray((parameters.rho,)),
+            q=q[None, :],
+            mu=mu_test[None, :],
+            interest_rate=jnp.asarray((parameters.r,)),
             dlog_k_dt=dlog_k_dt[None, :],
             da_dt=jnp.zeros((1, 3)),
             dlog_q_dt=dlog_q_dt[None, :],
-            dlog_marginal_wealth_dt=dlog_m_dt[None, :],
+            dlog_mu_dt=dlog_m_dt[None, :],
             parameters=parameters,
         )
         populations = jnp.asarray(parameters.populations)
@@ -163,7 +163,7 @@ class KernelSmokeTests(unittest.TestCase):
                 k_jvp,
                 q_jvp,
                 m_jvp,
-                parameters.rho,
+                parameters.r,
                 parameters,
             )
             return jnp.sum(
@@ -357,7 +357,7 @@ class KernelSmokeTests(unittest.TestCase):
         # The implicit-AD comparative statics agree across the dense and
         # matrix-free AD paths (the cg tangent/cotangent solve runs the
         # block-eigen-preconditioned CG to tolerance at zero damping).
-        for name in ("alpha", "gamma", "delta", "rho", "installation_elasticity"):
+        for name in ("alpha", "gamma", "delta", "r", "eta"):
             self.assertAlmostEqual(
                 cg[f"d_rate_d_{name}"],
                 outputs["auto"][f"d_rate_d_{name}"],
@@ -425,15 +425,13 @@ class KernelSmokeTests(unittest.TestCase):
         h_rho = 4e-4
         fd_rho = (
             rate_at_10(
-                parameters=dataclasses.replace(parameters, rho=parameters.rho + h_rho)
+                parameters=dataclasses.replace(parameters, r=parameters.r + h_rho)
             )
             - rate_at_10(
-                parameters=dataclasses.replace(parameters, rho=parameters.rho - h_rho)
+                parameters=dataclasses.replace(parameters, r=parameters.r - h_rho)
             )
         ) / (2.0 * h_rho)
-        self.assertAlmostEqual(
-            results["d_rate_d_rho"], fd_rho, delta=2e-2 * abs(fd_rho)
-        )
+        self.assertAlmostEqual(results["d_rate_d_r"], fd_rho, delta=2e-2 * abs(fd_rho))
         h_productivity = 1e-3
         fd_productivity = (
             rate_at_10(
@@ -637,7 +635,7 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(float(steady["s"]), parameters.delta, places=14)
         self.assertAlmostEqual(
             float(steady["q"]),
-            1.0 / parameters.installation_elasticity,
+            1.0 / parameters.eta,
             places=14,
         )
         self.assertLess(float(tail["stable_root"]), 0.0)
@@ -657,7 +655,7 @@ class KernelSmokeTests(unittest.TestCase):
 
     def test_open_economy_growth_kernel_smoke(self):
         baseline_parameters = OpenEconomyParameters()
-        parameters = OpenEconomyParameters(r_star=baseline_parameters.rho)
+        parameters = OpenEconomyParameters(r_star=baseline_parameters.r)
         results, extras = open_economy_growth_kernel(parameters=parameters)
         self.assertTrue(results["solution_accepted"], results["rejection_reason"])
         self.assertEqual(results["stopping_reason"], "converged")
@@ -785,7 +783,7 @@ class KernelSmokeTests(unittest.TestCase):
         realized_growth = math.log(path["c"].iloc[-1] / path["c"].iloc[0]) / (
             path["t"].iloc[-1] - path["t"].iloc[0]
         )
-        expected_growth = (parameters.interest_rate - parameters.rho) / parameters.gamma
+        expected_growth = (parameters.interest_rate - parameters.r) / parameters.gamma
         self.assertAlmostEqual(realized_growth, expected_growth, places=5)
         self.assertLess(path["marginal_wealth"].abs().max(), 1e-6)
         self.assertLess(path["consumption_foc"].abs().max(), 2e-6)

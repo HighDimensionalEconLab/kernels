@@ -65,8 +65,8 @@ class TradeGrowthEquations(unittest.TestCase):
         )
         values, diagnostics = static_trade_equilibrium(
             k=jnp.asarray((1.0, 0.8, 1.3)),
-            tobin_q=jnp.full(3, 1.0 / parameters.installation_elasticity),
-            marginal_wealth=jnp.asarray((1.0, 1.1, 0.9)),
+            q=jnp.full(3, 1.0 / parameters.eta),
+            mu=jnp.asarray((1.0, 1.1, 0.9)),
             parameters=parameters,
         )
         self.assertLess(diagnostics["max_residual"], 1e-10)
@@ -84,13 +84,13 @@ class TradeGrowthEquations(unittest.TestCase):
         parameters = draw_trade_growth_parameters(3, seed=11)
         k = jnp.asarray([[0.9, 1.1, 1.3]])
         q = jnp.asarray([[0.8, 0.9, 1.0]])
-        marginal_wealth = jnp.asarray([[1.1, 0.95, 1.05]])
+        mu = jnp.asarray([[1.1, 0.95, 1.05]])
         interest_rate = jnp.asarray([0.04])
         a = jnp.asarray([[-0.15, 0.02, 0.1]])
         static, diagnostics = static_trade_equilibrium(
             k[0],
             q[0],
-            marginal_wealth[0],
+            mu[0],
             parameters,
         )
         self.assertLess(diagnostics["max_residual"], 1e-10)
@@ -98,7 +98,7 @@ class TradeGrowthEquations(unittest.TestCase):
         allocations = multicountry_trade_allocations(
             k,
             q,
-            marginal_wealth,
+            mu,
             interest_rate,
             log_static,
             parameters,
@@ -111,14 +111,14 @@ class TradeGrowthEquations(unittest.TestCase):
         values = multicountry_trade_path_values(
             k=k,
             a=a,
-            tobin_q=q,
-            marginal_wealth=marginal_wealth,
+            q=q,
+            mu=mu,
             interest_rate=interest_rate,
             log_static=log_static,
             dlog_k_dt=allocations["capital_drift"] / k,
             da_dt=budget_drift,
             dlog_q_dt=allocations["tobin_q_drift"] / q,
-            dlog_marginal_wealth_dt=(parameters.rho - interest_rate[:, None]),
+            dlog_mu_dt=(parameters.r - interest_rate[:, None]),
             parameters=parameters,
         )
         for name in DYNAMIC_RESIDUAL_NAMES:

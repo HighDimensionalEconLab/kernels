@@ -75,21 +75,21 @@ def trade_growth_local_linearization(
         dv = w[num_functions : 2 * num_functions]
         free = w[2 * num_functions :]
         log_q_0 = free[:N]
-        log_marginal_wealth_0 = free[N : 2 * N]
+        log_mu_0 = free[N : 2 * N]
         log_static_0 = free[2 * N : -1].reshape(num_static, N)
         log_rate_0 = free[-1]
         static_levels = lv[4 * N : -1].reshape(num_static, N)
         values = multicountry_trade_path_values(
             k=jnp.exp(log_k_0 + lv[:N])[None, :],
             a=(a_0 + lv[N : 2 * N])[None, :],
-            tobin_q=jnp.exp(log_q_0 + lv[2 * N : 3 * N])[None, :],
-            marginal_wealth=jnp.exp(log_marginal_wealth_0 + lv[3 * N : 4 * N])[None, :],
+            q=jnp.exp(log_q_0 + lv[2 * N : 3 * N])[None, :],
+            mu=jnp.exp(log_mu_0 + lv[3 * N : 4 * N])[None, :],
             interest_rate=jnp.exp(log_rate_0 + lv[-1])[None],
             log_static=(log_static_0 + static_levels)[None, :, :],
             dlog_k_dt=dv[:N][None, :],
             da_dt=dv[N : 2 * N][None, :],
             dlog_q_dt=dv[2 * N : 3 * N][None, :],
-            dlog_marginal_wealth_dt=dv[3 * N : 4 * N][None, :],
+            dlog_mu_dt=dv[3 * N : 4 * N][None, :],
             parameters=parameters,
         )
         return residual_scale * jnp.concatenate(
@@ -516,21 +516,21 @@ def trade_growth_block_eigen_families(
         dv = w[num_functions : 2 * num_functions]
         free = w[2 * num_functions :]
         log_q_0 = free[:N]
-        log_marginal_wealth_0 = free[N : 2 * N]
+        log_mu_0 = free[N : 2 * N]
         log_static_0 = free[2 * N : -1].reshape(num_static, N)
         log_rate_0 = free[-1]
         static_levels = lv[4 * N : -1].reshape(num_static, N)
         values = multicountry_trade_path_values(
             k=jnp.exp(log_k_0 + lv[:N])[None, :],
             a=(a_0 + lv[N : 2 * N])[None, :],
-            tobin_q=jnp.exp(log_q_0 + lv[2 * N : 3 * N])[None, :],
-            marginal_wealth=jnp.exp(log_marginal_wealth_0 + lv[3 * N : 4 * N])[None, :],
+            q=jnp.exp(log_q_0 + lv[2 * N : 3 * N])[None, :],
+            mu=jnp.exp(log_mu_0 + lv[3 * N : 4 * N])[None, :],
             interest_rate=jnp.exp(log_rate_0 + lv[-1])[None],
             log_static=(log_static_0 + static_levels)[None, :, :],
             dlog_k_dt=dv[:N][None, :],
             da_dt=dv[N : 2 * N][None, :],
             dlog_q_dt=dv[2 * N : 3 * N][None, :],
-            dlog_marginal_wealth_dt=dv[3 * N : 4 * N][None, :],
+            dlog_mu_dt=dv[3 * N : 4 * N][None, :],
             parameters=parameters,
         )
         return residual_scale * jnp.concatenate(

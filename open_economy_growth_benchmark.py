@@ -37,47 +37,39 @@ def open_economy_growth_benchmark(
     alpha = parameters.alpha
     delta = parameters.delta
     interest_rate = parameters.interest_rate
-    installation_elasticity = parameters.installation_elasticity
-    installation_efficiency = parameters.installation_efficiency
+    eta = parameters.eta
+    chi = parameters.chi
     consumption_growth = consumption_growth_rate(parameters)
     annuity_rate = consumption_annuity_rate(parameters)
     if annuity_rate <= 0.0:
         raise ValueError("r_star - consumption growth must be positive")
 
-    q_ss = 1.0 / installation_elasticity
-    marginal_product_ss = delta + interest_rate / installation_elasticity
+    q_ss = 1.0 / eta
+    marginal_product_ss = delta + interest_rate / eta
     k_ss = (alpha / marginal_product_ss) ** (1.0 / (1.0 - alpha))
     output_ss = k_ss**alpha
     g_ss = output_ss - delta * k_ss
-    capital_loading = delta * installation_elasticity / (1.0 - installation_elasticity)
-    q_loading = (1.0 - alpha) * (interest_rate + installation_elasticity * delta)
+    capital_loading = delta * eta / (1.0 - eta)
+    q_loading = (1.0 - alpha) * (interest_rate + eta * delta)
     stable_root = 0.5 * (
         interest_rate - np.sqrt(interest_rate**2 + 4.0 * capital_loading * q_loading)
     )
     stable_slope = stable_root / capital_loading
     resource_loading = (
-        alpha * output_ss
-        - delta * k_ss
-        - delta * k_ss * stable_slope / (1.0 - installation_elasticity)
+        alpha * output_ss - delta * k_ss - delta * k_ss * stable_slope / (1.0 - eta)
     )
 
-    def investment_rate(tobin_q):
-        return (installation_efficiency * installation_elasticity * tobin_q) ** (
-            1.0 / (1.0 - installation_elasticity)
-        )
+    def investment_rate(q):
+        return (chi * eta * q) ** (1.0 / (1.0 - eta))
 
     def ode(t, values):
-        k, tobin_q = values
+        k, q = values
         z = np.asarray(productivity(t), dtype=float)
-        s = investment_rate(tobin_q)
-        dk_dt = k * (installation_efficiency * s**installation_elasticity - delta)
+        s = investment_rate(q)
+        dk_dt = k * (chi * s**eta - delta)
         dq_dt = (
-            interest_rate
-            + delta
-            - (1.0 - installation_elasticity)
-            * installation_efficiency
-            * s**installation_elasticity
-        ) * tobin_q - alpha * z * k ** (alpha - 1.0)
+            interest_rate + delta - (1.0 - eta) * chi * s**eta
+        ) * q - alpha * z * k ** (alpha - 1.0)
         return np.vstack((dk_dt, dq_dt))
 
     def boundary_condition(initial, terminal):
@@ -102,9 +94,9 @@ def open_economy_growth_benchmark(
     terminal_time = float(t_grid[-1])
 
     def domestic_resources(t):
-        k, tobin_q = solution.sol(t)
+        k, q = solution.sol(t)
         z = np.asarray(productivity(t), dtype=float)
-        return z * k**alpha - k * investment_rate(tobin_q)
+        return z * k**alpha - k * investment_rate(q)
 
     discounted_resources = quad(
         lambda t: np.exp(-interest_rate * t) * float(domestic_resources(t)),
@@ -154,10 +146,10 @@ def open_economy_growth_benchmark(
         points = np.asarray(points, dtype=float)
         if np.any(points < 0.0) or np.any(points > terminal_time):
             raise ValueError("evaluation points must lie inside the benchmark horizon")
-        k, tobin_q = solution.sol(points)
+        k, q = solution.sol(points)
         a = asset_solution.sol(points)[0]
         z = np.asarray(productivity(points), dtype=float)
-        s = investment_rate(tobin_q)
+        s = investment_rate(q)
         x = k * s
         output = z * k**alpha
         c = c_0 * np.exp(consumption_growth * points)
@@ -166,7 +158,7 @@ def open_economy_growth_benchmark(
             "t": points,
             "k": k,
             "a": a,
-            "q": tobin_q,
+            "q": q,
             "c": c,
             "x": x,
             "output": output,

@@ -71,7 +71,7 @@ def multicountry_block_eigen_families(
     k_0_array,
     a_0_array,
     q_reference,
-    marginal_wealth_reference,
+    mu_reference,
     output_scale,
     residual_scale,
 ):
@@ -101,8 +101,8 @@ def multicountry_block_eigen_families(
 
     log_k_0 = jnp.log(k_0_array)
     log_q_reference = jnp.log(q_reference)
-    log_marginal_wealth_reference = jnp.log(marginal_wealth_reference)
-    log_rho = jnp.log(jnp.asarray(parameters.rho, dtype=dtype))
+    log_mu_reference = jnp.log(mu_reference)
+    log_r = jnp.log(jnp.asarray(parameters.r, dtype=dtype))
     total_population = jnp.sum(jnp.asarray(parameters.populations, dtype=dtype))
     N = num_countries
 
@@ -114,22 +114,18 @@ def multicountry_block_eigen_families(
         dv = w[num_blocks : 2 * num_blocks]
         free = w[2 * num_blocks :]
         q_offsets = free[:N]
-        marginal_wealth_offsets = free[N : 2 * N]
+        mu_offsets = free[N : 2 * N]
         rate_offset = free[-1]
         values = multicountry_path_values(
             k=jnp.exp(log_k_0 + lv[0:N])[None, :],
             a=(a_0_array + output_scale * lv[N : 2 * N])[None, :],
-            tobin_q=jnp.exp(log_q_reference + q_offsets + lv[2 * N : 3 * N])[None, :],
-            marginal_wealth=jnp.exp(
-                log_marginal_wealth_reference
-                + marginal_wealth_offsets
-                + lv[3 * N : 4 * N]
-            )[None, :],
-            interest_rate=jnp.exp(log_rho + rate_offset + lv[4 * N])[None],
+            q=jnp.exp(log_q_reference + q_offsets + lv[2 * N : 3 * N])[None, :],
+            mu=jnp.exp(log_mu_reference + mu_offsets + lv[3 * N : 4 * N])[None, :],
+            interest_rate=jnp.exp(log_r + rate_offset + lv[4 * N])[None],
             dlog_k_dt=dv[0:N][None, :],
             da_dt=(output_scale * dv[N : 2 * N])[None, :],
             dlog_q_dt=dv[2 * N : 3 * N][None, :],
-            dlog_marginal_wealth_dt=dv[3 * N : 4 * N][None, :],
+            dlog_mu_dt=dv[3 * N : 4 * N][None, :],
             parameters=parameters,
         )
         dynamic = jnp.concatenate(

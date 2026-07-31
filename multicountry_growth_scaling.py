@@ -39,7 +39,7 @@ jax.config.update("jax_default_matmul_precision", "highest")
 # Long-run economic validity bars, applied at every rung on top of the
 # driver's residual acceptance gates: by t ~ 100 consumption, capital, and
 # debt are flat, capital sits at the theory steady state (MPK equalized at
-# delta + rho/e), and r ~ rho; the exact one-good invariants -- constant
+# delta + r/eta), and interest rate ~ r; the exact one-good invariants -- constant
 # consumption ratios and consumption proportional to initial total wealth
 # a_0 + PV(resources) -- hold to solver accuracy. Bounds are ~3x the
 # measured ladder values (flatness/theory gaps ~ 8e-3 with the a-drift

@@ -44,8 +44,8 @@ class TradeGrowthParameters:
     alpha: float = 0.33
     gamma: float = 2.0
     delta: float = -math.log(0.94)
-    rho: float = -math.log(0.96)
-    installation_elasticity: float = 0.76
+    r: float = -math.log(0.96)
+    eta: float = 0.76
     trade_elasticity: float = 4.0
     variety_elasticity: float = 2.0
     populations: tuple[float, ...] = (1.0, 1.0)
@@ -62,10 +62,10 @@ class TradeGrowthParameters:
             raise ValueError("alpha must lie in (0, 1)")
         if self.gamma <= 0.0:
             raise ValueError("gamma must be positive")
-        if self.delta <= 0.0 or self.rho <= 0.0:
-            raise ValueError("delta and rho must be positive")
-        if not 0.0 < self.installation_elasticity < 1.0:
-            raise ValueError("installation_elasticity must lie in (0, 1)")
+        if self.delta <= 0.0 or self.r <= 0.0:
+            raise ValueError("delta and r must be positive")
+        if not 0.0 < self.eta < 1.0:
+            raise ValueError("eta must lie in (0, 1)")
         if self.trade_elasticity <= 0.0:
             raise ValueError("trade_elasticity must be positive")
         if self.variety_elasticity <= 1.0:
@@ -114,8 +114,8 @@ class TradeGrowthParameters:
         return len(self.populations)
 
     @property
-    def installation_efficiency(self):
-        return self.delta ** (1.0 - self.installation_elasticity)
+    def chi(self):
+        return self.delta ** (1.0 - self.eta)
 
     @property
     def price_index_constant(self):
@@ -129,8 +129,8 @@ class TradeGrowthParameterValues:
     alpha: jax.Array
     gamma: jax.Array
     delta: jax.Array
-    rho: jax.Array
-    installation_elasticity: jax.Array
+    r: jax.Array
+    eta: jax.Array
     trade_elasticity: jax.Array
     variety_elasticity: jax.Array
     populations: jax.Array
@@ -147,8 +147,8 @@ class TradeGrowthParameterValues:
         return self.populations.shape[-1]
 
     @property
-    def installation_efficiency(self):
-        return self.delta ** (1.0 - self.installation_elasticity)
+    def chi(self):
+        return self.delta ** (1.0 - self.eta)
 
     @property
     def price_index_constant(self):
@@ -161,10 +161,8 @@ def trade_growth_parameter_values(parameters, dtype=jnp.float64):
         alpha=jnp.asarray(parameters.alpha, dtype=dtype),
         gamma=jnp.asarray(parameters.gamma, dtype=dtype),
         delta=jnp.asarray(parameters.delta, dtype=dtype),
-        rho=jnp.asarray(parameters.rho, dtype=dtype),
-        installation_elasticity=jnp.asarray(
-            parameters.installation_elasticity, dtype=dtype
-        ),
+        r=jnp.asarray(parameters.r, dtype=dtype),
+        eta=jnp.asarray(parameters.eta, dtype=dtype),
         trade_elasticity=jnp.asarray(parameters.trade_elasticity, dtype=dtype),
         variety_elasticity=jnp.asarray(parameters.variety_elasticity, dtype=dtype),
         populations=jnp.asarray(parameters.populations, dtype=dtype),
@@ -248,12 +246,12 @@ def unpack_static_trade_values(log_static, parameters):
 def static_trade_values(
     log_static,
     k,
-    tobin_q,
-    marginal_wealth,
+    q,
+    mu,
     parameters,
 ):
     static = unpack_static_trade_values(log_static, parameters)
-    dtype = jnp.result_type(log_static, k, tobin_q, marginal_wealth)
+    dtype = jnp.result_type(log_static, k, q, mu)
     populations = jnp.asarray(parameters.populations, dtype=dtype)
     intermediate_productivities = jnp.asarray(
         parameters.intermediate_productivities, dtype=dtype
@@ -320,17 +318,15 @@ def static_trade_values(
     )
     trade_shares = jax.nn.softmax(log_competitiveness, axis=-1)
 
-    consumption = jnp.exp(
-        -(jnp.log(marginal_wealth) + log_consumption_price) / parameters.gamma
-    )
+    consumption = jnp.exp(-(jnp.log(mu) + log_consumption_price) / parameters.gamma)
     investment_rate = jnp.exp(
         (
-            jnp.log(parameters.installation_efficiency)
-            + jnp.log(parameters.installation_elasticity)
-            + jnp.log(tobin_q)
+            jnp.log(parameters.chi)
+            + jnp.log(parameters.eta)
+            + jnp.log(q)
             - log_investment_price
         )
-        / (1.0 - parameters.installation_elasticity)
+        / (1.0 - parameters.eta)
     )
     investment = k * investment_rate
 
@@ -442,23 +438,23 @@ def static_trade_values(
 def static_trade_residuals(
     log_static,
     k,
-    tobin_q,
-    marginal_wealth,
+    q,
+    mu,
     parameters,
 ):
     return static_trade_values(
         log_static,
         k,
-        tobin_q,
-        marginal_wealth,
+        q,
+        mu,
         parameters,
     )["static_residuals"]
 
 
 def static_trade_equilibrium(
     k,
-    tobin_q,
-    marginal_wealth,
+    q,
+    mu,
     parameters,
     log_initial=None,
     residual_tol: float | None = None,
@@ -466,19 +462,19 @@ def static_trade_equilibrium(
     max_nfev: int = 500,
 ):
     k = jnp.asarray(k)
-    tobin_q = jnp.asarray(tobin_q, dtype=k.dtype)
-    marginal_wealth = jnp.asarray(marginal_wealth, dtype=k.dtype)
+    q = jnp.asarray(q, dtype=k.dtype)
+    mu = jnp.asarray(mu, dtype=k.dtype)
     expected_shape = (parameters.num_countries,)
     if k.shape != expected_shape:
         raise ValueError("k must contain one value per country")
-    if tobin_q.shape != expected_shape or marginal_wealth.shape != expected_shape:
+    if q.shape != expected_shape or mu.shape != expected_shape:
         raise ValueError(
             "tobin_q and marginal_wealth must contain one value per country"
         )
-    if bool(jnp.any(k <= 0.0)) or bool(jnp.any(tobin_q <= 0.0)):
-        raise ValueError("k and tobin_q must be positive")
-    if bool(jnp.any(marginal_wealth <= 0.0)):
-        raise ValueError("marginal_wealth must be positive")
+    if bool(jnp.any(k <= 0.0)) or bool(jnp.any(q <= 0.0)):
+        raise ValueError("k and q must be positive")
+    if bool(jnp.any(mu <= 0.0)):
+        raise ValueError("mu must be positive")
     if residual_tol is None:
         residual_tol = 1e-9 if np.dtype(k.dtype).itemsize == 8 else 5e-6
     if residual_tol <= 0.0:
@@ -495,8 +491,8 @@ def static_trade_equilibrium(
         return static_trade_residuals(
             log_static_flat.reshape(static_shape),
             k,
-            tobin_q,
-            marginal_wealth,
+            q,
+            mu,
             parameters,
         ).reshape(-1)
 
@@ -526,8 +522,8 @@ def static_trade_equilibrium(
     values = static_trade_values(
         log_solution,
         k,
-        tobin_q,
-        marginal_wealth,
+        q,
+        mu,
         parameters,
     )
     residual = np.asarray(values["static_residuals"]).reshape(-1)
@@ -563,8 +559,8 @@ def static_trade_equilibrium(
 
 def multicountry_trade_allocations(
     k,
-    tobin_q,
-    marginal_wealth,
+    q,
+    mu,
     interest_rate,
     log_static,
     parameters,
@@ -572,26 +568,21 @@ def multicountry_trade_allocations(
     values = static_trade_values(
         log_static,
         k,
-        tobin_q,
-        marginal_wealth,
+        q,
+        mu,
         parameters,
     )
-    installation = (
-        parameters.installation_efficiency
-        * values["investment_rate"] ** parameters.installation_elasticity
-    )
+    installation = parameters.chi * values["investment_rate"] ** parameters.eta
     capital_drift = k * (installation - parameters.delta)
     rate = jnp.asarray(interest_rate, dtype=k.dtype)[..., None]
-    tobin_q_drift = (
-        rate
-        + parameters.delta
-        - (1.0 - parameters.installation_elasticity) * installation
-    ) * tobin_q - values["rental_rate"]
+    q_drift = (
+        rate + parameters.delta - (1.0 - parameters.eta) * installation
+    ) * q - values["rental_rate"]
     return {
         **values,
         "capital_drift": capital_drift,
-        "tobin_q_drift": tobin_q_drift,
-        "marginal_wealth_drift": marginal_wealth * (parameters.rho - rate),
+        "tobin_q_drift": q_drift,
+        "marginal_wealth_drift": mu * (parameters.r - rate),
     }
 
 
@@ -609,20 +600,20 @@ def consumption_basket_log_price(log_static, parameters):
 def multicountry_trade_path_values(
     k,
     a,
-    tobin_q,
-    marginal_wealth,
+    q,
+    mu,
     interest_rate,
     log_static,
     dlog_k_dt,
     da_dt,
     dlog_q_dt,
-    dlog_marginal_wealth_dt,
+    dlog_mu_dt,
     parameters,
 ):
     allocations = multicountry_trade_allocations(
         k,
-        tobin_q,
-        marginal_wealth,
+        q,
+        mu,
         interest_rate,
         log_static,
         parameters,
@@ -644,20 +635,17 @@ def multicountry_trade_path_values(
         **allocations,
         "k": k,
         "a": a,
-        "q": tobin_q,
-        "marginal_wealth": marginal_wealth,
+        "q": q,
+        "marginal_wealth": mu,
         "interest_rate": interest_rate,
         "current_account": da_dt,
         "capital": dlog_k_dt - allocations["capital_drift"] / k,
         "assets": (da_dt - budget_drift) / income_scale[:, None],
-        "tobin_q": dlog_q_dt - allocations["tobin_q_drift"] / tobin_q,
-        "marginal_wealth_euler": dlog_marginal_wealth_dt
-        - (parameters.rho - interest_rate[:, None]),
+        "tobin_q": dlog_q_dt - allocations["tobin_q_drift"] / q,
+        "marginal_wealth_euler": dlog_mu_dt - (parameters.r - interest_rate[:, None]),
         "world_flow": world_flow / income_scale,
         "asset_clearing": world_asset_clearing(a, parameters, income_scale),
-        "interest_rate_country_gap": parameters.rho
-        - dlog_marginal_wealth_dt
-        - interest_rate[:, None],
+        "interest_rate_country_gap": parameters.r - dlog_mu_dt - interest_rate[:, None],
     }
 
 
@@ -743,13 +731,10 @@ def multicountry_trade_tvc_diagnostics(t, values, parameters):
         [jnp.zeros(1, dtype=t.dtype), jnp.cumsum(increments)]
     )
     bond_discount = jnp.exp(-integrated_rate)
-    utility_discount = jnp.exp(-parameters.rho * t)
-    marginal_wealth = values["marginal_wealth"]
+    utility_discount = jnp.exp(-parameters.r * t)
+    mu = values["marginal_wealth"]
     return {
         "discounted_assets": bond_discount[:, None] * values["a"],
-        "asset_tvc": utility_discount[:, None] * marginal_wealth * values["a"],
-        "capital_tvc": utility_discount[:, None]
-        * marginal_wealth
-        * values["q"]
-        * values["k"],
+        "asset_tvc": utility_discount[:, None] * mu * values["a"],
+        "capital_tvc": utility_discount[:, None] * mu * values["q"] * values["k"],
     }

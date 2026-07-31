@@ -219,7 +219,7 @@ def build_multicountry_trade_comparative_statics(
         "a_0",
         "parameters.alpha",
         "parameters.consumption_value_added_shares",
-        "parameters.installation_elasticity",
+        "parameters.eta",
         "parameters.intermediate_value_added_shares",
         "parameters.investment_value_added_shares",
     }

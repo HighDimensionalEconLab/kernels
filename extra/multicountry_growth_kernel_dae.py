@@ -28,7 +28,7 @@ from multicountry_growth import (
     draw_initial_conditions,
     marginal_product,
     multicountry_output_scale,
-    multicountry_reference_marginal_wealth,
+    multicountry_reference_mu,
     multicountry_steady_state,
     multicountry_tail_diagnostics,
     multicountry_tvc_diagnostics,
@@ -56,15 +56,15 @@ STATUS_TO_REASON = {
 def multicountry_dae_path_values(
     k,
     a,
-    tobin_q,
-    marginal_wealth,
+    q,
+    mu,
     consumption,
     investment_rate,
     interest_rate,
     dlog_k_dt,
     da_dt,
     dlog_q_dt,
-    dlog_marginal_wealth_dt,
+    dlog_mu_dt,
     dlog_consumption_dt,
     dlog_investment_rate_dt,
     parameters,
@@ -77,19 +77,15 @@ def multicountry_dae_path_values(
     mpk = marginal_product(k, productivities, parameters)
     resources = output - investment
     capital_drift = k * (
-        parameters.installation_efficiency
-        * investment_rate**parameters.installation_elasticity
-        - parameters.delta
+        parameters.chi * investment_rate**parameters.eta - parameters.delta
     )
     budget_drift = rate * a + resources - consumption
     q_drift = (
-        tobin_q
+        q
         * (
             rate
             + parameters.delta
-            - (1.0 - parameters.installation_elasticity)
-            * parameters.installation_efficiency
-            * investment_rate**parameters.installation_elasticity
+            - (1.0 - parameters.eta) * parameters.chi * investment_rate**parameters.eta
         )
         - mpk
     )
@@ -109,7 +105,7 @@ def multicountry_dae_path_values(
     return {
         "k": k,
         "a": a,
-        "q": tobin_q,
+        "q": q,
         "c": consumption,
         "s": investment_rate,
         "x": investment,
@@ -117,17 +113,17 @@ def multicountry_dae_path_values(
         "resources": resources,
         "current_account": da_dt,
         "interest_rate": interest_rate,
-        "marginal_wealth": marginal_wealth,
-        "relative_welfare_weights": relative_welfare_weights(marginal_wealth),
+        "marginal_wealth": mu,
+        "relative_welfare_weights": relative_welfare_weights(mu),
         "capital": dlog_k_dt - capital_drift / k,
         "assets": da_dt - budget_drift,
-        "tobin_q": dlog_q_dt - q_drift / tobin_q,
-        "marginal_wealth_euler": dlog_marginal_wealth_dt - (parameters.rho - rate),
-        "consumption_foc": marginal_wealth * consumption**parameters.gamma - 1.0,
-        "investment_foc": parameters.installation_efficiency
-        * parameters.installation_elasticity
-        * tobin_q
-        * investment_rate ** (parameters.installation_elasticity - 1.0)
+        "tobin_q": dlog_q_dt - q_drift / q,
+        "marginal_wealth_euler": dlog_mu_dt - (parameters.r - rate),
+        "consumption_foc": mu * consumption**parameters.gamma - 1.0,
+        "investment_foc": parameters.chi
+        * parameters.eta
+        * q
+        * investment_rate ** (parameters.eta - 1.0)
         - 1.0,
         "resource": resource,
         "resource_drift": resource_drift,
@@ -286,14 +282,14 @@ def multicountry_growth_kernel_dae(
 
     q_reference = jnp.full(
         num_countries,
-        1.0 / parameters.installation_elasticity,
+        1.0 / parameters.eta,
         dtype=dtype,
     )
-    marginal_wealth_reference = multicountry_reference_marginal_wealth(
+    mu_reference = multicountry_reference_mu(
         parameters,
         dtype,
     )
-    consumption_reference = marginal_wealth_reference ** (-1.0 / parameters.gamma)
+    consumption_reference = mu_reference ** (-1.0 / parameters.gamma)
     investment_rate_reference = jnp.full(
         num_countries,
         parameters.delta,
@@ -316,18 +312,14 @@ def multicountry_growth_kernel_dae(
     def path_coordinates(theta, K_eval, K_tilde_eval):
         alpha_k, alpha_a, alpha_q, alpha_m, alpha_c, alpha_s, alpha_r, initial = theta
         q_offsets = initial[:num_countries]
-        marginal_wealth_offsets = initial[num_countries : 2 * num_countries]
+        mu_offsets = initial[num_countries : 2 * num_countries]
         consumption_offsets = initial[2 * num_countries : 3 * num_countries]
         investment_rate_offsets = initial[3 * num_countries : 4 * num_countries]
         interest_rate_offset = initial[-1]
         log_k = jnp.log(k_0_array) + K_tilde_eval @ alpha_k.T
         a = a_0_array + output_scale * (K_tilde_eval @ alpha_a.T)
         log_q = jnp.log(q_reference) + q_offsets + K_tilde_eval @ alpha_q.T
-        log_marginal_wealth = (
-            jnp.log(marginal_wealth_reference)
-            + marginal_wealth_offsets
-            + K_tilde_eval @ alpha_m.T
-        )
+        log_mu = jnp.log(mu_reference) + mu_offsets + K_tilde_eval @ alpha_m.T
         log_consumption = (
             jnp.log(consumption_reference)
             + consumption_offsets
@@ -339,20 +331,20 @@ def multicountry_growth_kernel_dae(
             + K_tilde_eval @ alpha_s.T
         )
         log_interest_rate = (
-            jnp.log(parameters.rho) + interest_rate_offset + K_tilde_eval @ alpha_r
+            jnp.log(parameters.r) + interest_rate_offset + K_tilde_eval @ alpha_r
         )
         return {
             "k": jnp.exp(log_k),
             "a": a,
-            "tobin_q": jnp.exp(log_q),
-            "marginal_wealth": jnp.exp(log_marginal_wealth),
+            "q": jnp.exp(log_q),
+            "mu": jnp.exp(log_mu),
             "consumption": jnp.exp(log_consumption),
             "investment_rate": jnp.exp(log_investment_rate),
             "interest_rate": jnp.exp(log_interest_rate),
             "dlog_k_dt": K_eval @ alpha_k.T,
             "da_dt": output_scale * (K_eval @ alpha_a.T),
             "dlog_q_dt": K_eval @ alpha_q.T,
-            "dlog_marginal_wealth_dt": K_eval @ alpha_m.T,
+            "dlog_mu_dt": K_eval @ alpha_m.T,
             "dlog_consumption_dt": K_eval @ alpha_c.T,
             "dlog_investment_rate_dt": K_eval @ alpha_s.T,
         }
@@ -560,7 +552,7 @@ def multicountry_growth_kernel_dae(
                 test_eval["interest_rate"]
                 - jnp.asarray(benchmark_values["interest_rate"])
             )
-            / parameters.rho
+            / parameters.r
         )
         max_benchmark_error = max(
             float(jnp.max(k_relative_error)),
@@ -607,7 +599,7 @@ def multicountry_growth_kernel_dae(
 
     initial = theta[7]
     q_offsets = initial[:num_countries]
-    marginal_wealth_offsets = initial[num_countries : 2 * num_countries]
+    mu_offsets = initial[num_countries : 2 * num_countries]
     consumption_offsets = initial[2 * num_countries : 3 * num_countries]
     investment_rate_offsets = initial[3 * num_countries : 4 * num_countries]
     results = {
@@ -682,7 +674,7 @@ def multicountry_growth_kernel_dae(
         "equation_diagnostic_reason": (
             "passed" if equation_diagnostics_pass else ",".join(diagnostic_reasons)
         ),
-        "interest_rate_0": float(parameters.rho * jnp.exp(initial[-1])),
+        "interest_rate_0": float(parameters.r * jnp.exp(initial[-1])),
     }
     for country in range(num_countries):
         suffix = country + 1
@@ -697,8 +689,7 @@ def multicountry_growth_kernel_dae(
                     q_reference[country] * jnp.exp(q_offsets[country])
                 ),
                 f"m_0_{suffix}": float(
-                    marginal_wealth_reference[country]
-                    * jnp.exp(marginal_wealth_offsets[country])
+                    mu_reference[country] * jnp.exp(mu_offsets[country])
                 ),
                 f"c_0_{suffix}": float(
                     consumption_reference[country]

@@ -99,9 +99,9 @@ def selected_shock_directions(problem):
         "delta_up_1pct": scalar_proportional("delta"),
         "gamma_up_1pct": scalar_proportional("gamma"),
         "installation_elasticity_up_1pp": parameter_direction(
-            installation_elasticity=jnp.asarray(
+            eta=jnp.asarray(
                 0.01,
-                dtype=parameters.rho.dtype,
+                dtype=parameters.r.dtype,
             )
         ),
         "trade_elasticity_up_1pct": scalar_proportional("trade_elasticity"),

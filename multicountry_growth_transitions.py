@@ -7,7 +7,7 @@
 #   - world saving = investment rate X/Y (boom decaying to the steady
 #     replacement share; smoothing cuts early saving, so d s / d gamma < 0
 #     early);
-#   - the world interest rate (r -> rho as growth flattens);
+#   - the world interest rate (converging to r as growth flattens);
 #   - the population-weighted output Gini (sigma-convergence: capital and
 #     output converge as MPKs equalize);
 #   - NFA dispersion (population-weighted RMS of the net positions,

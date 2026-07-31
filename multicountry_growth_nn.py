@@ -27,7 +27,7 @@ from multicountry_growth import (
     multicountry_long_run_diagnostics,
     multicountry_output_scale,
     multicountry_path_values,
-    multicountry_reference_marginal_wealth,
+    multicountry_reference_mu,
     multicountry_steady_state,
     multicountry_tail_diagnostics,
     multicountry_tvc_diagnostics,
@@ -102,7 +102,7 @@ class SolverSettings:
 class StoppingCriteria:
     max_steps: int = 250
     train_loss_threshold: float = 1e-12
-    num_attempts: int = 3
+    num_attempts: int = 5
 
 
 @struct.dataclass
@@ -112,7 +112,7 @@ class ResidualArgs:
     k_0: jax.Array
     a_0: jax.Array
     q_reference: jax.Array
-    marginal_wealth_reference: jax.Array
+    mu_reference: jax.Array
     output_scale: jax.Array
     parameters: MulticountryParameters = struct.field(pytree_node=False)
 
@@ -164,7 +164,7 @@ def policy_coordinates(
     k_0,
     a_0,
     q_reference,
-    marginal_wealth_reference,
+    mu_reference,
     output_scale,
     parameters,
 ):
@@ -175,26 +175,26 @@ def policy_coordinates(
             k_0 * jnp.exp(time_coordinate * raw[0]),
             a_0 + output_scale * time_coordinate * raw[1],
             q_reference * unit_softplus(raw[2]),
-            marginal_wealth_reference * unit_softplus(raw[3]),
+            mu_reference * unit_softplus(raw[3]),
         )
 
     values, derivatives = jax.vmap(
         lambda t: jax.jvp(decoded_path, (t,), (jnp.ones_like(t),))
     )(points)
-    k, a, tobin_q, marginal_wealth = values
+    k, a, q, mu = values
     dk_dt, da_dt, dq_dt, dm_dt = derivatives
-    dlog_marginal_wealth_dt = dm_dt / marginal_wealth
-    interest_rate = parameters.rho - jnp.mean(dlog_marginal_wealth_dt, axis=1)
+    dlog_mu_dt = dm_dt / mu
+    interest_rate = parameters.r - jnp.mean(dlog_mu_dt, axis=1)
     return {
         "k": k,
         "a": a,
-        "tobin_q": tobin_q,
-        "marginal_wealth": marginal_wealth,
+        "q": q,
+        "mu": mu,
         "interest_rate": interest_rate,
         "dlog_k_dt": dk_dt / k,
         "da_dt": da_dt,
-        "dlog_q_dt": dq_dt / tobin_q,
-        "dlog_marginal_wealth_dt": dlog_marginal_wealth_dt,
+        "dlog_q_dt": dq_dt / q,
+        "dlog_mu_dt": dlog_mu_dt,
     }
 
 
@@ -204,7 +204,7 @@ def evaluate_policy(
     k_0,
     a_0,
     q_reference,
-    marginal_wealth_reference,
+    mu_reference,
     output_scale,
     parameters,
 ):
@@ -214,7 +214,7 @@ def evaluate_policy(
         k_0,
         a_0,
         q_reference,
-        marginal_wealth_reference,
+        mu_reference,
         output_scale,
         parameters,
     )
@@ -229,7 +229,7 @@ def residual_fn(theta, args):
         args.k_0,
         args.a_0,
         args.q_reference,
-        args.marginal_wealth_reference,
+        args.mu_reference,
         args.output_scale,
         args.parameters,
     )
@@ -338,10 +338,10 @@ def multicountry_growth_nn(
         raise ValueError("population-weighted initial NFA positions must sum to zero")
     q_reference = jnp.full(
         num_countries,
-        1.0 / parameters.installation_elasticity,
+        1.0 / parameters.eta,
         dtype=dtype,
     )
-    marginal_wealth_reference = multicountry_reference_marginal_wealth(
+    mu_reference = multicountry_reference_mu(
         parameters,
         dtype,
     )
@@ -369,7 +369,7 @@ def multicountry_growth_nn(
         k_0=k_0_array,
         a_0=a_0_array,
         q_reference=q_reference,
-        marginal_wealth_reference=marginal_wealth_reference,
+        mu_reference=mu_reference,
         output_scale=output_scale,
         parameters=parameters,
     )
@@ -414,7 +414,7 @@ def multicountry_growth_nn(
             k_0_array,
             a_0_array,
             q_reference,
-            marginal_wealth_reference,
+            mu_reference,
             output_scale,
             parameters,
         )
@@ -507,7 +507,7 @@ def multicountry_growth_nn(
                 test_eval["interest_rate"]
                 - jnp.asarray(benchmark_values["interest_rate"])
             )
-            / parameters.rho
+            / parameters.r
         )
         max_benchmark_error = max(
             float(jnp.max(k_relative_error)),

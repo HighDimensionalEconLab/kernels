@@ -10,7 +10,7 @@ from extra.multicountry_growth_kernel_dae import (
 )
 from multicountry_growth import (
     MulticountryParameters,
-    multicountry_reference_marginal_wealth,
+    multicountry_reference_mu,
     multicountry_steady_state,
 )
 
@@ -24,21 +24,21 @@ class MulticountryGrowthKernelDAETests(unittest.TestCase):
             populations=(1.0, 2.0, 1.5),
             productivities=(1.0, 1.1, 0.9),
         )
-        marginal_wealth = multicountry_reference_marginal_wealth(parameters)
-        steady = multicountry_steady_state(marginal_wealth, parameters)
+        mu = multicountry_reference_mu(parameters)
+        steady = multicountry_steady_state(mu, parameters)
         zeros = jnp.zeros((1, parameters.num_countries))
         values = multicountry_dae_path_values(
             k=steady["k"][None, :],
             a=steady["a"][None, :],
-            tobin_q=steady["q"][None, :],
-            marginal_wealth=steady["marginal_wealth"][None, :],
+            q=steady["q"][None, :],
+            mu=steady["marginal_wealth"][None, :],
             consumption=steady["c"][None, :],
             investment_rate=(steady["x"] / steady["k"])[None, :],
-            interest_rate=jnp.asarray((parameters.rho,)),
+            interest_rate=jnp.asarray((parameters.r,)),
             dlog_k_dt=zeros,
             da_dt=zeros,
             dlog_q_dt=zeros,
-            dlog_marginal_wealth_dt=zeros,
+            dlog_mu_dt=zeros,
             dlog_consumption_dt=zeros,
             dlog_investment_rate_dt=zeros,
             parameters=parameters,

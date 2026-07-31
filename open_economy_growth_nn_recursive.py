@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
-from nlls_gram import LevenbergMarquardt, LMStatus
+from nlls_gram import LevenbergMarquardt, LMStatus, MultiStart
 from tinydiffeq import (
     RK4,
     ConstantStepSize,
@@ -86,6 +86,9 @@ class DataSettings:
 class StoppingCriteria:
     max_steps: int = 250
     train_loss_threshold: float = 1e-12
+    # frac_accepted measures acceptance within the restart budget, not first-try
+    # robustness: a seed that stalls short of the loss threshold is redrawn.
+    num_attempts: int = 5
 
 
 @dataclass(frozen=True)
@@ -120,10 +123,10 @@ class DynamicModelParameters:
     alpha: jax.Array
     gamma: jax.Array
     delta: jax.Array
-    rho: jax.Array
-    installation_elasticity: jax.Array
+    r: jax.Array
+    eta: jax.Array
     interest_rate: jax.Array
-    installation_efficiency: jax.Array
+    chi: jax.Array
 
     @classmethod
     def from_model(cls, parameters, dtype):
@@ -131,14 +134,10 @@ class DynamicModelParameters:
             alpha=jnp.asarray(parameters.alpha, dtype=dtype),
             gamma=jnp.asarray(parameters.gamma, dtype=dtype),
             delta=jnp.asarray(parameters.delta, dtype=dtype),
-            rho=jnp.asarray(parameters.rho, dtype=dtype),
-            installation_elasticity=jnp.asarray(
-                parameters.installation_elasticity, dtype=dtype
-            ),
+            r=jnp.asarray(parameters.r, dtype=dtype),
+            eta=jnp.asarray(parameters.eta, dtype=dtype),
             interest_rate=jnp.asarray(parameters.interest_rate, dtype=dtype),
-            installation_efficiency=jnp.asarray(
-                parameters.installation_efficiency, dtype=dtype
-            ),
+            chi=jnp.asarray(parameters.chi, dtype=dtype),
         )
 
 
@@ -197,6 +196,32 @@ class SequentialPolicyNN(nnx.Module):
         return jnp.stack([investment, current_account])
 
 
+# nlls_gram.DrawNNXModule cannot be used here: it splits on nnx.Param alone,
+# which is a non-exhaustive filter for a policy carrying non-Param scaling
+# Variables. The redrawn fixed_state is deterministic in the settings, so args
+# pass through unchanged. Value-hashable on the spec so equal draws share one
+# jit compilation rather than recompiling per instance.
+class DrawSequentialPolicy:
+    def __init__(self, settings, dtype):
+        self.settings = settings
+        self.dtype = dtype
+
+    def __call__(self, key, x_old, args_old):
+        module = SequentialPolicyNN(self.settings, dtype=self.dtype, rngs=nnx.Rngs(key))
+        _, theta, _ = nnx.split(module, nnx.Param, ...)
+        return theta, args_old
+
+    def __hash__(self):
+        return hash((DrawSequentialPolicy, self.settings, self.dtype))
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, DrawSequentialPolicy)
+            and self.settings == other.settings
+            and self.dtype == other.dtype
+        )
+
+
 def make_train_t_grid(data_set, dtype):
     if data_set.train_points_list is None:
         values = np.linspace(
@@ -218,37 +243,28 @@ def policy_values(policy, k, a, parameters):
     investment, current_account = flows
     investment_derivative, current_account_derivative = flow_derivatives
     investment_rate = investment / k
-    installation_elasticity = parameters.installation_elasticity
-    tobin_q = investment_rate ** (1.0 - installation_elasticity) / (
-        parameters.installation_efficiency * installation_elasticity
-    )
+    eta = parameters.eta
+    q = investment_rate ** (1.0 - eta) / (parameters.chi * eta)
     output = production(k, 1.0, parameters)
     mpk = marginal_product(k, 1.0, parameters)
-    capital_drift = k * (
-        parameters.installation_efficiency * investment_rate**installation_elasticity
-        - parameters.delta
-    )
-    log_q_derivative = (1.0 - installation_elasticity) * (
-        investment_derivative / investment - 1.0 / k
-    )
+    capital_drift = k * (parameters.chi * investment_rate**eta - parameters.delta)
+    log_q_derivative = (1.0 - eta) * (investment_derivative / investment - 1.0 / k)
     log_q_drift = log_q_derivative * capital_drift
     q_equation = (
         parameters.interest_rate
         + parameters.delta
-        - (1.0 - installation_elasticity)
-        * parameters.installation_efficiency
-        * investment_rate**installation_elasticity
-        - mpk / tobin_q
+        - (1.0 - eta) * parameters.chi * investment_rate**eta
+        - mpk / q
     )
     consumption = parameters.interest_rate * a + output - investment - current_account
     consumption_drift = (
         mpk - investment_derivative - current_account_derivative
     ) * capital_drift + parameters.interest_rate * current_account
-    consumption_growth = (parameters.interest_rate - parameters.rho) / parameters.gamma
+    consumption_growth = (parameters.interest_rate - parameters.r) / parameters.gamma
     return {
         "k": k,
         "a": a,
-        "q": tobin_q,
+        "q": q,
         "c": consumption,
         "x": investment,
         "output": output,
@@ -271,9 +287,7 @@ def rollout_field(state, _, parameters, p):
     investment, current_account = policy(k)
     investment_rate = investment / k
     capital_drift = k * (
-        parameters.installation_efficiency
-        * investment_rate**parameters.installation_elasticity
-        - parameters.delta
+        parameters.chi * investment_rate**parameters.eta - parameters.delta
     )
     return jnp.stack(
         [
@@ -455,7 +469,7 @@ def open_economy_growth_nn_recursive(
         data_set.diagnostic_points,
         dtype=dtype,
     )
-    init_key = jax.random.key(seed)
+    init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     model = SequentialPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(init_key))
     graphdef, theta_0, fixed_state = nnx.split(model, nnx.Param, ...)
     residual_args = ResidualArgs(
@@ -486,10 +500,16 @@ def open_economy_growth_nn_recursive(
         p=residual_parameters,
         max_steps=stop_set.max_steps,
         atol=atol,
+        multi_start=MultiStart(
+            key=multi_start_key,
+            num_starts=stop_set.num_attempts,
+            draw=DrawSequentialPolicy(nn_set, dtype),
+        ),
         max_steps_is_success=False,
     )
     jax.block_until_ready(result)
     train_time = time.perf_counter() - train_start
+    attempt = int(result.multi_start.attempt) + 1
     policy = nnx.merge(graphdef, result.x, fixed_state)
 
     train_eval = evaluate_path(
@@ -625,9 +645,7 @@ def open_economy_growth_nn_recursive(
     policy_x = policy_flows[:, 0]
     policy_ca = policy_flows[:, 1]
     policy_s = policy_x / policy_k
-    policy_q = policy_s ** (1.0 - parameters.installation_elasticity) / (
-        parameters.installation_efficiency * parameters.installation_elasticity
-    )
+    policy_q = policy_s ** (1.0 - parameters.eta) / (parameters.chi * parameters.eta)
 
     results = {
         **asdict(parameters),
@@ -667,6 +685,7 @@ def open_economy_growth_nn_recursive(
         "ex_post_capital_tvc": float(tvc["capital_tvc"]),
         "benchmark_a_0_gap": abs(float(benchmark_diagnostics["a_0_gap"])),
         "steps": int(result.steps),
+        "attempt": attempt,
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
         "train_time": train_time,
         "train_time_success": train_time if solution_accepted else np.nan,

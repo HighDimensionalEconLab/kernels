@@ -33,7 +33,7 @@ from multicountry_growth import (
     multicountry_output_scale,
     multicountry_parameter_values,
     multicountry_path_values,
-    multicountry_reference_marginal_wealth,
+    multicountry_reference_mu,
     multicountry_steady_state,
     multicountry_tail_diagnostics,
     multicountry_tvc_diagnostics,
@@ -95,7 +95,7 @@ class DataSettings:
     benchmark_T: float = 200.0
     benchmark_points: int = 241
     # Long-run validity checks are evaluated at t ~ long_run_check_T (flat
-    # consumption/capital/debt, capital at the theory steady state, r ~ rho),
+    # consumption/capital/debt, capital at the theory steady state, interest rate ~ r),
     # with flatness measured against t = long_run_check_T - long_run_window.
     long_run_check_T: float = 100.0
     long_run_window: float = 10.0
@@ -253,12 +253,10 @@ def multicountry_growth_kernel(
         raise ValueError("population-weighted initial NFA positions must sum to zero")
     q_reference = jnp.full(
         num_countries,
-        1.0 / parameters.installation_elasticity,
+        1.0 / parameters.eta,
         dtype=k_0_array.dtype,
     )
-    marginal_wealth_reference = multicountry_reference_marginal_wealth(
-        parameters, k_0_array.dtype
-    )
+    mu_reference = multicountry_reference_mu(parameters, k_0_array.dtype)
 
     metric_data = train_data.astype(jnp.float64)
     K_metric, K_tilde_metric = integrated_kernel_matrices(
@@ -292,42 +290,32 @@ def multicountry_growth_kernel(
         # feasible clearing set, so every direction is meaningful.
         a_0_p = p["a_0"] - jnp.sum(populations_p * p["a_0"]) / jnp.sum(populations_p)
         output_scale_p = multicountry_output_scale(parameters_p, k_0_p.dtype)
-        marginal_wealth_reference_p = multicountry_reference_marginal_wealth(
-            parameters_p, k_0_p.dtype
-        )
+        mu_reference_p = multicountry_reference_mu(parameters_p, k_0_p.dtype)
         alpha_k, alpha_a, alpha_q, alpha_m, alpha_r, initial = theta
         q_offsets = initial[:num_countries]
-        marginal_wealth_offsets = initial[num_countries : 2 * num_countries]
+        mu_offsets = initial[num_countries : 2 * num_countries]
         interest_rate_offset = initial[-1]
         log_k = jnp.log(k_0_p) + K_tilde_eval @ alpha_k.T
         a = a_0_p + output_scale_p * (K_tilde_eval @ alpha_a.T)
-        log_q = (
-            -jnp.log(parameters_p.installation_elasticity)
-            + q_offsets
-            + K_tilde_eval @ alpha_q.T
-        )
-        log_marginal_wealth = (
-            jnp.log(marginal_wealth_reference_p)
-            + marginal_wealth_offsets
-            + K_tilde_eval @ alpha_m.T
-        )
+        log_q = -jnp.log(parameters_p.eta) + q_offsets + K_tilde_eval @ alpha_q.T
+        log_mu = jnp.log(mu_reference_p) + mu_offsets + K_tilde_eval @ alpha_m.T
         dlog_k_dt = K_eval @ alpha_k.T
         da_dt = output_scale_p * (K_eval @ alpha_a.T)
         dlog_q_dt = K_eval @ alpha_q.T
-        dlog_marginal_wealth_dt = K_eval @ alpha_m.T
+        dlog_mu_dt = K_eval @ alpha_m.T
         interest_rate = jnp.exp(
-            jnp.log(parameters_p.rho) + interest_rate_offset + K_tilde_eval @ alpha_r
+            jnp.log(parameters_p.r) + interest_rate_offset + K_tilde_eval @ alpha_r
         )
         return {
             "k": jnp.exp(log_k),
             "a": a,
-            "tobin_q": jnp.exp(log_q),
-            "marginal_wealth": jnp.exp(log_marginal_wealth),
+            "q": jnp.exp(log_q),
+            "mu": jnp.exp(log_mu),
             "interest_rate": interest_rate,
             "dlog_k_dt": dlog_k_dt,
             "da_dt": da_dt,
             "dlog_q_dt": dlog_q_dt,
-            "dlog_marginal_wealth_dt": dlog_marginal_wealth_dt,
+            "dlog_mu_dt": dlog_mu_dt,
         }
 
     def evaluate_coordinates(
@@ -417,7 +405,7 @@ def multicountry_growth_kernel(
                     k_0_array,
                     a_0_array,
                     q_reference,
-                    marginal_wealth_reference,
+                    mu_reference,
                     output_scale,
                     residual_scale,
                 ),
@@ -609,7 +597,7 @@ def multicountry_growth_kernel(
                 test_eval["interest_rate"]
                 - jnp.asarray(benchmark_values["interest_rate"])
             )
-            / parameters.rho
+            / parameters.r
         )
         max_benchmark_error = max(
             float(jnp.max(k_relative_error)),
@@ -693,10 +681,8 @@ def multicountry_growth_kernel(
             "alpha": float(gradient_parameters.alpha),
             "gamma": float(gradient_parameters.gamma),
             "delta": float(gradient_parameters.delta),
-            "rho": float(gradient_parameters.rho),
-            "installation_elasticity": float(
-                gradient_parameters.installation_elasticity
-            ),
+            "r": float(gradient_parameters.r),
+            "eta": float(gradient_parameters.eta),
         }
         country_sensitivities = {
             "productivity": np.asarray(gradient_parameters.productivities),
@@ -720,8 +706,8 @@ def multicountry_growth_kernel(
         "alpha": parameters.alpha,
         "gamma": parameters.gamma,
         "delta": parameters.delta,
-        "rho": parameters.rho,
-        "installation_elasticity": parameters.installation_elasticity,
+        "r": parameters.r,
+        "eta": parameters.eta,
         "num_countries": num_countries,
         "residual_dtype": str(jnp.dtype(dtype)),
         "kernel": kernel,

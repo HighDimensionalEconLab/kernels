@@ -240,14 +240,14 @@ def multicountry_trade_growth_kernel(
 
     base_q = jnp.full(
         num_countries,
-        1.0 / parameters.installation_elasticity,
+        1.0 / parameters.eta,
         dtype=dtype,
     )
-    base_marginal_wealth = jnp.ones(num_countries, dtype=dtype)
+    base_mu = jnp.ones(num_countries, dtype=dtype)
     base_static, _ = static_trade_equilibrium(
         k_0_array,
         base_q,
-        base_marginal_wealth,
+        base_mu,
         parameters,
     )
     basket_price = jnp.exp(
@@ -255,11 +255,11 @@ def multicountry_trade_growth_kernel(
     )
     price_scale = 1.0 / basket_price
     q_initial_guess = price_scale * base_q
-    marginal_wealth_initial_guess = base_marginal_wealth / price_scale
+    mu_initial_guess = base_mu / price_scale
     static_initial_guess, static_initial_diagnostics = static_trade_equilibrium(
         k_0_array,
         q_initial_guess,
-        marginal_wealth_initial_guess,
+        mu_initial_guess,
         parameters,
         log_initial=base_static["log_static"] + jnp.log(price_scale),
     )
@@ -297,7 +297,7 @@ def multicountry_trade_growth_kernel(
         )
         alpha_k, alpha_a, alpha_q, alpha_m, alpha_static, alpha_r, initial = theta
         log_q_0 = initial[:num_countries]
-        log_marginal_wealth_0 = initial[num_countries : 2 * num_countries]
+        log_mu_0 = initial[num_countries : 2 * num_countries]
         log_static_0 = initial[2 * num_countries : -1].reshape(
             num_static, num_countries
         )
@@ -305,21 +305,21 @@ def multicountry_trade_growth_kernel(
         log_k = jnp.log(k_0_p) + K_tilde_eval @ alpha_k.T
         a = a_0_p + K_tilde_eval @ alpha_a.T
         log_q = log_q_0 + K_tilde_eval @ alpha_q.T
-        log_marginal_wealth = log_marginal_wealth_0 + K_tilde_eval @ alpha_m.T
+        log_mu = log_mu_0 + K_tilde_eval @ alpha_m.T
         static_levels = jnp.einsum("tm,snm->tsn", K_tilde_eval, alpha_static)
         log_static = log_static_0 + static_levels
         log_interest_rate = log_interest_rate_0 + K_tilde_eval @ alpha_r
         return {
             "k": jnp.exp(log_k),
             "a": a,
-            "tobin_q": jnp.exp(log_q),
-            "marginal_wealth": jnp.exp(log_marginal_wealth),
+            "q": jnp.exp(log_q),
+            "mu": jnp.exp(log_mu),
             "interest_rate": jnp.exp(log_interest_rate),
             "log_static": log_static,
             "dlog_k_dt": K_eval @ alpha_k.T,
             "da_dt": K_eval @ alpha_a.T,
             "dlog_q_dt": K_eval @ alpha_q.T,
-            "dlog_marginal_wealth_dt": K_eval @ alpha_m.T,
+            "dlog_mu_dt": K_eval @ alpha_m.T,
         }
 
     def evaluate_coordinates(theta, K_eval, K_tilde_eval, p_value):
@@ -372,9 +372,9 @@ def multicountry_trade_growth_kernel(
         jnp.concatenate(
             [
                 jnp.log(q_initial_guess),
-                jnp.log(marginal_wealth_initial_guess),
+                jnp.log(mu_initial_guess),
                 log_static_initial_guess.reshape(-1),
-                jnp.log(jnp.asarray(parameters.rho, dtype=dtype))[None],
+                jnp.log(jnp.asarray(parameters.r, dtype=dtype))[None],
             ]
         ),
     )
@@ -905,7 +905,7 @@ def multicountry_trade_growth_kernel(
         / terminal_income_scale
     )
     tail_interest_rate_gap = float(
-        jnp.abs(validation_eval["interest_rate"][-1] - parameters.rho) / parameters.rho
+        jnp.abs(validation_eval["interest_rate"][-1] - parameters.r) / parameters.r
     )
     tail_max_current_account = float(
         jnp.max(jnp.abs(validation_eval["current_account"][tail_start:]))
@@ -1071,11 +1071,8 @@ def multicountry_trade_growth_kernel(
                 ("alpha", parameter_grads.alpha),
                 ("gamma", parameter_grads.gamma),
                 ("delta", parameter_grads.delta),
-                ("rho", parameter_grads.rho),
-                (
-                    "installation_elasticity",
-                    parameter_grads.installation_elasticity,
-                ),
+                ("r", parameter_grads.r),
+                ("eta", parameter_grads.eta),
                 ("trade_elasticity", parameter_grads.trade_elasticity),
                 ("variety_elasticity", parameter_grads.variety_elasticity),
             )
@@ -1124,8 +1121,8 @@ def multicountry_trade_growth_kernel(
         "alpha": parameters.alpha,
         "gamma": parameters.gamma,
         "delta": parameters.delta,
-        "rho": parameters.rho,
-        "installation_elasticity": parameters.installation_elasticity,
+        "r": parameters.r,
+        "eta": parameters.eta,
         "trade_elasticity": parameters.trade_elasticity,
         "variety_elasticity": parameters.variety_elasticity,
         "num_countries": num_countries,
@@ -1223,7 +1220,7 @@ def multicountry_trade_growth_kernel(
         "static_initial_guess_max_residual": static_initial_diagnostics["max_residual"],
         "terminal_interest_rate": float(validation_eval["interest_rate"][-1]),
         "terminal_interest_rate_gap": float(
-            abs(validation_eval["interest_rate"][-1] - parameters.rho)
+            abs(validation_eval["interest_rate"][-1] - parameters.r)
         ),
         "ex_post_discounted_assets": float(
             jnp.max(jnp.abs(tvc["discounted_assets"][-1]))

@@ -83,7 +83,7 @@ class ResidualArgs:
     k_0: jax.Array
     a_0: jax.Array
     q_scale: jax.Array
-    marginal_wealth_scale: jax.Array
+    mu_scale: jax.Array
     output_scale: jax.Array
     static_center_log: jax.Array
     parameters: TradeGrowthParameters = struct.field(pytree_node=False)
@@ -138,7 +138,7 @@ def dynamic_coordinates(
     k_0,
     a_0,
     q_scale,
-    marginal_wealth_scale,
+    mu_scale,
     output_scale,
 ):
     def decoded_path(t):
@@ -148,23 +148,23 @@ def dynamic_coordinates(
             k_0 * jnp.exp(time_coordinate * raw[0]),
             a_0 + output_scale * time_coordinate * raw[1],
             q_scale * unit_softplus(raw[2]),
-            marginal_wealth_scale * unit_softplus(raw[3]),
+            mu_scale * unit_softplus(raw[3]),
         )
 
     values, derivatives = jax.vmap(
         lambda t: jax.jvp(decoded_path, (t,), (jnp.ones_like(t),))
     )(points)
-    k, a, tobin_q, marginal_wealth = values
+    k, a, q, mu = values
     dk_dt, da_dt, dq_dt, dm_dt = derivatives
     return {
         "k": k,
         "a": a,
-        "tobin_q": tobin_q,
-        "marginal_wealth": marginal_wealth,
+        "q": q,
+        "mu": mu,
         "dlog_k_dt": dk_dt / k,
         "da_dt": da_dt,
-        "dlog_q_dt": dq_dt / tobin_q,
-        "dlog_marginal_wealth_dt": dm_dt / marginal_wealth,
+        "dlog_q_dt": dq_dt / q,
+        "dlog_mu_dt": dm_dt / mu,
     }
 
 
@@ -176,11 +176,11 @@ def residual_fn(theta, args):
         args.k_0,
         args.a_0,
         args.q_scale,
-        args.marginal_wealth_scale,
+        args.mu_scale,
         args.output_scale,
     )
     raw = jax.vmap(policy)(args.train_data)
-    interest_rate = args.parameters.rho * (1.0 + raw[:, 4 * args.num_countries])
+    interest_rate = args.parameters.r * (1.0 + raw[:, 4 * args.num_countries])
     log_static = args.static_center_log + raw[:, 4 * args.num_countries + 1 :].reshape(
         args.n_train, len(STATIC_BLOCK_NAMES), args.num_countries
     )
@@ -244,7 +244,7 @@ def multicountry_trade_growth_nn(
 
     base_q = jnp.full(
         num_countries,
-        1.0 / parameters.installation_elasticity,
+        1.0 / parameters.eta,
         dtype=dtype,
     )
     base_m = jnp.ones(num_countries, dtype=dtype)
@@ -259,11 +259,11 @@ def multicountry_trade_growth_nn(
     )
     price_scale = 1.0 / basket_price
     q_scale = price_scale * base_q
-    marginal_wealth_scale = base_m / price_scale
+    mu_scale = base_m / price_scale
     static_center, static_center_diagnostics = static_trade_equilibrium(
         k_0_array,
         q_scale,
-        marginal_wealth_scale,
+        mu_scale,
         parameters,
         log_initial=base_static["log_static"] + jnp.log(price_scale),
     )
@@ -286,7 +286,7 @@ def multicountry_trade_growth_nn(
         k_0=k_0_array,
         a_0=a_0_array,
         q_scale=q_scale,
-        marginal_wealth_scale=marginal_wealth_scale,
+        mu_scale=mu_scale,
         output_scale=output_scale,
         static_center_log=static_center_log,
         parameters=parameters,
@@ -322,11 +322,11 @@ def multicountry_trade_growth_nn(
             k_0_array,
             a_0_array,
             q_scale,
-            marginal_wealth_scale,
+            mu_scale,
             output_scale,
         )
         raw = jax.vmap(policy)(points)
-        interest_rate = parameters.rho * (1.0 + raw[:, 4 * num_countries])
+        interest_rate = parameters.r * (1.0 + raw[:, 4 * num_countries])
         log_static = static_center_log + raw[:, 4 * num_countries + 1 :].reshape(
             len(points),
             len(STATIC_BLOCK_NAMES),
@@ -357,7 +357,7 @@ def multicountry_trade_growth_nn(
         k_0_array,
         a_0_array,
         q_scale,
-        marginal_wealth_scale,
+        mu_scale,
         output_scale,
     )
     max_initial_residual = max(
@@ -462,8 +462,8 @@ def multicountry_trade_growth_nn(
         "alpha": parameters.alpha,
         "gamma": parameters.gamma,
         "delta": parameters.delta,
-        "rho": parameters.rho,
-        "installation_elasticity": parameters.installation_elasticity,
+        "r": parameters.r,
+        "eta": parameters.eta,
         "trade_elasticity": parameters.trade_elasticity,
         "num_countries": num_countries,
         "seed": seed,

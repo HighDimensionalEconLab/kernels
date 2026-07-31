@@ -36,9 +36,15 @@ def run(output_dir: str = ".results", verbose: bool = False):
     for key in ("basin_correct", "false_positive", "basin_failed"):
         results_df[key] = results_df[key].fillna(False).astype(bool)
     # A grid point that raised carries no columns of its own; the thresholds are
-    # constant across the sweep, so fill them from the points that solved.
-    for key in ("k_thr", "k_ss_low", "k_ss_high"):
-        results_df[key] = results_df[key].ffill().bfill()
+    # constant across the sweep, so fill them from the points that solved. The
+    # solver reports them in the detrended state kappa = k/z, which coincides
+    # with k here since the sweep runs at g = 0 and z_0 = 1.
+    for key, kappa_key in (
+        ("k_thr", "kappa_thr"),
+        ("k_ss_low", "kappa_ss_low"),
+        ("k_ss_high", "kappa_ss_high"),
+    ):
+        results_df[key] = results_df[kappa_key].ffill().bfill()
 
     n_accepted = int(results_df["solution_accepted"].sum())
     print(

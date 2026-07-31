@@ -233,20 +233,17 @@ def residual_fn(theta, args):
         args.output_scale,
         args.parameters,
     )
-    global_constraints = jnp.concatenate(
-        [
-            values["resource"][:1],
-            values["resource_drift"][:1],
-            values["asset_clearing"][1:],
-        ]
-    )
+    # No algebraic row contains the rate (clearing is a stock condition on
+    # the states, so the DAE has index > 1); the rate path is disciplined by
+    # the assets and Euler rows. The t=0 clearing row is identically zero
+    # because a_0 clears, and is kept for uniformity.
     residual = jnp.concatenate(
         [
             values["capital"].reshape(-1),
             values["assets"].reshape(-1),
             values["tobin_q"].reshape(-1),
             values["marginal_wealth_euler"].reshape(-1),
-            global_constraints,
+            values["asset_clearing"],
         ]
     )
     return residual / jnp.sqrt(residual.size)
@@ -429,13 +426,7 @@ def multicountry_growth_nn(
         "tobin_q",
         "marginal_wealth_euler",
     )
-    train_global_constraints = jnp.concatenate(
-        [
-            train_eval["resource"][:1],
-            train_eval["resource_drift"][:1],
-            train_eval["asset_clearing"][1:],
-        ]
-    )
+    train_global_constraints = train_eval["asset_clearing"]
     max_train_residual = max(
         max(float(jnp.max(jnp.abs(train_eval[name]))) for name in residual_names),
         float(jnp.max(jnp.abs(train_global_constraints))),
@@ -550,7 +541,7 @@ def multicountry_growth_nn(
     log_relative_weights = jnp.log(relative_weights)
     theta_initial, _ = ravel_pytree(theta_0)
     theta_final, _ = ravel_pytree(result.x)
-    residual_count = (4 * num_countries + 1) * n_train + 1
+    residual_count = (4 * num_countries + 1) * n_train
     results = {
         **asdict(parameters),
         "num_countries": num_countries,
@@ -585,8 +576,6 @@ def multicountry_growth_nn(
         "max_validation_residual": max_validation_residual,
         "max_asset_clearing_residual": max_asset_clearing_residual,
         "max_rate_consistency_residual": max_rate_consistency_residual,
-        "initial_resource_residual": float(train_eval["resource"][0]),
-        "initial_resource_drift_residual": float(train_eval["resource_drift"][0]),
         "benchmark_available": benchmark_available,
         "benchmark_match": benchmark_match,
         "max_benchmark_error": max_benchmark_error,
@@ -695,7 +684,6 @@ def multicountry_growth_nn(
             "t": np.asarray(points),
             "interest_rate": np.asarray(values["interest_rate"]),
             "resource_residual": np.asarray(values["resource"]),
-            "resource_drift_residual": np.asarray(values["resource_drift"]),
             "asset_clearing_residual": np.asarray(values["asset_clearing"]),
             "interest_rate_country_gap": np.asarray(
                 jnp.max(jnp.abs(values["interest_rate_country_gap"]), axis=1)

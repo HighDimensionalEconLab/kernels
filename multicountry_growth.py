@@ -291,15 +291,6 @@ def multicountry_path_values(
             populations * (allocations["resources"] - allocations["consumption"]),
             axis=-1,
         ),
-        "resource_drift": jnp.sum(
-            populations
-            * (
-                (allocations["mpk"] * k - allocations["investment"]) * dlog_k_dt
-                - allocations["investment"] * dlog_q_dt / (1.0 - parameters.eta)
-                + allocations["consumption"] * dlog_mu_dt / parameters.gamma
-            ),
-            axis=-1,
-        ),
         "asset_clearing": jnp.sum(populations * a, axis=-1),
         "interest_rate_country_gap": parameters.r - dlog_mu_dt - interest_rate[:, None],
     }

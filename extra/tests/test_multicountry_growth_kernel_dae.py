@@ -39,8 +39,6 @@ class MulticountryGrowthKernelDAETests(unittest.TestCase):
             da_dt=zeros,
             dlog_q_dt=zeros,
             dlog_mu_dt=zeros,
-            dlog_consumption_dt=zeros,
-            dlog_investment_rate_dt=zeros,
             parameters=parameters,
         )
         for name in (
@@ -51,7 +49,6 @@ class MulticountryGrowthKernelDAETests(unittest.TestCase):
             "consumption_foc",
             "investment_foc",
             "resource",
-            "resource_drift",
             "asset_clearing",
         ):
             np.testing.assert_allclose(values[name], 0.0, atol=1e-14)
@@ -80,13 +77,13 @@ class MulticountryGrowthKernelDAETests(unittest.TestCase):
         )
         self.assertEqual(
             results["global_algebraic_residual_count"],
-            results["num_train_points"] + 1,
+            results["num_train_points"],
         )
         self.assertEqual(
             results["dae_residual_count"],
-            13 * results["num_train_points"] + 1,
+            13 * results["num_train_points"],
         )
-        self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 8)
+        self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 9)
         self.assertEqual(results["dynamic_rkhs_function_count"], 8)
         self.assertEqual(results["country_algebraic_rkhs_function_count"], 4)
         self.assertEqual(results["common_algebraic_rkhs_function_count"], 1)
@@ -97,7 +94,7 @@ class MulticountryGrowthKernelDAETests(unittest.TestCase):
         self.assertEqual(results["selection"], "minimum_rkhs_norm_ridge")
         self.assertEqual(
             results["global_closure"],
-            "explicit_assets_and_index_consistent_clearing",
+            "explicit_assets_and_algebraic_clearing",
         )
         self.assertLess(results["max_train_residual"], 1e-5)
         self.assertLess(results["max_validation_residual"], 5e-3)
@@ -134,7 +131,7 @@ class MulticountryGrowthKernelDAETests(unittest.TestCase):
         self.assertEqual(results["rkhs_function_count"], 19)
         self.assertEqual(results["free_initial_value_count"], 13)
         self.assertEqual(results["metric_selection_dimension"], 12)
-        self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 12)
+        self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 13)
         # Countries 2 and 3 share a_0 but draw different k_0, so their
         # welfare weights must be positive and genuinely distinct (the old
         # equalities held only under identical initial capital).

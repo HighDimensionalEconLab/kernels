@@ -327,7 +327,7 @@ def multicountry_growth_kernel(
         coordinates = path_coordinates(theta, K_eval, K_tilde_eval, p)
         return multicountry_path_values(**coordinates, parameters=p["parameters"])
 
-    residual_count = (4 * num_countries + 1) * n_train + 1
+    residual_count = (4 * num_countries + 1) * n_train
     residual_scale = 1.0 / jnp.sqrt(float(residual_count))
 
     # The aggregate rows are population-weighted SUMS, so their natural size
@@ -342,19 +342,12 @@ def multicountry_growth_kernel(
     def residual_fn(theta, _, p):
         values = evaluate_coordinates(theta, K, K_tilde, p)
         total_population_p = jnp.sum(p["parameters"].populations)
-        # The level-clearing equation at t=0 is fixed by a_0 and has a zero
-        # Jacobian. G(0) = 0 replaces that row, while G_dot(0) = 0 supplies the
-        # index-consistency equation that identifies the initial algebraic rate.
-        global_constraints = (
-            jnp.concatenate(
-                [
-                    values["resource"][:1],
-                    values["resource_drift"][:1],
-                    values["asset_clearing"][1:],
-                ]
-            )
-            / total_population_p
-        )
+        # No algebraic row contains the rate (clearing is a stock condition on
+        # the states, so the DAE has index > 1); the rate path is disciplined
+        # by the assets and Euler rows, with the pointwise slack resolved by
+        # the minimum-norm selection. The t=0 clearing row is identically zero
+        # because a_0 clears, and is kept for uniformity.
+        global_constraints = values["asset_clearing"] / total_population_p
         return residual_scale * jnp.concatenate(
             [
                 values["capital"].reshape(-1),
@@ -513,16 +506,7 @@ def multicountry_growth_kernel(
     # normalization: the raw population-weighted sums grow with N, so the
     # per-capita values are the scale-free quantities the N-independent
     # gates bound.
-    train_global_constraints = (
-        jnp.concatenate(
-            [
-                train_eval["resource"][:1],
-                train_eval["resource_drift"][:1],
-                train_eval["asset_clearing"][1:],
-            ]
-        )
-        / total_population
-    )
+    train_global_constraints = train_eval["asset_clearing"] / total_population
     max_train_residual = max(
         max(
             float(jnp.max(jnp.abs(train_eval[name]))) for name in dynamic_residual_names
@@ -717,12 +701,6 @@ def multicountry_growth_kernel(
         "num_train_points": n_train,
         "test_T": data_set.test_T,
         "max_train_residual": max_train_residual,
-        "initial_resource_residual": float(
-            train_eval["resource"][0] / total_population
-        ),
-        "initial_resource_drift_residual": float(
-            train_eval["resource_drift"][0] / total_population
-        ),
         "max_validation_residual": max_validation_residual,
         "max_asset_clearing_residual": max_asset_clearing_residual,
         "max_rate_consistency_residual": max_rate_consistency_residual,
@@ -856,9 +834,6 @@ def multicountry_growth_kernel(
             "t": np.asarray(points),
             "interest_rate": np.asarray(values["interest_rate"]),
             "resource_residual": np.asarray(values["resource"] / total_population),
-            "resource_drift_residual": np.asarray(
-                values["resource_drift"] / total_population
-            ),
             "asset_clearing_residual": np.asarray(
                 values["asset_clearing"] / total_population
             ),

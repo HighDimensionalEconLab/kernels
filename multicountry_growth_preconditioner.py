@@ -26,10 +26,9 @@ The preconditioner keeps three families, block-diagonal:
   come out one-sided automatically),
 - the free initial values ``U'U`` (unpenalized: damping-only shift).
 
-The aggregate rows (resource and resource-drift at t=0, asset clearing at
-t>0) are time-local too and enter the diagonal blocks exactly through row
-masks. Dropped off-diagonal couplings only change the CG iteration path,
-never the converged step.
+The aggregate asset-clearing row is time-local too and enters the diagonal
+blocks exactly. Dropped off-diagonal couplings only change the CG iteration
+path, never the converged step.
 """
 
 from __future__ import annotations
@@ -136,17 +135,8 @@ def multicountry_block_eigen_families(
                 values["marginal_wealth_euler"].reshape(-1),
             ]
         )
-        # Mirrors the driver's per-capita normalization of the aggregate rows.
-        aggregates = (
-            jnp.concatenate(
-                [
-                    values["resource"],
-                    values["resource_drift"],
-                    values["asset_clearing"],
-                ]
-            )
-            / total_population
-        )
+        # Mirrors the driver's per-capita normalization of the aggregate row.
+        aggregates = values["asset_clearing"] / total_population
         return residual_scale * jnp.concatenate([dynamic, aggregates])
 
     w = jnp.concatenate(
@@ -154,16 +144,6 @@ def multicountry_block_eigen_families(
         axis=1,
     )
     jacobian = jax.vmap(jax.jacfwd(per_time_rows))(w)
-    # The three aggregate candidates exist at every time; the residual keeps
-    # resource and resource-drift at t=0 only, asset clearing at t>0 only.
-    time_index = jnp.arange(n_train)
-    aggregate_mask = jnp.stack(
-        [time_index == 0, time_index == 0, time_index > 0], axis=1
-    ).astype(dtype)
-    mask = jnp.concatenate(
-        [jnp.ones((n_train, 4 * N), dtype=dtype), aggregate_mask], axis=1
-    )
-    jacobian = jacobian * mask[:, :, None]
     C = jacobian[:, :, :num_blocks]
     D = jacobian[:, :, num_blocks : 2 * num_blocks]
     U = jacobian[:, :, 2 * num_blocks :]

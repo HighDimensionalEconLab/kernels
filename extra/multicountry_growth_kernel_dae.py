@@ -65,8 +65,6 @@ def multicountry_dae_path_values(
     da_dt,
     dlog_q_dt,
     dlog_mu_dt,
-    dlog_consumption_dt,
-    dlog_investment_rate_dt,
     parameters,
 ):
     productivities = jnp.asarray(parameters.productivities, dtype=k.dtype)
@@ -93,15 +91,6 @@ def multicountry_dae_path_values(
         populations * (resources - consumption),
         axis=-1,
     )
-    resource_drift = jnp.sum(
-        populations
-        * (
-            (mpk * k - investment) * dlog_k_dt
-            - investment * dlog_investment_rate_dt
-            - consumption * dlog_consumption_dt
-        ),
-        axis=-1,
-    )
     return {
         "k": k,
         "a": a,
@@ -126,7 +115,6 @@ def multicountry_dae_path_values(
         * investment_rate ** (parameters.eta - 1.0)
         - 1.0,
         "resource": resource,
-        "resource_drift": resource_drift,
         "asset_clearing": jnp.sum(populations * a, axis=-1),
     }
 
@@ -345,8 +333,6 @@ def multicountry_growth_kernel_dae(
             "da_dt": output_scale * (K_eval @ alpha_a.T),
             "dlog_q_dt": K_eval @ alpha_q.T,
             "dlog_mu_dt": K_eval @ alpha_m.T,
-            "dlog_consumption_dt": K_eval @ alpha_c.T,
-            "dlog_investment_rate_dt": K_eval @ alpha_s.T,
         }
 
     def evaluate_coordinates(theta, K_eval, K_tilde_eval):
@@ -357,7 +343,7 @@ def multicountry_growth_kernel_dae(
 
     differential_residual_count = 4 * num_countries * n_train
     country_algebraic_residual_count = 2 * num_countries * n_train
-    global_algebraic_residual_count = n_train + 1
+    global_algebraic_residual_count = n_train
     residual_count = (
         differential_residual_count
         + country_algebraic_residual_count
@@ -367,13 +353,11 @@ def multicountry_growth_kernel_dae(
 
     def residual_fn(theta):
         values = evaluate_coordinates(theta, K, K_tilde)
-        global_constraints = jnp.concatenate(
-            [
-                values["resource"][:1],
-                values["resource_drift"][:1],
-                values["asset_clearing"][1:],
-            ]
-        )
+        # No algebraic row contains the rate (clearing is a stock condition on
+        # the states, so the DAE has index > 1); the rate path is disciplined
+        # by the assets and Euler rows. The t=0 clearing row is identically
+        # zero because a_0 clears, and is kept for uniformity.
+        global_constraints = values["asset_clearing"]
         return residual_scale * jnp.concatenate(
             [
                 values["capital"].reshape(-1),
@@ -469,13 +453,7 @@ def multicountry_growth_kernel_dae(
         "consumption_foc",
         "investment_foc",
     )
-    train_global_constraints = jnp.concatenate(
-        [
-            train_eval["resource"][:1],
-            train_eval["resource_drift"][:1],
-            train_eval["asset_clearing"][1:],
-        ]
-    )
+    train_global_constraints = train_eval["asset_clearing"]
     max_train_residual = max(
         max(
             float(jnp.max(jnp.abs(train_eval[name])))
@@ -613,8 +591,6 @@ def multicountry_growth_kernel_dae(
         "num_train_points": n_train,
         "test_T": data_set.test_T,
         "max_train_residual": max_train_residual,
-        "initial_resource_residual": float(train_eval["resource"][0]),
-        "initial_resource_drift_residual": float(train_eval["resource_drift"][0]),
         "max_validation_residual": max_validation_residual,
         "max_asset_clearing_residual": max_asset_clearing_residual,
         "max_consumption_foc_residual": float(
@@ -646,7 +622,7 @@ def multicountry_growth_kernel_dae(
         "metric_selection_dimension": 4 * num_countries,
         "selection": "minimum_rkhs_norm_ridge",
         "initialization": "zero_coordinate",
-        "global_closure": "explicit_assets_and_index_consistent_clearing",
+        "global_closure": "explicit_assets_and_algebraic_clearing",
         "ex_post_k_log_gap": float(jnp.max(tail["k_log_gap"])),
         "ex_post_q_log_gap": float(jnp.max(tail["q_log_gap"])),
         "ex_post_asset_scaled_gap": float(jnp.max(tail["asset_scaled_gap"])),
@@ -734,7 +710,6 @@ def multicountry_growth_kernel_dae(
             "t": np.asarray(points),
             "interest_rate": np.asarray(values["interest_rate"]),
             "resource_residual": np.asarray(values["resource"]),
-            "resource_drift_residual": np.asarray(values["resource_drift"]),
             "asset_clearing_residual": np.asarray(values["asset_clearing"]),
         }
         for country in range(num_countries):

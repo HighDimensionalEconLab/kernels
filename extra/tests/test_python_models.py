@@ -24,7 +24,6 @@ from multicountry_growth import (
     MulticountryParameters,
     draw_initial_conditions,
     multicountry_allocations,
-    multicountry_path_values,
     multicountry_reference_mu,
     multicountry_steady_state,
     weighted_gini,
@@ -129,59 +128,6 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(float(steady["asset_clearing_gap"]), 0.0, places=13)
         np.testing.assert_allclose(steady["relative_welfare_weights"], 1.0, atol=1e-14)
 
-        log_state = jnp.log(
-            jnp.concatenate(
-                [
-                    steady["k"] * jnp.asarray((0.9, 1.1, 1.05)),
-                    steady["q"] * jnp.asarray((1.1, 0.95, 1.02)),
-                    mu * jnp.asarray((0.95, 1.08, 1.03)),
-                ]
-            )
-        )
-        log_direction = jnp.asarray(
-            (0.02, -0.01, 0.03, -0.04, 0.01, 0.02, 0.03, -0.02, 0.01)
-        )
-        k, q, mu_test = jnp.split(jnp.exp(log_state), 3)
-        dlog_k_dt, dlog_q_dt, dlog_m_dt = jnp.split(log_direction, 3)
-        values = multicountry_path_values(
-            k=k[None, :],
-            a=jnp.zeros((1, 3)),
-            q=q[None, :],
-            mu=mu_test[None, :],
-            interest_rate=jnp.asarray((parameters.r,)),
-            dlog_k_dt=dlog_k_dt[None, :],
-            da_dt=jnp.zeros((1, 3)),
-            dlog_q_dt=dlog_q_dt[None, :],
-            dlog_mu_dt=dlog_m_dt[None, :],
-            parameters=parameters,
-        )
-        populations = jnp.asarray(parameters.populations)
-
-        def resource(logs):
-            k_jvp, q_jvp, m_jvp = jnp.split(jnp.exp(logs), 3)
-            allocation_jvp = multicountry_allocations(
-                k_jvp,
-                q_jvp,
-                m_jvp,
-                parameters.r,
-                parameters,
-            )
-            return jnp.sum(
-                populations
-                * (allocation_jvp["resources"] - allocation_jvp["consumption"])
-            )
-
-        _, resource_jvp = jax.jvp(
-            resource,
-            (log_state,),
-            (log_direction,),
-        )
-        self.assertAlmostEqual(
-            float(values["resource_drift"][0]),
-            float(resource_jvp),
-            places=13,
-        )
-
     def test_multicountry_growth_kernel_smoke(self):
         parameters = MulticountryParameters(
             populations=(1.0, 1.4),
@@ -194,9 +140,9 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertEqual(results["terminal_residual_count"], 0)
         self.assertEqual(
             results["dae_residual_count"],
-            9 * results["num_train_points"] + 1,
+            9 * results["num_train_points"],
         )
-        self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 4)
+        self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 5)
         self.assertEqual(results["dynamic_rkhs_function_count"], 8)
         self.assertEqual(results["algebraic_rkhs_function_count"], 1)
         self.assertEqual(results["free_initial_value_count"], 5)
@@ -245,7 +191,6 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertTrue(results["long_run_terminal_a_rank_matches_a_0"])
         self.assertGreater(results["minimum_rate_denominator"], 0.0)
         self.assertLess(results["max_train_residual"], 1e-5)
-        self.assertLess(abs(results["initial_resource_drift_residual"]), 1e-5)
         self.assertLess(results["max_validation_residual"], 5e-3)
         self.assertLess(results["max_asset_clearing_residual"], 5e-5)
         self.assertLess(results["max_rate_consistency_residual"], 5e-5)
@@ -525,7 +470,7 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertEqual(results["calculated_algebraic_value_count"], 5)
         self.assertEqual(
             results["dae_residual_count"],
-            9 * results["num_train_points"] + 1,
+            9 * results["num_train_points"],
         )
         self.assertGreater(results["total_params"], 500)
         # 2e-5 under the drawn heterogeneous initial conditions (measured
@@ -595,7 +540,7 @@ class KernelSmokeTests(unittest.TestCase):
         self.assertEqual(results["algebraic_rkhs_function_count"], 1)
         self.assertEqual(results["free_initial_value_count"], 7)
         self.assertEqual(results["metric_selection_dimension"], 6)
-        self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 6)
+        self.assertEqual(results["unknown_count"], results["dae_residual_count"] + 7)
         self.assertLess(results["max_train_residual"], 1e-5)
         self.assertLess(results["max_validation_residual"], 5e-3)
         self.assertLess(results["max_asset_clearing_residual"], 5e-5)
@@ -620,7 +565,7 @@ class KernelSmokeTests(unittest.TestCase):
         )
         self.assertIn("k_3", extras["test_df"])
         self.assertIn("marginal_wealth_3", extras["test_df"])
-        self.assertIn("resource_drift_residual", extras["test_df"])
+        self.assertIn("resource_residual", extras["test_df"])
 
         with self.assertRaisesRegex(ValueError, "must sum to zero"):
             multicountry_growth_kernel(

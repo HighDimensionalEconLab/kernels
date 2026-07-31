@@ -152,8 +152,9 @@ class DataSettings:
     adaptive_steps: int | None = None
     dt: float = 0.25
     step_growth_max: float = 3.0
-    rtol: float = 1e-8
-    atol: float = 1e-10
+    rtol: float | None = None
+    atol: float | None = None
+    dt_min: float | None = None
     test_T: float = 100.0
     test_points: int = 401
     test_steps: int = 128
@@ -176,7 +177,7 @@ class ResidualArgs:
 @dataclass(frozen=True)
 class StoppingCriteria:
     max_steps: int = 250
-    train_loss_threshold: float = 1e-14
+    train_loss_threshold: float | None = None
     num_attempts: int = 1
     log_tvc_threshold: float = 0.0
 
@@ -188,11 +189,23 @@ STATUS_TO_REASON = {
 }
 
 
+def resolve_adaptive_tolerances(data_set, dtype):
+    if jnp.dtype(dtype) == jnp.dtype(jnp.float64):
+        default_rtol, default_atol = 1e-8, 1e-10
+    else:
+        default_rtol, default_atol = 1e-4, 1e-6
+    return replace(
+        data_set,
+        rtol=default_rtol if data_set.rtol is None else data_set.rtol,
+        atol=default_atol if data_set.atol is None else data_set.atol,
+    )
+
+
 def ode_components(data_set):
     controller = IController(
         rtol=data_set.rtol,
         atol=data_set.atol,
-        dt_min=1e-10,
+        dt_min=data_set.dt_min,
         factor_max=data_set.step_growth_max,
     )
     if data_set.ode_solver == "tsit5":
@@ -214,7 +227,17 @@ def log_capital_drift_field(log_kappa, _, args, p):
     return drift(policy, k, structural) / k
 
 
-def adaptive_rollout(policy, T, budget, p, data_set, save_at):
+def adaptive_rollout(
+    policy,
+    T,
+    budget,
+    p,
+    data_set,
+    save_at,
+    *,
+    initial_log_kappa=None,
+):
+    data_set = resolve_adaptive_tolerances(data_set, p.k_0.dtype)
     ode_solver, controller = ode_components(data_set)
     field = log_capital_drift_field
     field_p = (policy, p)
@@ -231,7 +254,7 @@ def adaptive_rollout(policy, T, budget, p, data_set, save_at):
         ode_solver,
         0.0,
         T,
-        jnp.zeros_like(p.k_0),
+        (jnp.zeros_like(p.k_0) if initial_log_kappa is None else initial_log_kappa),
         dt_0=data_set.dt,
         controller=controller,
         max_steps=budget,
@@ -242,24 +265,36 @@ def adaptive_rollout(policy, T, budget, p, data_set, save_at):
 
 def adaptive_collocation(policy, p, data_set):
     budget = training_attempt_budget(data_set)
-    solution = adaptive_rollout(
-        policy,
-        data_set.train_T,
-        budget,
-        p,
-        data_set,
-        SaveAt(steps=True),
+    initial_log_kappas = jnp.zeros((1,), dtype=p.k_0.dtype)
+    solution = jax.vmap(
+        lambda initial_log_kappa: adaptive_rollout(
+            policy,
+            data_set.train_T,
+            budget,
+            p,
+            data_set,
+            SaveAt(steps=True),
+            initial_log_kappa=initial_log_kappa,
+        )
+    )(initial_log_kappas)
+    states = p.k_0 * jnp.exp(
+        jnp.where(
+            solution.ok[:, None],
+            solution.xs,
+            jnp.full_like(solution.xs, jnp.inf),
+        )
     )
-    states = p.k_0 * jnp.exp(jnp.where(solution.ok, solution.xs, jnp.inf))
     return states, solution.ts, solution.accepted, solution.ok
 
 
 def adaptive_residuals(policy, p, data_set):
     states, _, active, rollout_ok = adaptive_collocation(policy, p, data_set)
-    euler = euler_residuals(policy, states, p)
-    active_scale = jnp.sqrt(jnp.maximum(jnp.sum(active), 1))
-    residual = jnp.where(active, euler, 0.0) / active_scale
-    return jnp.where(rollout_ok, residual, jnp.inf)
+    euler = euler_residuals(policy, states.reshape(-1), p).reshape(states.shape)
+    active_count = jnp.asarray(jnp.maximum(jnp.sum(active), 1), dtype=euler.dtype)
+    residual = jnp.where(active, euler, jnp.zeros_like(euler)) / jnp.sqrt(active_count)
+    return jnp.where(
+        rollout_ok[:, None], residual, jnp.full_like(residual, jnp.inf)
+    ).reshape(-1)
 
 
 def residual_fn(theta, args, p):
@@ -299,6 +334,15 @@ def neoclassical_growth_nn_recursive_adaptive(
         else float("inf")
     )
     dtype = jnp.float64 if use_float64 else jnp.float32
+    data_set = resolve_adaptive_tolerances(data_set, dtype)
+    if stop_set.train_loss_threshold is None:
+        threshold = 1e-14 if dtype == jnp.float64 else 1e-10
+        stop_set = replace(stop_set, train_loss_threshold=threshold)
+    if not (
+        math.isfinite(stop_set.train_loss_threshold)
+        and stop_set.train_loss_threshold > 0.0
+    ):
+        raise ValueError("train_loss_threshold must be positive")
     p = StructuralParameters.create(
         dtype,
         a=a,

@@ -13,7 +13,7 @@ dependencies = [
     "pandas>=2.3.2",
     "pyarrow>=24.0.0",
     "scipy>=1.18.0",
-    "tinydiffeq>=2.3.0",
+    "tinydiffeq>=2.4.0",
     "unopy>=0.4.10",
 ]
 

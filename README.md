@@ -146,12 +146,13 @@ The main NN modules are deliberately limited:
 - `neoclassical_growth_nn.py`: direct sequence-space MLP.
 - `neoclassical_growth_nn_recursive.py`: recursive NN with separate TFP and
   capital states, exogenous `dz/dt = g z`, and a homothetic investment-share
-  representation on `log(k) - log(z)`. Training collocation can use the fixed
-  RK4 requested dates or Tsit5's genuinely adaptive accepted internal states;
-  both modes retain static residual shapes through an accepted-prefix mask and
-  use the same fixed RK4 held-out evaluator. The main paper driver retains its
-  legacy `g=0`, single-path and fixed-RK4 defaults; the optional fixed-kernel
-  comparison uses positive growth and held-out initial-condition draws.
+  representation on `log(k) - log(z)`. Training collocation can use exact
+  aligned knots from the fixed RK4 rollout or Tsit5's genuinely adaptive
+  accepted internal states; both modes retain static residual shapes through an
+  accepted-prefix mask and use the same fixed RK4 held-out evaluator. The main
+  paper driver retains its legacy `g=0`, single-path and fixed-RK4 defaults; the
+  optional fixed-kernel comparison uses positive growth and held-out
+  initial-condition draws.
 - `open_economy_growth_nn.py`: the open-economy sequence-space MLP. It carries
   the same five RKHS paths the kernel does as network outputs of `t`, imposes
   the same five DAE residuals on the same front-loaded collocation grid, and

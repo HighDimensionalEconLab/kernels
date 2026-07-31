@@ -14,6 +14,7 @@ from neoclassical_growth_nn_recursive import (
     batched_rollout,
     collocation_log_states,
     collocation_residuals,
+    collocation_rollout,
     euler_residuals,
     neoclassical_growth_nn_recursive,
     production,
@@ -39,8 +40,7 @@ class SharePolicy:
 class BalancedGrowthPolicy:
     investment_growth: jax.Array
 
-    def __call__(self, log_state, p):
-        del p
+    def __call__(self, log_state, _):
         return self.investment_growth * jnp.exp(log_state[1])
 
 
@@ -183,6 +183,64 @@ class RecursiveGrowthTsit5Tests(unittest.TestCase):
                 np.asarray(solution.xs[index]),
                 rtol=2e-6,
                 atol=1e-10,
+            )
+
+    def test_float32_fixed_vmap_is_pure_for_one_and_three_trajectories(self):
+        data_set = DataSettings(
+            ode_solver="rk4",
+            train_T=8.0,
+            train_steps=8,
+            train_points=5,
+        )
+        for initial_conditions in (
+            ((1.0,), (1.0,)),
+            ((1.0, 1.02, 0.98), (1.0, 0.98, 1.02)),
+        ):
+            p = parameters(
+                z_0=initial_conditions[0],
+                k_0=initial_conditions[1],
+                dtype=jnp.float32,
+            )
+
+            def residual_from_logit(logit):
+                policy = SharePolicy(logit, jnp.asarray(0.15, jnp.float32))
+                return collocation_residuals(policy, p, data_set).reshape(-1)
+
+            logit = jnp.asarray(-1.0, jnp.float32)
+            jaxpr = str(jax.make_jaxpr(residual_from_logit)(logit))
+            residual, pullback = jax.vjp(residual_from_logit, logit)
+            cotangent = pullback(jnp.ones_like(residual))[0]
+            policy = SharePolicy(logit, jnp.asarray(0.15, jnp.float32))
+            solution = collocation_rollout(policy, p, data_set)
+            expected_times = jnp.linspace(
+                jnp.asarray(0.0, dtype=jnp.float32),
+                jnp.asarray(data_set.train_T, dtype=jnp.float32),
+                data_set.train_points,
+                dtype=jnp.float32,
+            )
+
+            self.assertNotIn("f64", jaxpr)
+            self.assertNotIn("searchsorted", jaxpr)
+            self.assertEqual(residual.dtype, jnp.float32)
+            self.assertEqual(cotangent.dtype, jnp.float32)
+            self.assertTrue(np.all(np.isfinite(np.asarray(residual))))
+            self.assertTrue(bool(jnp.isfinite(cotangent)))
+            self.assertEqual(
+                solution.ts.shape,
+                (len(initial_conditions[0]), data_set.train_points),
+            )
+            self.assertEqual(
+                solution.xs.shape,
+                (len(initial_conditions[0]), data_set.train_points, 2),
+            )
+            self.assertTrue(bool(jnp.all(solution.ok)))
+            self.assertTrue(bool(jnp.all(solution.num_steps == data_set.train_steps)))
+            np.testing.assert_array_equal(
+                np.asarray(solution.ts),
+                np.broadcast_to(
+                    np.asarray(expected_times),
+                    (len(initial_conditions[0]), data_set.train_points),
+                ),
             )
 
     def test_padding_is_inert_and_normalization_is_global(self):

@@ -106,7 +106,7 @@ def run(
     test_error_tolerance: float = 5e-3,
     verbose: bool = False,
 ):
-    """Compare fixed requested-date and adaptive accepted-step collocation."""
+    """Compare fixed exact-knot and adaptive accepted-step collocation."""
     if n_seeds < 1:
         raise ValueError("n_seeds must be positive")
     if train_points < 2:
@@ -145,7 +145,7 @@ def run(
 
     summaries = []
     for method, ode_solver in (
-        ("fixed_rk4_requested_times", "rk4"),
+        ("fixed_rk4_exact_knots", "rk4"),
         ("tsit5_accepted_steps", "tsit5"),
     ):
         options = {
@@ -205,11 +205,7 @@ def run(
     write_summary(
         output_dir,
         PREFIX,
-        experiments={
-            "fixed_rk4_requested_times",
-            "tsit5_accepted_steps",
-            "comparison",
-        },
+        experiments={"fixed_rk4_exact_knots", "tsit5_accepted_steps", "comparison"},
     )
     print(comparison.to_string(index=False))
 

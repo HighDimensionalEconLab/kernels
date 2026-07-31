@@ -8,6 +8,8 @@ from tinydiffeq import SaveAt
 from extra.neoclassical_growth_nn_recursive_adaptive import (
     DataSettings,
     StructuralParameters,
+    adaptive_collocation,
+    adaptive_residuals,
     adaptive_rollout,
 )
 
@@ -16,6 +18,50 @@ jax.config.update("jax_default_matmul_precision", "highest")
 
 
 class AdaptiveRecursiveNNTests(unittest.TestCase):
+    def test_training_collocation_keeps_a_leading_vmap_axis(self):
+        parameters = StructuralParameters.create(
+            jnp.float32,
+            a=1 / 3,
+            delta=0.1,
+            rho_hat=0.11,
+            k_0=1.0,
+            A=1.0,
+            b_1=1.0,
+            b_2=0.0,
+            k_thr=jnp.inf,
+        )
+        data_set = DataSettings(
+            train_T=5.0,
+            ode_solver="tsit5",
+            adaptive_steps=16,
+            dt=0.25,
+        )
+        states, times, active, ok = adaptive_collocation(
+            lambda k: jnp.asarray(0.12, k.dtype) * k,
+            parameters,
+            data_set,
+        )
+
+        self.assertEqual(states.shape, (1, 17))
+        self.assertEqual(times.shape, (1, 17))
+        self.assertEqual(active.shape, (1, 17))
+        self.assertEqual(ok.shape, (1,))
+        self.assertEqual(states.dtype, jnp.float32)
+        self.assertEqual(times.dtype, jnp.float32)
+        self.assertTrue(bool(ok[0]))
+
+        def residual(scale):
+            return adaptive_residuals(lambda k: scale * k, parameters, data_set)
+
+        scale = jnp.asarray(0.12, jnp.float32)
+        jaxpr = str(jax.make_jaxpr(residual)(scale))
+        values, pullback = jax.vjp(residual, scale)
+        cotangent = pullback(jnp.ones_like(values))[0]
+        self.assertNotIn("f64", jaxpr)
+        self.assertEqual(values.dtype, jnp.float32)
+        self.assertEqual(cotangent.dtype, jnp.float32)
+        self.assertTrue(bool(jnp.isfinite(cotangent)))
+
     def test_accepted_states_move_with_policy_parameters(self):
         parameters = StructuralParameters.create(
             jnp.float64,

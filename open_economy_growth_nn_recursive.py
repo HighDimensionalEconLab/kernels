@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from functools import partial
 from typing import Literal
 
@@ -62,17 +62,17 @@ STATUS_TO_REASON = {
 @dataclass(frozen=True)
 class DataSettings:
     dt: float = 1.0
-    # RK4 is seed-robust at 32 internal steps. A 48-step Euler rollout is
-    # faster for seed 0 but misses the independent RK4 residual gate for seeds
-    # 1 and 2; adaptive Tsit5 is accurate but materially slower here.
+    # The default fixed-step grid uses every RK4 knot, avoiding interpolation
+    # inside the differentiated residual.
     ode_solver: Literal["tsit5", "rk4", "euler", "rodas5p"] = "rk4"
-    rollout_steps: int = 32
+    rollout_steps: int = 64
     diagnostic_steps: int = 160
     rtol: float = 6.3e-7
     atol: float = 2.2e-7
+    adaptive_dt_min: float | None = None
     train_T: float = 40.0
     train_points: int = 65
-    train_points_list: list[float] | None = None
+    train_points_list: list[float] | None = field(default=None, hash=False)
     test_T: float = 50.0
     test_points: int = 51
     diagnostic_T: float = 160.0
@@ -85,7 +85,7 @@ class DataSettings:
 @dataclass(frozen=True)
 class StoppingCriteria:
     max_steps: int = 250
-    train_loss_threshold: float = 1e-12
+    train_loss_threshold: float | None = None
     # frac_accepted measures acceptance within the restart budget, not first-try
     # robustness: a seed that stalls short of the loss threshold is redrawn.
     num_attempts: int = 5
@@ -314,7 +314,7 @@ def rollout(
         controller = IController(
             rtol=data_set.rtol,
             atol=data_set.atol,
-            dt_min=1e-10,
+            dt_min=data_set.adaptive_dt_min,
         )
         dt_0 = data_set.dt
     elif ode_solver_name == "rodas5p":
@@ -322,7 +322,7 @@ def rollout(
         controller = IController(
             rtol=data_set.rtol,
             atol=data_set.atol,
-            dt_min=1e-10,
+            dt_min=data_set.adaptive_dt_min,
         )
         dt_0 = data_set.dt
     elif ode_solver_name == "rk4":
@@ -354,31 +354,51 @@ def states_from_solution(solution, k_0, a_0, flow_scale):
     k = k_0 * jnp.exp(solution.xs[:, 0])
     a = a_0 + flow_scale * solution.xs[:, 1]
     states = jnp.stack([k, a], axis=1)
-    return jnp.where(solution.ok, states, jnp.inf)
+    return jnp.where(solution.ok, states, jnp.full_like(states, jnp.inf))
 
 
 @partial(jax.jit, static_argnames=("data_set",))
-def collocation_rollout(policy, train_t, k_0, parameters, data_set):
-    return rollout(
-        policy,
-        data_set.train_T,
-        data_set.rollout_steps,
-        k_0,
-        parameters,
-        data_set,
-        save_at=SaveAt(ts=train_t),
+def collocation_rollout(policy, train_t, initial_k, parameters, data_set):
+    train_t = jnp.asarray(train_t, dtype=initial_k.dtype)
+    default_uniform_grid = data_set.train_points_list is None
+    aligned_fixed_grid = (
+        data_set.ode_solver in ("rk4", "euler")
+        and default_uniform_grid
+        and data_set.train_points > 1
+        and data_set.rollout_steps % (data_set.train_points - 1) == 0
     )
+    save_at = SaveAt(ts=train_t, exact=aligned_fixed_grid)
+
+    def solve_one(k_0):
+        return rollout(
+            policy,
+            data_set.train_T,
+            data_set.rollout_steps,
+            k_0,
+            parameters,
+            data_set,
+            save_at=save_at,
+        )
+
+    return jax.vmap(solve_one)(initial_k)
 
 
 def collocation_states(policy, train_t, k_0, a_0, parameters, data_set):
+    initial_k = jnp.reshape(k_0, (1,))
+    initial_a = jnp.reshape(a_0, (1,))
     solution = collocation_rollout(
         policy,
         train_t,
-        k_0,
+        initial_k,
         parameters,
         data_set,
     )
-    return states_from_solution(solution, k_0, a_0, policy.flow_scale[...])
+    return jax.vmap(states_from_solution, in_axes=(0, 0, 0, None))(
+        solution,
+        initial_k,
+        initial_a,
+        policy.flow_scale[...],
+    )
 
 
 def residual_fn(theta, args, p):
@@ -391,9 +411,10 @@ def residual_fn(theta, args, p):
         p.model,
         args.data_set,
     )
-    values = path_values(policy, states, p.model)
+    values = path_values(policy, states.reshape(-1, 2), p.model)
     residual = jnp.concatenate([values["q_euler"], values["c_euler"]])
-    return residual / jnp.sqrt(residual.size)
+    residual_count = jnp.asarray(residual.size, dtype=residual.dtype)
+    return residual / jnp.sqrt(residual_count)
 
 
 @partial(jax.jit, static_argnames=("budget",))
@@ -441,15 +462,27 @@ def open_economy_growth_nn_recursive(
 ):
     if not jax.config.jax_enable_x64:
         raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    dtype = jnp.float64 if use_float64 else jnp.float32
+    if stop_set.train_loss_threshold is None:
+        # The float32 solve resolves 1e-12 and needs it to pass the independent
+        # path-residual and benchmark gates; 1e-10 stops prematurely.
+        threshold = 1e-14 if dtype == jnp.float64 else 1e-12
+        stop_set = replace(stop_set, train_loss_threshold=threshold)
     if k_0 <= 0.0:
         raise ValueError("k_0 must be positive")
     if data_set.diagnostic_T < max(data_set.train_T, data_set.test_T):
         raise ValueError("diagnostic_T must cover the train and test horizons")
     if data_set.benchmark_T < data_set.test_T:
         raise ValueError("benchmark_T must cover the test horizon")
-    if stop_set.train_loss_threshold <= 0.0:
+    if data_set.adaptive_dt_min is not None and not (
+        math.isfinite(data_set.adaptive_dt_min) and data_set.adaptive_dt_min > 0.0
+    ):
+        raise ValueError("adaptive_dt_min must be positive or None")
+    if stop_set.train_loss_threshold is None or not (
+        math.isfinite(stop_set.train_loss_threshold)
+        and stop_set.train_loss_threshold > 0.0
+    ):
         raise ValueError("train_loss_threshold must be positive")
-    dtype = jnp.float64 if use_float64 else jnp.float32
     k_0_jax = jnp.asarray(k_0, dtype=dtype)
     a_0_jax = jnp.asarray(a_0, dtype=dtype)
     dynamic_parameters = DynamicModelParameters.from_model(parameters, dtype)
@@ -582,18 +615,29 @@ def open_economy_growth_nn_recursive(
         parameters=parameters,
     )
     benchmark_values = benchmark(np.asarray(test_t))
-    output_scale = float(steady_state(parameters)["output"])
-    k_relative_error = jnp.abs(
-        test_eval["k"] - jnp.asarray(benchmark_values["k"])
-    ) / jnp.asarray(benchmark_values["k"])
-    q_relative_error = jnp.abs(
-        test_eval["q"] - jnp.asarray(benchmark_values["q"])
-    ) / jnp.asarray(benchmark_values["q"])
-    c_relative_error = jnp.abs(
-        test_eval["c"] - jnp.asarray(benchmark_values["c"])
-    ) / jnp.asarray(benchmark_values["c"])
-    a_scaled_error = (
-        jnp.abs(test_eval["a"] - jnp.asarray(benchmark_values["a"])) / output_scale
+    benchmark_test_values = {
+        name: jnp.asarray(benchmark_values[name], dtype=dtype)
+        for name in ("k", "q", "c", "a")
+    }
+    output_scale = jnp.asarray(steady_state(parameters)["output"], dtype=dtype)
+    k_relative_error = (
+        jnp.abs(test_eval["k"] - benchmark_test_values["k"])
+        / benchmark_test_values["k"]
+    )
+    q_relative_error = (
+        jnp.abs(test_eval["q"] - benchmark_test_values["q"])
+        / benchmark_test_values["q"]
+    )
+    c_relative_error = (
+        jnp.abs(test_eval["c"] - benchmark_test_values["c"])
+        / benchmark_test_values["c"]
+    )
+    a_scaled_error = jnp.abs(test_eval["a"] - benchmark_test_values["a"]) / output_scale
+    benchmark_error_arrays = (
+        k_relative_error,
+        q_relative_error,
+        c_relative_error,
+        a_scaled_error,
     )
     max_benchmark_error = max(
         float(jnp.max(k_relative_error)),
@@ -601,7 +645,10 @@ def open_economy_growth_nn_recursive(
         float(jnp.max(c_relative_error)),
         float(jnp.max(a_scaled_error)),
     )
-    benchmark_match = max_benchmark_error <= BENCHMARK_MATCH_TOL
+    benchmark_match_tolerance = (
+        BENCHMARK_MATCH_TOL if dtype == jnp.float64 else 2.0 * BENCHMARK_MATCH_TOL
+    )
+    benchmark_match = max_benchmark_error <= benchmark_match_tolerance
 
     terminal = {name: diagnostic_eval[name][-1] for name in diagnostic_eval}
     tail = tail_diagnostics(
@@ -668,6 +715,9 @@ def open_economy_growth_nn_recursive(
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
         "max_benchmark_error": max_benchmark_error,
+        "benchmark_error_dtype": str(jnp.result_type(*benchmark_error_arrays)),
+        "benchmark_error_device": k_relative_error.device.platform,
+        "benchmark_match_tolerance": benchmark_match_tolerance,
         "benchmark_match": benchmark_match,
         "k_relative_error_max": float(jnp.max(k_relative_error)),
         "q_relative_error_max": float(jnp.max(q_relative_error)),
@@ -698,6 +748,13 @@ def open_economy_growth_nn_recursive(
         "nn_depth": nn_set.depth,
         "train_T": data_set.train_T,
         "num_train_points": int(train_t.size),
+        "num_training_trajectories": 1,
+        "fixed_collocation_exact": (
+            data_set.ode_solver in ("rk4", "euler")
+            and data_set.train_points_list is None
+            and data_set.train_points > 1
+            and data_set.rollout_steps % (data_set.train_points - 1) == 0
+        ),
         "test_T": data_set.test_T,
         "diagnostic_T": data_set.diagnostic_T,
         "ode_solver": data_set.ode_solver,

@@ -426,7 +426,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.3.2" },
     { name = "pyarrow", specifier = ">=24.0.0" },
     { name = "scipy", specifier = ">=1.18.0" },
-    { name = "tinydiffeq", specifier = ">=2.3.0" },
+    { name = "tinydiffeq", specifier = ">=2.4.0" },
     { name = "unopy", specifier = ">=0.4.10" },
 ]
 
@@ -1470,15 +1470,15 @@ wheels = [
 
 [[package]]
 name = "tinydiffeq"
-version = "2.3.0"
+version = "2.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jax" },
     { name = "nlls-gram" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3a/b0/e511d313de7f6ffdca24231604655882942c8c00b46fbff93fa983a1cb77/tinydiffeq-2.3.0.tar.gz", hash = "sha256:34d37caa62acda73eb004dc4a1fdec93fd9fcdc59f6403eac067bf3c9c80ec74", size = 594057, upload-time = "2026-07-26T02:27:36.88Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/85/ef/70d9c158b96f8a9405ad053ae993ab50118331b262334824477cd6ba0002/tinydiffeq-2.4.0.tar.gz", hash = "sha256:932dc3443fb43b94c3522f6ff481ed41352a5ba613019d718b7d8e54613afd5f", size = 614923, upload-time = "2026-07-31T16:46:37.068Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/48/bd/48000f27b287973e3d3a17dc2cc1676b500616381619d957dbe22a277ac6/tinydiffeq-2.3.0-py3-none-any.whl", hash = "sha256:a433f65c614a1ccb63640dc68b926840d87d1e00dc91137e23d37765d32aa18d", size = 60399, upload-time = "2026-07-26T02:27:35.408Z" },
+    { url = "https://files.pythonhosted.org/packages/5d/35/21fda2fb23cfb9c22b831ae4d782bd8759f4e1be018755e497457edba269/tinydiffeq-2.4.0-py3-none-any.whl", hash = "sha256:7bca7dc9654079c9f114eaf04cbae4bef476dc25e186585fde3a799c9d937dfb", size = 67794, upload-time = "2026-07-31T16:46:35.877Z" },
 ]
 
 [[package]]

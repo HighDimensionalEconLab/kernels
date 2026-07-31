@@ -77,7 +77,7 @@ class DataSettings:
     # tinydiffeq's stable defaults for float32.
     adaptive_rtol: float | None = None
     adaptive_atol: float | None = None
-    adaptive_dt_min: float = 1e-10
+    adaptive_dt_min: float | None = None
     adaptive_dt_max: float = math.inf
     adaptive_step_growth_max: float = 3.0
     tvc_steps: int = 256
@@ -112,7 +112,7 @@ class ResidualArgs:
 @dataclass(frozen=True)
 class StoppingCriteria:
     max_steps: int = 250
-    train_loss_threshold: float = 1e-14
+    train_loss_threshold: float | None = None
     num_attempts: int = 1
     log_tvc_threshold: float = 0.0
 
@@ -392,8 +392,19 @@ def collocation_rollout(policy, p, data_set):
     else:
         budget = data_set.train_steps
         dt_0 = data_set.train_T / data_set.train_steps
-        train_ts = jnp.linspace(0.0, data_set.train_T, data_set.train_points)
-        save_at = SaveAt(ts=train_ts)
+        time_dtype = p.a.dtype
+        train_ts = jnp.linspace(
+            jnp.asarray(0.0, dtype=time_dtype),
+            jnp.asarray(data_set.train_T, dtype=time_dtype),
+            data_set.train_points,
+            dtype=time_dtype,
+        )
+        # In the baseline calibration these dates are every
+        # ``train_steps / (train_points - 1)`` internal steps. Gather those RK
+        # states directly; retain interpolation for a user-supplied grid that
+        # does not divide the integration mesh.
+        exact_grid = data_set.train_steps % (data_set.train_points - 1) == 0
+        save_at = SaveAt(ts=train_ts, exact=exact_grid)
     return batched_rollout(
         policy,
         initial_log_states,
@@ -448,10 +459,10 @@ def collocation_residuals(policy, p, data_set):
     euler = euler_residuals(policy, log_states.reshape(-1, 2), p).reshape(active.shape)
     active_count = jnp.asarray(jnp.maximum(jnp.sum(active), 1), dtype=euler.dtype)
     active_scale = jnp.sqrt(active_count)
-    residual = jnp.where(active, euler, 0.0) / active_scale
+    residual = jnp.where(active, euler, jnp.zeros_like(euler)) / active_scale
     # A budget-exhausted trajectory did not cover the requested economic
     # horizon. Make that a loud optimizer failure instead of fitting a prefix.
-    return jnp.where(solution.ok[:, None], residual, jnp.inf)
+    return jnp.where(solution.ok[:, None], residual, jnp.full_like(residual, jnp.inf))
 
 
 def residual_fn(theta, args, p):
@@ -722,6 +733,9 @@ def neoclassical_growth_nn_recursive(
         raise RuntimeError("enable jax_enable_x64 in the process entry point")
     dtype = jnp.float64 if use_float64 else jnp.float32
     data_set = resolve_adaptive_tolerances(data_set, dtype)
+    if stop_set.train_loss_threshold is None:
+        threshold = 1e-14 if dtype == jnp.float64 else 1e-10
+        stop_set = replace(stop_set, train_loss_threshold=threshold)
     if not 0.0 < a < 1.0:
         raise ValueError("a must lie strictly between zero and one")
     if sigma_crra <= 0.0:
@@ -761,14 +775,18 @@ def neoclassical_growth_nn_recursive(
         and data_set.adaptive_atol > 0.0
     ):
         raise ValueError("adaptive_rtol and adaptive_atol must be positive")
-    if not (math.isfinite(data_set.adaptive_dt_min) and data_set.adaptive_dt_min > 0.0):
-        raise ValueError("adaptive_dt_min must be positive")
+    if data_set.adaptive_dt_min is not None and not (
+        math.isfinite(data_set.adaptive_dt_min) and data_set.adaptive_dt_min > 0.0
+    ):
+        raise ValueError("adaptive_dt_min must be positive or None")
     if math.isnan(data_set.adaptive_dt_max) or (
-        data_set.adaptive_dt_max < data_set.adaptive_dt_min
+        data_set.adaptive_dt_min is not None
+        and data_set.adaptive_dt_max < data_set.adaptive_dt_min
     ):
         raise ValueError("adaptive_dt_max must be at least adaptive_dt_min")
-    if not (
-        data_set.adaptive_dt_min <= data_set.adaptive_dt_0 <= data_set.adaptive_dt_max
+    if data_set.adaptive_dt_0 > data_set.adaptive_dt_max or (
+        data_set.adaptive_dt_min is not None
+        and data_set.adaptive_dt_0 < data_set.adaptive_dt_min
     ):
         raise ValueError(
             "adaptive_dt_0 must lie between adaptive_dt_min and adaptive_dt_max"
@@ -778,6 +796,11 @@ def neoclassical_growth_nn_recursive(
         and data_set.adaptive_step_growth_max > 1.0
     ):
         raise ValueError("adaptive_step_growth_max must exceed one")
+    if stop_set.train_loss_threshold is None or not (
+        math.isfinite(stop_set.train_loss_threshold)
+        and stop_set.train_loss_threshold > 0.0
+    ):
+        raise ValueError("train_loss_threshold must be positive")
     if data_set.dt <= 0.0 or data_set.tvc_steps < 1:
         raise ValueError("dt and tvc_steps must be positive")
     if data_set.train_tvc_T <= data_set.train_T:
@@ -894,7 +917,11 @@ def neoclassical_growth_nn_recursive(
     train_df["point_rule"] = (
         "adaptive_accepted_steps"
         if data_set.ode_solver == "tsit5"
-        else "fixed_requested_times"
+        else (
+            "fixed_exact_knots"
+            if data_set.train_steps % (data_set.train_points - 1) == 0
+            else "fixed_requested_times"
+        )
     )
     collocation_diagnostics = collocation_step_diagnostics(
         train_solution.ts, train_active
@@ -991,7 +1018,11 @@ def neoclassical_growth_nn_recursive(
         "point_rule": (
             "adaptive_accepted_steps"
             if data_set.ode_solver == "tsit5"
-            else "fixed_requested_times"
+            else (
+                "fixed_exact_knots"
+                if data_set.train_steps % (data_set.train_points - 1) == 0
+                else "fixed_requested_times"
+            )
         ),
         "collocation_capacity_per_trajectory": int(train_active.shape[1]),
         "train_kappa_0_min": float(train_kappa_0.min()),
@@ -1004,6 +1035,10 @@ def neoclassical_growth_nn_recursive(
         "evaluation_ode_solver": data_set.evaluation_ode_solver,
         "train_steps": data_set.train_steps,
         "train_points": data_set.train_points,
+        "fixed_collocation_exact": (
+            data_set.ode_solver != "tsit5"
+            and data_set.train_steps % (data_set.train_points - 1) == 0
+        ),
         "integrator_attempt_budget": (
             data_set.adaptive_attempt_budget
             if data_set.ode_solver == "tsit5"

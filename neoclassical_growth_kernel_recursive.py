@@ -15,10 +15,11 @@ from flax import struct
 from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
 
 from kernels import (
+    MATERN_STATE_FAMILIES,
+    additive_matern_state_features,
     additive_rbf_state_features,
-    additive_rbf_state_gram,
+    ard_matern_state_features,
     ard_rbf_state_features,
-    ard_rbf_state_gram,
     rbf_state_features,
     rbf_state_gram,
     rkhs_norm_squared,
@@ -69,11 +70,19 @@ class StateKernelSettings:
     # With the free constant, theta is (alpha, h_const) and only alpha is
     # penalized; without it the policy is the pure RKHS expansion.
     free_constant: bool = True
-    # Homothetic: 1-D RBF on log(k/z). Non-homothetic: 2-D RBF on the centered
-    # (log z, log k); lengthscales default per axis to `lengthscale`, and
-    # linear_mean appends two unpenalized linear coefficients.
+    # Homothetic: 1-D RBF on log(k/z). Non-homothetic: a 2-D expansion on the
+    # centered (log z, log k) with product (ard) or sum (additive) composition
+    # of RBF or Matern 1-D kernels; lengthscales default per axis to
+    # `lengthscale`, and linear_mean appends two unpenalized coefficients.
     homothetic_representation: bool = True
-    state_kernel: Literal["ard_rbf", "additive_rbf"] = "ard_rbf"
+    state_kernel: Literal[
+        "ard_rbf",
+        "additive_rbf",
+        "ard_matern32",
+        "ard_matern52",
+        "additive_matern32",
+        "additive_matern52",
+    ] = "ard_rbf"
     log_z_lengthscale: float | None = None
     log_k_lengthscale: float | None = None
     linear_mean: bool = False
@@ -106,6 +115,21 @@ def state_lengthscales(kernel_set):
     )
 
 
+def nonhomothetic_state_features(x, centers, kernel_set):
+    dtype = x.dtype
+    lengthscales = jnp.asarray(state_lengthscales(kernel_set), dtype)
+    structure, _, family = kernel_set.state_kernel.partition("_")
+    if structure == "ard":
+        sigma = jnp.asarray(kernel_set.amplitude, dtype)
+        if family == "rbf":
+            return ard_rbf_state_features(x, centers, sigma, lengthscales)
+        return ard_matern_state_features(family, x, centers, sigma, lengthscales)
+    sigmas = jnp.full(2, kernel_set.amplitude, dtype)
+    if family == "rbf":
+        return additive_rbf_state_features(x, centers, sigmas, lengthscales)
+    return additive_matern_state_features(family, x, centers, sigmas, lengthscales)
+
+
 def validate_settings(data_set, kernel_set, ridge):
     if data_set.collocation_source != "exact_path":
         raise ValueError(f"unknown collocation_source: {data_set.collocation_source!r}")
@@ -125,7 +149,12 @@ def validate_settings(data_set, kernel_set, ridge):
         raise ValueError("kernel amplitude and lengthscale must be positive")
     if kernel_set.metric_epsilon <= 0.0:
         raise ValueError("metric_epsilon must be positive")
-    if kernel_set.state_kernel not in ("ard_rbf", "additive_rbf"):
+    state_kernels = tuple(
+        f"{structure}_{family}"
+        for structure in ("ard", "additive")
+        for family in ("rbf", *MATERN_STATE_FAMILIES)
+    )
+    if kernel_set.state_kernel not in state_kernels:
         raise ValueError(f"unknown state_kernel: {kernel_set.state_kernel!r}")
     if not all(ell > 0.0 for ell in state_lengthscales(kernel_set)):
         raise ValueError("per-dimension lengthscales must be positive when set")
@@ -180,15 +209,7 @@ def build_residual_args(train_log_states, kernel_set, z_0=1.0, k_0=1.0):
         )
     else:
         centers = flat_states - state_offset
-        lengthscales = jnp.asarray(state_lengthscales(kernel_set), dtype)
-        if kernel_set.state_kernel == "ard_rbf":
-            gram = ard_rbf_state_gram(
-                centers, jnp.asarray(kernel_set.amplitude, dtype), lengthscales
-            )
-        else:
-            gram = additive_rbf_state_gram(
-                centers, jnp.full(2, kernel_set.amplitude, dtype), lengthscales
-            )
+        gram = nonhomothetic_state_features(centers, centers, kernel_set)
     gram = (gram + gram.T) / 2.0
     return ResidualArgs(
         centers=centers,
@@ -212,21 +233,7 @@ def raw_policy(theta, args, log_state, kernel_set):
         h = features @ alpha
     else:
         x = log_state - args.state_offset
-        lengthscales = jnp.asarray(state_lengthscales(kernel_set), x.dtype)
-        if kernel_set.state_kernel == "ard_rbf":
-            features = ard_rbf_state_features(
-                x,
-                args.centers,
-                jnp.asarray(kernel_set.amplitude, x.dtype),
-                lengthscales,
-            )
-        else:
-            features = additive_rbf_state_features(
-                x,
-                args.centers,
-                jnp.full(2, kernel_set.amplitude, x.dtype),
-                lengthscales,
-            )
+        features = nonhomothetic_state_features(x, args.centers, kernel_set)
         h = features @ alpha
         # The linear-mean coefficients are the last theta leaf, after the free
         # constant when both are present; like h_const they are unpenalized.

@@ -6,10 +6,15 @@ import numpy as np
 from flax import nnx
 
 from kernels import (
+    additive_matern_state_gram,
     additive_rbf_state_features,
     additive_rbf_state_gram,
+    ard_matern_state_features,
+    ard_matern_state_gram,
     ard_rbf_state_features,
     ard_rbf_state_gram,
+    matern_kernel_1p5,
+    matern_kernel_2p5,
     rbf_state_features,
 )
 from neoclassical_growth_kernel_recursive import (
@@ -94,6 +99,52 @@ class VectorStateKernelTests(unittest.TestCase):
         np.testing.assert_allclose(
             np.asarray(features), np.asarray(per_dimension), rtol=1e-13, atol=1e-13
         )
+
+    def test_ard_matern_features_are_products_of_per_dimension_materns(self):
+        sigma = jnp.asarray(1.2)
+        lengthscales = jnp.asarray([0.7, 0.35])
+        for name, scalar_kernel in (
+            ("matern32", matern_kernel_1p5),
+            ("matern52", matern_kernel_2p5),
+        ):
+            features = ard_matern_state_features(
+                name, POINTS_2D, CENTERS_2D, sigma, lengthscales
+            )
+            per_dimension = [
+                jax.vmap(
+                    jax.vmap(scalar_kernel, (None, 0, None, None)),
+                    (0, None, None, None),
+                )(POINTS_2D[:, d], CENTERS_2D[:, d], jnp.asarray(1.0), lengthscales[d])
+                for d in range(2)
+            ]
+            np.testing.assert_allclose(
+                np.asarray(features),
+                np.asarray(sigma**2 * per_dimension[0] * per_dimension[1]),
+                rtol=1e-13,
+                atol=1e-13,
+            )
+
+    def test_matern_grams_are_symmetric_positive_and_differentiable(self):
+        lengthscales = jnp.asarray([0.7, 0.35])
+        for name in ("matern32", "matern52"):
+            for gram in (
+                ard_matern_state_gram(name, CENTERS_2D, jnp.asarray(1.2), lengthscales),
+                additive_matern_state_gram(
+                    name, CENTERS_2D, jnp.asarray([1.2, 0.8]), lengthscales
+                ),
+            ):
+                np.testing.assert_allclose(
+                    np.asarray(gram), np.asarray(gram.T), atol=1e-12
+                )
+                self.assertGreater(np.linalg.eigvalsh(np.asarray(gram)).min(), -1e-10)
+            # C^1 at the centers: the derivative through |x - c| is finite and
+            # zero exactly at a center, where the Euler residual evaluates it.
+            grad = jax.grad(
+                lambda x: ard_matern_state_features(
+                    name, x, CENTERS_2D, jnp.asarray(1.2), lengthscales
+                ).sum()
+            )(CENTERS_2D[0])
+            self.assertTrue(bool(jnp.all(jnp.isfinite(grad))))
 
     def test_grams_match_features_and_are_symmetric(self):
         sigma = jnp.asarray(1.2)

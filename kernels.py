@@ -73,8 +73,37 @@ def rbf_state_gram(centers, sigma, ell):
     return rbf_state_features(centers[:, None], centers, sigma, ell).squeeze(1)
 
 
-# Vector-state RBF kernels: ARD is the product of per-dimension 1-D RBFs with
-# one amplitude, additive their sum with per-dimension amplitudes.
+# Vector-state kernels: ARD is the product of per-dimension 1-D correlations
+# with one amplitude, additive their sum with per-dimension amplitudes. The
+# Matern families keep exponential (rather than Gaussian) tails, so they decay
+# to the mean far more slowly off the center support; matern12 is excluded
+# because its kink sits exactly at the centers the Euler residual
+# differentiates through.
+MATERN_STATE_FAMILIES = ("matern32", "matern52")
+
+
+def matern_correlation(name, scaled_abs):
+    x = MATERN_DECAY[name] * scaled_abs
+    poly = {"matern32": 1.0 + x, "matern52": 1.0 + x + x**2 / 3.0}[name]
+    return poly * jnp.exp(-x)
+
+
+def ard_matern_state_features(name, x, centers, sigma, lengthscales):
+    scaled = jnp.abs(x[..., None, :] - centers) / lengthscales
+    return sigma**2 * jnp.prod(matern_correlation(name, scaled), axis=-1)
+
+
+def ard_matern_state_gram(name, centers, sigma, lengthscales):
+    return ard_matern_state_features(name, centers, centers, sigma, lengthscales)
+
+
+def additive_matern_state_features(name, x, centers, sigmas, lengthscales):
+    scaled = jnp.abs(x[..., None, :] - centers) / lengthscales
+    return jnp.sum(sigmas**2 * matern_correlation(name, scaled), axis=-1)
+
+
+def additive_matern_state_gram(name, centers, sigmas, lengthscales):
+    return additive_matern_state_features(name, centers, centers, sigmas, lengthscales)
 
 
 def ard_rbf_state_features(x, centers, sigma, lengthscales):

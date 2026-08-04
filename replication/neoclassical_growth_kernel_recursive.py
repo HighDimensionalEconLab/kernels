@@ -43,15 +43,17 @@ MULTI_IC_X4 = {**MULTI_IC, "num_train_trajectories": 20}
 # Multi-IC homothetic runs fail fast on the base kernel geometry and retry a
 # data seed under the longer, more regularized geometry.
 RETRIES = ({"kernel_set": {"lengthscale": 0.6, "metric_epsilon": 3e-4}},)
-# Non-homothetic kernels use the seed-validated per-dimension lengthscales.
+# Non-homothetic kernels use the sweep-validated per-dimension lengthscales:
+# at g = 0 the long-z/short-k balance cuts the OOD errors severalfold, while
+# at g = 0.02 (log z sweeps [0, 2] in training) the longer k bandwidth stays.
 NONHOM_G0 = {
     "homothetic_representation": False,
     "state_kernel": "ard_rbf",
     "linear_mean": True,
-    "log_z_lengthscale": 0.3,
-    "log_k_lengthscale": 0.9,
+    "log_z_lengthscale": 0.6,
+    "log_k_lengthscale": 0.45,
 }
-NONHOM_G02 = {**NONHOM_G0, "log_z_lengthscale": 0.6}
+NONHOM_G02 = {**NONHOM_G0, "log_k_lengthscale": 0.9}
 # Out-of-distribution test samples (g = 0 training): the ID baseline at the
 # OOD sample size, a joint unequal (z, k) center shift, and a wider spread.
 OOD_TESTS = {

@@ -47,13 +47,10 @@ from utilities import OptimizerSettings, unit_softplus
 class DataSettings:
     collocation_source: Literal["exact_path"] = "exact_path"
     train_T: float = 100.0
-    # Number of fixed RKHS centers placed along the exact path. Unlike the
-    # recursive NN, nothing is integrated during training, so this is a
-    # representation size rather than a collocation grid over a rollout.
+    # Fixed RKHS centers on the exact path: a representation size, not a
+    # rollout grid (nothing is integrated during training).
     train_points: int = 65
-    # Held-out paths are fixed-step RK4 read off the integrator's own states:
-    # ``test_points`` points from ``test_points - 1`` steps, initial condition
-    # included, so nothing is interpolated.
+    # Held-out paths are fixed-step RK4 on the integrator's own states.
     test_points: int = 41
     tvc_steps: int = 256
     train_tvc_T: float = 200.0
@@ -72,13 +69,9 @@ class StateKernelSettings:
     # With the free constant, theta is (alpha, h_const) and only alpha is
     # penalized; without it the policy is the pure RKHS expansion.
     free_constant: bool = True
-    # Homothetic: 1-D RBF expansion on q = log k - log z with the delta * k
-    # output anchor. Non-homothetic: a 2-D expansion on the centered
-    # (log z, log k) with the constant delta * k_0 anchor; state_kernel picks
-    # product/ARD versus sum-of-1-D RBFs, the per-dimension lengthscales
-    # default to `lengthscale` when unset, and linear_mean appends two
-    # unpenalized coefficients on the centered states (the RBF expansion
-    # decays to the constant mean off-support).
+    # Homothetic: 1-D RBF on log(k/z). Non-homothetic: 2-D RBF on the centered
+    # (log z, log k); lengthscales default per axis to `lengthscale`, and
+    # linear_mean appends two unpenalized linear coefficients.
     homothetic_representation: bool = True
     state_kernel: Literal["ard_rbf", "additive_rbf"] = "ard_rbf"
     log_z_lengthscale: float | None = None
@@ -89,9 +82,7 @@ class StateKernelSettings:
 @dataclass(frozen=True)
 class StoppingCriteria:
     max_steps: int = 100
-    # RMS Euler at 1e-5 is far below economic significance; the tighter 5e-6
-    # criterion left the near-BGP-clustered multi-trajectory designs grinding
-    # in a flat h_const/alpha valley without improving the policy.
+    # RMS Euler at 1e-5 is far below economic significance.
     residual_atol: float = 1e-5
     gtol: float = 1e-7
     log_tvc_threshold: float = 0.0
@@ -246,12 +237,8 @@ def raw_policy(theta, args, log_state, kernel_set):
     return h
 
 
-# Same output maps as the recursive NN. Homothetic: i = delta * k *
-# unit_softplus(h), so zero theta invests exactly delta k (capital at rest in
-# levels). Non-homothetic: i = delta * k_0 * unit_softplus(h), a constant
-# anchor with no scale tied to the state. Investment is positive and
-# consumption Y - i is unclamped either way; only delta and the state enter
-# the map.
+# Same output maps as the recursive NN: unit softplus of the raw policy
+# anchored at delta * k (homothetic) or the constant delta * k_0.
 def investment(theta, args, log_state, p, kernel_set):
     raw = raw_policy(theta, args, log_state, kernel_set)
     if kernel_set.homothetic_representation:

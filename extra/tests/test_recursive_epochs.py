@@ -42,7 +42,7 @@ def solve(stop_set):
 
 class EpochModeTests(unittest.TestCase):
     def test_single_epoch_solve_matches_pinned_values(self):
-        # Values recorded from the pre-epoch solver on the same seed.
+        # Pinned same-seed reference values.
         results, _ = solve(
             StoppingCriteria(max_steps=60, num_attempts=2, train_loss_threshold=1e-12)
         )

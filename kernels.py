@@ -73,10 +73,8 @@ def rbf_state_gram(centers, sigma, ell):
     return rbf_state_features(centers[:, None], centers, sigma, ell).squeeze(1)
 
 
-# Vector-state RBF kernels over x in R^D with centers (M, D) and per-dimension
-# lengthscales (D,). The ARD kernel is the product of per-dimension 1-D RBFs
-# sharing one amplitude; the additive kernel is the sum of per-dimension 1-D
-# RBFs with per-dimension amplitudes (D,).
+# Vector-state RBF kernels: ARD is the product of per-dimension 1-D RBFs with
+# one amplitude, additive their sum with per-dimension amplitudes.
 
 
 def ard_rbf_state_features(x, centers, sigma, lengthscales):

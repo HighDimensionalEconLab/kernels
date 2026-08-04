@@ -40,10 +40,8 @@ class StructuralParameters:
 
 @dataclass(frozen=True)
 class DataSettings:
-    # Every rollout is fixed-step RK4 evaluated on the integrator's own states:
-    # ``n`` points come from ``n - 1`` steps of ``T / (n - 1)``, including the
-    # initial condition. Training places a residual on every knot; the held-out
-    # path reports on the same states, so nothing is interpolated.
+    # Fixed-step RK4 on the integrator's own states: n points from n - 1
+    # steps including the initial condition, so nothing is interpolated.
     train_points: int = 65
     test_points: int = 41
     tvc_steps: int = 256
@@ -57,24 +55,17 @@ class DataSettings:
 
 @dataclass(frozen=True)
 class InitialConditionSettings:
-    # One data_seed fixes both the training and held-out draws (its key is
-    # split into independent train and test streams), and it is kept separate
-    # from the NN initialization seed so every NN seed and the deterministic
-    # kernel face identical initial conditions. Train and test are independent
-    # draws centered on the same scalar (z_0, k_0); each of log z_0 and
-    # log k_0 receives an independent centered draw with the exact requested
-    # population variance, so a zero variance pins that axis at its base.
+    # One data_seed fixes independent train and test draws around (z_0, k_0),
+    # separate from the NN seed; a zero log variance pins its axis at the base.
     data_seed: int = 0
     num_train_trajectories: int = 1
     num_test_trajectories: int = 50
     train_log_z_variance: float = 0.0
     train_log_k_variance: float = 0.0
-    # Held-out draws inherit the training variances when None; setting a value
-    # overrides per axis. The resolved values are recorded in results.
+    # None inherits the training variances; results record the resolved values.
     test_log_z_variance: float | None = None
     test_log_k_variance: float | None = None
-    # Held-out draws recenter on these when set (out-of-distribution testing);
-    # None keeps the training center (z_0, k_0).
+    # Recenter the held-out draws when set (out-of-distribution testing).
     test_z_0: float | None = None
     test_k_0: float | None = None
 
@@ -118,14 +109,9 @@ class InvestmentPolicySettings:
     homothetic_representation: bool = True
 
 
-# i = anchor * U(h(features)) with U the unit softplus (U(0) = U'(0) = 1) and
-# a near-zero head, so investment is positive and consumption Y - i is
-# unclamped (an infeasible iterate is a loud NaN residual). Homothetic: the
-# features are q = log(k/z) alone and the anchor delta * k carries the
-# degree-one scale, so kdot/k = delta * (U(h) - 1) starts capital at rest in
-# levels. Non-homothetic: the features are the centered (log z, log k) and the
-# anchor is the constant delta * k_scale, so nothing ties the policy's scale
-# to the state. Only delta and the state enter the map either way.
+# i = anchor * U(h), U the unit softplus with near-zero head: homothetic is
+# h(log(k/z)) anchored at delta * k, non-homothetic h(centered log z, log k)
+# anchored at the constant delta * k_scale; consumption Y - i stays unclamped.
 class InvestmentPolicyNN(nnx.Module):
     def __init__(
         self,
@@ -267,9 +253,8 @@ def standardized_log_initial_states(key, log_base, scales, num_trajectories):
     return log_base[None, :] + scales[None, :] * standardized
 
 
-# Runs after every LM update; at each epoch boundary it redraws the training
-# ICs, stops on a nonfinite or (optionally) converged fresh-batch loss, and
-# otherwise continues on the fresh batch with damping reset.
+# At each interior epoch boundary: redraw the training ICs, stop on a
+# nonfinite or converged fresh-batch loss, else continue with damping reset.
 @dataclass(frozen=True)
 class EpochCallback:
     num_train_trajectories: int
@@ -608,9 +593,8 @@ def add_benchmark_path_diagnostics(
     return k_error, c_error, test_summary_df
 
 
-# nnx.jit rather than jax.jit so the same compiled evaluation serves both
-# policy types: the NN policy is an nnx.Module (split/merged at the boundary)
-# and the kernel policy is a plain flax.struct pytree.
+# nnx.jit so one compiled evaluation serves both the nnx policy and the
+# kernel policy pytree.
 @nnx.jit
 def trajectory_values(policy, log_states, p):
     shape = log_states.shape[:-1]
@@ -641,9 +625,8 @@ def trajectory_values(policy, log_states, p):
 SCALE_INVARIANCE_LAMBDAS = (math.exp(-0.25), 1.0, math.exp(0.25))
 
 
-# i/k at matched kappa under the common scales (z, k) -> (lam z, lam k):
-# homothetic policies are exactly invariant across the three columns, so the
-# dispersion measures scale sensitivity directly.
+# i/k at matched kappa under common scales (z, k) -> (lam z, lam k); the
+# dispersion across columns is zero iff the policy is homothetic.
 def scale_invariance_columns(policy, kappa_grid, p, dtype, suffix):
     log_lambdas = jnp.log(jnp.asarray(SCALE_INVARIANCE_LAMBDAS, dtype=dtype))
     log_kappa = jnp.log(jnp.asarray(kappa_grid, dtype=dtype))
@@ -892,8 +875,7 @@ def neoclassical_growth_nn_recursive(
         )
     policy = nnx.merge(graphdef, result.x, fixed_state)
 
-    # All training diagnostics use the batch the solution was returned on; it
-    # equals the initial draw unless an epoch callback resampled it.
+    # Training diagnostics use the batch the solution was returned on.
     train_batch_log_states = result.args.initial_log_states
     train_batch_initial_conditions = jnp.exp(train_batch_log_states)
     train_solution = collocation_rollout(policy, train_batch_log_states, p, data_set)

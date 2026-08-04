@@ -14,7 +14,15 @@ import pandas as pd
 from flax import struct
 from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
 
-from kernels import rbf_state_features, rbf_state_gram, rkhs_norm_squared
+from kernels import (
+    additive_rbf_state_features,
+    additive_rbf_state_gram,
+    ard_rbf_state_features,
+    ard_rbf_state_gram,
+    rbf_state_features,
+    rbf_state_gram,
+    rkhs_norm_squared,
+)
 from neoclassical_growth_nn_recursive import (
     STATUS_TO_REASON,
     InitialConditionSettings,
@@ -67,6 +75,18 @@ class StateKernelSettings:
     # With the free constant, theta is (alpha, h_const) and only alpha is
     # penalized; without it the policy is the pure RKHS expansion.
     free_constant: bool = True
+    # Homothetic: 1-D RBF expansion on q = log k - log z with the delta * k
+    # output anchor. Non-homothetic: a 2-D expansion on the centered
+    # (log z, log k) with the constant delta * k_0 anchor; state_kernel picks
+    # product/ARD versus sum-of-1-D RBFs, the per-dimension lengthscales
+    # default to `lengthscale` when unset, and linear_mean appends two
+    # unpenalized coefficients on the centered states (the RBF expansion
+    # decays to the constant mean off-support).
+    homothetic_representation: bool = True
+    state_kernel: Literal["ard_rbf", "additive_rbf"] = "ard_rbf"
+    log_z_lengthscale: float | None = None
+    log_k_lengthscale: float | None = None
+    linear_mean: bool = False
 
 
 @dataclass(frozen=True)
@@ -95,6 +115,17 @@ class ResidualArgs:
     centers: jax.Array
     train_log_states: jax.Array
     gram: jax.Array
+    state_offset: jax.Array
+    k_scale: jax.Array
+
+
+def state_lengthscales(kernel_set):
+    ell_z = kernel_set.log_z_lengthscale
+    ell_k = kernel_set.log_k_lengthscale
+    return (
+        kernel_set.lengthscale if ell_z is None else ell_z,
+        kernel_set.lengthscale if ell_k is None else ell_k,
+    )
 
 
 def validate_settings(data_set, kernel_set, lm_set):
@@ -116,6 +147,12 @@ def validate_settings(data_set, kernel_set, lm_set):
         raise ValueError("kernel amplitude and lengthscale must be positive")
     if kernel_set.metric_epsilon <= 0.0:
         raise ValueError("metric_epsilon must be positive")
+    if kernel_set.state_kernel not in ("ard_rbf", "additive_rbf"):
+        raise ValueError(f"unknown state_kernel: {kernel_set.state_kernel!r}")
+    if not all(ell > 0.0 for ell in state_lengthscales(kernel_set)):
+        raise ValueError("per-dimension lengthscales must be positive when set")
+    if kernel_set.linear_mean and kernel_set.homothetic_representation:
+        raise ValueError("linear_mean requires homothetic_representation=False")
     if lm_set.ridge <= 0.0:
         raise ValueError("ridge must be positive")
 
@@ -152,42 +189,88 @@ def fixed_collocation_data(
     )
 
 
-def build_residual_args(train_log_states, kernel_set):
+def build_residual_args(train_log_states, kernel_set, z_0=1.0, k_0=1.0):
     flat_states = train_log_states.reshape(-1, 2)
-    centers = flat_states[:, 1] - flat_states[:, 0]
-    gram = rbf_state_gram(
-        centers,
-        jnp.asarray(kernel_set.amplitude, centers.dtype),
-        jnp.asarray(kernel_set.lengthscale, centers.dtype),
-    )
+    dtype = flat_states.dtype
+    state_offset = jnp.log(jnp.asarray([z_0, k_0], dtype))
+    if kernel_set.homothetic_representation:
+        centers = flat_states[:, 1] - flat_states[:, 0]
+        gram = rbf_state_gram(
+            centers,
+            jnp.asarray(kernel_set.amplitude, dtype),
+            jnp.asarray(kernel_set.lengthscale, dtype),
+        )
+    else:
+        centers = flat_states - state_offset
+        lengthscales = jnp.asarray(state_lengthscales(kernel_set), dtype)
+        if kernel_set.state_kernel == "ard_rbf":
+            gram = ard_rbf_state_gram(
+                centers, jnp.asarray(kernel_set.amplitude, dtype), lengthscales
+            )
+        else:
+            gram = additive_rbf_state_gram(
+                centers, jnp.full(2, kernel_set.amplitude, dtype), lengthscales
+            )
     gram = (gram + gram.T) / 2.0
     return ResidualArgs(
         centers=centers,
         train_log_states=flat_states,
         gram=gram,
+        state_offset=state_offset,
+        k_scale=jnp.asarray(k_0, dtype),
     )
 
 
 def raw_policy(theta, args, log_state, kernel_set):
     alpha = theta[0]
-    h_const = theta[1] if len(theta) > 1 else jnp.zeros((), alpha.dtype)
-    q = log_state[1] - log_state[0]
-    features = rbf_state_features(
-        q,
-        args.centers,
-        jnp.asarray(kernel_set.amplitude, q.dtype),
-        jnp.asarray(kernel_set.lengthscale, q.dtype),
-    )
-    return h_const + features @ alpha
+    if kernel_set.homothetic_representation:
+        q = log_state[1] - log_state[0]
+        features = rbf_state_features(
+            q,
+            args.centers,
+            jnp.asarray(kernel_set.amplitude, q.dtype),
+            jnp.asarray(kernel_set.lengthscale, q.dtype),
+        )
+        h = features @ alpha
+    else:
+        x = log_state - args.state_offset
+        lengthscales = jnp.asarray(state_lengthscales(kernel_set), x.dtype)
+        if kernel_set.state_kernel == "ard_rbf":
+            features = ard_rbf_state_features(
+                x,
+                args.centers,
+                jnp.asarray(kernel_set.amplitude, x.dtype),
+                lengthscales,
+            )
+        else:
+            features = additive_rbf_state_features(
+                x,
+                args.centers,
+                jnp.full(2, kernel_set.amplitude, x.dtype),
+                lengthscales,
+            )
+        h = features @ alpha
+        # The linear-mean coefficients are the last theta leaf, after the free
+        # constant when both are present; like h_const they are unpenalized.
+        if kernel_set.linear_mean:
+            h = h + x @ theta[-1]
+    if kernel_set.free_constant and len(theta) > 1:
+        h = h + theta[1]
+    return h
 
 
-# Same output map as the recursive NN: i = delta * k * unit_softplus(h), so
-# zero theta invests exactly delta k (capital at rest in levels), investment
-# is positive, and consumption Y - i is unclamped. Only delta and the state
-# enter the map; the RKHS expansion on q is the sole homothetic ingredient.
+# Same output maps as the recursive NN. Homothetic: i = delta * k *
+# unit_softplus(h), so zero theta invests exactly delta k (capital at rest in
+# levels). Non-homothetic: i = delta * k_0 * unit_softplus(h), a constant
+# anchor with no scale tied to the state. Investment is positive and
+# consumption Y - i is unclamped either way; only delta and the state enter
+# the map.
 def investment(theta, args, log_state, p, kernel_set):
-    k = jnp.exp(log_state[1])
-    return p.delta * k * unit_softplus(raw_policy(theta, args, log_state, kernel_set))
+    raw = raw_policy(theta, args, log_state, kernel_set)
+    if kernel_set.homothetic_representation:
+        k = jnp.exp(log_state[1])
+        return p.delta * k * unit_softplus(raw)
+    return p.delta * args.k_scale * unit_softplus(raw)
 
 
 @struct.dataclass
@@ -296,8 +379,8 @@ def neoclassical_growth_kernel_recursive(
         data_set,
         dtype=dtype,
     )
-    args = build_residual_args(train_log_states, kernel_set)
-    n_train = args.centers.size
+    args = build_residual_args(train_log_states, kernel_set, z_0, k_0)
+    n_train = args.centers.shape[0]
     shifted_gram = args.gram + kernel_set.metric_epsilon * jnp.eye(n_train, dtype=dtype)
     metric = RepeatedFactorMetric(
         jnp.linalg.cholesky(shifted_gram, upper=True),
@@ -306,6 +389,8 @@ def neoclassical_growth_kernel_recursive(
     theta_0 = (jnp.zeros(n_train, dtype=dtype),)
     if kernel_set.free_constant:
         theta_0 = theta_0 + (jnp.zeros((), dtype=dtype),)
+    if kernel_set.linear_mean:
+        theta_0 = theta_0 + (jnp.zeros(2, dtype=dtype),)
     solver = RidgeLevenbergMarquardt(
         partial(residual_fn, kernel_set=kernel_set),
         metric=metric,
@@ -437,9 +522,18 @@ def neoclassical_growth_kernel_recursive(
         "test_k_0": test_k_center,
         "data_seed": ic_set.data_seed,
         "residual_dtype": str(jnp.dtype(dtype)),
-        "policy": "delta_k_unit_softplus",
-        "state_coordinate": "log(k / z)",
-        "kernel": "rbf",
+        "homothetic_representation": kernel_set.homothetic_representation,
+        "policy": (
+            "delta_k_unit_softplus"
+            if kernel_set.homothetic_representation
+            else "delta_k0_unit_softplus"
+        ),
+        "state_coordinate": (
+            "log(k / z)" if kernel_set.homothetic_representation else "(log z, log k)"
+        ),
+        "kernel": (
+            "rbf" if kernel_set.homothetic_representation else kernel_set.state_kernel
+        ),
         "amplitude": kernel_set.amplitude,
         "lengthscale": kernel_set.lengthscale,
         "metric_epsilon": kernel_set.metric_epsilon,
@@ -451,11 +545,13 @@ def neoclassical_growth_kernel_recursive(
         ),
         "ridge": lm_set.ridge,
         "free_constant": kernel_set.free_constant,
+        "linear_mean": kernel_set.linear_mean,
         "h_const": h_const,
         "rkhs_norm": float(rkhs_norm_squared(alpha, args.gram)),
         "shifted_metric_norm": float(rkhs_norm_squared(alpha, shifted_gram)),
         "penalized_parameter_count": n_train,
-        "unpenalized_parameter_count": 1 if kernel_set.free_constant else 0,
+        "unpenalized_parameter_count": (1 if kernel_set.free_constant else 0)
+        + (2 if kernel_set.linear_mean else 0),
         "gram_min_eigenvalue": float(gram_eigenvalues[0]),
         "gram_max_eigenvalue": float(gram_eigenvalues[-1]),
         "shifted_gram_condition": float(jnp.linalg.cond(shifted_gram)),
@@ -499,6 +595,13 @@ def neoclassical_growth_kernel_recursive(
         "test_T": test_T,
         "train_tvc_T": data_set.train_tvc_T,
     }
+    if not kernel_set.homothetic_representation:
+        ell_z, ell_k = state_lengthscales(kernel_set)
+        results.update(
+            state_kernel=kernel_set.state_kernel,
+            log_z_lengthscale=ell_z,
+            log_k_lengthscale=ell_k,
+        )
     results.update(
         test_pooled_median_abs_k_rel_error=float(np.median(np.abs(k_error))),
         test_pooled_median_abs_c_rel_error=float(np.median(np.abs(c_error))),

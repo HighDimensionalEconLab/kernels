@@ -73,6 +73,30 @@ def rbf_state_gram(centers, sigma, ell):
     return rbf_state_features(centers[:, None], centers, sigma, ell).squeeze(1)
 
 
+# Vector-state RBF kernels over x in R^D with centers (M, D) and per-dimension
+# lengthscales (D,). The ARD kernel is the product of per-dimension 1-D RBFs
+# sharing one amplitude; the additive kernel is the sum of per-dimension 1-D
+# RBFs with per-dimension amplitudes (D,).
+
+
+def ard_rbf_state_features(x, centers, sigma, lengthscales):
+    scaled = (x[..., None, :] - centers) / lengthscales
+    return sigma**2 * jnp.exp(-0.5 * jnp.sum(scaled**2, axis=-1))
+
+
+def ard_rbf_state_gram(centers, sigma, lengthscales):
+    return ard_rbf_state_features(centers, centers, sigma, lengthscales)
+
+
+def additive_rbf_state_features(x, centers, sigmas, lengthscales):
+    scaled = (x[..., None, :] - centers) / lengthscales
+    return jnp.sum(sigmas**2 * jnp.exp(-0.5 * scaled**2), axis=-1)
+
+
+def additive_rbf_state_gram(centers, sigmas, lengthscales):
+    return additive_rbf_state_features(centers, centers, sigmas, lengthscales)
+
+
 # Each half-integer Matern kernel is sigma^2 pi(a d) e^{-a d} with pi a
 # degree-p polynomial and a the decay rate below; its antiderivative is
 # h(d) = int_0^d k = (sigma^2/a) [c - e^{-a d} eta(a d)] with eta a degree-p

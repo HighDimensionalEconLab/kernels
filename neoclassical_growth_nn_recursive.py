@@ -114,18 +114,43 @@ class InvestmentPolicySettings:
     depth: int = 3
     hidden_activation: str = "gelu"
     head_init_scale: float = 1e-3
+    homothetic_representation: bool = True
 
 
-# i = delta * k * U(h(q)) with U the unit softplus (U(0) = U'(0) = 1), so
-# kdot/k = delta * (U(h) - 1): the near-zero head starts capital at rest in
-# levels, investment is positive, and consumption Y - i is unclamped (an
-# infeasible iterate is a loud NaN residual). Only delta and the state enter
-# the map; homotheticity appears only through the head input q = log(k/z).
+# i = anchor * U(h(features)) with U the unit softplus (U(0) = U'(0) = 1) and
+# a near-zero head, so investment is positive and consumption Y - i is
+# unclamped (an infeasible iterate is a loud NaN residual). Homothetic: the
+# features are q = log(k/z) alone and the anchor delta * k carries the
+# degree-one scale, so kdot/k = delta * (U(h) - 1) starts capital at rest in
+# levels. Non-homothetic: the features are the centered (log z, log k) and the
+# anchor is the constant delta * k_scale, so nothing ties the policy's scale
+# to the state. Only delta and the state enter the map either way.
 class InvestmentPolicyNN(nnx.Module):
-    def __init__(self, settings: InvestmentPolicySettings, *, dtype, rngs: nnx.Rngs):
+    def __init__(
+        self,
+        settings: InvestmentPolicySettings,
+        *,
+        z_scale=1.0,
+        k_scale=1.0,
+        dtype,
+        rngs: nnx.Rngs,
+    ):
+        self.homothetic = settings.homothetic_representation
+        self.log_z_scale = math.log(z_scale)
+        self.log_k_scale = math.log(k_scale)
+        self.k_scale = k_scale
         self.hidden_activation = ACTIVATIONS[settings.hidden_activation]
+        in_features = 1 if self.homothetic else 2
         self.layers = nnx.List(
-            [nnx.Linear(1, settings.width, dtype=dtype, param_dtype=dtype, rngs=rngs)]
+            [
+                nnx.Linear(
+                    in_features,
+                    settings.width,
+                    dtype=dtype,
+                    param_dtype=dtype,
+                    rngs=rngs,
+                )
+            ]
         )
         for _ in range(settings.depth - 1):
             self.layers.append(
@@ -149,21 +174,29 @@ class InvestmentPolicyNN(nnx.Module):
 
     def __call__(self, log_state, p):
         log_z, log_k = log_state
-        h = jnp.atleast_1d(log_k - log_z)
+        if self.homothetic:
+            h = jnp.atleast_1d(log_k - log_z)
+            anchor = p.delta * jnp.exp(log_k)
+        else:
+            h = jnp.stack([log_z - self.log_z_scale, log_k - self.log_k_scale])
+            anchor = p.delta * self.k_scale
         for layer in self.layers:
             h = self.hidden_activation(layer(h))
-        k = jnp.exp(log_k)
-        return p.delta * k * unit_softplus(self.head(h)[0])
+        return anchor * unit_softplus(self.head(h)[0])
 
 
 @dataclass(frozen=True)
 class DrawInvestmentPolicy:
     settings: InvestmentPolicySettings
     dtype: object
+    z_scale: float = 1.0
+    k_scale: float = 1.0
 
     def __call__(self, key, _, args):
         module = InvestmentPolicyNN(
             self.settings,
+            z_scale=self.z_scale,
+            k_scale=self.k_scale,
             dtype=self.dtype,
             rngs=nnx.Rngs(key),
         )
@@ -633,7 +666,11 @@ def neoclassical_growth_nn_recursive(
     fit_start = time.perf_counter()
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     graphdef, _, fixed_state = nnx.split(
-        InvestmentPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(0)), nnx.Param, ...
+        InvestmentPolicyNN(
+            nn_set, z_scale=z_0, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(0)
+        ),
+        nnx.Param,
+        ...,
     )
     residual_args = ResidualArgs(
         graphdef=graphdef,
@@ -649,12 +686,14 @@ def neoclassical_growth_nn_recursive(
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
     _, theta_0, _ = nnx.split(
-        InvestmentPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(init_key)),
+        InvestmentPolicyNN(
+            nn_set, z_scale=z_0, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(init_key)
+        ),
         nnx.Param,
         ...,
     )
     atol = math.sqrt(stop_set.train_loss_threshold)
-    draw = DrawInvestmentPolicy(nn_set, dtype)
+    draw = DrawInvestmentPolicy(nn_set, dtype, z_0, k_0)
 
     start_time = time.perf_counter()
     result = solver.solve(
@@ -737,8 +776,15 @@ def neoclassical_growth_nn_recursive(
     collocation_kappa_spread = float(np.max(train_kappa) / np.min(train_kappa))
     results = {
         "variant": "recursive_nn",
-        "policy": "delta_k_unit_softplus",
-        "state_coordinate": "log(k / z)",
+        "homothetic_representation": nn_set.homothetic_representation,
+        "policy": (
+            "delta_k_unit_softplus"
+            if nn_set.homothetic_representation
+            else "delta_k0_unit_softplus"
+        ),
+        "state_coordinate": (
+            "log(k / z)" if nn_set.homothetic_representation else "(log z, log k)"
+        ),
         "a": a,
         "delta": delta,
         "rho_hat": rho_hat,

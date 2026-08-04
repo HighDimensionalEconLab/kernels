@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import jax
 import jsonargparse
 
@@ -37,10 +39,38 @@ MULTI_IC = {
     "test_log_z_variance": 0.0025,
     "test_log_k_variance": 0.0025,
 }
+MULTI_IC_X4 = {**MULTI_IC, "num_train_trajectories": 20}
+# Multi-IC homothetic runs fail fast on the base kernel geometry and retry a
+# data seed under the longer, more regularized geometry.
+RETRIES = ({"kernel_set": {"lengthscale": 0.6, "metric_epsilon": 3e-4}},)
+# Non-homothetic kernels use the seed-validated per-dimension lengthscales.
+NONHOM_G0 = {
+    "homothetic_representation": False,
+    "state_kernel": "ard_rbf",
+    "linear_mean": True,
+    "log_z_lengthscale": 0.3,
+    "log_k_lengthscale": 0.9,
+}
+NONHOM_G02 = {**NONHOM_G0, "log_z_lengthscale": 0.6}
+OOD_SHIFT = math.exp(0.25)
+# Out-of-distribution test samples (g = 0 training): the ID baseline at the
+# OOD sample size, single-axis center shifts, and a wider spread.
+OOD_TESTS = {
+    "id50": {},
+    "shift_k": {"test_k_0": OOD_SHIFT},
+    "shift_z": {"test_z_0": OOD_SHIFT},
+    "spread": {"test_log_z_variance": 0.04, "test_log_k_variance": 0.04},
+}
+OOD_BASE = {
+    "num_test_trajectories": 50,
+    "test_log_z_variance": 0.0025,
+    "test_log_k_variance": 0.0025,
+}
 DIAGNOSTIC_COLUMNS = [
     "max_train_euler",
     "max_test_euler",
     "max_log_tvc_residual",
+    "test_mean_log_tvc_residual",
     "test_mean_abs_k_rel_error",
     "test_mean_abs_c_rel_error",
     "steps",
@@ -58,6 +88,7 @@ def run(
     output_dir: str = ".results",
     n_data_seeds: int = 5,
     use_float64: bool = True,
+    experiments: list[str] | None = None,
     verbose: bool = False,
 ):
     meta = dict(
@@ -65,48 +96,81 @@ def run(
         residual_dtype="float64" if use_float64 else "float32",
     )
 
+    # (g, ic overrides, kernel_set overrides, retry ladder) per data-seed sweep.
+    all_experiments = {
+        "multi_ic_g0": (0.0, MULTI_IC, None, RETRIES),
+        "multi_ic_g02": (0.02, MULTI_IC, None, RETRIES),
+        "multi_ic_g0_nonhom": (0.0, MULTI_IC, NONHOM_G0, ()),
+        "multi_ic_g02_nonhom": (0.02, MULTI_IC, NONHOM_G02, ()),
+        "multi_ic_g0_x4": (0.0, MULTI_IC_X4, None, RETRIES),
+        "multi_ic_g02_x4": (0.02, MULTI_IC_X4, None, RETRIES),
+        "multi_ic_g0_x4_nonhom": (0.0, MULTI_IC_X4, NONHOM_G0, ()),
+        "multi_ic_g02_x4_nonhom": (0.02, MULTI_IC_X4, NONHOM_G02, ()),
+    }
+    for train_tag, train_ic in (("n5", MULTI_IC), ("n20", MULTI_IC_X4)):
+        for rep_tag, kernel_set, retries in (
+            ("hom", None, RETRIES),
+            ("nonhom", NONHOM_G0, ()),
+        ):
+            for test_tag, test_ic in OOD_TESTS.items():
+                all_experiments[f"ood_{rep_tag}_{train_tag}_{test_tag}"] = (
+                    0.0,
+                    {**train_ic, **OOD_BASE, **test_ic},
+                    kernel_set,
+                    retries,
+                )
+    run_single = experiments is None or "single_ic_g0" in experiments
+    if experiments is not None:
+        unknown = set(experiments) - set(all_experiments) - {"single_ic_g0"}
+        if unknown:
+            raise ValueError(f"unknown experiments: {sorted(unknown)}")
+        all_experiments = {
+            name: spec for name, spec in all_experiments.items() if name in experiments
+        }
+
     # The kernel is deterministic given its data draw: the single-IC case is
     # timed over repeated solves, while the multi-IC cases sweep the data seed
     # so the sensitivity to the drawn initial conditions is measured.
-    print(f"single_ic_g0 -> {output_dir}/")
-    results_df, frames, hyperparameters = ensemble(
-        SOLVER,
-        1,
-        options={
+    if run_single:
+        print(f"single_ic_g0 -> {output_dir}/")
+        results_df, frames, hyperparameters = ensemble(
+            SOLVER,
+            1,
+            options={
+                "use_float64": use_float64,
+                "verbose": verbose,
+                "g": 0.0,
+                "ic_set": {"data_seed": 0, **SINGLE_IC},
+            },
+        )
+        save_experiment(
+            "single_ic_g0",
+            results_df,
+            frames,
+            output_dir,
+            meta,
+            prefix=PREFIX,
+            hyperparameters=hyperparameters,
+        )
+        report("single_ic_g0", results_df)
+
+    for name, (g, ic_set, kernel_set, retries) in all_experiments.items():
+        print(f"{name}: {n_data_seeds} data seeds -> {output_dir}/")
+        options = {
             "use_float64": use_float64,
             "verbose": verbose,
-            "g": 0.0,
-            "ic_set": {"data_seed": 0, **SINGLE_IC},
-        },
-    )
-    save_experiment(
-        "single_ic_g0",
-        results_df,
-        frames,
-        output_dir,
-        meta,
-        prefix=PREFIX,
-        hyperparameters=hyperparameters,
-    )
-    report("single_ic_g0", results_df)
-
-    for name, g in (("multi_ic_g0", 0.0), ("multi_ic_g02", 0.02)):
-        print(f"{name}: {n_data_seeds} data seeds -> {output_dir}/")
-        # Converging solves finish in ~20 LM steps, so fail fast on the base
-        # kernel geometry and retry a data seed under the longer, more
-        # regularized geometry; each row records the geometry that produced it.
+            "g": g,
+            "ic_set": dict(ic_set),
+            "stop_set": {"max_steps": 60},
+        }
+        if kernel_set is not None:
+            options["kernel_set"] = dict(kernel_set)
         results_df, frames, hyperparameters = sweep(
             SOLVER,
             "ic_set.data_seed",
             range(n_data_seeds),
-            options={
-                "use_float64": use_float64,
-                "verbose": verbose,
-                "g": g,
-                "ic_set": dict(MULTI_IC),
-                "stop_set": {"max_steps": 60},
-            },
-            retries=({"kernel_set": {"lengthscale": 0.6, "metric_epsilon": 3e-4}},),
+            options=options,
+            retries=retries,
         )
         save_experiment(
             name,
@@ -120,7 +184,11 @@ def run(
         report(name, results_df)
 
     write_summary(
-        output_dir, PREFIX, experiments={"single_ic_g0", "multi_ic_g0", "multi_ic_g02"}
+        output_dir,
+        PREFIX,
+        experiments={"single_ic_g0", *all_experiments}
+        if run_single
+        else set(all_experiments),
     )
 
 

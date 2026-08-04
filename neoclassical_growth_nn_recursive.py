@@ -454,7 +454,14 @@ def log_tvc_residual(policy, initial_log_states, T_start, T_end, p, data_set):
     k_0 = jnp.exp(initial_log_states[:, 1])
     initial_log_tvc = -p.sigma_crra * jnp.log(c_0) + jnp.log(k_0)
     normalized_log_tvc = log_tvc - initial_log_tvc[:, None]
-    return jnp.max(jnp.where(valid, normalized_log_tvc, -jnp.inf)), solution.ok
+    # Alongside the windowed max, the per-trajectory certificate at the single
+    # terminal date T_end; a failed rollout is a loud +inf.
+    terminal_log_tvc = jnp.where(solution.ok, normalized_log_tvc[:, -1], jnp.inf)
+    return (
+        jnp.max(jnp.where(valid, normalized_log_tvc, -jnp.inf)),
+        terminal_log_tvc,
+        solution.ok,
+    )
 
 
 @lru_cache(maxsize=None)
@@ -628,6 +635,30 @@ def trajectory_values(policy, log_states, p):
         "dk": dk,
         "dkappa": dkappa,
         "euler_residual": euler,
+    }
+
+
+SCALE_INVARIANCE_LAMBDAS = (math.exp(-0.25), 1.0, math.exp(0.25))
+
+
+# i/k at matched kappa under the common scales (z, k) -> (lam z, lam k):
+# homothetic policies are exactly invariant across the three columns, so the
+# dispersion measures scale sensitivity directly.
+def scale_invariance_columns(policy, kappa_grid, p, dtype, suffix):
+    log_lambdas = jnp.log(jnp.asarray(SCALE_INVARIANCE_LAMBDAS, dtype=dtype))
+    log_kappa = jnp.log(jnp.asarray(kappa_grid, dtype=dtype))
+    states = jnp.stack(
+        [
+            jnp.broadcast_to(log_lambdas[:, None], (len(log_lambdas), log_kappa.size)),
+            log_lambdas[:, None] + log_kappa[None, :],
+        ],
+        axis=-1,
+    )
+    values = trajectory_values(policy, states, p)
+    i_over_k = np.asarray(values["i"] / values["k"])
+    return {
+        f"i_over_k_scale_{tag}_{suffix}": i_over_k[row]
+        for row, tag in enumerate(("lo", "mid", "hi"))
     }
 
 
@@ -898,7 +929,7 @@ def neoclassical_growth_nn_recursive(
     )
     test_df = trajectory_frame(test_values, test_solution.ts, test_initial_conditions)
 
-    max_log_tvc, tvc_ok = log_tvc_residual(
+    max_log_tvc, train_terminal_log_tvc, tvc_ok = log_tvc_residual(
         policy,
         train_batch_log_states,
         data_set.train_T,
@@ -910,9 +941,22 @@ def neoclassical_growth_nn_recursive(
     transversality_ok = bool(
         jnp.all(tvc_ok) and max_log_tvc < stop_set.log_tvc_threshold
     )
+    _, test_terminal_log_tvc, test_tvc_ok = log_tvc_residual(
+        policy,
+        test_initial_log_states,
+        data_set.train_T,
+        data_set.train_tvc_T,
+        p,
+        data_set,
+    )
+    test_max_log_tvc = float(jnp.max(test_terminal_log_tvc))
+    test_transversality_ok = bool(
+        jnp.all(test_tvc_ok) and test_max_log_tvc < stop_set.log_tvc_threshold
+    )
     solver_accepted = bool(result.multi_start.accepted)
     max_train_euler = float(train_df["euler_residual"].abs().max())
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
+    test_trajectory_euler = jnp.mean(jnp.abs(test_values["euler_residual"]), axis=1)
 
     train_kappa_0 = np.asarray(
         train_batch_initial_conditions[:, 1] / train_batch_initial_conditions[:, 0]
@@ -921,6 +965,7 @@ def neoclassical_growth_nn_recursive(
         test_initial_conditions[:, 1] / test_initial_conditions[:, 0]
     )
     train_kappa = train_df["kappa"].to_numpy()
+    test_kappa = test_df["kappa"].to_numpy()
     collocation_kappa_spread = float(np.max(train_kappa) / np.min(train_kappa))
     results = {
         "variant": "recursive_nn",
@@ -952,7 +997,18 @@ def neoclassical_growth_nn_recursive(
         "max_test_euler": max_test_euler,
         "final_damping": float(result.lm_state.damping),
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_values["euler_residual"]))),
+        "test_trajectory_euler_mean_abs_p50": float(
+            jnp.quantile(test_trajectory_euler, 0.5)
+        ),
+        "test_trajectory_euler_mean_abs_p90": float(
+            jnp.quantile(test_trajectory_euler, 0.9)
+        ),
+        "test_trajectory_euler_mean_abs_max": float(jnp.max(test_trajectory_euler)),
         "max_log_tvc_residual": max_log_tvc,
+        "mean_log_tvc_residual": float(jnp.mean(train_terminal_log_tvc)),
+        "test_mean_log_tvc_residual": float(jnp.mean(test_terminal_log_tvc)),
+        "test_max_log_tvc_residual": test_max_log_tvc,
+        "test_transversality_ok": test_transversality_ok,
         "tvc_normalization": "relative_to_initial_log_certificate",
         "transversality_ok": transversality_ok,
         "min_test_c": float(jnp.min(test_values["c"])),
@@ -976,6 +1032,10 @@ def neoclassical_growth_nn_recursive(
         **collocation_diagnostics,
         "collocation_path_ok": bool(jnp.all(train_solution.ok)),
         "collocation_kappa_spread": collocation_kappa_spread,
+        "collocation_log_kappa_min": float(np.log(np.min(train_kappa))),
+        "collocation_log_kappa_max": float(np.log(np.max(train_kappa))),
+        "test_log_kappa_min": float(np.log(np.nanmin(test_kappa))),
+        "test_log_kappa_max": float(np.log(np.nanmax(test_kappa))),
         "train_kappa_0_min": float(train_kappa_0.min()),
         "train_kappa_0_max": float(train_kappa_0.max()),
         "test_kappa_0_min": float(test_kappa_0.min()),
@@ -1074,6 +1134,7 @@ def neoclassical_growth_nn_recursive(
             "i_per_z_nn": np.asarray(grid_values["i"][0]),
             "c_tilde_nn": np.asarray(grid_values["c"][0]),
             "dkappa_nn": np.asarray(grid_values["dkappa"][0]),
+            **scale_invariance_columns(policy, kappa_grid, p, dtype, "nn"),
         }
     )
     c_benchmark_grid = benchmark_policy_grid(

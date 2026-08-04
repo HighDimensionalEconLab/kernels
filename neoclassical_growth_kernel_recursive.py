@@ -36,6 +36,7 @@ from neoclassical_growth_nn_recursive import (
     positive_policy_grid,
     production,
     rollout_steps,
+    scale_invariance_columns,
     trajectory_frame,
     trajectory_values,
 )
@@ -492,7 +493,7 @@ def neoclassical_growth_kernel_recursive(
         g=g,
     )
 
-    max_log_tvc, tvc_ok = log_tvc_residual(
+    max_log_tvc, train_terminal_log_tvc, tvc_ok = log_tvc_residual(
         policy,
         jnp.log(train_initial_conditions),
         data_set.train_T,
@@ -504,9 +505,22 @@ def neoclassical_growth_kernel_recursive(
     transversality_ok = bool(
         jnp.all(tvc_ok) and max_log_tvc < stop_set.log_tvc_threshold
     )
+    _, test_terminal_log_tvc, test_tvc_ok = log_tvc_residual(
+        policy,
+        jnp.log(test_initial_conditions),
+        data_set.train_T,
+        data_set.train_tvc_T,
+        p,
+        data_set,
+    )
+    test_max_log_tvc = float(jnp.max(test_terminal_log_tvc))
+    test_transversality_ok = bool(
+        jnp.all(test_tvc_ok) and test_max_log_tvc < stop_set.log_tvc_threshold
+    )
 
     max_train_euler = float(jnp.max(jnp.abs(train_values["euler_residual"])))
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
+    test_trajectory_euler = jnp.mean(jnp.abs(test_values["euler_residual"]), axis=1)
     mean_k_error = float(np.mean(np.abs(k_error)))
     mean_c_error = float(np.mean(np.abs(c_error)))
 
@@ -518,6 +532,7 @@ def neoclassical_growth_kernel_recursive(
         test_initial_conditions[:, 1] / test_initial_conditions[:, 0]
     )
     train_kappa = train_df["kappa"].to_numpy()
+    test_kappa = test_df["kappa"].to_numpy()
     collocation_kappa_spread = float(np.max(train_kappa) / np.min(train_kappa))
     results = {
         "variant": "fixed_recursive_kernel",
@@ -572,7 +587,18 @@ def neoclassical_growth_kernel_recursive(
         "max_train_euler": max_train_euler,
         "max_test_euler": max_test_euler,
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_values["euler_residual"]))),
+        "test_trajectory_euler_mean_abs_p50": float(
+            jnp.quantile(test_trajectory_euler, 0.5)
+        ),
+        "test_trajectory_euler_mean_abs_p90": float(
+            jnp.quantile(test_trajectory_euler, 0.9)
+        ),
+        "test_trajectory_euler_mean_abs_max": float(jnp.max(test_trajectory_euler)),
         "max_log_tvc_residual": max_log_tvc,
+        "mean_log_tvc_residual": float(jnp.mean(train_terminal_log_tvc)),
+        "test_mean_log_tvc_residual": float(jnp.mean(test_terminal_log_tvc)),
+        "test_max_log_tvc_residual": test_max_log_tvc,
+        "test_transversality_ok": test_transversality_ok,
         "tvc_normalization": "relative_to_initial_log_certificate",
         "transversality_ok": transversality_ok,
         "min_test_c": float(jnp.min(test_values["c"])),
@@ -594,6 +620,10 @@ def neoclassical_growth_kernel_recursive(
         "num_test_trajectories": ic_set.num_test_trajectories,
         "num_collocation_states": n_train,
         "collocation_kappa_spread": collocation_kappa_spread,
+        "collocation_log_kappa_min": float(np.log(np.min(train_kappa))),
+        "collocation_log_kappa_max": float(np.log(np.max(train_kappa))),
+        "test_log_kappa_min": float(np.log(np.nanmin(test_kappa))),
+        "test_log_kappa_max": float(np.log(np.nanmax(test_kappa))),
         "train_kappa_0_min": float(train_kappa_0.min()),
         "train_kappa_0_max": float(train_kappa_0.max()),
         "test_kappa_0_min": float(test_kappa_0.min()),
@@ -679,6 +709,7 @@ def neoclassical_growth_kernel_recursive(
             "i_per_z_kernel": np.asarray(grid_values["i"][0]),
             "c_tilde_kernel": np.asarray(grid_values["c"][0]),
             "dkappa_kernel": np.asarray(grid_values["dkappa"][0]),
+            **scale_invariance_columns(policy, kappa_grid, p, dtype, "kernel"),
             "c_tilde_benchmark": c_benchmark_grid,
             "dkappa_benchmark": (
                 kappa_grid**a - c_benchmark_grid - (delta + g) * kappa_grid

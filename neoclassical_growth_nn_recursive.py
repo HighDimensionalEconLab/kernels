@@ -16,7 +16,7 @@ from nlls_gram import LevenbergMarquardt, LMStatus, MultiStart
 from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
-from utilities import ACTIVATIONS
+from utilities import ACTIVATIONS, unit_softplus
 
 if __name__ == "__main__":
     jax.config.update("jax_enable_x64", True)
@@ -35,10 +35,6 @@ class StructuralParameters:
     g: jax.Array
     z_0: jax.Array
     k_0: jax.Array
-    A: jax.Array
-    b_1: jax.Array
-    b_2: jax.Array
-    kappa_thr: jax.Array
 
     @classmethod
     def create(cls, dtype, **kwargs):
@@ -59,9 +55,6 @@ class DataSettings:
     train_T: float = 100.0
     train_tvc_T: float = 200.0
     test_T: float = 40.0
-    num_test_trajectories: int = 50
-    settle_T: float = 400.0
-    settle_points: int = 401
     policy_grid_size: int = 100
     benchmark_T: float = 200.0
     benchmark_points: int = 801
@@ -69,13 +62,24 @@ class DataSettings:
 
 @dataclass(frozen=True)
 class InitialConditionSettings:
-    # Kept separate from the NN initialization seed so every NN seed and the
-    # deterministic kernel face the same held-out initial conditions.
+    # One data_seed fixes both the training and held-out draws (its key is
+    # split into independent train and test streams), and it is kept separate
+    # from the NN initialization seed so every NN seed and the deterministic
+    # kernel face identical initial conditions. Train and test are independent
+    # draws centered on the same scalar (z_0, k_0); each of log z_0 and
+    # log k_0 receives an independent centered draw with the exact requested
+    # population variance, so a zero variance pins that axis at its base.
     data_seed: int = 0
-    # Each of log z_0 and log k_0 receives an independent centered draw with
-    # this exact population variance. The economic initial conditions remain
-    # the separate pair (z_0, k_0); only the approximator forms log(k/z).
-    test_log_variance: float = 0.0025
+    num_train_trajectories: int = 1
+    num_test_trajectories: int = 50
+    train_log_z_variance: float = 0.0
+    train_log_k_variance: float = 0.0
+    test_log_z_variance: float = 0.0025
+    test_log_k_variance: float = 0.0025
+    # Held-out draws recenter on these when set (out-of-distribution testing);
+    # None keeps the training center (z_0, k_0).
+    test_z_0: float | None = None
+    test_k_0: float | None = None
 
 
 @struct.dataclass
@@ -107,9 +111,14 @@ class InvestmentPolicySettings:
     width: int = 32
     depth: int = 3
     hidden_activation: str = "gelu"
-    initial_investment_share: float = 0.2
+    head_init_scale: float = 1e-3
 
 
+# i = delta * k * U(h(q)) with U the unit softplus (U(0) = U'(0) = 1), so
+# kdot/k = delta * (U(h) - 1): the near-zero head starts capital at rest in
+# levels, investment is positive, and consumption Y - i is unclamped (an
+# infeasible iterate is a loud NaN residual). Only delta and the state enter
+# the map; homotheticity appears only through the head input q = log(k/z).
 class InvestmentPolicyNN(nnx.Module):
     def __init__(self, settings: InvestmentPolicySettings, *, dtype, rngs: nnx.Rngs):
         self.hidden_activation = ACTIVATIONS[settings.hidden_activation]
@@ -126,15 +135,11 @@ class InvestmentPolicyNN(nnx.Module):
                     rngs=rngs,
                 )
             )
-        initial_logit = math.log(
-            settings.initial_investment_share
-            / (1.0 - settings.initial_investment_share)
-        )
         self.head = nnx.Linear(
             settings.width,
             1,
-            kernel_init=nnx.initializers.normal(1e-3),
-            bias_init=nnx.initializers.constant(initial_logit),
+            kernel_init=nnx.initializers.normal(settings.head_init_scale),
+            bias_init=nnx.initializers.zeros_init(),
             dtype=dtype,
             param_dtype=dtype,
             rngs=rngs,
@@ -145,9 +150,8 @@ class InvestmentPolicyNN(nnx.Module):
         h = jnp.atleast_1d(log_k - log_z)
         for layer in self.layers:
             h = self.hidden_activation(layer(h))
-        investment_share = jax.nn.sigmoid(self.head(h)[0])
-        z, k = jnp.exp(log_state)
-        return production(z, k, p) * investment_share
+        k = jnp.exp(log_k)
+        return p.delta * k * unit_softplus(self.head(h)[0])
 
 
 @dataclass(frozen=True)
@@ -166,22 +170,18 @@ class DrawInvestmentPolicy:
 
 
 STATUS_TO_REASON = {
-    LMStatus.CONVERGED: "early_stopping_met",
-    LMStatus.NONFINITE: "loss_divergence",
+    LMStatus.CONVERGED: "converged",
+    LMStatus.NONFINITE: "nonfinite",
     LMStatus.MAX_STEPS: "max_steps",
 }
 
 
 def production(z, k, p):
-    kappa = k / z
-    base = kappa**p.a
-    return z * p.A * jnp.maximum(base, p.b_1 * base - p.b_2)
+    return z * (k / z) ** p.a
 
 
 def mpk(z, k, p):
-    kappa = k / z
-    base = p.A * p.a * kappa ** (p.a - 1.0)
-    return jnp.where(kappa > p.kappa_thr, p.b_1 * base, base)
+    return p.a * (k / z) ** (p.a - 1.0)
 
 
 def consumption(policy, log_state, p):
@@ -199,74 +199,47 @@ def log_state_drift(policy, log_state, p):
 def euler_residuals(policy, log_states, p):
     def residual_scalar(log_state):
         state_drift = log_state_drift(policy, log_state, p)
-        _, dlog_c_dt = jax.jvp(
+        log_c, dlog_c_dt = jax.jvp(
             lambda state: jnp.log(consumption(policy, state, p)),
             (log_state,),
             (state_drift,),
         )
         z, k = jnp.exp(log_state)
-        return dlog_c_dt - (mpk(z, k, p) - p.delta - p.rho_hat) / p.sigma_crra
+        # The tangent c_dot / c alone is finite for negative consumption, so
+        # the zero-scaled primal log c keeps the residual NaN outside the
+        # model's domain (c <= 0) instead of quietly extending the Euler
+        # equation there. It contributes exactly zero on the feasible domain.
+        domain_guard = 0.0 * log_c
+        return (
+            dlog_c_dt
+            + domain_guard
+            - (mpk(z, k, p) - p.delta - p.rho_hat) / p.sigma_crra
+        )
 
     return jax.vmap(residual_scalar)(log_states)
 
 
-def initial_condition_array(z_0, k_0, dtype):
-    z_values = np.atleast_1d(np.asarray(z_0, dtype=float))
-    k_values = np.atleast_1d(np.asarray(k_0, dtype=float))
-    if z_values.size == 1 and k_values.size > 1:
-        z_values = np.full_like(k_values, z_values.item())
-    if k_values.size == 1 and z_values.size > 1:
-        k_values = np.full_like(z_values, k_values.item())
-    if z_values.shape != k_values.shape:
-        raise ValueError(
-            "z_0 and k_0 must be scalars or broadcastable one-dimensional lists"
-        )
-    if np.any(z_values <= 0.0) or np.any(k_values <= 0.0):
-        raise ValueError("all initial z_0 and k_0 values must be positive")
-    return jnp.asarray(np.stack([z_values, k_values], axis=1), dtype=dtype)
-
-
-def draw_test_initial_conditions(train_initial_conditions, data_set, ic_set):
-    n_test = data_set.num_test_trajectories
-    variance = ic_set.test_log_variance
-    if n_test < 1:
-        raise ValueError("num_test_trajectories must be positive")
-    if variance < 0.0:
-        raise ValueError("test_log_variance must be nonnegative")
-    if variance > 0.0 and n_test < 2:
-        raise ValueError(
-            "positive test_log_variance requires at least two trajectories"
-        )
-
-    dtype = train_initial_conditions.dtype
-    base_index = jnp.arange(n_test) % train_initial_conditions.shape[0]
-    base = train_initial_conditions[base_index]
-    if variance == 0.0:
-        return base
-
-    key = jax.random.key(ic_set.data_seed)
-    draws = jax.random.normal(key, (n_test, 2), dtype=dtype)
+def draw_initial_conditions(
+    z_0, k_0, num_trajectories, log_z_variance, log_k_variance, key, dtype
+):
+    if z_0 <= 0.0 or k_0 <= 0.0:
+        raise ValueError("z_0 and k_0 must be positive")
+    if num_trajectories < 1:
+        raise ValueError("trajectory counts must be positive")
+    if log_z_variance < 0.0 or log_k_variance < 0.0:
+        raise ValueError("initial-condition log variances must be nonnegative")
+    base = jnp.asarray([z_0, k_0], dtype=dtype)
+    if log_z_variance == 0.0 and log_k_variance == 0.0:
+        return jnp.tile(base, (num_trajectories, 1))
+    if num_trajectories < 2:
+        raise ValueError("positive log variances require at least two trajectories")
+    draws = jax.random.normal(key, (num_trajectories, 2), dtype=dtype)
+    # Center and standardize each column so every axis carries exactly the
+    # requested population variance; a zero variance pins its axis at the base.
     centered = draws - jnp.mean(draws, axis=0, keepdims=True)
     standardized = centered / jnp.sqrt(jnp.mean(centered**2, axis=0, keepdims=True))
-    log_z_base = jnp.log(base[:, 0])
-    log_k_base = jnp.log(base[:, 1])
-    scale = jnp.sqrt(jnp.asarray(variance, dtype=dtype))
-    log_z = log_z_base + scale * standardized[:, 0]
-    log_k = log_k_base + scale * standardized[:, 1]
-    z_test = jnp.exp(log_z)
-    k_test = jnp.exp(log_k)
-    return jnp.stack([z_test, k_test], axis=1)
-
-
-def fixed_step_count(T, dt, *, horizon_name):
-    if T <= 0.0 or dt <= 0.0:
-        raise ValueError(f"{horizon_name} and dt must be positive")
-    steps = round(T / dt)
-    effective_T = steps * dt
-    tolerance = 1e-12 * max(1.0, abs(T), abs(effective_T))
-    if steps < 1 or not math.isclose(T, effective_T, rel_tol=0.0, abs_tol=tolerance):
-        raise ValueError(f"{horizon_name} must be an integer multiple of dt")
-    return steps
+    scales = jnp.sqrt(jnp.asarray([log_z_variance, log_k_variance], dtype=dtype))
+    return jnp.exp(jnp.log(base)[None, :] + scales[None, :] * standardized)
 
 
 def positive_policy_grid(grid_lo, grid_hi, size):
@@ -366,7 +339,7 @@ def log_tvc_residual(policy, initial_log_states, T_start, T_end, p, data_set):
     return jnp.max(jnp.where(valid, normalized_log_tvc, -jnp.inf)), solution.ok
 
 
-@lru_cache(maxsize=2048)
+@lru_cache(maxsize=None)
 def cached_benchmark_trajectory(
     a,
     delta,
@@ -419,14 +392,18 @@ def benchmark_trajectories(
 
 
 def benchmark_policy_grid(a, delta, rho_hat, sigma_crra, g, kappa_grid, data_set):
-    """Interpolate c/z from benchmark transitions covering both sides of BGP."""
-    # Stay out of the terminal boundary layer of the truncated BVP. The exact
-    # balanced-growth point below closes the small remaining interpolation gap.
+    # Interpolate c/z from benchmark transitions started at the low, middle,
+    # and high grid points. The long transitions overlap in the interior and
+    # asymptote toward balanced growth from both sides, so the interpolation
+    # support is dense without ever computing a steady state. Sampling stops
+    # at the training horizon to stay out of the terminal boundary layer of
+    # the truncated BVP.
     policy_sample_T = max(data_set.train_T, data_set.test_T)
     benchmark_times = np.linspace(0.0, policy_sample_T, data_set.benchmark_points)
     kappa_samples = []
     c_tilde_samples = []
-    for kappa_initial in np.unique([kappa_grid[0], kappa_grid[-1]]):
+    kappa_starts = [kappa_grid[0], kappa_grid[len(kappa_grid) // 2], kappa_grid[-1]]
+    for kappa_initial in np.unique(kappa_starts):
         z_path, k_path, c_path = benchmark_trajectories(
             a,
             delta,
@@ -440,10 +417,8 @@ def benchmark_policy_grid(a, delta, rho_hat, sigma_crra, g, kappa_grid, data_set
         kappa_samples.append((k_path / z_path).reshape(-1))
         c_tilde_samples.append((c_path / z_path).reshape(-1))
 
-    kappa_ss = ((delta + rho_hat + sigma_crra * g) / a) ** (1.0 / (a - 1.0))
-    c_tilde_ss = kappa_ss**a - (delta + g) * kappa_ss
-    kappa_path = np.concatenate((*kappa_samples, np.asarray([kappa_ss])))
-    c_tilde_path = np.concatenate((*c_tilde_samples, np.asarray([c_tilde_ss])))
+    kappa_path = np.concatenate(kappa_samples)
+    c_tilde_path = np.concatenate(c_tilde_samples)
     order = np.argsort(kappa_path)
     kappa_sorted = kappa_path[order]
     c_tilde_sorted = c_tilde_path[order]
@@ -570,11 +545,8 @@ def neoclassical_growth_nn_recursive(
     rho_hat: float = 0.11,
     sigma_crra: float = 1.0,
     g: float = 0.0,
-    z_0: float | list[float] = 1.0,
-    k_0: float | list[float] = 1.0,
-    A: float | None = None,
-    b_1: float | None = None,
-    b_2: float | None = None,
+    z_0: float = 1.0,
+    k_0: float = 1.0,
     seed: int = 0,
     use_float64: bool = True,
     data_set: DataSettings = DataSettings(),
@@ -594,20 +566,16 @@ def neoclassical_growth_nn_recursive(
         raise ValueError("a must lie strictly between zero and one")
     if sigma_crra <= 0.0:
         raise ValueError("sigma_crra must be positive")
+    # Well-posedness of the planner objective, not steady-state structure:
+    # finiteness of discounted utility needs rho_hat + (sigma - 1) g > 0, the
+    # discounted-capital certificate needs g < rho_hat, and detrended capital
+    # needs positive effective depreciation.
     if g >= rho_hat:
         raise ValueError("g must be less than rho_hat")
     if rho_hat + (sigma_crra - 1.0) * g <= 0.0:
         raise ValueError("rho_hat + (sigma_crra - 1) * g must be positive")
     if delta + g <= 0.0:
         raise ValueError("delta + g must be positive")
-    if delta + rho_hat + sigma_crra * g <= 0.0:
-        raise ValueError("delta + rho_hat + sigma_crra * g must be positive")
-    if (delta + rho_hat + sigma_crra * g) / a <= delta + g:
-        raise ValueError("balanced-growth consumption per unit of z must be positive")
-    if not 0.0 < nn_set.initial_investment_share < 1.0:
-        raise ValueError(
-            "initial_investment_share must lie strictly between zero and one"
-        )
     if data_set.train_T <= 0.0:
         raise ValueError("train_T must be positive")
     if data_set.train_points < 2:
@@ -619,8 +587,8 @@ def neoclassical_growth_nn_recursive(
         raise ValueError("train_loss_threshold must be positive")
     if data_set.tvc_steps < 1:
         raise ValueError("tvc_steps must be positive")
-    if data_set.test_points < 2 or data_set.settle_points < 2:
-        raise ValueError("test_points and settle_points must be at least two")
+    if data_set.test_points < 2:
+        raise ValueError("test_points must be at least two")
     if data_set.train_tvc_T <= data_set.train_T:
         raise ValueError("train_tvc_T must exceed train_T")
     n_test_steps = data_set.test_points - 1
@@ -628,22 +596,26 @@ def neoclassical_growth_nn_recursive(
     if data_set.benchmark_T < max(data_set.train_T, test_T):
         raise ValueError("benchmark_T must cover both train_T and test_T")
 
-    kinked_parameter_count = sum(parameter is not None for parameter in (A, b_1, b_2))
-    if kinked_parameter_count not in {0, 3}:
-        raise ValueError("Set all of A, b_1, and b_2, or set none of them.")
-    use_kinked_production = kinked_parameter_count == 3
-    A_value = 1.0 if A is None else float(A)
-    b_1_value = 1.0 if b_1 is None else float(b_1)
-    b_2_value = 0.0 if b_2 is None else float(b_2)
-    kappa_thr = (
-        (b_2_value / (b_1_value - 1.0)) ** (1.0 / a)
-        if use_kinked_production
-        else float("inf")
+    train_ic_key, test_ic_key = jax.random.split(jax.random.key(ic_set.data_seed))
+    train_initial_conditions = draw_initial_conditions(
+        z_0,
+        k_0,
+        ic_set.num_train_trajectories,
+        ic_set.train_log_z_variance,
+        ic_set.train_log_k_variance,
+        train_ic_key,
+        dtype,
     )
-
-    train_initial_conditions = initial_condition_array(z_0, k_0, dtype)
-    test_initial_conditions = draw_test_initial_conditions(
-        train_initial_conditions, data_set, ic_set
+    test_z_center = z_0 if ic_set.test_z_0 is None else ic_set.test_z_0
+    test_k_center = k_0 if ic_set.test_k_0 is None else ic_set.test_k_0
+    test_initial_conditions = draw_initial_conditions(
+        test_z_center,
+        test_k_center,
+        ic_set.num_test_trajectories,
+        ic_set.test_log_z_variance,
+        ic_set.test_log_k_variance,
+        test_ic_key,
+        dtype,
     )
     p = StructuralParameters.create(
         dtype,
@@ -654,24 +626,7 @@ def neoclassical_growth_nn_recursive(
         g=g,
         z_0=train_initial_conditions[:, 0],
         k_0=train_initial_conditions[:, 1],
-        A=A_value,
-        b_1=b_1_value,
-        b_2=b_2_value,
-        kappa_thr=kappa_thr,
     )
-
-    def branch_steady_state(branch_factor):
-        return ((delta + rho_hat + sigma_crra * g) / (A_value * a * branch_factor)) ** (
-            1.0 / (a - 1.0)
-        )
-
-    if use_kinked_production:
-        kappa_ss_low = branch_steady_state(1.0)
-        kappa_ss_high = branch_steady_state(b_1_value)
-        steady_targets = (kappa_ss_low, kappa_ss_high)
-    else:
-        kappa_ss = branch_steady_state(1.0)
-        steady_targets = (kappa_ss,)
 
     fit_start = time.perf_counter()
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
@@ -767,6 +722,7 @@ def neoclassical_growth_nn_recursive(
     )
     solver_accepted = bool(result.multi_start.accepted)
     max_train_euler = float(train_df["euler_residual"].abs().max())
+    max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
 
     status = int(result.status)
     train_kappa_0 = np.asarray(
@@ -775,19 +731,21 @@ def neoclassical_growth_nn_recursive(
     test_kappa_0 = np.asarray(
         test_initial_conditions[:, 1] / test_initial_conditions[:, 0]
     )
+    train_kappa = train_df["kappa"].to_numpy()
+    collocation_kappa_spread = float(np.max(train_kappa) / np.min(train_kappa))
     results = {
-        "variant": "homothetic_investment_share",
+        "variant": "recursive_nn",
+        "policy": "delta_k_unit_softplus",
+        "state_coordinate": "log(k / z)",
         "a": a,
         "delta": delta,
         "rho_hat": rho_hat,
         "sigma_crra": sigma_crra,
         "g": g,
-        "z_0": float(np.asarray(train_initial_conditions[0, 0])),
-        "k_0": float(np.asarray(train_initial_conditions[0, 1])),
-        "A": A_value,
-        "b_1": b_1_value,
-        "b_2": b_2_value,
-        "use_kinked_production": use_kinked_production,
+        "z_0": z_0,
+        "k_0": k_0,
+        "test_z_0": test_z_center,
+        "test_k_0": test_k_center,
         "seed": seed,
         "data_seed": ic_set.data_seed,
         "residual_dtype": str(jnp.dtype(dtype)),
@@ -795,6 +753,7 @@ def neoclassical_growth_nn_recursive(
         "selection": "minimum_identity_metric_parameter_step",
         "train_loss": float(result.info.loss),
         "max_train_euler": max_train_euler,
+        "max_test_euler": max_test_euler,
         "final_damping": float(result.lm_state.damping),
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_values["euler_residual"]))),
         "max_log_tvc_residual": max_log_tvc,
@@ -813,15 +772,19 @@ def neoclassical_growth_nn_recursive(
         "total_params": int(ravel_pytree(nnx.state(policy, nnx.Param))[0].size),
         "solution_accepted": solver_accepted,
         "solver_converged": solver_accepted,
-        "num_train_trajectories": int(train_initial_conditions.shape[0]),
-        "num_test_trajectories": data_set.num_test_trajectories,
+        "num_train_trajectories": ic_set.num_train_trajectories,
+        "num_test_trajectories": ic_set.num_test_trajectories,
         **collocation_diagnostics,
         "collocation_path_ok": bool(jnp.all(train_solution.ok)),
+        "collocation_kappa_spread": collocation_kappa_spread,
         "train_kappa_0_min": float(train_kappa_0.min()),
         "train_kappa_0_max": float(train_kappa_0.max()),
         "test_kappa_0_min": float(test_kappa_0.min()),
         "test_kappa_0_max": float(test_kappa_0.max()),
-        "test_log_variance": ic_set.test_log_variance,
+        "train_log_z_variance": ic_set.train_log_z_variance,
+        "train_log_k_variance": ic_set.train_log_k_variance,
+        "test_log_z_variance": ic_set.test_log_z_variance,
+        "test_log_k_variance": ic_set.test_log_k_variance,
         "ode_solver": "rk4",
         "train_points": data_set.train_points,
         "train_steps": data_set.train_points - 1,
@@ -831,78 +794,60 @@ def neoclassical_growth_nn_recursive(
         "train_tvc_T": data_set.train_tvc_T,
     }
 
-    if use_kinked_production:
-        n_settle_steps = data_set.settle_points - 1
-        settle_solution = rollout_steps(
-            policy,
-            train_initial_log_states,
-            data_set.settle_T,
-            n_settle_steps,
-            data_set.settle_T / n_settle_steps,
-            p,
-        )
-        settled = jnp.exp(settle_solution.xs[:, -1])
-        kappa_settled = np.asarray(settled[:, 1] / settled[:, 0])
-        tol = 0.05 * kappa_thr
-        targets = np.where(train_kappa_0 < kappa_thr, kappa_ss_low, kappa_ss_high)
-        others = np.where(train_kappa_0 < kappa_thr, kappa_ss_high, kappa_ss_low)
-        per_correct = np.abs(kappa_settled - targets) < tol
-        per_fp = (~per_correct) & (np.abs(kappa_settled - others) < tol)
-        results.update(
-            kappa_thr=kappa_thr,
-            kappa_ss_low=kappa_ss_low,
-            kappa_ss_high=kappa_ss_high,
-            kappa_settled=float(kappa_settled[0]),
-            basin_correct=bool(np.all(per_correct)),
-            false_positive=bool(np.any(per_fp)),
-            basin_failed=bool(np.any(~(per_correct | per_fp))),
-        )
-    else:
-        z_benchmark, k_benchmark, c_benchmark = benchmark_trajectories(
-            a,
-            delta,
-            rho_hat,
-            sigma_crra,
-            g,
-            test_initial_conditions,
-            np.asarray(test_solution.ts[0]),
-            data_set,
-        )
-        k_error, c_error, test_summary_df = add_benchmark_path_diagnostics(
-            test_df,
-            test_values,
-            test_initial_conditions,
-            z_benchmark,
-            k_benchmark,
-            c_benchmark,
-            a=a,
-            delta=delta,
-            g=g,
-        )
-        results.update(
-            kappa_ss=kappa_ss,
-            test_mean_abs_k_rel_error=float(np.mean(np.abs(k_error))),
-            test_mean_abs_c_rel_error=float(np.mean(np.abs(c_error))),
-            test_median_abs_k_rel_error=float(np.median(np.abs(k_error))),
-            test_median_abs_c_rel_error=float(np.median(np.abs(c_error))),
-            test_pooled_median_abs_k_rel_error=float(np.median(np.abs(k_error))),
-            test_pooled_median_abs_c_rel_error=float(np.median(np.abs(c_error))),
-            test_median_trajectory_mean_abs_k_rel_error=float(
-                test_summary_df["mean_k_abs_rel_error"].median()
-            ),
-            test_median_trajectory_mean_abs_c_rel_error=float(
-                test_summary_df["mean_c_abs_rel_error"].median()
-            ),
-            test_max_abs_k_rel_error=float(np.max(np.abs(k_error))),
-            test_max_abs_c_rel_error=float(np.max(np.abs(c_error))),
-        )
+    z_benchmark, k_benchmark, c_benchmark = benchmark_trajectories(
+        a,
+        delta,
+        rho_hat,
+        sigma_crra,
+        g,
+        test_initial_conditions,
+        np.asarray(test_solution.ts[0]),
+        data_set,
+    )
+    k_error, c_error, test_summary_df = add_benchmark_path_diagnostics(
+        test_df,
+        test_values,
+        test_initial_conditions,
+        z_benchmark,
+        k_benchmark,
+        c_benchmark,
+        a=a,
+        delta=delta,
+        g=g,
+    )
+    results.update(
+        test_mean_abs_k_rel_error=float(np.mean(np.abs(k_error))),
+        test_mean_abs_c_rel_error=float(np.mean(np.abs(c_error))),
+        test_median_abs_k_rel_error=float(np.median(np.abs(k_error))),
+        test_median_abs_c_rel_error=float(np.median(np.abs(c_error))),
+        test_pooled_median_abs_k_rel_error=float(np.median(np.abs(k_error))),
+        test_pooled_median_abs_c_rel_error=float(np.median(np.abs(c_error))),
+        test_median_trajectory_mean_abs_k_rel_error=float(
+            test_summary_df["mean_k_abs_rel_error"].median()
+        ),
+        test_median_trajectory_mean_abs_c_rel_error=float(
+            test_summary_df["mean_c_abs_rel_error"].median()
+        ),
+        test_max_abs_k_rel_error=float(np.max(np.abs(k_error))),
+        test_max_abs_c_rel_error=float(np.max(np.abs(c_error))),
+    )
 
-    grid_lo = min(
-        float(train_kappa_0.min()), float(test_kappa_0.min()), *steady_targets
+    # Diagnostic grid bounds come from the realized states, never a steady
+    # state. Snapping to a coarse log lattice keeps the cached benchmark
+    # starts shared across seeds and data draws.
+    observed_kappa = np.concatenate(
+        [
+            train_kappa,
+            test_df["kappa"].to_numpy(),
+            train_kappa_0,
+            test_kappa_0,
+        ]
     )
-    grid_hi = max(
-        float(train_kappa_0.max()), float(test_kappa_0.max()), *steady_targets
-    )
+    observed_kappa = observed_kappa[np.isfinite(observed_kappa) & (observed_kappa > 0)]
+    if observed_kappa.size == 0:
+        observed_kappa = np.concatenate([train_kappa_0, test_kappa_0])
+    grid_lo = math.exp(math.floor(math.log(observed_kappa.min()) / 0.05) * 0.05)
+    grid_hi = math.exp(math.ceil(math.log(observed_kappa.max()) / 0.05) * 0.05)
     kappa_grid = positive_policy_grid(grid_lo, grid_hi, data_set.policy_grid_size)
     grid_log_states = jnp.stack(
         [
@@ -923,27 +868,30 @@ def neoclassical_growth_nn_recursive(
         {
             "kappa": kappa_grid,
             "investment_share_nn": np.asarray(grid_values["i"][0]) / grid_output_per_z,
+            # The learned object itself: unit_softplus of the head, since the
+            # grid fixes z = 1 so k = kappa.
+            "i_over_delta_k_nn": np.asarray(grid_values["i"][0])
+            / (delta * np.asarray(kappa_grid)),
             "i_per_z_nn": np.asarray(grid_values["i"][0]),
             "c_tilde_nn": np.asarray(grid_values["c"][0]),
             "dkappa_nn": np.asarray(grid_values["dkappa"][0]),
         }
     )
-    if not use_kinked_production:
-        c_benchmark_grid = benchmark_policy_grid(
-            a,
-            delta,
-            rho_hat,
-            sigma_crra,
-            g,
-            kappa_grid,
-            data_set,
-        )
-        policy_df["c_tilde_benchmark"] = c_benchmark_grid
-        policy_df["dkappa_benchmark"] = (
-            np.asarray(kappa_grid) ** a
-            - c_benchmark_grid
-            - (delta + g) * np.asarray(kappa_grid)
-        )
+    c_benchmark_grid = benchmark_policy_grid(
+        a,
+        delta,
+        rho_hat,
+        sigma_crra,
+        g,
+        kappa_grid,
+        data_set,
+    )
+    policy_df["c_tilde_benchmark"] = c_benchmark_grid
+    policy_df["dkappa_benchmark"] = (
+        np.asarray(kappa_grid) ** a
+        - c_benchmark_grid
+        - (delta + g) * np.asarray(kappa_grid)
+    )
 
     data_hyperparameters = asdict(data_set)
     hyperparameters = {
@@ -958,9 +906,6 @@ def neoclassical_growth_nn_recursive(
             "rho_hat": rho_hat,
             "sigma_crra": sigma_crra,
             "g": g,
-            "A": A_value,
-            "b_1": b_1_value,
-            "b_2": b_2_value,
         },
         "initial_conditions": {
             "z_0": np.asarray(train_initial_conditions[:, 0]).tolist(),
@@ -980,9 +925,8 @@ def neoclassical_growth_nn_recursive(
         "test_df": test_df,
         "policy_df": policy_df,
         "hyperparameters": hyperparameters,
+        "test_summary_df": test_summary_df,
     }
-    if not use_kinked_production:
-        extras["test_summary_df"] = test_summary_df
     return results, extras
 
 

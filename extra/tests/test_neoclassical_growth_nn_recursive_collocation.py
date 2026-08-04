@@ -39,10 +39,6 @@ def parameters(*, z_0=(1.0,), k_0=(1.0,), g=0.02, dtype=jnp.float64):
         g=g,
         z_0=jnp.asarray(z_0),
         k_0=jnp.asarray(k_0),
-        A=1.0,
-        b_1=1.0,
-        b_2=0.0,
-        kappa_thr=jnp.inf,
     )
 
 

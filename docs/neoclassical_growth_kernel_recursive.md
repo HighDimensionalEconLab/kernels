@@ -8,7 +8,7 @@ move during optimization.
 
 ## Economic problem
 
-Production is homogeneous,
+Production is Cobb-Douglas,
 
 \[
 Y(z,k)=z\left(\frac{k}{z}\right)^a,
@@ -43,43 +43,55 @@ Thus the explicit TFP-growth contribution is included in the residual; the
 economic problem is not replaced by a detrended one-state system. The only
 exception is the independent `solve_bvp` benchmark, which solves an equivalent
 normalized boundary-value problem internally and reconstructs the level paths
-\(z(t),k(t),c(t)\) before returning them. Validation enforces both the requested
-\(g<\rho\) restriction and the effective-discount condition
-\(\rho+(\sigma-1)g>0\).
+\(z(t),k(t),c(t)\) before returning them. Interface validation rejects only
+ill-posed structural parameters — \(g<\rho\), the effective-discount condition
+\(\rho+(\sigma-1)g>0\), and positive effective depreciation \(\delta+g>0\) —
+and never computes steady states or balanced-growth quantities.
 
-## Shared homothetic policy representation
+## Policy representation
 
-Homothetic structure is used only in the approximation architecture. Both the
-NN and kernel receive
+Both the NN and kernel receive
 
 \[
 q(z,k)=\log k-\log z
 \]
 
-as their learned-policy input and return an investment share:
+as their learned-policy input — the only place homothetic structure enters
+either solver — and share one output map:
 
 \[
-i_\theta(z,k)=Y(z,k)\,\operatorname{sigmoid}(h_\theta(q)).
+i_\theta(z,k)=\delta\,k\,U(h_\theta(q)),
+\qquad U(0)=U'(0)=1,
 \]
 
-This guarantees positive investment and consumption without introducing an
-initial-state reference level. For the fixed kernel,
+with \(U\) the unit-anchored softplus. Because
+\(\dot k/k=\delta\,(U(h_\theta)-1)\), a zero head holds capital exactly at
+rest in levels (under \(g>0\) detrended \(\kappa=k/z\) still falls at rate
+\(g\) at that anchor), investment is positive, and consumption
+\(c_\theta=Y-i_\theta\) is unclamped: an infeasible iterate produces a loud
+NaN residual that the optimizer rejects rather than a silent projection. Only
+\(\delta\) and the state enter the map — no production function, growth rate,
+or steady state.
+
+The two solvers differ only in the representation of \(h_\theta\). The NN uses
+an MLP whose head initializes with zero bias and small weights; the fixed
+kernel uses
 
 \[
-h_\theta(q)=i_{\mathrm{const}}
+h_\theta(q)=h_{\mathrm{const}}
 +\sum_{j=1}^{n}\alpha_j K(q,q_j),
 \qquad
 K(q,q_j)=\sigma_K^2
-\exp\left[-\frac{(q-q_j)^2}{2\ell^2}\right].
+\exp\left[-\frac{(q-q_j)^2}{2\ell^2}\right],
 \]
 
-The learned `i_const` is the unpenalized kernel mean. Its initialization and
-the NN output bias both imply an investment share of 0.2; this is only an
-initial parameter value, not an anchor or a reference-level normalization.
+with \(\theta_0=0\), so both start at the capital-at-rest anchor. The
+unpenalized constant \(h_{\mathrm{const}}\) can be removed entirely with
+`StateKernelSettings.free_constant=False`, leaving the pure RKHS expansion.
 
 ## Fixed exact-path distribution
 
-For every supplied training pair \((z_{0m},k_{0m})\), the code evaluates the
+For every drawn training pair \((z_{0m},k_{0m})\), the code evaluates the
 benchmark at
 
 \[
@@ -91,8 +103,8 @@ It retains the separate benchmark states \((z_{mj},k_{mj})\) for the economic
 residual and places kernel centers only on
 \(q_{mj}=\log k_{mj}-\log z_{mj}\). The defaults \(P=65\) and
 \(T_{\mathrm{train}}=100\) exactly match the recursive NN's 65 residual dates,
-with spacing 1.5625. The NN's fixed RK4 rollout uses 128 internal steps over the
-same horizon. With \(M\) training trajectories, the residual contains all
+with spacing 1.5625. The NN's fixed RK4 rollout uses 64 internal steps over
+the same horizon. With \(M\) training trajectories, the residual contains all
 \(MP\) trajectory-date observations, flattened and scaled by
 \(1/\sqrt{MP}\).
 
@@ -107,27 +119,24 @@ unshifted kernel, while the optimizer metric factors \(K+\epsilon I\). Ridge
 LM solves
 
 \[
-\min_{\alpha,i_{\mathrm{const}}}
+\min_{\alpha,h_{\mathrm{const}}}
 \frac{1}{MP}\sum_{m=1}^{M}\sum_{j=1}^{P}
 R_\theta(z_{mj},k_{mj})^2
 +\lambda\alpha^\mathsf{T}(K+\epsilon I)\alpha.
 \]
 
-Only the coefficient block is penalized. The learned constant is a trailing
-free block. Reports retain raw and shifted Gram diagnostics, train/test Euler
-errors, a scale-invariant transversality certificate relative to its initial
-log value, optimizer time, total fitting time, and held-out benchmark path
-errors. This distinction matters: a short lengthscale can fit the Euler
-equation on the fixed states while generating the wrong transition away from
-those states, so local convergence alone is not acceptance.
+Only the coefficient block is penalized; the learned constant, when enabled,
+is a trailing free block.
 
-At the longer `T_train=100` design, the retained defaults are lengthscale 0.4
-and metric shift (3\times 10^{-5}). With one and two training paths, these
-gave shifted Gram condition numbers (2.1\times 10^6) and
-(4.2\times 10^6), and maximum train Euler residuals (1.04\times 10^{-5})
-and (1.73\times 10^{-5}). The old 0.3 / (10^{-5}) geometry reached
-(1.25\times 10^7) condition number and narrowly failed the two-path Euler
-gate, so it was not retained merely by loosening acceptance.
+Acceptance is solver convergence alone. Everything else — train and held-out
+maximum Euler residuals, finiteness and positivity of the test paths, the
+scale-invariant transversality certificate relative to its initial log value,
+and the benchmark path errors — is computed identically in both solvers and
+reported as diagnostics, never used to reject a solution. The point is to
+measure the generalization error of a converged algorithm: a short
+lengthscale that fits the Euler equation on the fixed states while generating
+the wrong transition away from them shows up as a large held-out Euler
+residual and benchmark error in the reports, not as a hidden rejection.
 
 The benchmark states and Gram matrix are a frozen experimental design. JAX AD
 therefore differentiates the residual and fitted coefficients conditional on
@@ -138,12 +147,20 @@ labels the present derivative semantics explicitly.
 
 ## Training, testing, and saved output
 
-Training initial conditions may be scalars or equal-length lists. Both the NN
-and kernel use the same deterministic held-out generator. A separate
-`data_seed` draws independent centered perturbations of \(\log z_0\) and
-\(\log k_0\), each with the requested exact population variance. The network
-seed changes only NN parameters, so all NN seeds and the deterministic kernel
-face identical test trajectories.
+Initial conditions are drawn, not supplied as lists. A single `data_seed`
+splits into independent train and test streams; each stream draws
+`num_train_trajectories` (or `num_test_trajectories`) initial pairs centered
+on the scalar \((z_0,k_0)\), with independent centered perturbations of
+\(\log z_0\) and \(\log k_0\) carrying exactly the requested population
+variances (`train_log_z_variance`, `train_log_k_variance`,
+`test_log_z_variance`, `test_log_k_variance`). Zero variances reproduce the
+deterministic base point without consuming randomness, so the single-IC
+configuration is the degenerate case of the same machinery. Setting
+`test_z_0`/`test_k_0` recenters only the held-out draws for
+out-of-distribution testing; unset, they inherit the training center.
+The network seed
+changes only NN parameters, so all NN seeds and the deterministic kernel face
+identical train and test initial conditions.
 
 The test rollout uses the configured fixed-step solver, `test_T`, and `dt`;
 `test_T` must be an integer multiple of `dt`.
@@ -166,11 +183,10 @@ uv run python -m extra.replication.neoclassical_growth_recursive_comparison \
 ```
 
 The comparison performs one discarded NN warm-up, retains warm NN timings,
-and compares them with the kernel's five-run warm median. Its common validation
-gate requires solver convergence, the same train-Euler tolerance, a finite
-positive test path, transversality, and the same benchmark-error tolerances for
-both methods. The method table is stored in Parquet; the comparison JSON is a
-single wide row with method-prefixed values and speed/error ratios.
+and compares them with the kernel's five-run warm median. Its common gate is
+solver convergence (plus a well-formed collocation path); Euler residuals,
+path checks, transversality, and benchmark errors are carried as reported
+columns with one identical meaning for both methods.
 
 Run the focused tests with
 
@@ -178,5 +194,5 @@ Run the focused tests with
 uv run python -m unittest \
   extra.tests.test_neoclassical_growth_balanced \
   extra.tests.test_recursive_growth_comparison \
-  extra.tests.test_recursive_kernel_fixed -v
+  extra.tests.test_recursive_kernel -v
 ```

@@ -561,15 +561,47 @@ def neoclassical_growth_nn(out):
     }
 
 
+RECURSIVE_EXPERIMENTS = ("single_ic_g0", "multi_ic_g0", "multi_ic_g02")
+
+
 def neoclassical_growth_nn_recursive(out):
     prefix = "neoclassical_growth_nn_recursive"
+    hp = load(out, f"{prefix}_single_ic_g0_hyperparameters")
+    single_json = load(out, f"{prefix}_single_ic_g0")
 
     # Medians over ACCEPTED seeds only (a rejected attempt burns the full
-    # training budget, so all-seed medians would mix in outliers).
-    baseline_json = load(out, f"{prefix}_baseline")
-    baseline_df = pd.read_parquet(out / f"{prefix}_baseline_results.parquet")
-    accepted = baseline_df[baseline_df["solution_accepted"]]
-    hp = load(out, f"{prefix}_baseline_hyperparameters")
+    # training budget, so all-seed medians would mix in outliers). Acceptance
+    # is solver convergence; Euler, path, transversality, and benchmark errors
+    # are reported diagnostics, never gates.
+    def experiment(name):
+        j = load(out, f"{prefix}_{name}")
+        df = pd.read_parquet(out / f"{prefix}_{name}_results.parquet")
+        accepted = df[df["solution_accepted"]]
+        sample = accepted if not accepted.empty else df
+        return {
+            "frac_accepted": sig(j["frac_accepted"]),
+            "test_mean_abs_k_rel_error_median": sci(
+                float(sample["test_mean_abs_k_rel_error"].median())
+            ),
+            "test_mean_abs_c_rel_error_median": sci(
+                float(sample["test_mean_abs_c_rel_error"].median())
+            ),
+            "test_euler_mean_abs_median": sci(
+                float(sample["test_euler_mean_abs"].median())
+            ),
+            "max_train_euler_median": sci(float(sample["max_train_euler"].median())),
+            "max_test_euler_median": sci(float(sample["max_test_euler"].median())),
+            "max_log_tvc_residual_median": sig(
+                float(sample["max_log_tvc_residual"].median()), 4
+            ),
+            "train_time_median": sig(float(sample["train_time"].median())),
+            "steps_median": sig(float(sample["steps"].median())),
+            **final_damping_summary(sample),
+            "num_collocation_states": int(med(j["num_collocation_states"])),
+            "ode_solver": str(sample["ode_solver"].iloc[0]),
+            "num_train_trajectories": int(med(j["num_train_trajectories"])),
+            "num_test_trajectories": int(med(j["num_test_trajectories"])),
+        }
 
     return {
         "parameters": hp["parameters"],
@@ -578,7 +610,7 @@ def neoclassical_growth_nn_recursive(out):
             "width": hp["nn_set"]["width"],
             "depth": hp["nn_set"]["depth"],
             "hidden_activation": hp["nn_set"]["hidden_activation"],
-            "total_params": int(med(baseline_json["total_params"])),
+            "total_params": int(med(single_json["total_params"])),
         },
         "stopping": {
             "train_loss_threshold": hp["stop_set"]["train_loss_threshold"],
@@ -586,73 +618,40 @@ def neoclassical_growth_nn_recursive(out):
             "num_attempts": hp["stop_set"]["num_attempts"],
             "log_tvc_threshold": hp["stop_set"]["log_tvc_threshold"],
         },
-        "n_seeds": int(baseline_json["n_seeds"]),
-        "experiments": {
-            "baseline": {
-                "frac_accepted": sig(baseline_json["frac_accepted"]),
-                "test_mean_abs_k_rel_error_median": sci(
-                    float(accepted["test_mean_abs_k_rel_error"].median())
-                ),
-                "test_mean_abs_c_rel_error_median": sci(
-                    float(accepted["test_mean_abs_c_rel_error"].median())
-                ),
-                "test_euler_mean_abs_median": sci(
-                    float(accepted["test_euler_mean_abs"].median())
-                ),
-                "max_log_tvc_residual_median": sig(
-                    float(accepted["max_log_tvc_residual"].median()), 4
-                ),
-                "train_time_median": sig(float(accepted["train_time"].median())),
-                "steps_median": sig(float(accepted["steps"].median())),
-                **final_damping_summary(accepted),
-                "num_collocation_states": int(
-                    med(baseline_json["num_collocation_states"])
-                ),
-                "ode_solver": str(accepted["ode_solver"].iloc[0]),
-                "train_points": hp["data_set"]["train_points"],
-                "kappa_ss": sig(med(baseline_json["kappa_ss"]), 4),
-            }
-        },
+        "n_seeds": int(single_json["n_seeds"]),
+        "experiments": {name: experiment(name) for name in RECURSIVE_EXPERIMENTS},
     }
 
 
 def neoclassical_growth_kernel_recursive(out):
     prefix = "neoclassical_growth_kernel_recursive"
+    hp = load(out, f"{prefix}_single_ic_g0_hyperparameters")
 
-    baseline_json = load(out, f"{prefix}_baseline")
-    hp = load(out, f"{prefix}_baseline_hyperparameters")
+    def experiment(name):
+        j = load(out, f"{prefix}_{name}")
+        return {
+            "frac_accepted": sig(j["frac_accepted"]),
+            "test_mean_abs_k_rel_error": sci(med(j["test_mean_abs_k_rel_error"])),
+            "test_mean_abs_c_rel_error": sci(med(j["test_mean_abs_c_rel_error"])),
+            "test_euler_mean_abs": sci(med(j["test_euler_mean_abs"])),
+            "max_train_euler": sci(med(j["max_train_euler"])),
+            "max_test_euler": sci(med(j["max_test_euler"])),
+            "max_log_tvc_residual": sig(med(j["max_log_tvc_residual"]), 4),
+            "solve_time": sig(med(j["solve_time"])),
+            "steps": int(med(j["steps"])),
+            "num_collocation_states": int(med(j["num_collocation_states"])),
+            "penalized_parameter_count": int(med(j["penalized_parameter_count"])),
+            "rkhs_norm": sig(med(j["rkhs_norm"])),
+            "num_train_trajectories": int(med(j["num_train_trajectories"])),
+            "num_test_trajectories": int(med(j["num_test_trajectories"])),
+        }
 
     return {
         "parameters": hp["parameters"],
         "data": hp["data_set"],
         "kernel": hp["kernel_set"],
         "solver": {"ridge": hp["lm_set"]["ridge"]},
-        "experiments": {
-            "baseline": {
-                "frac_accepted": sig(med(baseline_json["frac_accepted"])),
-                "test_mean_abs_k_rel_error": sci(
-                    med(baseline_json["test_mean_abs_k_rel_error"])
-                ),
-                "test_mean_abs_c_rel_error": sci(
-                    med(baseline_json["test_mean_abs_c_rel_error"])
-                ),
-                "test_euler_mean_abs": sci(med(baseline_json["test_euler_mean_abs"])),
-                "max_train_euler": sci(med(baseline_json["max_train_euler"])),
-                "max_log_tvc_residual": sig(
-                    med(baseline_json["max_log_tvc_residual"]), 4
-                ),
-                "solve_time": sig(med(baseline_json["solve_time"])),
-                "steps": int(med(baseline_json["steps"])),
-                "num_collocation_states": int(
-                    med(baseline_json["num_collocation_states"])
-                ),
-                "penalized_parameter_count": int(
-                    med(baseline_json["penalized_parameter_count"])
-                ),
-                "rkhs_norm": sig(med(baseline_json["rkhs_norm"])),
-                "kappa_ss": sig(med(baseline_json["kappa_ss"]), 4),
-            }
-        },
+        "experiments": {name: experiment(name) for name in RECURSIVE_EXPERIMENTS},
     }
 
 
@@ -1126,13 +1125,6 @@ def collect(output_dir: str = ".results"):
                 neoclassical_growth_concave_convex_kernel(
                     out,
                     prefix="neoclassical_growth_concave_convex_nn",
-                    require_all=False,
-                )
-            ),
-            "neoclassical_growth_concave_convex_nn_recursive": (
-                neoclassical_growth_concave_convex_kernel(
-                    out,
-                    prefix="neoclassical_growth_concave_convex_nn_recursive",
                     require_all=False,
                 )
             ),

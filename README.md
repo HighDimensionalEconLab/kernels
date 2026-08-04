@@ -40,7 +40,6 @@ The core pipeline covers:
 - `neoclassical_growth_concave_convex_kernel.py`
 - `neoclassical_growth_concave_convex_kernel_uno.py`
 - `neoclassical_growth_concave_convex_nn.py`
-- `neoclassical_growth_concave_convex_nn_recursive.py`
 - `asset_pricing_kernel.py`
 - `asset_pricing_kernel_uno.py`
 - `asset_pricing_nn.py`
@@ -82,14 +81,12 @@ The main kernel modules are:
 - `neoclassical_growth_kernel.py`: smooth or kinked neoclassical growth.
 - `neoclassical_growth_kernel_uno.py`: constrained growth kernel comparison.
 - `neoclassical_growth_concave_convex_kernel.py`: the butterfly-production
-  threshold experiment. `neoclassical_growth_concave_convex_nn.py` and
-  `neoclassical_growth_concave_convex_nn_recursive.py` run the same 70-point
-  `k_0` sweep with the two NN formulations. Basin correctness is scored
-  independently of solver acceptance in all four: a sequence-space solution
-  (kernel, UNO, sequential NN) may still be in motion at `test_T` and is
-  classified by the side it ends on plus the direction of its tail, while the
-  recursive policy is settled to `settle_T` and classified by the steady-state
-  ball it lands in. Neither test feeds back into the solve.
+  threshold experiment. `neoclassical_growth_concave_convex_nn.py` runs the
+  same 70-point `k_0` sweep with the sequence-space NN formulation. Basin
+  correctness is scored independently of solver acceptance in all three
+  (kernel, UNO, sequential NN): a solution may still be in motion at `test_T`
+  and is classified by the side it ends on plus the direction of its tail.
+  Neither test feeds back into the solve.
 - `optimal_advertising_kernel.py`: optimal advertising.
 - `human_capital_kernel.py`: the two-capital human-capital model.
 - `open_economy_growth_kernel.py`: the one-country open-economy DAE.
@@ -146,14 +143,20 @@ The main NN modules are deliberately limited:
 
 - `neoclassical_growth_nn.py`: direct sequence-space MLP.
 - `neoclassical_growth_nn_recursive.py`: recursive NN with separate TFP and
-  capital states, exogenous `dz/dt = g z`, and a homothetic investment-share
-  representation on `log(k) - log(z)`. Every rollout is fixed-step RK4 and
-  training collocation is the integrator's own states: `train_points` knots
-  from `train_points - 1` steps, with nothing interpolated inside the
-  differentiated residual. The main paper driver retains its legacy `g=0`,
-  single-path defaults;
+  capital states and exogenous `dz/dt = g z`. The policy is
+  `i = delta * k * unit_softplus(h)` with the head reading `log(k) - log(z)`
+  (the only homothetic ingredient), so the zero-initialized policy holds
+  capital at rest in levels and no steady state or production structure enters
+  the map. Every rollout is fixed-step RK4 and training collocation is the
+  integrator's own states: `train_points` knots from `train_points - 1` steps,
+  with nothing interpolated inside the differentiated residual. Train and
+  test initial conditions are independent draws around the scalar
+  `(z_0, k_0)` with per-axis log variances; acceptance is solver convergence
+  and everything else (train/test Euler residuals, transversality, benchmark
+  path errors) is reported, never gated. The paper driver runs three
+  experiments: `single_ic_g0`, `multi_ic_g0`, and `multi_ic_g02`.
   `neoclassical_growth_kernel_recursive.py` is the kernel counterpart on the
-  same state-space formulation, with positive growth and held-out
+  same state-space formulation with the identical output map and
   initial-condition draws.
 - `open_economy_growth_nn.py`: the open-economy sequence-space MLP. It carries
   the same five RKHS paths the kernel does as network outputs of `t`, imposes

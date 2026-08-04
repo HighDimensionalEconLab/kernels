@@ -24,8 +24,8 @@ def run(output_dir: str = ".results"):
     out = pathlib.Path(output_dir)
 
     # --- learned homothetic policy vs the solve_bvp benchmark policy -----------
-    policy_df = pd.read_parquet(out / f"{PREFIX}_baseline_policy_df.parquet")
-    results = pd.read_parquet(out / f"{PREFIX}_baseline_results.parquet")
+    policy_df = pd.read_parquet(out / f"{PREFIX}_single_ic_g0_policy_df.parquet")
+    results = pd.read_parquet(out / f"{PREFIX}_single_ic_g0_results.parquet")
     ok_seeds = results.loc[results["solution_accepted"], "seed"]
     policy_df = policy_df[policy_df["seed"].isin(ok_seeds)]
 

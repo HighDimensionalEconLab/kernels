@@ -22,29 +22,20 @@ enable_compilation_cache()
 PREFIX = "neoclassical_growth_recursive_comparison"
 
 
-def apply_common_validation(results, train_euler_tolerance, test_error_tolerance):
+# Acceptance is solver convergence plus a well-formed training design; the
+# Euler residuals, path checks, transversality certificate, and benchmark
+# errors are reported diagnostics so generalization is measured on converged
+# solves rather than filtered by it.
+def apply_common_validation(results):
     results = results.copy()
     collocation_path_ok = (
         results["collocation_path_ok"].astype(bool)
         if "collocation_path_ok" in results
         else True
     )
-    benchmark_quality_ok = (
-        results["test_mean_abs_k_rel_error"] <= test_error_tolerance
-    ) & (results["test_mean_abs_c_rel_error"] <= test_error_tolerance)
-    common_accepted = (
-        results["solver_converged"].astype(bool)
-        & collocation_path_ok
-        & (results["max_train_euler"] <= train_euler_tolerance)
-        & results["test_path_ok"].astype(bool)
-        & results["transversality_ok"].astype(bool)
-        & benchmark_quality_ok
-    )
+    common_accepted = results["solver_converged"].astype(bool) & collocation_path_ok
     results["native_solution_accepted"] = results["solution_accepted"]
-    results["benchmark_quality_ok"] = benchmark_quality_ok
     results["common_validation_accepted"] = common_accepted
-    # The comparison's solution_accepted has one identical meaning for both
-    # methods. Native solver-specific acceptance remains in the adjacent field.
     results["solution_accepted"] = common_accepted
     return results
 
@@ -72,6 +63,8 @@ def method_summary(method, results):
             sample["test_median_trajectory_mean_abs_c_rel_error"].median()
         ),
         "test_euler_mean_abs": float(sample["test_euler_mean_abs"].median()),
+        "max_train_euler": float(sample["max_train_euler"].median()),
+        "max_test_euler": float(sample["max_test_euler"].median()),
     }
 
 
@@ -108,10 +101,14 @@ def run(
     n_nn_seeds: int = 10,
     use_float64: bool = True,
     g: float = 0.02,
-    z_0: float | list[float] = 1.0,
-    k_0: float | list[float] = 1.0,
+    z_0: float = 1.0,
+    k_0: float = 1.0,
+    num_train_trajectories: int = 1,
     num_test_trajectories: int = 50,
-    test_log_variance: float = 0.0025,
+    train_log_z_variance: float = 0.0,
+    train_log_k_variance: float = 0.0,
+    test_log_z_variance: float = 0.0025,
+    test_log_k_variance: float = 0.0025,
     train_T: float = 100.0,
     train_points: int = 65,
     train_tvc_T: float = 200.0,
@@ -119,8 +116,6 @@ def run(
     test_T: float = 40.0,
     test_points: int = 41,
     data_seed: int = 0,
-    train_euler_tolerance: float = 2e-5,
-    test_error_tolerance: float = 5e-3,
     verbose: bool = False,
 ):
     if n_nn_seeds < 1:
@@ -128,7 +123,6 @@ def run(
     if train_points < 2:
         raise ValueError("train_points must be at least two")
     data_set = {
-        "num_test_trajectories": num_test_trajectories,
         "train_T": train_T,
         "train_points": train_points,
         "train_tvc_T": train_tvc_T,
@@ -140,7 +134,12 @@ def run(
     }
     ic_set = {
         "data_seed": data_seed,
-        "test_log_variance": test_log_variance,
+        "num_train_trajectories": num_train_trajectories,
+        "num_test_trajectories": num_test_trajectories,
+        "train_log_z_variance": train_log_z_variance,
+        "train_log_k_variance": train_log_k_variance,
+        "test_log_z_variance": test_log_z_variance,
+        "test_log_k_variance": test_log_k_variance,
     }
     common = {
         "g": g,
@@ -157,8 +156,7 @@ def run(
         "n_nn_seeds": n_nn_seeds,
         "data_seed": data_seed,
         "residual_dtype": "float64" if use_float64 else "float32",
-        "train_euler_tolerance": train_euler_tolerance,
-        "test_error_tolerance": test_error_tolerance,
+        "benchmark_errors_are_reported_not_gated": True,
     }
 
     # Compile and populate benchmark caches once, then time every retained NN
@@ -173,9 +171,7 @@ def run(
         n_nn_seeds,
         options=common,
     )
-    nn_results = apply_common_validation(
-        nn_results, train_euler_tolerance, test_error_tolerance
-    )
+    nn_results = apply_common_validation(nn_results)
     save_experiment(
         "nn",
         nn_results,
@@ -191,9 +187,7 @@ def run(
         1,
         options=common,
     )
-    kernel_results = apply_common_validation(
-        kernel_results, train_euler_tolerance, test_error_tolerance
-    )
+    kernel_results = apply_common_validation(kernel_results)
     save_experiment(
         "kernel",
         kernel_results,
@@ -230,11 +224,9 @@ def run(
             "parameters": {"g": g},
             "initial_conditions": {"z_0": z_0, "k_0": k_0},
             "common_validation": {
-                "train_euler_tolerance": train_euler_tolerance,
-                "test_error_tolerance": test_error_tolerance,
                 "requires_solver_converged": True,
-                "requires_positive_finite_test_path": True,
-                "requires_transversality": True,
+                "requires_collocation_path_ok": True,
+                "benchmark_errors_are_reported_not_gated": True,
             },
         },
     )

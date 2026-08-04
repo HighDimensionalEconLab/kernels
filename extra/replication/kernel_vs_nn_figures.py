@@ -9,10 +9,6 @@ import pandas as pd
 from replication.utilities import style
 
 PREFIX = "kernel_vs_nn"
-RECURSIVE_PREFIX = "neoclassical_growth_nn_recursive"
-
-# Runs last in generate_all_results.sh: the basin overlay reads the recursive
-# prefix's butterfly files alongside this driver's kernel / sequential-NN runs.
 
 ERROR_SERIES = [
     # (experiment, points column, error column, label, color)
@@ -50,7 +46,6 @@ BASIN_SERIES = [
     # (prefix, experiment, label, color)
     (PREFIX, "basin_kernel", "Kernel (ridgeless RKHS)", "k"),
     (PREFIX, "basin_nn_direct", "NN: direct MLP", "C0"),
-    (RECURSIVE_PREFIX, "butterfly_basin", r"NN: recursive $i(k)$", "C2"),
 ]
 
 

@@ -7,6 +7,7 @@ import numpy as np
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from neoclassical_growth_nn_recursive import (
     DataSettings,
+    InitialConditionSettings,
     StoppingCriteria,
     StructuralParameters,
     euler_residuals,
@@ -133,10 +134,6 @@ class BalancedGrowthRecursiveNNTests(unittest.TestCase):
             g=0.0,
             z_0=jnp.asarray([1.0]),
             k_0=jnp.asarray([1.0]),
-            A=1.0,
-            b_1=1.0,
-            b_2=0.0,
-            kappa_thr=jnp.inf,
         )
 
         def policy(log_state, parameters):
@@ -175,10 +172,6 @@ class BalancedGrowthRecursiveNNTests(unittest.TestCase):
             g=g,
             z_0=jnp.asarray([1.0]),
             k_0=jnp.asarray([kappa_ss]),
-            A=1.0,
-            b_1=1.0,
-            b_2=0.0,
-            kappa_thr=jnp.inf,
         )
 
         def balanced_policy(log_state, parameters):
@@ -198,14 +191,16 @@ class BalancedGrowthRecursiveNNTests(unittest.TestCase):
             train_tvc_T=50.0,
             test_T=10.0,
             test_points=11,
-            num_test_trajectories=6,
         )
         results, extras = neoclassical_growth_nn_recursive(
-            z_0=[1.0, 1.0],
-            k_0=[0.9, 1.1],
             g=0.02,
             verbose=False,
             data_set=data_set,
+            ic_set=InitialConditionSettings(
+                num_train_trajectories=2,
+                num_test_trajectories=6,
+                train_log_k_variance=0.0025,
+            ),
             stop_set=StoppingCriteria(max_steps=200, num_attempts=1),
         )
 

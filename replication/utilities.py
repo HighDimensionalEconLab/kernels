@@ -264,21 +264,6 @@ def kinked_thresholds(a=1 / 3, delta=0.1, rho_hat=0.11, A=0.5, b_1=3.0, b_2=2.5)
     return k_thr, k_ss_low, k_ss_high
 
 
-def classify_settled_basin(k_settled, k_0, k_thr, k_ss_low, k_ss_high, tol_frac=0.05):
-    # For recursive policies rolled forward to settle_T: the terminal state must
-    # land in a ball (tol_frac of the kink) around a steady state.
-    tol = tol_frac * k_thr
-    target = k_ss_low if k_0 < k_thr else k_ss_high
-    other = k_ss_high if k_0 < k_thr else k_ss_low
-    basin_correct = bool(abs(k_settled - target) < tol)
-    false_positive = bool(not basin_correct and abs(k_settled - other) < tol)
-    return {
-        "basin_correct": basin_correct,
-        "false_positive": false_positive,
-        "basin_failed": not (basin_correct or false_positive),
-    }
-
-
 def classify_path_basin(k_path, k_0, k_thr, k_ss_low, k_ss_high, tol_frac=0.05):
     # Finite-horizon solutions (kernel and sequential-NN paths to test_T) may
     # end mid-transition near the threshold, so a settle-ball test alone cannot

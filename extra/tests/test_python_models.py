@@ -983,44 +983,10 @@ class NNSmokeTests(unittest.TestCase):
         self.assertTrue(results["transversality_ok"])
         self.assertLess(results["test_mean_abs_k_rel_error"], 5e-2)
         self.assertGreater(results["min_test_c"], 0.0)
+        self.assertIn("max_test_euler", results)
+        self.assertNotIn("kappa_ss", results)
         self.assertIn("i_per_z_nn", extras["policy_df"].columns)
-
-    def test_recursive_nn_butterfly_smoke(self):
-        results, extras = neoclassical_growth_nn_recursive(
-            k_0=1.5,
-            A=0.5,
-            b_1=3.0,
-            b_2=2.5,
-            verbose=False,
-            data_set=RecursiveNNDataSettings(
-                train_T=20.0,
-                train_tvc_T=100.0,
-                test_T=20.0,
-                test_points=11,
-                settle_T=200.0,
-                settle_points=101,
-            ),
-            stop_set=RecursiveNNStoppingCriteria(max_steps=200, num_attempts=1),
-        )
-
-        self.assertFalse(results["solution_accepted"])
-        self.assertEqual(results["stopping_reason"], "max_steps")
-        self.assertTrue(results["basin_correct"])
-        self.assertFalse(results["false_positive"])
-        policy_df = extras["policy_df"]
-        output_per_z = 0.5 * np.maximum(
-            policy_df["kappa"] ** (1 / 3),
-            3.0 * policy_df["kappa"] ** (1 / 3) - 2.5,
-        )
-        np.testing.assert_allclose(
-            policy_df["investment_share_nn"],
-            policy_df["i_per_z_nn"] / output_per_z,
-            rtol=2e-14,
-        )
-        self.assertLess(
-            abs(results["kappa_settled"] - results["kappa_ss_low"]),
-            0.05 * results["kappa_thr"],
-        )
+        self.assertIn("i_over_delta_k_nn", extras["policy_df"].columns)
 
 
 if __name__ == "__main__":

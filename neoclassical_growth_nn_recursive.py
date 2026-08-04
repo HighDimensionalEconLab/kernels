@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
-from nlls_gram import DrawNNXModule, LevenbergMarquardt, LMStatus, MultiStart
+from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
 from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
@@ -79,21 +79,34 @@ class InitialConditionSettings:
     test_k_0: float | None = None
 
 
+# Training ICs and keys live in args (the epoch callback may rewrite args
+# only), so the implicit derivative is conditional on the carried batch.
 @struct.dataclass
 class ResidualArgs:
     graphdef: nnx.GraphDef
     fixed_state: nnx.State
+    initial_log_states: jax.Array
+    epoch_key: jax.Array
+    restart_key: jax.Array
+    epoch: jax.Array
+    train_loss_threshold: jax.Array
+    epoch_steps: jax.Array
+    total_steps: jax.Array
     data_set: DataSettings = struct.field(pytree_node=False)
 
 
 @dataclass(frozen=True)
 class StoppingCriteria:
+    # max_steps is the LM-update budget per epoch; training ICs are redrawn at
+    # each interior epoch boundary, so num_epochs = 1 never resamples.
     max_steps: int = 250
     train_loss_threshold: float | None = None
     # Multi-start restarts with fresh parameter draws; later attempts run only
     # when an earlier one fails, so converging solves pay nothing.
     num_attempts: int = 5
     log_tvc_threshold: float = 0.0
+    num_epochs: int = 1
+    epoch_early_stopping: bool = True
 
 
 @dataclass(frozen=True)
@@ -246,6 +259,106 @@ def draw_initial_conditions(
     return jnp.exp(jnp.log(base)[None, :] + scales[None, :] * standardized)
 
 
+def standardized_log_initial_states(key, log_base, scales, num_trajectories):
+    # Trace-safe core of draw_initial_conditions on the log scale.
+    draws = jax.random.normal(key, (num_trajectories, 2), dtype=log_base.dtype)
+    centered = draws - jnp.mean(draws, axis=0, keepdims=True)
+    standardized = centered / jnp.sqrt(jnp.mean(centered**2, axis=0, keepdims=True))
+    return log_base[None, :] + scales[None, :] * standardized
+
+
+# Runs after every LM update; at each epoch boundary it redraws the training
+# ICs, stops on a nonfinite or (optionally) converged fresh-batch loss, and
+# otherwise continues on the fresh batch with damping reset.
+@dataclass(frozen=True)
+class EpochCallback:
+    num_train_trajectories: int
+    log_z_0: float
+    log_k_0: float
+    log_z_scale: float
+    log_k_scale: float
+    epoch_early_stopping: bool
+
+    def next_epoch(self, ctx):
+        epoch_key, draw_key = jax.random.split(ctx.args.epoch_key)
+        dtype = ctx.args.initial_log_states.dtype
+        fresh = ctx.args.replace(
+            initial_log_states=standardized_log_initial_states(
+                draw_key,
+                jnp.asarray([self.log_z_0, self.log_k_0], dtype),
+                jnp.asarray([self.log_z_scale, self.log_k_scale], dtype),
+                self.num_train_trajectories,
+            ),
+            epoch_key=epoch_key,
+            epoch=ctx.args.epoch + 1,
+        )
+        r = residual_fn(ctx.x, fresh, ctx.p)
+        loss = jnp.sum(r * r)
+        nonfinite = ~jnp.isfinite(loss)
+        if self.epoch_early_stopping:
+            converged = loss < fresh.train_loss_threshold
+        else:
+            converged = jnp.asarray(False)
+        status = jnp.where(
+            nonfinite,
+            jnp.asarray(LMStatus.NONFINITE, dtype=jnp.int32),
+            jnp.where(
+                converged,
+                jnp.asarray(LMStatus.CONVERGED, dtype=jnp.int32),
+                jnp.asarray(LMStatus.RUNNING, dtype=jnp.int32),
+            ),
+        )
+        return nonfinite | converged, status, fresh, ctx.initial_lm_state.damping
+
+    def mid_epoch(self, ctx):
+        return (
+            jnp.asarray(False),
+            jnp.asarray(LMStatus.RUNNING, dtype=jnp.int32),
+            ctx.args,
+            ctx.lm_state.damping,
+        )
+
+    def __call__(self, ctx):
+        boundary = (ctx.step % ctx.args.epoch_steps == 0) & (
+            ctx.step < ctx.args.total_steps
+        )
+        stop, status, args, damping = jax.lax.cond(
+            boundary, self.next_epoch, self.mid_epoch, ctx
+        )
+        return LMAction(
+            stop=stop,
+            status=status,
+            args=args,
+            lm_state=replace(ctx.lm_state, damping=damping),
+        )
+
+
+# Restart draw: fresh net from the retry key and a fresh epoch-key chain from
+# args.restart_key; the initial training batch is kept.
+@dataclass(frozen=True)
+class DrawInvestmentPolicy:
+    settings: InvestmentPolicySettings
+    dtype: object
+    z_scale: float = 1.0
+    k_scale: float = 1.0
+
+    def __call__(self, key, _, args):
+        module = InvestmentPolicyNN(
+            self.settings,
+            z_scale=self.z_scale,
+            k_scale=self.k_scale,
+            dtype=self.dtype,
+            rngs=nnx.Rngs(key),
+        )
+        _, theta, _ = nnx.split(module, nnx.Param, ...)
+        restart_key, epoch_key = jax.random.split(args.restart_key)
+        return theta, args.replace(
+            epoch_key=epoch_key,
+            restart_key=restart_key,
+            epoch=jnp.asarray(0, dtype=jnp.int32),
+        )
+
+
 def positive_policy_grid(grid_lo, grid_hi, size):
     if grid_lo <= 0.0 or grid_hi < grid_lo:
         raise ValueError("policy-grid bounds must satisfy 0 < grid_lo <= grid_hi")
@@ -279,8 +392,7 @@ def batched_rollout(policy, initial_log_states, T, budget, dt_0, p):
 
 
 @partial(jax.jit, static_argnames=("data_set",))
-def collocation_rollout(policy, p, data_set):
-    initial_log_states = jnp.log(jnp.stack([p.z_0, p.k_0], axis=1))
+def collocation_rollout(policy, initial_log_states, p, data_set):
     budget = data_set.train_points - 1
     return batched_rollout(
         policy,
@@ -297,8 +409,8 @@ def rollout_steps(policy, initial_log_states, T, budget, dt_0, p):
     return batched_rollout(policy, initial_log_states, T, budget, dt_0, p)
 
 
-def collocation_residuals(policy, p, data_set):
-    solution = collocation_rollout(policy, p, data_set)
+def collocation_residuals(policy, initial_log_states, p, data_set):
+    solution = collocation_rollout(policy, initial_log_states, p, data_set)
     log_states = solution.xs
     euler = euler_residuals(policy, log_states.reshape(-1, 2), p).reshape(
         log_states.shape[:2]
@@ -317,7 +429,9 @@ def collocation_residuals(policy, p, data_set):
 
 def residual_fn(theta, args, p):
     policy = nnx.merge(args.graphdef, theta, args.fixed_state)
-    return collocation_residuals(policy, p, args.data_set).reshape(-1)
+    return collocation_residuals(
+        policy, args.initial_log_states, p, args.data_set
+    ).reshape(-1)
 
 
 def log_tvc_residual(policy, initial_log_states, T_start, T_end, p, data_set):
@@ -611,6 +725,11 @@ def neoclassical_growth_nn_recursive(
     test_T = data_set.test_T
     if data_set.benchmark_T < max(data_set.train_T, test_T):
         raise ValueError("benchmark_T must cover both train_T and test_T")
+    # Without a positive variance every epoch redraw returns the same batch.
+    if stop_set.num_epochs > 1 and (
+        ic_set.train_log_z_variance <= 0.0 and ic_set.train_log_k_variance <= 0.0
+    ):
+        raise ValueError("epoch resampling requires a positive training log variance")
 
     train_ic_key, test_ic_key = jax.random.split(jax.random.key(ic_set.data_seed))
     train_initial_conditions = draw_initial_conditions(
@@ -663,9 +782,20 @@ def neoclassical_growth_nn_recursive(
         nnx.Param,
         ...,
     )
+    # The initial training draw consumes train_ic_key itself; the epoch and
+    # restart streams chain from independent fold-ins of the same key.
     residual_args = ResidualArgs(
         graphdef=graphdef,
         fixed_state=fixed_state,
+        initial_log_states=jnp.log(train_initial_conditions),
+        epoch_key=jax.random.fold_in(train_ic_key, 1),
+        restart_key=jax.random.fold_in(train_ic_key, 2),
+        epoch=jnp.asarray(0, dtype=jnp.int32),
+        train_loss_threshold=jnp.asarray(stop_set.train_loss_threshold, dtype=dtype),
+        epoch_steps=jnp.asarray(stop_set.max_steps, dtype=jnp.int32),
+        total_steps=jnp.asarray(
+            stop_set.num_epochs * stop_set.max_steps, dtype=jnp.int32
+        ),
         data_set=data_set,
     )
     solver = LevenbergMarquardt(
@@ -683,47 +813,65 @@ def neoclassical_growth_nn_recursive(
         nnx.Param,
         ...,
     )
-    atol = math.sqrt(stop_set.train_loss_threshold)
-    draw = DrawNNXModule(
-        InvestmentPolicyNN, hc_set, z_scale=z_0, k_scale=k_0, dtype=dtype
+    callback = EpochCallback(
+        num_train_trajectories=ic_set.num_train_trajectories,
+        log_z_0=math.log(z_0),
+        log_k_0=math.log(k_0),
+        log_z_scale=math.sqrt(ic_set.train_log_z_variance),
+        log_k_scale=math.sqrt(ic_set.train_log_k_variance),
+        epoch_early_stopping=stop_set.epoch_early_stopping,
     )
+    draw = DrawInvestmentPolicy(hc_set, dtype, z_0, k_0)
+    # The per-step tolerance is sound only while the training batch never
+    # changes; across epochs, convergence is judged at the boundaries instead.
+    atol = math.sqrt(stop_set.train_loss_threshold) if stop_set.num_epochs == 1 else 0.0
 
     start_time = time.perf_counter()
     result = solver.solve(
         theta_0,
         residual_args,
         p=p,
-        max_steps=stop_set.max_steps,
+        max_steps=stop_set.num_epochs * stop_set.max_steps,
         atol=atol,
+        callback=callback,
         multi_start=MultiStart(
             key=multi_start_key,
             num_starts=stop_set.num_attempts,
             draw=draw,
         ),
-        max_steps_is_success=False,
+        max_steps_is_success=not stop_set.epoch_early_stopping,
     )
     jax.block_until_ready(result)
     train_time = time.perf_counter() - start_time
     total_fit_time = time.perf_counter() - fit_start
     setup_time = start_time - fit_start
     steps = int(result.steps)
-    train_loss = float(result.info.loss)
+    # info.loss can describe the pre-swap batch when an epoch boundary stopped
+    # the solve, so the loss is recomputed at the returned (x, args).
+    r = residual_fn(result.x, result.args, p)
+    train_loss = float(jnp.sum(r * r))
+    epochs_run = -(-steps // stop_set.max_steps)
     stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
     attempt = int(result.multi_start.attempt) + 1
     if verbose:
         print(
-            f"attempt {attempt}: {stopping_reason} after {steps} steps, "
+            f"attempt {attempt}: {stopping_reason} after {steps} steps "
+            f"(epoch {epochs_run}/{stop_set.num_epochs}), "
             f"train_loss={train_loss:.3e} ({train_time:.2f}s)"
         )
     policy = nnx.merge(graphdef, result.x, fixed_state)
 
-    train_solution = collocation_rollout(policy, p, data_set)
+    # All training diagnostics use the batch the solution was returned on; it
+    # equals the initial draw unless an epoch callback resampled it.
+    train_batch_log_states = result.args.initial_log_states
+    train_batch_initial_conditions = jnp.exp(train_batch_log_states)
+    train_solution = collocation_rollout(policy, train_batch_log_states, p, data_set)
     train_log_states = train_solution.xs
     train_values = trajectory_values(policy, train_log_states, p)
     train_df = trajectory_frame(
         train_values,
         train_solution.ts,
-        train_initial_conditions,
+        train_batch_initial_conditions,
     )
     train_df["collocation_step_index"] = train_df.groupby("trajectory").cumcount()
     collocation_diagnostics = collocation_step_diagnostics(train_solution.ts)
@@ -750,10 +898,9 @@ def neoclassical_growth_nn_recursive(
     )
     test_df = trajectory_frame(test_values, test_solution.ts, test_initial_conditions)
 
-    train_initial_log_states = jnp.log(train_initial_conditions)
     max_log_tvc, tvc_ok = log_tvc_residual(
         policy,
-        train_initial_log_states,
+        train_batch_log_states,
         data_set.train_T,
         data_set.train_tvc_T,
         p,
@@ -768,7 +915,7 @@ def neoclassical_growth_nn_recursive(
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
 
     train_kappa_0 = np.asarray(
-        train_initial_conditions[:, 1] / train_initial_conditions[:, 0]
+        train_batch_initial_conditions[:, 1] / train_batch_initial_conditions[:, 0]
     )
     test_kappa_0 = np.asarray(
         test_initial_conditions[:, 1] / test_initial_conditions[:, 0]
@@ -811,6 +958,9 @@ def neoclassical_growth_nn_recursive(
         "min_test_c": float(jnp.min(test_values["c"])),
         "test_path_ok": test_path_ok,
         "steps": steps,
+        "num_epochs": stop_set.num_epochs,
+        "epochs_run": epochs_run,
+        "parameter_derivative": "conditional_on_carried_training_batch",
         "attempt": attempt,
         "stopping_reason": stopping_reason,
         "train_time": train_time,

@@ -56,17 +56,20 @@ class RecursiveGrowthCollocationTests(unittest.TestCase):
                 k_0=initial_conditions[1],
                 dtype=jnp.float32,
             )
+            initial_log_states = jnp.log(jnp.stack([p.z_0, p.k_0], axis=1))
 
             def residual_from_logit(logit):
                 policy = SharePolicy(logit, jnp.asarray(0.15, jnp.float32))
-                return collocation_residuals(policy, p, data_set).reshape(-1)
+                return collocation_residuals(
+                    policy, initial_log_states, p, data_set
+                ).reshape(-1)
 
             logit = jnp.asarray(-1.0, jnp.float32)
             jaxpr = str(jax.make_jaxpr(residual_from_logit)(logit))
             residual, pullback = jax.vjp(residual_from_logit, logit)
             cotangent = pullback(jnp.ones_like(residual))[0]
             policy = SharePolicy(logit, jnp.asarray(0.15, jnp.float32))
-            solution = collocation_rollout(policy, p, data_set)
+            solution = collocation_rollout(policy, initial_log_states, p, data_set)
             expected_times = jnp.linspace(
                 jnp.asarray(0.0, dtype=jnp.float32),
                 jnp.asarray(data_set.train_T, dtype=jnp.float32),
@@ -105,9 +108,10 @@ class RecursiveGrowthCollocationTests(unittest.TestCase):
         data_set = DataSettings(train_T=8.0, train_points=9)
         p = parameters(z_0=(1.0, 1.05), k_0=(1.0, 0.95))
         policy = SharePolicy(jnp.asarray(-1.0), jnp.asarray(0.15))
+        initial_log_states = jnp.log(jnp.stack([p.z_0, p.k_0], axis=1))
 
-        solution = collocation_rollout(policy, p, data_set)
-        residual = collocation_residuals(policy, p, data_set)
+        solution = collocation_rollout(policy, initial_log_states, p, data_set)
+        residual = collocation_residuals(policy, initial_log_states, p, data_set)
         expected = euler_residuals(policy, solution.xs.reshape(-1, 2), p).reshape(
             residual.shape
         )

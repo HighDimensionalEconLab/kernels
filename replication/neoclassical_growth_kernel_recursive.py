@@ -92,6 +92,9 @@ def run(
 
     for name, g in (("multi_ic_g0", 0.0), ("multi_ic_g02", 0.02)):
         print(f"{name}: {n_data_seeds} data seeds -> {output_dir}/")
+        # Converging solves finish in ~20 LM steps, so fail fast on the base
+        # kernel geometry and retry a data seed under the longer, more
+        # regularized geometry; each row records the geometry that produced it.
         results_df, frames, hyperparameters = sweep(
             SOLVER,
             "ic_set.data_seed",
@@ -101,7 +104,9 @@ def run(
                 "verbose": verbose,
                 "g": g,
                 "ic_set": dict(MULTI_IC),
+                "stop_set": {"max_steps": 60},
             },
+            retries=({"kernel_set": {"lengthscale": 0.6, "metric_epsilon": 3e-4}},),
         )
         save_experiment(
             name,

@@ -93,7 +93,9 @@ class ResidualArgs:
 class StoppingCriteria:
     max_steps: int = 250
     train_loss_threshold: float | None = None
-    num_attempts: int = 1
+    # Multi-start restarts with fresh parameter draws; later attempts run only
+    # when an earlier one fails, so converging solves pay nothing.
+    num_attempts: int = 5
     log_tvc_threshold: float = 0.0
 
 

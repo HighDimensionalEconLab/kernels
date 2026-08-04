@@ -299,7 +299,6 @@ def neoclassical_growth_kernel_recursive(
     data_set: DataSettings = DataSettings(),
     ic_set: InitialConditionSettings = InitialConditionSettings(),
     kernel_set: StateKernelSettings = StateKernelSettings(),
-    # Shared utilities.OptimizerSettings with this driver's tuned LM values.
     opt_set: OptimizerSettings = OptimizerSettings(
         init_damping=1e-6,
         damping_decrease=0.25,
@@ -344,12 +343,22 @@ def neoclassical_growth_kernel_recursive(
     )
     test_z_center = z_0 if ic_set.test_z_0 is None else ic_set.test_z_0
     test_k_center = k_0 if ic_set.test_k_0 is None else ic_set.test_k_0
+    test_log_z_variance = (
+        ic_set.train_log_z_variance
+        if ic_set.test_log_z_variance is None
+        else ic_set.test_log_z_variance
+    )
+    test_log_k_variance = (
+        ic_set.train_log_k_variance
+        if ic_set.test_log_k_variance is None
+        else ic_set.test_log_k_variance
+    )
     test_initial_conditions = draw_initial_conditions(
         test_z_center,
         test_k_center,
         ic_set.num_test_trajectories,
-        ic_set.test_log_z_variance,
-        ic_set.test_log_k_variance,
+        test_log_z_variance,
+        test_log_k_variance,
         test_ic_key,
         dtype,
     )
@@ -591,8 +600,8 @@ def neoclassical_growth_kernel_recursive(
         "test_kappa_0_max": float(test_kappa_0.max()),
         "train_log_z_variance": ic_set.train_log_z_variance,
         "train_log_k_variance": ic_set.train_log_k_variance,
-        "test_log_z_variance": ic_set.test_log_z_variance,
-        "test_log_k_variance": ic_set.test_log_k_variance,
+        "test_log_z_variance": test_log_z_variance,
+        "test_log_k_variance": test_log_k_variance,
         "train_point_dt": data_set.train_T / (data_set.train_points - 1),
         "test_points": data_set.test_points,
         "train_T": data_set.train_T,

@@ -4,8 +4,8 @@ import jax
 import jax.numpy as jnp
 
 
-# Gram-form Levenberg-Marquardt settings shared across solvers (override via
-# opt_set); drivers pin their tuned values inline in the signature default.
+# Gram-form Levenberg-Marquardt settings shared across solvers; each solver
+# pins its tuned values inline in its opt_set signature default.
 @dataclass(frozen=True)
 class OptimizerSettings:
     init_damping: float = 1e-5

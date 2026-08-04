@@ -69,8 +69,10 @@ class InitialConditionSettings:
     num_test_trajectories: int = 50
     train_log_z_variance: float = 0.0
     train_log_k_variance: float = 0.0
-    test_log_z_variance: float = 0.0025
-    test_log_k_variance: float = 0.0025
+    # Held-out draws inherit the training variances when None; setting a value
+    # overrides per axis. The resolved values are recorded in results.
+    test_log_z_variance: float | None = None
+    test_log_k_variance: float | None = None
     # Held-out draws recenter on these when set (out-of-distribution testing);
     # None keeps the training center (z_0, k_0).
     test_z_0: float | None = None
@@ -485,6 +487,10 @@ def add_benchmark_path_diagnostics(
     return k_error, c_error, test_summary_df
 
 
+# nnx.jit rather than jax.jit so the same compiled evaluation serves both
+# policy types: the NN policy is an nnx.Module (split/merged at the boundary)
+# and the kernel policy is a plain flax.struct pytree.
+@nnx.jit
 def trajectory_values(policy, log_states, p):
     shape = log_states.shape[:-1]
     flat_states = log_states.reshape(-1, 2)
@@ -555,7 +561,6 @@ def neoclassical_growth_nn_recursive(
     data_set: DataSettings = DataSettings(),
     ic_set: InitialConditionSettings = InitialConditionSettings(),
     hc_set: InvestmentPolicySettings = InvestmentPolicySettings(),
-    # Shared utilities.OptimizerSettings with this driver's tuned LM values.
     opt_set: OptimizerSettings = OptimizerSettings(
         init_damping=3.26e-5,
         damping_decrease=0.482,
@@ -619,12 +624,22 @@ def neoclassical_growth_nn_recursive(
     )
     test_z_center = z_0 if ic_set.test_z_0 is None else ic_set.test_z_0
     test_k_center = k_0 if ic_set.test_k_0 is None else ic_set.test_k_0
+    test_log_z_variance = (
+        ic_set.train_log_z_variance
+        if ic_set.test_log_z_variance is None
+        else ic_set.test_log_z_variance
+    )
+    test_log_k_variance = (
+        ic_set.train_log_k_variance
+        if ic_set.test_log_k_variance is None
+        else ic_set.test_log_k_variance
+    )
     test_initial_conditions = draw_initial_conditions(
         test_z_center,
         test_k_center,
         ic_set.num_test_trajectories,
-        ic_set.test_log_z_variance,
-        ic_set.test_log_k_variance,
+        test_log_z_variance,
+        test_log_k_variance,
         test_ic_key,
         dtype,
     )
@@ -817,8 +832,8 @@ def neoclassical_growth_nn_recursive(
         "test_kappa_0_max": float(test_kappa_0.max()),
         "train_log_z_variance": ic_set.train_log_z_variance,
         "train_log_k_variance": ic_set.train_log_k_variance,
-        "test_log_z_variance": ic_set.test_log_z_variance,
-        "test_log_k_variance": ic_set.test_log_k_variance,
+        "test_log_z_variance": test_log_z_variance,
+        "test_log_k_variance": test_log_k_variance,
         "ode_solver": "rk4",
         "train_points": data_set.train_points,
         "train_steps": data_set.train_points - 1,

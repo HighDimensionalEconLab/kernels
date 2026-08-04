@@ -39,11 +39,7 @@ from neoclassical_growth_nn_recursive import (
     trajectory_frame,
     trajectory_values,
 )
-from utilities import unit_softplus
-
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
+from utilities import OptimizerSettings, unit_softplus
 
 
 @dataclass(frozen=True)
@@ -90,16 +86,6 @@ class StateKernelSettings:
 
 
 @dataclass(frozen=True)
-class SolverSettings:
-    ridge: float = 1e-12
-    init_damping: float = 1e-6
-    damping_decrease: float = 0.25
-    damping_increase: float = 4.0
-    geodesic_acceleration: bool = True
-    geodesic_acceptance_ratio: float = 0.75
-
-
-@dataclass(frozen=True)
 class StoppingCriteria:
     max_steps: int = 100
     # RMS Euler at 1e-5 is far below economic significance; the tighter 5e-6
@@ -128,7 +114,7 @@ def state_lengthscales(kernel_set):
     )
 
 
-def validate_settings(data_set, kernel_set, lm_set):
+def validate_settings(data_set, kernel_set, ridge):
     if data_set.collocation_source != "exact_path":
         raise ValueError(f"unknown collocation_source: {data_set.collocation_source!r}")
     if data_set.train_points < 2:
@@ -153,7 +139,7 @@ def validate_settings(data_set, kernel_set, lm_set):
         raise ValueError("per-dimension lengthscales must be positive when set")
     if kernel_set.linear_mean and kernel_set.homothetic_representation:
         raise ValueError("linear_mean requires homothetic_representation=False")
-    if lm_set.ridge <= 0.0:
+    if ridge <= 0.0:
         raise ValueError("ridge must be positive")
 
 
@@ -307,16 +293,26 @@ def neoclassical_growth_kernel_recursive(
     g: float = 0.0,
     z_0: float = 1.0,
     k_0: float = 1.0,
+    ridge: float = 1e-12,
     use_float64: bool = True,
+    matmul_highest: bool = True,
     data_set: DataSettings = DataSettings(),
     ic_set: InitialConditionSettings = InitialConditionSettings(),
     kernel_set: StateKernelSettings = StateKernelSettings(),
-    lm_set: SolverSettings = SolverSettings(),
+    # Shared utilities.OptimizerSettings with this driver's tuned LM values.
+    opt_set: OptimizerSettings = OptimizerSettings(
+        init_damping=1e-6,
+        damping_decrease=0.25,
+        damping_increase=4.0,
+        geodesic_acceleration=True,
+        geodesic_acceptance_ratio=0.75,
+    ),
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
 ):
-    if not jax.config.jax_enable_x64:
-        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    jax.config.update("jax_enable_x64", use_float64)
+    if matmul_highest:
+        jax.config.update("jax_default_matmul_precision", "highest")
     if not 0.0 < a < 1.0:
         raise ValueError("a must lie strictly between zero and one")
     if sigma_crra <= 0.0:
@@ -331,7 +327,7 @@ def neoclassical_growth_kernel_recursive(
         raise ValueError("rho_hat + (sigma_crra - 1) * g must be positive")
     if delta + g <= 0.0:
         raise ValueError("delta + g must be positive")
-    validate_settings(data_set, kernel_set, lm_set)
+    validate_settings(data_set, kernel_set, ridge)
     n_test_steps = data_set.test_points - 1
     test_T = data_set.test_T
 
@@ -394,12 +390,12 @@ def neoclassical_growth_kernel_recursive(
     solver = RidgeLevenbergMarquardt(
         partial(residual_fn, kernel_set=kernel_set),
         metric=metric,
-        ridge=lm_set.ridge,
-        init_damping=lm_set.init_damping,
-        damping_decrease=lm_set.damping_decrease,
-        damping_increase=lm_set.damping_increase,
-        geodesic_acceleration=lm_set.geodesic_acceleration,
-        geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
+        ridge=ridge,
+        init_damping=opt_set.init_damping,
+        damping_decrease=opt_set.damping_decrease,
+        damping_increase=opt_set.damping_increase,
+        geodesic_acceleration=opt_set.geodesic_acceleration,
+        geodesic_acceptance_ratio=opt_set.geodesic_acceptance_ratio,
     )
 
     solve_start = time.perf_counter()
@@ -416,6 +412,16 @@ def neoclassical_growth_kernel_recursive(
     jax.block_until_ready(result)
     solve_time = time.perf_counter() - solve_start
     total_fit_time = time.perf_counter() - fit_start
+    steps = int(result.steps)
+    train_loss = float(result.info.resid_loss)
+    status = int(result.status)
+    stopping_reason = STATUS_TO_REASON.get(status, "unknown")
+    solver_converged = status == LMStatus.CONVERGED
+    if verbose:
+        print(
+            f"solve: {stopping_reason} after {steps} steps, "
+            f"train_loss={train_loss:.3e} ({solve_time:.2f}s)"
+        )
 
     theta = result.x
     alpha = theta[0]
@@ -494,8 +500,6 @@ def neoclassical_growth_kernel_recursive(
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
     mean_k_error = float(np.mean(np.abs(k_error)))
     mean_c_error = float(np.mean(np.abs(c_error)))
-    status = int(result.status)
-    solver_converged = status == LMStatus.CONVERGED
 
     gram_eigenvalues = jnp.linalg.eigvalsh(args.gram)
     train_kappa_0 = np.asarray(
@@ -543,7 +547,7 @@ def neoclassical_growth_kernel_recursive(
             if kernel_set.free_constant
             else "ridge_rkhs_coefficients"
         ),
-        "ridge": lm_set.ridge,
+        "ridge": ridge,
         "free_constant": kernel_set.free_constant,
         "linear_mean": kernel_set.linear_mean,
         "h_const": h_const,
@@ -555,7 +559,7 @@ def neoclassical_growth_kernel_recursive(
         "gram_min_eigenvalue": float(gram_eigenvalues[0]),
         "gram_max_eigenvalue": float(gram_eigenvalues[-1]),
         "shifted_gram_condition": float(jnp.linalg.cond(shifted_gram)),
-        "train_loss": float(result.info.resid_loss),
+        "train_loss": train_loss,
         "max_train_euler": max_train_euler,
         "max_test_euler": max_test_euler,
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_values["euler_residual"]))),
@@ -570,8 +574,8 @@ def neoclassical_growth_kernel_recursive(
         "test_median_abs_c_rel_error": float(np.median(np.abs(c_error))),
         "test_max_abs_k_rel_error": float(np.max(np.abs(k_error))),
         "test_max_abs_c_rel_error": float(np.max(np.abs(c_error))),
-        "steps": int(result.steps),
-        "stopping_reason": STATUS_TO_REASON.get(status, "unknown"),
+        "steps": steps,
+        "stopping_reason": stopping_reason,
         "solve_time": solve_time,
         "setup_time": setup_time,
         "total_fit_time": total_fit_time,
@@ -676,7 +680,8 @@ def neoclassical_growth_kernel_recursive(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
-        "lm_set": asdict(lm_set),
+        "ridge": ridge,
+        "opt_set": asdict(opt_set),
         "stop_set": asdict(stop_set),
         "parameters": {
             "a": a,

@@ -1,5 +1,18 @@
+from dataclasses import dataclass
+
 import jax
 import jax.numpy as jnp
+
+
+# Gram-form Levenberg-Marquardt settings shared across solvers (override via
+# opt_set); drivers pin their tuned values inline in the signature default.
+@dataclass(frozen=True)
+class OptimizerSettings:
+    init_damping: float = 1e-5
+    damping_decrease: float = 0.35
+    damping_increase: float = 8.0
+    geodesic_acceleration: bool = True
+    geodesic_acceptance_ratio: float = 0.8
 
 
 # U(0) = U'(0) = 1, so a near-zero head starts at its declared output scale

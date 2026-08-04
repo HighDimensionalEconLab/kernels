@@ -607,9 +607,9 @@ def neoclassical_growth_nn_recursive(out):
         "parameters": hp["parameters"],
         "data": hp["data_set"],
         "architecture": {
-            "width": hp["nn_set"]["width"],
-            "depth": hp["nn_set"]["depth"],
-            "hidden_activation": hp["nn_set"]["hidden_activation"],
+            "width": hp["hc_set"]["mlp_width"],
+            "depth": hp["hc_set"]["mlp_depth"],
+            "hidden_activation": hp["hc_set"]["hidden_activation"],
             "total_params": int(med(single_json["total_params"])),
         },
         "stopping": {
@@ -650,7 +650,7 @@ def neoclassical_growth_kernel_recursive(out):
         "parameters": hp["parameters"],
         "data": hp["data_set"],
         "kernel": hp["kernel_set"],
-        "solver": {"ridge": hp["lm_set"]["ridge"]},
+        "solver": {"ridge": hp["ridge"]},
         "experiments": {name: experiment(name) for name in RECURSIVE_EXPERIMENTS},
     }
 

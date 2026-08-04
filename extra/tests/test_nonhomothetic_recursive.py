@@ -21,9 +21,6 @@ from neoclassical_growth_kernel_recursive import (
     neoclassical_growth_kernel_recursive,
     validate_settings,
 )
-from neoclassical_growth_kernel_recursive import (
-    SolverSettings as KernelSolverSettings,
-)
 from neoclassical_growth_nn_recursive import (
     DataSettings as NNDataSettings,
 )
@@ -195,7 +192,7 @@ class NonHomotheticPolicyMapTests(unittest.TestCase):
             validate_settings(
                 DataSettings(),
                 StateKernelSettings(linear_mean=True),
-                KernelSolverSettings(),
+                1e-12,
             )
 
     def test_homothetic_default_keeps_prior_gram_and_centers(self):
@@ -243,7 +240,7 @@ class NonHomotheticSolveTests(unittest.TestCase):
                 train_T=20.0, train_tvc_T=50.0, test_T=10.0, test_points=11
             ),
             ic_set=InitialConditionSettings(num_test_trajectories=2),
-            nn_set=InvestmentPolicySettings(homothetic_representation=False),
+            hc_set=InvestmentPolicySettings(homothetic_representation=False),
             stop_set=NNStoppingCriteria(max_steps=2, num_attempts=1),
         )
 

@@ -12,16 +12,11 @@ import numpy as np
 import pandas as pd
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
-from nlls_gram import LevenbergMarquardt, LMStatus, MultiStart
+from nlls_gram import DrawNNXModule, LevenbergMarquardt, LMStatus, MultiStart
 from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
-from utilities import ACTIVATIONS, unit_softplus
-
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
-
+from utilities import ACTIVATIONS, OptimizerSettings, unit_softplus
 
 DOMAIN_EPS = 1e-8
 
@@ -100,18 +95,9 @@ class StoppingCriteria:
 
 
 @dataclass(frozen=True)
-class SolverSettings:
-    init_damping: float = 3.26e-5
-    damping_decrease: float = 0.482
-    damping_increase: float = 2.71
-    geodesic_acceleration: bool = True
-    geodesic_acceptance_ratio: float = 0.541
-
-
-@dataclass(frozen=True)
 class InvestmentPolicySettings:
-    width: int = 32
-    depth: int = 3
+    mlp_width: int = 32
+    mlp_depth: int = 3
     hidden_activation: str = "gelu"
     head_init_scale: float = 1e-3
     homothetic_representation: bool = True
@@ -145,25 +131,25 @@ class InvestmentPolicyNN(nnx.Module):
             [
                 nnx.Linear(
                     in_features,
-                    settings.width,
+                    settings.mlp_width,
                     dtype=dtype,
                     param_dtype=dtype,
                     rngs=rngs,
                 )
             ]
         )
-        for _ in range(settings.depth - 1):
+        for _ in range(settings.mlp_depth - 1):
             self.layers.append(
                 nnx.Linear(
-                    settings.width,
-                    settings.width,
+                    settings.mlp_width,
+                    settings.mlp_width,
                     dtype=dtype,
                     param_dtype=dtype,
                     rngs=rngs,
                 )
             )
         self.head = nnx.Linear(
-            settings.width,
+            settings.mlp_width,
             1,
             kernel_init=nnx.initializers.normal(settings.head_init_scale),
             bias_init=nnx.initializers.zeros_init(),
@@ -183,25 +169,6 @@ class InvestmentPolicyNN(nnx.Module):
         for layer in self.layers:
             h = self.hidden_activation(layer(h))
         return anchor * unit_softplus(self.head(h)[0])
-
-
-@dataclass(frozen=True)
-class DrawInvestmentPolicy:
-    settings: InvestmentPolicySettings
-    dtype: object
-    z_scale: float = 1.0
-    k_scale: float = 1.0
-
-    def __call__(self, key, _, args):
-        module = InvestmentPolicyNN(
-            self.settings,
-            z_scale=self.z_scale,
-            k_scale=self.k_scale,
-            dtype=self.dtype,
-            rngs=nnx.Rngs(key),
-        )
-        _, theta, _ = nnx.split(module, nnx.Param, ...)
-        return theta, args
 
 
 STATUS_TO_REASON = {
@@ -584,15 +551,24 @@ def neoclassical_growth_nn_recursive(
     k_0: float = 1.0,
     seed: int = 0,
     use_float64: bool = True,
+    matmul_highest: bool = True,
     data_set: DataSettings = DataSettings(),
     ic_set: InitialConditionSettings = InitialConditionSettings(),
-    nn_set: InvestmentPolicySettings = InvestmentPolicySettings(),
-    lm_set: SolverSettings = SolverSettings(),
+    hc_set: InvestmentPolicySettings = InvestmentPolicySettings(),
+    # Shared utilities.OptimizerSettings with this driver's tuned LM values.
+    opt_set: OptimizerSettings = OptimizerSettings(
+        init_damping=3.26e-5,
+        damping_decrease=0.482,
+        damping_increase=2.71,
+        geodesic_acceleration=True,
+        geodesic_acceptance_ratio=0.541,
+    ),
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
 ):
-    if not jax.config.jax_enable_x64:
-        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    jax.config.update("jax_enable_x64", use_float64)
+    if matmul_highest:
+        jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
     if stop_set.train_loss_threshold is None:
         threshold = 1e-14 if dtype == jnp.float64 else 1e-10
@@ -667,7 +643,7 @@ def neoclassical_growth_nn_recursive(
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     graphdef, _, fixed_state = nnx.split(
         InvestmentPolicyNN(
-            nn_set, z_scale=z_0, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(0)
+            hc_set, z_scale=z_0, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(0)
         ),
         nnx.Param,
         ...,
@@ -679,21 +655,23 @@ def neoclassical_growth_nn_recursive(
     )
     solver = LevenbergMarquardt(
         residual_fn,
-        init_damping=lm_set.init_damping,
-        damping_decrease=lm_set.damping_decrease,
-        damping_increase=lm_set.damping_increase,
-        geodesic_acceleration=lm_set.geodesic_acceleration,
-        geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
+        init_damping=opt_set.init_damping,
+        damping_decrease=opt_set.damping_decrease,
+        damping_increase=opt_set.damping_increase,
+        geodesic_acceleration=opt_set.geodesic_acceleration,
+        geodesic_acceptance_ratio=opt_set.geodesic_acceptance_ratio,
     )
     _, theta_0, _ = nnx.split(
         InvestmentPolicyNN(
-            nn_set, z_scale=z_0, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(init_key)
+            hc_set, z_scale=z_0, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(init_key)
         ),
         nnx.Param,
         ...,
     )
     atol = math.sqrt(stop_set.train_loss_threshold)
-    draw = DrawInvestmentPolicy(nn_set, dtype, z_0, k_0)
+    draw = DrawNNXModule(
+        InvestmentPolicyNN, hc_set, z_scale=z_0, k_scale=k_0, dtype=dtype
+    )
 
     start_time = time.perf_counter()
     result = solver.solve(
@@ -713,6 +691,15 @@ def neoclassical_growth_nn_recursive(
     train_time = time.perf_counter() - start_time
     total_fit_time = time.perf_counter() - fit_start
     setup_time = start_time - fit_start
+    steps = int(result.steps)
+    train_loss = float(result.info.loss)
+    stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
+    attempt = int(result.multi_start.attempt) + 1
+    if verbose:
+        print(
+            f"attempt {attempt}: {stopping_reason} after {steps} steps, "
+            f"train_loss={train_loss:.3e} ({train_time:.2f}s)"
+        )
     policy = nnx.merge(graphdef, result.x, fixed_state)
 
     train_solution = collocation_rollout(policy, p, data_set)
@@ -765,7 +752,6 @@ def neoclassical_growth_nn_recursive(
     max_train_euler = float(train_df["euler_residual"].abs().max())
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
 
-    status = int(result.status)
     train_kappa_0 = np.asarray(
         train_initial_conditions[:, 1] / train_initial_conditions[:, 0]
     )
@@ -776,14 +762,14 @@ def neoclassical_growth_nn_recursive(
     collocation_kappa_spread = float(np.max(train_kappa) / np.min(train_kappa))
     results = {
         "variant": "recursive_nn",
-        "homothetic_representation": nn_set.homothetic_representation,
+        "homothetic_representation": hc_set.homothetic_representation,
         "policy": (
             "delta_k_unit_softplus"
-            if nn_set.homothetic_representation
+            if hc_set.homothetic_representation
             else "delta_k0_unit_softplus"
         ),
         "state_coordinate": (
-            "log(k / z)" if nn_set.homothetic_representation else "(log z, log k)"
+            "log(k / z)" if hc_set.homothetic_representation else "(log z, log k)"
         ),
         "a": a,
         "delta": delta,
@@ -799,7 +785,7 @@ def neoclassical_growth_nn_recursive(
         "residual_dtype": str(jnp.dtype(dtype)),
         "metric": "identity_parameter_metric",
         "selection": "minimum_identity_metric_parameter_step",
-        "train_loss": float(result.info.loss),
+        "train_loss": train_loss,
         "max_train_euler": max_train_euler,
         "max_test_euler": max_test_euler,
         "final_damping": float(result.lm_state.damping),
@@ -809,9 +795,9 @@ def neoclassical_growth_nn_recursive(
         "transversality_ok": transversality_ok,
         "min_test_c": float(jnp.min(test_values["c"])),
         "test_path_ok": test_path_ok,
-        "steps": int(result.steps),
-        "attempt": int(result.multi_start.attempt) + 1,
-        "stopping_reason": STATUS_TO_REASON.get(status, "max_steps"),
+        "steps": steps,
+        "attempt": attempt,
+        "stopping_reason": stopping_reason,
         "train_time": train_time,
         "solve_time": train_time,
         "setup_time": setup_time,
@@ -943,10 +929,10 @@ def neoclassical_growth_nn_recursive(
 
     data_hyperparameters = asdict(data_set)
     hyperparameters = {
-        "nn_set": asdict(nn_set),
+        "hc_set": asdict(hc_set),
         "data_set": data_hyperparameters,
         "ic_set": asdict(ic_set),
-        "lm_set": asdict(lm_set),
+        "opt_set": asdict(opt_set),
         "stop_set": asdict(stop_set),
         "parameters": {
             "a": a,

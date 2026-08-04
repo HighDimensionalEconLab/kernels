@@ -40,13 +40,11 @@ MULTI_IC = {
 }
 MULTI_IC_X4 = {**MULTI_IC, "num_train_trajectories": 20}
 NONHOM = {"homothetic_representation": False}
-OOD_SHIFT = math.exp(0.25)
 # Out-of-distribution test samples (g = 0 training): the ID baseline at the
-# OOD sample size, single-axis center shifts, and a wider spread.
+# OOD sample size, a joint unequal (z, k) center shift, and a wider spread.
 OOD_TESTS = {
     "id50": {},
-    "shift_k": {"test_k_0": OOD_SHIFT},
-    "shift_z": {"test_z_0": OOD_SHIFT},
+    "shift_zk": {"test_z_0": math.exp(0.25), "test_k_0": math.exp(0.5)},
     "spread": {"test_log_z_variance": 0.04, "test_log_k_variance": 0.04},
 }
 OOD_BASE = {

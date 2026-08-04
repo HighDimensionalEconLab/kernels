@@ -52,13 +52,11 @@ NONHOM_G0 = {
     "log_k_lengthscale": 0.9,
 }
 NONHOM_G02 = {**NONHOM_G0, "log_z_lengthscale": 0.6}
-OOD_SHIFT = math.exp(0.25)
 # Out-of-distribution test samples (g = 0 training): the ID baseline at the
-# OOD sample size, single-axis center shifts, and a wider spread.
+# OOD sample size, a joint unequal (z, k) center shift, and a wider spread.
 OOD_TESTS = {
     "id50": {},
-    "shift_k": {"test_k_0": OOD_SHIFT},
-    "shift_z": {"test_z_0": OOD_SHIFT},
+    "shift_zk": {"test_z_0": math.exp(0.25), "test_k_0": math.exp(0.5)},
     "spread": {"test_log_z_variance": 0.04, "test_log_k_variance": 0.04},
 }
 OOD_BASE = {

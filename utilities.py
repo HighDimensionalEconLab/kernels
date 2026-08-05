@@ -1,8 +1,58 @@
 import math
+import time
 from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+from nlls_gram import LMStatus
+
+STATUS_TO_REASON = {
+    LMStatus.CONVERGED: "converged",
+    LMStatus.NONFINITE: "nonfinite",
+    LMStatus.MAX_STEPS: "max_steps",
+}
+
+
+# solution_accepted / rejection_reason results-dict fields from the collected
+# gate failures; an empty list is acceptance.
+def acceptance_fields(rejection_reasons):
+    accepted = not rejection_reasons
+    return {
+        "solution_accepted": accepted,
+        "rejection_reason": "accepted" if accepted else ",".join(rejection_reasons),
+    }
+
+
+# Precision-dependent settings default to None in the dataclasses and resolve
+# to the solver's tuned per-dtype value at runtime, so a single CLI override
+# serves both precisions.
+def resolve_precision_default(value, dtype, float64, float32):
+    if value is not None:
+        return value
+    return float64 if jnp.dtype(dtype) == jnp.dtype(jnp.float64) else float32
+
+
+# Acceptance tolerances never demand more than the working precision can
+# certify: 8 eps absorbs the rounding of the residual evaluation itself.
+def tolerance_floor(tol, dtype):
+    return max(tol, 8.0 * float(jnp.finfo(dtype).eps))
+
+
+def domain_eps(dtype):
+    return 1e-8 if jnp.dtype(dtype) == jnp.dtype(jnp.float64) else 1e-5
+
+
+# perf_counter anchored at construction; elapsed(x) blocks on x first so
+# asynchronous dispatch cannot leak out of the timed span.
+class Stopwatch:
+    def __init__(self):
+        self.start = time.perf_counter()
+
+    def elapsed(self, value=None):
+        if value is not None:
+            jax.block_until_ready(value)
+        return time.perf_counter() - self.start
 
 
 # Per-model shared constants: every solver variant of a model family defaults
@@ -90,6 +140,77 @@ class OptimizerSettings:
     damping_increase: float = 8.0
     geodesic_acceleration: bool = True
     geodesic_acceptance_ratio: float = 0.8
+
+
+# Ridge-LM settings shared by the kernel NLLS solvers. The stopping
+# thresholds and ridge default to None and resolve per precision inside each
+# solver (resolve_precision_default); subclasses add solver-specific fields
+# and each solver pins its tuned values inline in its lm_set default.
+@dataclass(frozen=True)
+class KernelSolverSettings:
+    init_damping: float = 1e-8
+    damping_decrease: float = 0.1
+    damping_increase: float = 4.0
+    max_steps: int = 50
+    residual_atol: float | None = None
+    ridge: float | None = None
+    gtol: float | None = None
+
+
+# Multi-start NN training budget shared by the NN solvers; the loss threshold
+# resolves per precision inside each solver, and subclasses add TVC/epoch
+# fields where the training loop uses them.
+@dataclass(frozen=True)
+class StoppingCriteria:
+    max_steps: int = 250
+    train_loss_threshold: float | None = None
+    # frac_accepted measures acceptance within the restart budget, not
+    # first-try robustness: a seed that stalls short of the loss threshold is
+    # redrawn.
+    num_attempts: int = 5
+
+
+def make_train_t_grid(data_set, dtype):
+    if data_set.train_points_list is None:
+        values = np.linspace(0.0, data_set.train_T, data_set.train_points).tolist()
+    else:
+        values = list(data_set.train_points_list)
+    values = sorted(set(float(value) for value in values))
+    return jnp.asarray(values, dtype=dtype)
+
+
+# uniform | front_loaded sampling (dense head, sparse tail); an explicit
+# train_points_list overrides the sampling family.
+def make_sampled_train_grid(data_set, dtype):
+    if data_set.train_points_list is not None:
+        train_data = jnp.sort(jnp.asarray(data_set.train_points_list, dtype=dtype))
+    elif data_set.sampling == "uniform":
+        train_data = jnp.linspace(
+            0.0, data_set.train_T, data_set.train_points, dtype=dtype
+        )
+    elif data_set.sampling == "front_loaded":
+        dense_points = data_set.train_points - data_set.tail_points
+        if (
+            dense_points < 2
+            or data_set.tail_points < 1
+            or not 0.0 < data_set.dense_T < data_set.train_T
+        ):
+            raise ValueError(
+                "front_loaded sampling requires at least 2 dense points, "
+                "1 tail point, and 0 < dense_T < train_T"
+            )
+        dense_data = jnp.linspace(0.0, data_set.dense_T, dense_points, dtype=dtype)
+        tail_data = jnp.linspace(
+            data_set.dense_T, data_set.train_T, data_set.tail_points + 1, dtype=dtype
+        )[1:]
+        train_data = jnp.concatenate([dense_data, tail_data])
+    else:
+        raise ValueError("sampling must be 'front_loaded' or 'uniform'")
+    if len(train_data) < 3 or not bool(jnp.all(jnp.diff(train_data) > 0.0)):
+        raise ValueError("training points must be strictly increasing")
+    if float(train_data[0]) != 0.0:
+        raise ValueError("training points must start at zero")
+    return train_data
 
 
 # U(0) = U'(0) = 1, so a near-zero head starts at its declared output scale

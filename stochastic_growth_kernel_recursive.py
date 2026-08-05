@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import pathlib
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from functools import partial
 
 import jax
@@ -14,12 +14,12 @@ from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
 
 from neoclassical_growth_kernel_recursive import (
     StateKernelSettings,
+    StoppingCriteria,
     build_residual_args,
     make_policy,
     state_lengthscales,
 )
 from neoclassical_growth_nn_recursive import (
-    STATUS_TO_REASON,
     InitialConditionSettings,
     collocation_step_diagnostics,
     draw_initial_conditions,
@@ -44,7 +44,9 @@ from utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
 from utilities import (
+    STATUS_TO_REASON,
     OptimizerSettings,
+    resolve_precision_default,
 )
 
 
@@ -92,9 +94,7 @@ def stochastic_growth_kernel_recursive(
     z_bar: float = 1.0,
     z_0: float = 1.0,
     k_0: float = 1.0,
-    ridge: float = 1e-12,
     use_float64: bool = True,
-    matmul_highest: bool = True,
     sde_solver: str = "sra1",
     policy_dir: str = ".results",
     # Half the NN's collocation density: the frozen design needs coverage,
@@ -120,19 +120,29 @@ def stochastic_growth_kernel_recursive(
         geodesic_acceleration=True,
         geodesic_acceptance_ratio=0.75,
     ),
-    max_steps: int = 150,
-    # The ridge-LM residual floor of this representation on the 2-D
-    # stochastic state box sits at ~1.3e-5 RMS, slightly above the
-    # deterministic variant's floor.
-    residual_atol: float = 2e-5,
-    gtol: float = 1e-7,
-    log_tvc_threshold: float = 0.0,
+    stop_set: StoppingCriteria = StoppingCriteria(max_steps=150),
     verbose: bool = True,
 ):
-    jax.config.update("jax_enable_x64", use_float64)
-    if matmul_highest:
-        jax.config.update("jax_default_matmul_precision", "highest")
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
+    kernel_set = replace(
+        kernel_set,
+        metric_epsilon=resolve_precision_default(
+            kernel_set.metric_epsilon, dtype, 3e-5, 1e-4
+        ),
+    )
+    # The float64 ridge-LM residual floor of this representation on the 2-D
+    # stochastic state box sits at ~1.3e-5 RMS, slightly above the
+    # deterministic variant's floor.
+    stop_set = replace(
+        stop_set,
+        residual_atol=resolve_precision_default(
+            stop_set.residual_atol, dtype, 2e-5, 2e-4
+        ),
+        gtol=resolve_precision_default(stop_set.gtol, dtype, 1e-7, 1e-5),
+        ridge=resolve_precision_default(stop_set.ridge, dtype, 1e-12, 1e-8),
+    )
     if not 0.0 < a < 1.0:
         raise ValueError("a must lie strictly between zero and one")
     if sigma_crra <= 0.0:
@@ -151,7 +161,9 @@ def stochastic_growth_kernel_recursive(
         raise ValueError(
             "the stochastic model requires homothetic_representation=False"
         )
-    if ridge <= 0.0:
+    if stop_set.residual_atol <= 0.0 or stop_set.gtol <= 0.0:
+        raise ValueError("residual_atol and gtol must be positive")
+    if stop_set.ridge <= 0.0:
         raise ValueError("ridge must be positive")
     if not all(ell > 0.0 for ell in state_lengthscales(kernel_set)):
         raise ValueError("kernel lengthscales must be positive")
@@ -265,7 +277,7 @@ def stochastic_growth_kernel_recursive(
     lm_solver = RidgeLevenbergMarquardt(
         partial(residual_fn, kernel_set=kernel_set),
         metric=metric,
-        ridge=ridge,
+        ridge=stop_set.ridge,
         init_damping=opt_set.init_damping,
         damping_decrease=opt_set.damping_decrease,
         damping_increase=opt_set.damping_increase,
@@ -279,9 +291,9 @@ def stochastic_growth_kernel_recursive(
         theta_0,
         args,
         p=p,
-        max_steps=max_steps,
-        atol=residual_atol,
-        gtol=gtol,
+        max_steps=stop_set.max_steps,
+        atol=stop_set.residual_atol,
+        gtol=stop_set.gtol,
         max_steps_is_success=False,
     )
     jax.block_until_ready(result)
@@ -376,7 +388,9 @@ def stochastic_growth_kernel_recursive(
         data_set,
     )
     max_log_tvc = float(max_log_tvc)
-    transversality_ok = bool(jnp.all(tvc_ok) and max_log_tvc < log_tvc_threshold)
+    transversality_ok = bool(
+        jnp.all(tvc_ok) and max_log_tvc < stop_set.log_tvc_threshold
+    )
     test_tvc_noise = sample_trajectory_noise(
         solver,
         jax.random.fold_in(test_ic_key, 2),
@@ -397,7 +411,7 @@ def stochastic_growth_kernel_recursive(
     )
     test_max_log_tvc = float(jnp.max(test_terminal_log_tvc))
     test_transversality_ok = bool(
-        jnp.all(test_tvc_ok) and test_max_log_tvc < log_tvc_threshold
+        jnp.all(test_tvc_ok) and test_max_log_tvc < stop_set.log_tvc_threshold
     )
 
     max_train_euler = float(jnp.max(jnp.abs(train_values["euler_residual"])))
@@ -446,7 +460,8 @@ def stochastic_growth_kernel_recursive(
         "test_z_0": test_z_center,
         "test_k_0": test_k_center,
         "data_seed": ic_set.data_seed,
-        "residual_dtype": str(jnp.dtype(dtype)),
+        # Measured, not requested: a float64 leak upstream shows up here.
+        "residual_dtype": str(train_values["euler_residual"].dtype),
         "sde_solver": sde_solver,
         "state_coordinate": "(log z, log k)",
         "policy": "delta_k0_unit_softplus",
@@ -456,7 +471,7 @@ def stochastic_growth_kernel_recursive(
         "log_k_lengthscale": state_lengthscales(kernel_set)[1],
         "metric_epsilon": kernel_set.metric_epsilon,
         "metric": "shifted_rkhs_gram",
-        "ridge": ridge,
+        "ridge": stop_set.ridge,
         "free_constant": kernel_set.free_constant,
         "linear_mean": kernel_set.linear_mean,
         "train_loss": train_loss,
@@ -517,12 +532,7 @@ def stochastic_growth_kernel_recursive(
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
         "opt_set": asdict(opt_set),
-        "stopping": {
-            "max_steps": max_steps,
-            "residual_atol": residual_atol,
-            "gtol": gtol,
-            "log_tvc_threshold": log_tvc_threshold,
-        },
+        "stop_set": asdict(stop_set),
         "parameters": {
             "a": a,
             "delta": delta,

@@ -62,12 +62,18 @@ def compare_residual_norm_frames(kernel_df, nn_df, quality_T):
     return summary, comparison
 
 
-def enable_compilation_cache(path=".jax_cache"):
-    # Must run before the first jax compilation; low thresholds force caching of
-    # our sub-second compiles, which the defaults skip.
+def configure_process(cache_path=".jax_cache"):
+    # Driver-side jax setup: the same always-on x64 + highest-matmul settings
+    # every solver pins at its own entry (use_float64 only selects the working
+    # dtype), plus the persistent compilation cache. Must run before the first
+    # jax compilation; low thresholds force caching of our sub-second
+    # compiles, which the defaults skip. Cache entries are keyed by program
+    # hash, so both precisions coexist in one cache dir.
     import jax
 
-    jax.config.update("jax_compilation_cache_dir", path)
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
+    jax.config.update("jax_compilation_cache_dir", cache_path)
     jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.0)
     jax.config.update("jax_persistent_cache_min_entry_size_bytes", 0)
 

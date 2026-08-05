@@ -21,7 +21,9 @@ from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from utilities import (
     ACTIVATIONS,
+    STATUS_TO_REASON,
     OptimizerSettings,
+    resolve_precision_default,
     unit_softplus,
 )
 from utilities import (
@@ -180,13 +182,6 @@ class InvestmentPolicyNN(nnx.Module):
         for layer in self.layers:
             h = self.hidden_activation(layer(h))
         return anchor * unit_softplus(self.head(h)[0])
-
-
-STATUS_TO_REASON = {
-    LMStatus.CONVERGED: "converged",
-    LMStatus.NONFINITE: "nonfinite",
-    LMStatus.MAX_STEPS: "max_steps",
-}
 
 
 # One .npz per trained policy: the nnx.Param state through nnx's supported
@@ -794,7 +789,6 @@ def neoclassical_growth_nn_recursive(
     k_0: float = 1.0,
     seed: int = 0,
     use_float64: bool = True,
-    matmul_highest: bool = True,
     data_set: DataSettings = DataSettings(),
     ic_set: InitialConditionSettings = InitialConditionSettings(),
     hc_set: InvestmentPolicySettings = InvestmentPolicySettings(),
@@ -814,13 +808,15 @@ def neoclassical_growth_nn_recursive(
     save_policy: str | None = None,
     verbose: bool = True,
 ):
-    jax.config.update("jax_enable_x64", use_float64)
-    if matmul_highest:
-        jax.config.update("jax_default_matmul_precision", "highest")
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    if stop_set.train_loss_threshold is None:
-        threshold = 1e-14 if dtype == jnp.float64 else 1e-10
-        stop_set = replace(stop_set, train_loss_threshold=threshold)
+    stop_set = replace(
+        stop_set,
+        train_loss_threshold=resolve_precision_default(
+            stop_set.train_loss_threshold, dtype, 1e-14, 1e-10
+        ),
+    )
     if not 0.0 < a < 1.0:
         raise ValueError("a must lie strictly between zero and one")
     if sigma_crra <= 0.0:
@@ -1056,6 +1052,9 @@ def neoclassical_growth_nn_recursive(
             )
         policy = nnx.merge(graphdef, theta_final, fixed_state)
 
+    # Measured, not requested: a float64 leak anywhere upstream shows up here.
+    residual_dtype = str(r.dtype)
+
     # Training diagnostics use the batch the solution was returned on.
     train_batch_log_states = solve_args.initial_log_states
     train_batch_initial_conditions = jnp.exp(train_batch_log_states)
@@ -1151,7 +1150,7 @@ def neoclassical_growth_nn_recursive(
         "test_k_0": test_k_center,
         "seed": seed,
         "data_seed": ic_set.data_seed,
-        "residual_dtype": str(jnp.dtype(dtype)),
+        "residual_dtype": residual_dtype,
         "metric": "identity_parameter_metric",
         "selection": "minimum_identity_metric_parameter_step",
         "train_loss": train_loss,

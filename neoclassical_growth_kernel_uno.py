@@ -10,16 +10,11 @@ import numpy as np
 import pandas as pd
 import unopy
 
-from kernels import integrated_kernel_matrices
+from kernels import integrated_kernel_matrices, rkhs_norm_squared
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
-from rkhs import rkhs_norm_squared
 from utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
-
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
 
 ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
 TRAIN_RESIDUAL_TOL = 1e-5
@@ -75,6 +70,9 @@ def neoclassical_growth_kernel_uno(
     c_0_guess: float | None = None,  # overrides the flat steady-flow warm start
     verbose: bool = False,
 ):
+    # IPOPT works in float64 C arrays, so this solver is float64-only.
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
     if sigma_crra <= 0.0:
         raise ValueError("sigma_crra must be positive")
     kinked_parameter_count = sum(parameter is not None for parameter in (A, b_1, b_2))
@@ -91,13 +89,21 @@ def neoclassical_growth_kernel_uno(
 
     nu, ell, sigma = kernel_set.nu, kernel_set.ell, kernel_set.sigma
     if data_set.train_points_list is None:
-        train_data = jnp.linspace(0, data_set.train_T, data_set.train_points)
+        train_data = jnp.linspace(
+            0, data_set.train_T, data_set.train_points, dtype=jnp.float64
+        )
     else:
-        train_data = jnp.array(data_set.train_points_list)
-    test_data = jnp.linspace(0, data_set.test_T, data_set.test_points)
+        train_data = jnp.array(data_set.train_points_list, dtype=jnp.float64)
+    test_data = jnp.linspace(
+        0, data_set.test_T, data_set.test_points, dtype=jnp.float64
+    )
     validation_points = max(data_set.test_points, data_set.benchmark_points)
-    validation_data = jnp.linspace(0, data_set.train_T, validation_points)
-    benchmark_grid = jnp.linspace(0, data_set.benchmark_T, data_set.benchmark_points)
+    validation_data = jnp.linspace(
+        0, data_set.train_T, validation_points, dtype=jnp.float64
+    )
+    benchmark_grid = jnp.linspace(
+        0, data_set.benchmark_T, data_set.benchmark_points, dtype=jnp.float64
+    )
 
     n_train = len(train_data)
     K, K_tilde = integrated_kernel_matrices(train_data, train_data, nu, sigma, ell)
@@ -279,9 +285,9 @@ def neoclassical_growth_kernel_uno(
     x = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))
     alpha_mu, alpha_c, alpha_k, c_0, mu_0 = unpack(x)
     rkhs_norms = {
-        "k": rkhs_norm_squared(alpha_k, K),
-        "c": rkhs_norm_squared(alpha_c, K),
-        "mu": rkhs_norm_squared(alpha_mu, K),
+        "k": float(rkhs_norm_squared(alpha_k, K)),
+        "c": float(rkhs_norm_squared(alpha_c, K)),
+        "mu": float(rkhs_norm_squared(alpha_mu, K)),
     }
 
     def evaluate_grid(points_data):

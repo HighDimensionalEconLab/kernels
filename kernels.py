@@ -4,6 +4,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 from jax.scipy.special import erf
+from nlls_gram import RepeatedFactorMetric
 
 # Stationary kernels with length scale ell (the paper's l) and amplitude
 # sigma, selected by name; the legacy Matern smoothness values nu in
@@ -199,3 +200,16 @@ def integrated_kernel_matrices(t_i, t_j, kernel, sigma, ell):
         in_axes=(0, None, None, None),
     )(t_i, t_j, sigma, ell)
     return K, K_tilde
+
+
+# Symmetrized training Gram with its upper-Cholesky RepeatedFactorMetric,
+# everything in train_data's dtype: a float32 run factors the float32 Gram
+# directly (with x64 off there is no float64 detour to take).
+def integrated_metric_factorization(train_data, kernel, sigma, ell, repeats):
+    K, K_tilde = integrated_kernel_matrices(train_data, train_data, kernel, sigma, ell)
+    K = (K + K.T) / 2.0
+    metric = RepeatedFactorMetric(
+        jnp.linalg.cholesky(K, upper=True),
+        repeats=repeats,
+    )
+    return K, K_tilde, metric

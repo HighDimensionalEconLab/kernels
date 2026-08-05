@@ -24,10 +24,6 @@ from open_economy_growth import (
 from open_economy_growth_benchmark import open_economy_growth_benchmark
 from open_economy_growth_kernel import DataSettings, KernelSettings
 
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
-
 ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
 TRAIN_RESIDUAL_TOL = 1e-5
 VALIDATION_RESIDUAL_TOL = 1e-2
@@ -52,8 +48,9 @@ def open_economy_growth_kernel_uno(
     solver_set: SolverSettings = SolverSettings(),
     verbose: bool = False,
 ):
-    if not jax.config.jax_enable_x64:
-        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    # IPOPT works in float64 C arrays, so this solver is float64-only.
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
     if k_0 <= 0.0:
         raise ValueError("k_0 must be positive")
 

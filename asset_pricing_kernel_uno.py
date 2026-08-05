@@ -11,12 +11,7 @@ import pandas as pd
 import unopy
 
 from asset_pricing_benchmark import mu_f_array
-from kernels import integrated_kernel_matrices
-from rkhs import rkhs_norm_squared
-
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
+from kernels import integrated_kernel_matrices, rkhs_norm_squared
 
 ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
 TRAIN_RESIDUAL_TOL = 1e-8
@@ -55,12 +50,19 @@ def asset_pricing_kernel_uno(
     solver_set: SolverSettings = SolverSettings(),
     verbose: bool = False,
 ):
+    # IPOPT works in float64 C arrays, so this solver is float64-only.
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
     nu, ell, sigma = kernel_set.nu, kernel_set.ell, kernel_set.sigma
     if data_set.train_points_list is None:
-        train_data = jnp.linspace(0, data_set.train_T, data_set.train_points)
+        train_data = jnp.linspace(
+            0, data_set.train_T, data_set.train_points, dtype=jnp.float64
+        )
     else:
-        train_data = jnp.array(data_set.train_points_list)
-    test_data = jnp.linspace(0, data_set.test_T, data_set.test_points)
+        train_data = jnp.array(data_set.train_points_list, dtype=jnp.float64)
+    test_data = jnp.linspace(
+        0, data_set.test_T, data_set.test_points, dtype=jnp.float64
+    )
 
     n_train = len(train_data)
     K, K_tilde = integrated_kernel_matrices(train_data, train_data, nu, sigma, ell)
@@ -246,7 +248,7 @@ def asset_pricing_kernel_uno(
         "test_T": data_set.test_T,
         "test_points": data_set.test_points,
         "p_0": float(p_0),
-        "rkhs_norm_p": rkhs_norm_squared(alpha, K),
+        "rkhs_norm_p": float(rkhs_norm_squared(alpha, K)),
         "max_train_residual": max_train_residual,
         "max_test_residual": float(jnp.max(jnp.abs(test_residual))),
         # min/max error statistics exclude the pinned t = 0 point ([1:]).

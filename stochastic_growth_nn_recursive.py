@@ -17,7 +17,6 @@ from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
 from tinydiffeq import SRA1, EulerMaruyama, Milstein, SaveAt, solve_sde
 
 from neoclassical_growth_nn_recursive import (
-    STATUS_TO_REASON,
     DrawInvestmentPolicy,
     InitialConditionSettings,
     InvestmentPolicyNN,
@@ -38,7 +37,9 @@ from utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
 from utilities import (
+    STATUS_TO_REASON,
     OptimizerSettings,
+    resolve_precision_default,
 )
 
 DOMAIN_EPS = 1e-8
@@ -530,7 +531,6 @@ def stochastic_growth_nn_recursive(
     k_0: float = 1.0,
     seed: int = 0,
     use_float64: bool = True,
-    matmul_highest: bool = True,
     sde_solver: str = "sra1",
     data_set: DataSettings = DataSettings(),
     # The initial log z spread matches the ergodic variance (sigma_z^2/(2 eta)).
@@ -558,13 +558,15 @@ def stochastic_growth_nn_recursive(
     save_policy: str | None = None,
     verbose: bool = True,
 ):
-    jax.config.update("jax_enable_x64", use_float64)
-    if matmul_highest:
-        jax.config.update("jax_default_matmul_precision", "highest")
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    if stop_set.train_loss_threshold is None:
-        threshold = 1e-14 if dtype == jnp.float64 else 1e-10
-        stop_set = replace(stop_set, train_loss_threshold=threshold)
+    stop_set = replace(
+        stop_set,
+        train_loss_threshold=resolve_precision_default(
+            stop_set.train_loss_threshold, dtype, 1e-14, 1e-10
+        ),
+    )
     if not 0.0 < a < 1.0:
         raise ValueError("a must lie strictly between zero and one")
     if sigma_crra <= 0.0:
@@ -953,7 +955,8 @@ def stochastic_growth_nn_recursive(
         "test_k_0": test_k_center,
         "seed": seed,
         "data_seed": ic_set.data_seed,
-        "residual_dtype": str(jnp.dtype(dtype)),
+        # Measured, not requested: a float64 leak upstream shows up here.
+        "residual_dtype": str(r.dtype),
         "sde_solver": sde_solver,
         "train_loss": train_loss,
         "max_train_euler": max_train_euler,

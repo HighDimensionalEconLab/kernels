@@ -11,8 +11,7 @@ import pandas as pd
 import unopy
 from nlls_gram import LevenbergMarquardt
 
-from kernels import integrated_kernel_matrices
-from rkhs import rkhs_norm_squared
+from kernels import integrated_kernel_matrices, rkhs_norm_squared
 
 if __name__ == "__main__":
     jax.config.update("jax_enable_x64", True)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from functools import partial
 from typing import Literal
 
@@ -25,7 +25,6 @@ from kernels import (
     rkhs_norm_squared,
 )
 from neoclassical_growth_nn_recursive import (
-    STATUS_TO_REASON,
     InitialConditionSettings,
     StructuralParameters,
     add_benchmark_path_diagnostics,
@@ -45,7 +44,9 @@ from utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
 from utilities import (
+    STATUS_TO_REASON,
     OptimizerSettings,
+    resolve_precision_default,
     unit_softplus,
 )
 
@@ -75,7 +76,9 @@ class StateKernelSettings:
     # shorter values under-cover the capital span and stall the ridge-LM
     # solve, while ~0.9 converges too slowly for the replication step budget.
     lengthscale: float = 0.6
-    metric_epsilon: float = 3e-5
+    # None resolves per precision (3e-5 float64, 1e-4 float32): the float32
+    # Gram needs a larger shift to stay Cholesky-factorable.
+    metric_epsilon: float | None = None
     # With the free constant, theta is (alpha, h_const) and only alpha is
     # penalized; without it the policy is the pure RKHS expansion.
     free_constant: bool = True
@@ -97,12 +100,15 @@ class StateKernelSettings:
     linear_mean: bool = False
 
 
+# None thresholds resolve per precision inside the solver: RMS Euler at 1e-5
+# (float64) is far below economic significance, and the float32 defaults sit
+# above that precision's residual floor.
 @dataclass(frozen=True)
 class StoppingCriteria:
     max_steps: int = 100
-    # RMS Euler at 1e-5 is far below economic significance.
-    residual_atol: float = 1e-5
-    gtol: float = 1e-7
+    residual_atol: float | None = None
+    gtol: float | None = None
+    ridge: float | None = None
     log_tvc_threshold: float = 0.0
 
 
@@ -139,7 +145,7 @@ def nonhomothetic_state_features(x, centers, kernel_set):
     return additive_matern_state_features(family, x, centers, sigmas, lengthscales)
 
 
-def validate_settings(data_set, kernel_set, ridge):
+def validate_settings(data_set, kernel_set, stop_set):
     if data_set.collocation_source != "exact_path":
         raise ValueError(f"unknown collocation_source: {data_set.collocation_source!r}")
     if data_set.train_points < 2:
@@ -169,7 +175,9 @@ def validate_settings(data_set, kernel_set, ridge):
         raise ValueError("per-dimension lengthscales must be positive when set")
     if kernel_set.linear_mean and kernel_set.homothetic_representation:
         raise ValueError("linear_mean requires homothetic_representation=False")
-    if ridge <= 0.0:
+    if stop_set.residual_atol <= 0.0 or stop_set.gtol <= 0.0:
+        raise ValueError("residual_atol and gtol must be positive")
+    if stop_set.ridge <= 0.0:
         raise ValueError("ridge must be positive")
 
 
@@ -299,9 +307,7 @@ def neoclassical_growth_kernel_recursive(
     g: float = 0.0,
     z_0: float = 1.0,
     k_0: float = 1.0,
-    ridge: float = 1e-12,
     use_float64: bool = True,
-    matmul_highest: bool = True,
     data_set: DataSettings = DataSettings(),
     ic_set: InitialConditionSettings = InitialConditionSettings(),
     kernel_set: StateKernelSettings = StateKernelSettings(),
@@ -315,9 +321,23 @@ def neoclassical_growth_kernel_recursive(
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
 ):
-    jax.config.update("jax_enable_x64", use_float64)
-    if matmul_highest:
-        jax.config.update("jax_default_matmul_precision", "highest")
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
+    dtype = jnp.float64 if use_float64 else jnp.float32
+    kernel_set = replace(
+        kernel_set,
+        metric_epsilon=resolve_precision_default(
+            kernel_set.metric_epsilon, dtype, 3e-5, 1e-4
+        ),
+    )
+    stop_set = replace(
+        stop_set,
+        residual_atol=resolve_precision_default(
+            stop_set.residual_atol, dtype, 1e-5, 1e-4
+        ),
+        gtol=resolve_precision_default(stop_set.gtol, dtype, 1e-7, 1e-5),
+        ridge=resolve_precision_default(stop_set.ridge, dtype, 1e-12, 1e-8),
+    )
     if not 0.0 < a < 1.0:
         raise ValueError("a must lie strictly between zero and one")
     if sigma_crra <= 0.0:
@@ -332,11 +352,10 @@ def neoclassical_growth_kernel_recursive(
         raise ValueError("rho_hat + (sigma_crra - 1) * g must be positive")
     if delta + g <= 0.0:
         raise ValueError("delta + g must be positive")
-    validate_settings(data_set, kernel_set, ridge)
+    validate_settings(data_set, kernel_set, stop_set)
     n_test_steps = data_set.test_points - 1
     test_T = data_set.test_T
 
-    dtype = jnp.float64 if use_float64 else jnp.float32
     train_ic_key, test_ic_key = jax.random.split(jax.random.key(ic_set.data_seed))
     train_initial_conditions = draw_initial_conditions(
         z_0,
@@ -405,7 +424,7 @@ def neoclassical_growth_kernel_recursive(
     solver = RidgeLevenbergMarquardt(
         partial(residual_fn, kernel_set=kernel_set),
         metric=metric,
-        ridge=ridge,
+        ridge=stop_set.ridge,
         init_damping=opt_set.init_damping,
         damping_decrease=opt_set.damping_decrease,
         damping_increase=opt_set.damping_increase,
@@ -554,7 +573,8 @@ def neoclassical_growth_kernel_recursive(
         "test_z_0": test_z_center,
         "test_k_0": test_k_center,
         "data_seed": ic_set.data_seed,
-        "residual_dtype": str(jnp.dtype(dtype)),
+        # Measured, not requested: a float64 leak upstream shows up here.
+        "residual_dtype": str(train_values["euler_residual"].dtype),
         "homothetic_representation": kernel_set.homothetic_representation,
         "policy": (
             "delta_k_unit_softplus"
@@ -576,7 +596,7 @@ def neoclassical_growth_kernel_recursive(
             if kernel_set.free_constant
             else "ridge_rkhs_coefficients"
         ),
-        "ridge": ridge,
+        "ridge": stop_set.ridge,
         "free_constant": kernel_set.free_constant,
         "linear_mean": kernel_set.linear_mean,
         "h_const": h_const,
@@ -725,7 +745,6 @@ def neoclassical_growth_kernel_recursive(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
-        "ridge": ridge,
         "opt_set": asdict(opt_set),
         "stop_set": asdict(stop_set),
         "parameters": {

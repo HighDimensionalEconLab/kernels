@@ -1,26 +1,21 @@
 from __future__ import annotations
 
-import jax
 import jsonargparse
 
 import open_economy_growth_kernel_uno
 from open_economy_growth import ModelParameters, steady_state
 from replication.utilities import (
-    enable_compilation_cache,
+    configure_process,
     ensemble,
     save_experiment,
     write_summary,
 )
 
-jax.config.update("jax_enable_x64", True)
-jax.config.update("jax_default_matmul_precision", "highest")
-
-enable_compilation_cache()
-
 PREFIX = "open_economy_growth_kernel_uno"
 
 
 def run(output_dir: str = ".results", verbose: bool = False):
+    configure_process()
     parameters = ModelParameters()
     output_ss = float(steady_state(parameters)["output"])
     meta = dict(n_seeds=1, residual_dtype="float64")

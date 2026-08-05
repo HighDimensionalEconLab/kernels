@@ -1,28 +1,32 @@
 from __future__ import annotations
 
-import jax
 import jsonargparse
 import numpy as np
 
 import neoclassical_growth_concave_convex_nn
 from replication.utilities import (
     classify_path_basin,
-    enable_compilation_cache,
+    configure_process,
     kinked_thresholds,
     save_experiment,
     sweep,
     write_summary,
 )
 
-jax.config.update("jax_enable_x64", True)
-jax.config.update("jax_default_matmul_precision", "highest")
-
-enable_compilation_cache()
-
 PREFIX = "neoclassical_growth_concave_convex_nn"
 
 
-def run(output_dir: str = ".results", verbose: bool = False):
+def run(
+    output_dir: str | None = None,
+    use_float64: bool = True,
+    verbose: bool = False,
+):
+    configure_process()
+    if output_dir is None:
+        output_dir = ".results" if use_float64 else ".results_float32"
+    # Float32 runs pass looser solver thresholds and acceptance gates; the
+    # float64 run uses the solver defaults.
+    stop = {} if use_float64 else dict(train_loss_threshold=1e-9)
     n_points = 70
     grid = np.linspace(0.5, 4.0, n_points)
     print(f"threshold sweep: {n_points} initial conditions -> {output_dir}/")
@@ -30,7 +34,7 @@ def run(output_dir: str = ".results", verbose: bool = False):
         neoclassical_growth_concave_convex_nn.neoclassical_growth_concave_convex_nn,
         "k_0",
         [float(k_0) for k_0 in grid],
-        options={"verbose": verbose},
+        options={"use_float64": use_float64, "verbose": verbose, "stop_set": stop},
     )
 
     # Ex-post basin classification of each finite-horizon path, identical to the
@@ -74,7 +78,11 @@ def run(output_dir: str = ".results", verbose: bool = False):
         results_df,
         frames,
         output_dir,
-        dict(n_seeds=1, n_points=n_points),
+        dict(
+            n_seeds=1,
+            n_points=n_points,
+            residual_dtype="float64" if use_float64 else "float32",
+        ),
         prefix=PREFIX,
         hyperparameters=hyperparameters,
     )

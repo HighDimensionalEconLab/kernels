@@ -2,22 +2,16 @@ from __future__ import annotations
 
 import math
 
-import jax
 import jsonargparse
 
 import neoclassical_growth_kernel_recursive
 from replication.utilities import (
-    enable_compilation_cache,
+    configure_process,
     ensemble,
     save_experiment,
     sweep,
     write_summary,
 )
-
-jax.config.update("jax_enable_x64", True)
-jax.config.update("jax_default_matmul_precision", "highest")
-
-enable_compilation_cache()
 
 PREFIX = "neoclassical_growth_kernel_recursive"
 
@@ -86,12 +80,19 @@ def report(name, results_df):
 
 
 def run(
-    output_dir: str = ".results",
+    output_dir: str | None = None,
     n_data_seeds: int = 1,
     use_float64: bool = True,
     experiments: list[str] | None = None,
     verbose: bool = False,
 ):
+    configure_process()
+    if output_dir is None:
+        output_dir = ".results" if use_float64 else ".results_float32"
+    # Float32 runs pass looser solver thresholds and acceptance gates; the
+    # float64 run uses the solver defaults.
+    stop = {} if use_float64 else dict(residual_atol=1e-4, gtol=1e-5, ridge=1e-8)
+    kernel_extra = {} if use_float64 else dict(metric_epsilon=1e-4)
     meta = dict(
         n_data_seeds=n_data_seeds,
         residual_dtype="float64" if use_float64 else "float32",
@@ -136,6 +137,8 @@ def run(
                 "verbose": verbose,
                 "g": 0.0,
                 "ic_set": {"data_seed": 0, **SINGLE_IC},
+                "stop_set": stop,
+                "kernel_set": kernel_extra,
             },
         )
         save_experiment(
@@ -156,10 +159,11 @@ def run(
             "verbose": verbose,
             "g": g,
             "ic_set": dict(ic_set),
-            "stop_set": {"max_steps": 60},
+            "stop_set": {"max_steps": 60, **stop},
+            "kernel_set": dict(kernel_extra),
         }
         if kernel_set is not None:
-            options["kernel_set"] = dict(kernel_set)
+            options["kernel_set"].update(kernel_set)
         results_df, frames, hyperparameters = sweep(
             SOLVER,
             "ic_set.data_seed",

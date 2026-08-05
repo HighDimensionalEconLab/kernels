@@ -1,23 +1,17 @@
 from __future__ import annotations
 
-import jax
 import jsonargparse
 import numpy as np
 
 import neoclassical_growth_concave_convex_kernel_uno
 from replication.utilities import (
     classify_path_basin,
-    enable_compilation_cache,
+    configure_process,
     kinked_thresholds,
     save_experiment,
     sweep,
     write_summary,
 )
-
-jax.config.update("jax_enable_x64", True)
-jax.config.update("jax_default_matmul_precision", "highest")
-
-enable_compilation_cache()
 
 PREFIX = "neoclassical_growth_concave_convex_kernel_uno"
 
@@ -26,6 +20,7 @@ def run(
     output_dir: str = ".results",
     verbose: bool = False,
 ):
+    configure_process()
     n_points = 70
     grid = np.linspace(0.5, 4.0, n_points)
     print(f"threshold sweep: {n_points} initial conditions -> {output_dir}/")

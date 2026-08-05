@@ -2,21 +2,15 @@ from __future__ import annotations
 
 import math
 
-import jax
 import jsonargparse
 
 import neoclassical_growth_nn_recursive
 from replication.utilities import (
-    enable_compilation_cache,
+    configure_process,
     ensemble,
     save_experiment,
     write_summary,
 )
-
-jax.config.update("jax_enable_x64", True)
-jax.config.update("jax_default_matmul_precision", "highest")
-
-enable_compilation_cache()
 
 PREFIX = "neoclassical_growth_nn_recursive"
 
@@ -65,7 +59,7 @@ DIAGNOSTIC_COLUMNS = [
 
 
 def run(
-    output_dir: str = ".results",
+    output_dir: str | None = None,
     # Multi-start retries inside each solve keep acceptance high, so a small
     # seed ensemble suffices for the cross-seed medians.
     n_seeds: int = 5,
@@ -77,6 +71,10 @@ def run(
     experiments: list[str] | None = None,
     verbose: bool = False,
 ):
+    configure_process()
+    if output_dir is None:
+        output_dir = ".results" if use_float64 else ".results_float32"
+
     def options(g, ic_set, hc_set=None):
         result = dict(
             use_float64=use_float64,
@@ -84,6 +82,9 @@ def run(
             g=g,
             data_set={"test_T": test_T, "test_points": test_points},
             ic_set={"data_seed": data_seed, **ic_set},
+            # Float32 runs pass a looser reachable loss threshold; float64
+            # uses the solver default.
+            stop_set={} if use_float64 else {"train_loss_threshold": 1e-10},
         )
         if hc_set is not None:
             result["hc_set"] = dict(hc_set)

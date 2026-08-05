@@ -707,7 +707,7 @@ def neoclassical_growth_kernel_recursive(out):
         "parameters": hp["parameters"],
         "data": hp["data_set"],
         "kernel": hp["kernel_set"],
-        "solver": {"ridge": hp["ridge"]},
+        "solver": {"ridge": hp["stop_set"]["ridge"]},
         "experiments": {name: experiment(name) for name in RECURSIVE_EXPERIMENTS},
     }
 
@@ -953,7 +953,7 @@ def multicountry_growth_nn(out):
     }
 
 
-def performance_comparisons(out):
+def performance_comparisons(out, include_uno=True):
     def accepted(prefix, experiment="baseline"):
         frame = pd.read_parquet(out / f"{prefix}_{experiment}_results.parquet")
         accepted_frame = frame[frame["solution_accepted"]]
@@ -962,17 +962,19 @@ def performance_comparisons(out):
         return accepted_frame
 
     asset_kernel = load(out, "asset_pricing_kernel_baseline")
-    asset_uno = load(out, "asset_pricing_kernel_uno_baseline")
     asset_nn = accepted("asset_pricing_nn")
     asset_kernel_time = med(asset_kernel["wall_time"])
     asset_nn_time = float(asset_nn["train_time"].median())
     asset_kernel_error = med(asset_kernel["p_rel_error_mean"])
-    asset_uno_time = med(asset_uno["wall_time"])
-    asset_uno_error = med(asset_uno["p_rel_error_mean"])
     asset_nn_error = float(asset_nn["p_rel_error_mean"].median())
+    if include_uno:
+        asset_uno = load(out, "asset_pricing_kernel_uno_baseline")
+        asset_uno_time = med(asset_uno["wall_time"])
+        asset_uno_error = med(asset_uno["p_rel_error_mean"])
+    else:
+        asset_uno_time = asset_uno_error = None
 
     growth_kernel = load(out, "neoclassical_growth_kernel_baseline")
-    growth_uno = load(out, "neoclassical_growth_kernel_uno_baseline")
     growth_sequential_nn = accepted("neoclassical_growth_nn")
     growth_recursive_nn = accepted("neoclassical_growth_nn_recursive", "single_ic_g0")
     growth_kernel_time = med(growth_kernel["wall_time"])
@@ -980,11 +982,15 @@ def performance_comparisons(out):
         med(growth_kernel["k_rel_error_mean"]),
         med(growth_kernel["c_rel_error_mean"]),
     )
-    growth_uno_time = med(growth_uno["wall_time"])
-    growth_uno_error = max(
-        med(growth_uno["k_rel_error_mean"]),
-        med(growth_uno["c_rel_error_mean"]),
-    )
+    if include_uno:
+        growth_uno = load(out, "neoclassical_growth_kernel_uno_baseline")
+        growth_uno_time = med(growth_uno["wall_time"])
+        growth_uno_error = max(
+            med(growth_uno["k_rel_error_mean"]),
+            med(growth_uno["c_rel_error_mean"]),
+        )
+    else:
+        growth_uno_time = growth_uno_error = None
 
     # Both NN formulations against the same sequence-space kernel baseline: the
     # sequential MLP shares the kernel's t -> (k, c) ansatz, the recursive one
@@ -999,13 +1005,16 @@ def performance_comparisons(out):
         )
 
     open_kernel = load(out, "open_economy_growth_kernel_baseline")
-    open_uno = load(out, "open_economy_growth_kernel_uno_baseline")
     open_sequential_nn = accepted("open_economy_growth_nn")
     open_recursive_nn = accepted("open_economy_growth_nn_recursive")
     open_kernel_time = med(open_kernel["wall_time"])
-    open_uno_time = med(open_uno["wall_time"])
     open_kernel_error = med(open_kernel["max_benchmark_error"])
-    open_uno_error = med(open_uno["max_benchmark_error"])
+    if include_uno:
+        open_uno = load(out, "open_economy_growth_kernel_uno_baseline")
+        open_uno_time = med(open_uno["wall_time"])
+        open_uno_error = med(open_uno["max_benchmark_error"])
+    else:
+        open_uno_time = open_uno_error = None
 
     def open_nn_stats(frame):
         return (
@@ -1061,17 +1070,21 @@ def performance_comparisons(out):
                 )
         return values
 
+    timing_contract = {
+        "kernel": "median of five cached deterministic solves",
+        "nn": (
+            "median across accepted seeds from 100 initializations "
+            "(21 for the open-economy sequence-space NN, five for "
+            "multicountry growth), each seed allowed up to five "
+            "multi-start restarts"
+        ),
+    }
+    if include_uno:
+        timing_contract["uno"] = (
+            "median of five cached deterministic constrained solves"
+        )
     return {
-        "timing_contract": {
-            "kernel": "median of five cached deterministic solves",
-            "uno": "median of five cached deterministic constrained solves",
-            "nn": (
-                "median across accepted seeds from 100 initializations "
-                "(21 for the open-economy sequence-space NN, five for "
-                "multicountry growth), each seed allowed up to five "
-                "multi-start restarts"
-            ),
-        },
+        "timing_contract": timing_contract,
         "asset_pricing": comparison(
             asset_kernel_time,
             asset_kernel_error,
@@ -1107,7 +1120,7 @@ def performance_comparisons(out):
     }
 
 
-def validate_replication_contract(out):
+def validate_replication_contract(out, include_uno=True):
     # (headline experiment, expected seed count) per NN prefix; the recursive
     # growth driver's headline experiment is single_ic_g0, not baseline.
     nn_seed_counts = {
@@ -1132,11 +1145,14 @@ def validate_replication_contract(out):
         "optimal_advertising_kernel",
         "human_capital_kernel",
         "open_economy_growth_kernel",
-        "open_economy_growth_kernel_uno",
         "multicountry_growth_kernel",
-        "asset_pricing_kernel_uno",
-        "neoclassical_growth_kernel_uno",
     )
+    if include_uno:
+        kernel_prefixes += (
+            "open_economy_growth_kernel_uno",
+            "asset_pricing_kernel_uno",
+            "neoclassical_growth_kernel_uno",
+        )
     for prefix in kernel_prefixes:
         timing = pd.read_parquet(out / f"{prefix}_baseline_timing_df.parquet")
         if len(timing) != DETERMINISTIC_TIMING_REPETITIONS:
@@ -1145,10 +1161,14 @@ def validate_replication_contract(out):
             )
 
 
-def collect(output_dir: str = ".results"):
+def collect(output_dir: str = ".results", include_uno: bool = True):
     out = pathlib.Path(output_dir)
-    validate_replication_contract(out)
+    validate_replication_contract(out, include_uno)
     write_nu_rho_table(out)
+    # The collected precision comes from the collected data itself.
+    residual_dtype = load(out, "neoclassical_growth_kernel_baseline").get(
+        "residual_dtype"
+    )
     payload = clean(
         {
             "_meta": {
@@ -1167,19 +1187,37 @@ def collect(output_dir: str = ".results"):
                 .isoformat(timespec="seconds"),
                 "machine": machine_info(),
                 "output_dir": output_dir,
+                "residual_dtype": residual_dtype,
+                "include_uno": include_uno,
                 "band_quantiles": [int(100 * QUANTILES[0]), int(100 * QUANTILES[-1])],
             },
             "neoclassical_growth_kernel": neoclassical_growth_kernel(out),
-            "neoclassical_growth_kernel_uno": neoclassical_growth_kernel_uno(out),
+            **(
+                {
+                    "neoclassical_growth_kernel_uno": neoclassical_growth_kernel_uno(
+                        out
+                    ),
+                    "neoclassical_growth_concave_convex_kernel_uno": (
+                        neoclassical_growth_concave_convex_kernel(
+                            out,
+                            prefix="neoclassical_growth_concave_convex_kernel_uno",
+                            require_all=False,
+                        )
+                    ),
+                    "asset_pricing_kernel_uno": asset_pricing_kernel(
+                        out, prefix="asset_pricing_kernel_uno"
+                    ),
+                    "open_economy_growth_kernel_uno": open_economy_growth_kernel(
+                        out,
+                        prefix="open_economy_growth_kernel_uno",
+                        selection="minimum_rkhs_norm_constrained",
+                    ),
+                }
+                if include_uno
+                else {}
+            ),
             "neoclassical_growth_concave_convex_kernel": (
                 neoclassical_growth_concave_convex_kernel(out)
-            ),
-            "neoclassical_growth_concave_convex_kernel_uno": (
-                neoclassical_growth_concave_convex_kernel(
-                    out,
-                    prefix="neoclassical_growth_concave_convex_kernel_uno",
-                    require_all=False,
-                )
             ),
             # require_all=False for both NNs: solver acceptance is scored
             # separately from basin correctness, so a rejected grid point is
@@ -1192,9 +1230,6 @@ def collect(output_dir: str = ".results"):
                 )
             ),
             "asset_pricing_kernel": asset_pricing_kernel(out),
-            "asset_pricing_kernel_uno": asset_pricing_kernel(
-                out, prefix="asset_pricing_kernel_uno"
-            ),
             "asset_pricing_nn": asset_pricing_nn(out),
             "optimal_advertising_kernel": optimal_advertising_kernel(out),
             "human_capital_kernel": human_capital_kernel(out),
@@ -1205,18 +1240,13 @@ def collect(output_dir: str = ".results"):
             ),
             "stochastic_growth_nn_recursive": stochastic_growth_nn_recursive(out),
             "open_economy_growth_kernel": open_economy_growth_kernel(out),
-            "open_economy_growth_kernel_uno": open_economy_growth_kernel(
-                out,
-                prefix="open_economy_growth_kernel_uno",
-                selection="minimum_rkhs_norm_constrained",
-            ),
             "open_economy_growth_nn": open_economy_growth_nn_recursive(
                 out, prefix="open_economy_growth_nn"
             ),
             "open_economy_growth_nn_recursive": open_economy_growth_nn_recursive(out),
             "multicountry_growth_kernel": multicountry_growth_kernel(out),
             "multicountry_growth_nn": multicountry_growth_nn(out),
-            "performance_comparisons": performance_comparisons(out),
+            "performance_comparisons": performance_comparisons(out, include_uno),
         }
     )
     # allow_nan=False guarantees the output is strict JSON (any NaN raises here).

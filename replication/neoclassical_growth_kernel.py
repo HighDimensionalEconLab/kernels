@@ -1,35 +1,46 @@
 from __future__ import annotations
 
-import jax
 import jsonargparse
 
 import neoclassical_growth_kernel
 from replication.utilities import (
-    enable_compilation_cache,
+    configure_process,
     ensemble,
     save_experiment,
     write_summary,
 )
 
-jax.config.update("jax_enable_x64", True)
-jax.config.update("jax_default_matmul_precision", "highest")
-
-enable_compilation_cache()
-
 PREFIX = "neoclassical_growth_kernel"
 
 
 def run(
-    output_dir: str = ".results",
+    output_dir: str | None = None,
+    use_float64: bool = True,
 ):
-    meta = dict(n_seeds=1)
+    configure_process()
+    if output_dir is None:
+        output_dir = ".results" if use_float64 else ".results_float32"
+    # Float32 runs pass looser solver thresholds and acceptance gates; the
+    # float64 run uses the solver defaults.
+    lm = {} if use_float64 else dict(residual_atol=1e-5, ridge=1e-7, gtol=1e-6)
+    tol = (
+        {}
+        if use_float64
+        else dict(train_residual=1e-3, validation_residual=1e-2, mpk_bound=5e-3)
+    )
+    meta = dict(n_seeds=1, residual_dtype="float64" if use_float64 else "float32")
 
     def go(name, **experiment):
         print(f"{name} -> {output_dir}/")
         results_df, frames, hyperparameters = ensemble(
             neoclassical_growth_kernel.neoclassical_growth_kernel,
             n_seeds=1,
-            options=experiment,
+            options={
+                "use_float64": use_float64,
+                "lm_set": lm,
+                "tolerance_set": tol,
+                **experiment,
+            },
         )
         save_experiment(
             name,

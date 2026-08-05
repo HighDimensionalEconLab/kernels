@@ -22,7 +22,7 @@ def run(
         output_dir = ".results" if use_float64 else ".results_float32"
     # Float32 runs pass looser solver thresholds and acceptance gates; the
     # float64 run uses the solver defaults.
-    lm = {} if use_float64 else dict(residual_atol=1e-5, ridge=1e-7, gtol=1e-7)
+    lm = {} if use_float64 else dict(residual_atol=1e-5, ridge=1e-7, gtol=3e-7)
     tol = {} if use_float64 else dict(train_residual=1e-3)
     print(f"baseline -> {output_dir}/")
     results_df, frames, hyperparameters = ensemble(

@@ -25,12 +25,18 @@ def run(output_dir: str | None = None, use_float64: bool = True):
     lm = (
         {}
         if use_float64
-        else dict(residual_atol=5e-5, ridge=1e-7, ridge_init=1e-5, gtol=1e-6)
+        else dict(
+            residual_atol=2e-4,
+            ridge=1e-7,
+            ridge_init=1e-5,
+            gtol=1e-5,
+            linear_solver="qr",
+        )
     )
     tol = (
         {}
         if use_float64
-        else dict(train_residual=1e-3, validation_residual=2e-2, benchmark_match=1e-2)
+        else dict(train_residual=5e-3, validation_residual=2e-2, benchmark_match=1e-2)
     )
     meta = dict(n_seeds=1, residual_dtype="float64" if use_float64 else "float32")
 

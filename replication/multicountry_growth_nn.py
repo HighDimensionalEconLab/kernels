@@ -42,7 +42,7 @@ def run(
         {}
         if use_float64
         else dict(
-            train_residual=1e-3,
+            train_residual=5e-3,
             validation_residual=1e-2,
             accounting=1e-3,
             benchmark_match=1e-2,

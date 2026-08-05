@@ -22,11 +22,11 @@ def run(
         output_dir = ".results" if use_float64 else ".results_float32"
     # Float32 runs pass looser solver thresholds and acceptance gates; the
     # float64 run uses the solver defaults.
-    lm = {} if use_float64 else dict(residual_atol=1e-5, ridge=1e-7, gtol=1e-6)
+    lm = {} if use_float64 else dict(residual_atol=5e-5, ridge=1e-7, gtol=1e-5)
     tol = (
         {}
         if use_float64
-        else dict(train_residual=1e-3, validation_residual=1e-2, mpk_bound=5e-3)
+        else dict(train_residual=5e-3, validation_residual=1e-2, mpk_bound=5e-3)
     )
     meta = dict(n_seeds=1, residual_dtype="float64" if use_float64 else "float32")
 

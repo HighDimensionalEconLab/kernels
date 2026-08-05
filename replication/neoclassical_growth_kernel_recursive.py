@@ -91,7 +91,7 @@ def run(
         output_dir = ".results" if use_float64 else ".results_float32"
     # Float32 runs pass looser solver thresholds and acceptance gates; the
     # float64 run uses the solver defaults.
-    stop = {} if use_float64 else dict(residual_atol=1e-4, gtol=1e-5, ridge=1e-8)
+    stop = {} if use_float64 else dict(residual_atol=3e-4, gtol=1e-5, ridge=1e-8)
     kernel_extra = {} if use_float64 else dict(metric_epsilon=1e-4)
     meta = dict(
         n_data_seeds=n_data_seeds,

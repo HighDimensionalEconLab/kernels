@@ -13,6 +13,9 @@ import unopy
 from kernels import integrated_kernel_matrices
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from rkhs import rkhs_norm_squared
+from utilities import (
+    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
+)
 
 if __name__ == "__main__":
     jax.config.update("jax_enable_x64", True)
@@ -34,13 +37,13 @@ class KernelSettings:
 
 @dataclass(frozen=True)
 class DataSettings:
-    train_T: float = 40.0
-    train_points: int = 41
+    train_T: float = CONSTANTS.train_T
+    train_points: int = 101
     train_points_list: list[float] | None = None
-    test_T: float = 50.0
+    test_T: float = CONSTANTS.sequence_test_T
     test_points: int = 100
-    benchmark_T: float = 80.0
-    benchmark_points: int = 300
+    benchmark_T: float = CONSTANTS.benchmark_T
+    benchmark_points: int = CONSTANTS.benchmark_points
 
 
 @dataclass(frozen=True)
@@ -55,10 +58,13 @@ class SolverSettings:
 KINKED_SOLVER_SETTINGS = SolverSettings(max_iterations=25, time_limit=0.15)
 
 
+# The shared NEOCLASSICAL_GROWTH_CONSTANTS (utilities.py) maps the Aruoba,
+# Fernandez-Villaverde & Rubio-Ramirez (2006 JEDC) benchmark values.
 def neoclassical_growth_kernel_uno(
-    a: float = 1 / 3,
-    delta: float = 0.1,
-    rho_hat: float = 0.11,
+    a: float = CONSTANTS.a,
+    delta: float = CONSTANTS.delta,
+    rho_hat: float = CONSTANTS.rho_hat,
+    sigma_crra: float = CONSTANTS.sigma_crra,
     k_0: float = 1.0,
     A: float | None = None,
     b_1: float | None = None,
@@ -69,6 +75,8 @@ def neoclassical_growth_kernel_uno(
     c_0_guess: float | None = None,  # overrides the flat steady-flow warm start
     verbose: bool = False,
 ):
+    if sigma_crra <= 0.0:
+        raise ValueError("sigma_crra must be positive")
     kinked_parameter_count = sum(parameter is not None for parameter in (A, b_1, b_2))
     if kinked_parameter_count not in {0, 3}:
         raise ValueError("Set all of A, b_1, and b_2, or set none of them.")
@@ -111,7 +119,7 @@ def neoclassical_growth_kernel_uno(
         c_flow_guess = max(float(c_0_guess), DOMAIN_EPS)
     x_initial = np.zeros(n_variables, dtype=np.float64)
     x_initial[3 * n_train] = c_flow_guess
-    x_initial[3 * n_train + 1] = 1.0 / c_flow_guess
+    x_initial[3 * n_train + 1] = c_flow_guess**-sigma_crra
 
     def unpack(x):
         alpha_mu = x[:n_train]
@@ -148,13 +156,15 @@ def neoclassical_growth_kernel_uno(
             + alpha_k @ K_jax @ alpha_k
         )
 
+    # CRRA first-order condition u'(c) = mu, i.e. mu c^sigma_crra = 1; the
+    # costate and resource residuals are utility-free.
     def constraints(x):
         k, c, mu, dk_dt, dmu_dt = path_values(x, K_jax, K_tilde_jax)
         output = production(k)
         mpk = marginal_product(k)
         resource = dk_dt - (output - delta * k - c)
         euler = dmu_dt + mu * (mpk - delta - rho_hat)
-        shadow_price = mu * c - 1.0
+        shadow_price = mu * c**sigma_crra - 1.0
         return jnp.concatenate([resource, euler, shadow_price, k, c, mu])
 
     def lagrangian(x, objective_multiplier, multipliers):
@@ -301,7 +311,7 @@ def neoclassical_growth_kernel_uno(
             "Y": output_values,
             "resource": dk_values - (output_values - delta * k_values - c_values),
             "euler": dmu_values + mu_values * (mpk_values - delta - rho_hat),
-            "shadow_price": mu_values * c_values - 1.0,
+            "shadow_price": mu_values * c_values**sigma_crra - 1.0,
             "mpk_lower_violation": jnp.maximum(mpk_lower_bound - implied_mpk, 0.0),
             "mpk_upper_violation": jnp.maximum(implied_mpk - mpk_upper_bound, 0.0),
         }
@@ -373,6 +383,7 @@ def neoclassical_growth_kernel_uno(
         "a": a,
         "delta": delta,
         "rho_hat": rho_hat,
+        "sigma_crra": sigma_crra,
         "k_0": k_0,
         "A": A_value,
         "b_1": b_1_value,
@@ -422,7 +433,7 @@ def neoclassical_growth_kernel_uno(
 
     if not use_kinked_production:
         benchmark_solution = neoclassical_growth_benchmark(
-            a, delta, rho_hat, 1.0, k_0, benchmark_grid
+            a, delta, rho_hat, sigma_crra, k_0, benchmark_grid
         )
         k_benchmark, c_benchmark = benchmark_solution(test_data)
         k_rel_error = jnp.abs(k_benchmark - test_eval["k"]) / k_benchmark
@@ -457,6 +468,7 @@ def neoclassical_growth_kernel_uno(
             "a": a,
             "delta": delta,
             "rho_hat": rho_hat,
+            "sigma_crra": sigma_crra,
             "A": A_value,
             "b_1": b_1_value,
             "b_2": b_2_value,

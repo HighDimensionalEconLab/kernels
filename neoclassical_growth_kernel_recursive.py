@@ -41,31 +41,40 @@ from neoclassical_growth_nn_recursive import (
     trajectory_frame,
     trajectory_values,
 )
-from utilities import OptimizerSettings, unit_softplus
+from utilities import (
+    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
+)
+from utilities import (
+    OptimizerSettings,
+    unit_softplus,
+)
 
 
 @dataclass(frozen=True)
 class DataSettings:
     collocation_source: Literal["exact_path"] = "exact_path"
-    train_T: float = 100.0
+    train_T: float = CONSTANTS.train_T
     # Fixed RKHS centers on the exact path: a representation size, not a
     # rollout grid (nothing is integrated during training).
     train_points: int = 65
     # Held-out paths are fixed-step RK4 on the integrator's own states.
     test_points: int = 41
     tvc_steps: int = 256
-    train_tvc_T: float = 200.0
-    test_T: float = 40.0
+    train_tvc_T: float = CONSTANTS.transversality_T
+    test_T: float = CONSTANTS.test_T
     policy_grid_size: int = 100
-    benchmark_T: float = 200.0
-    benchmark_points: int = 801
+    benchmark_T: float = CONSTANTS.benchmark_T
+    benchmark_points: int = CONSTANTS.benchmark_points
 
 
 @jax.tree_util.register_static
 @dataclass(frozen=True)
 class StateKernelSettings:
     amplitude: float = 1.0
-    lengthscale: float = 0.4
+    # Sweep-validated at the calibrated state geometry (k_ss ~ 3.6): much
+    # shorter values under-cover the capital span and stall the ridge-LM
+    # solve, while ~0.9 converges too slowly for the replication step budget.
+    lengthscale: float = 0.6
     metric_epsilon: float = 3e-5
     # With the free constant, theta is (alpha, h_const) and only alpha is
     # penalized; without it the policy is the pure RKHS expansion.
@@ -280,11 +289,13 @@ def residual_fn(theta, args, p, kernel_set):
     return residual / jnp.sqrt(residual.size)
 
 
+# Calibration shared with neoclassical_growth_nn_recursive via the scoped
+# NEOCLASSICAL_GROWTH_CONSTANTS (utilities.py).
 def neoclassical_growth_kernel_recursive(
-    a: float = 1 / 3,
-    delta: float = 0.1,
-    rho_hat: float = 0.11,
-    sigma_crra: float = 1.0,
+    a: float = CONSTANTS.a,
+    delta: float = CONSTANTS.delta,
+    rho_hat: float = CONSTANTS.rho_hat,
+    sigma_crra: float = CONSTANTS.sigma_crra,
     g: float = 0.0,
     z_0: float = 1.0,
     k_0: float = 1.0,

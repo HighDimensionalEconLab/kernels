@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import pathlib
 import time
 from dataclasses import asdict, dataclass, replace
 from functools import lru_cache, partial
@@ -16,7 +19,14 @@ from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
 from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
-from utilities import ACTIVATIONS, OptimizerSettings, unit_softplus
+from utilities import (
+    ACTIVATIONS,
+    OptimizerSettings,
+    unit_softplus,
+)
+from utilities import (
+    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
+)
 
 DOMAIN_EPS = 1e-8
 
@@ -45,12 +55,12 @@ class DataSettings:
     train_points: int = 65
     test_points: int = 41
     tvc_steps: int = 256
-    train_T: float = 100.0
-    train_tvc_T: float = 200.0
-    test_T: float = 40.0
+    train_T: float = CONSTANTS.train_T
+    train_tvc_T: float = CONSTANTS.transversality_T
+    test_T: float = CONSTANTS.test_T
     policy_grid_size: int = 100
-    benchmark_T: float = 200.0
-    benchmark_points: int = 801
+    benchmark_T: float = CONSTANTS.benchmark_T
+    benchmark_points: int = CONSTANTS.benchmark_points
 
 
 @dataclass(frozen=True)
@@ -177,6 +187,102 @@ STATUS_TO_REASON = {
     LMStatus.NONFINITE: "nonfinite",
     LMStatus.MAX_STEPS: "max_steps",
 }
+
+
+# One .npz per trained policy: the nnx.Param state through nnx's supported
+# State.to_pure_dict / replace_by_pure_dict conversion (keys joined with "/",
+# list indices numeric), plus a JSON block with the architecture settings,
+# scales, dtype, and the structural scalars, so a load is rollout-ready
+# without the training driver (e.g. as the trajectory generator for a kernel
+# design).
+def save_investment_policy(path, policy, settings, *, structural=None, extra=None):
+    def flatten(prefix, node, out):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                flatten((*prefix, str(key)), value, out)
+        else:
+            out["/".join(prefix)] = np.asarray(node)
+        return out
+
+    arrays = flatten((), nnx.state(policy, nnx.Param).to_pure_dict(), {})
+    meta = {
+        "settings": asdict(settings),
+        "log_z_scale": policy.log_z_scale,
+        "log_k_scale": policy.log_k_scale,
+        "k_scale": policy.k_scale,
+        "dtype": str(next(iter(arrays.values())).dtype),
+    }
+    if structural is not None:
+        meta["structural"] = {
+            name: float(np.asarray(value))
+            for name, value in structural.items()
+            if np.asarray(value).ndim == 0
+        }
+    if extra:
+        meta.update(extra)
+    np.savez(path, __meta__=np.asarray(json.dumps(meta)), **arrays)
+
+
+def load_investment_policy(path):
+    data = np.load(path)
+    meta = json.loads(str(data["__meta__"]))
+    settings = InvestmentPolicySettings(**meta["settings"])
+    dtype = jnp.dtype(meta["dtype"])
+    module = InvestmentPolicyNN(
+        settings,
+        z_scale=math.exp(meta["log_z_scale"]),
+        k_scale=meta["k_scale"],
+        dtype=dtype,
+        rngs=nnx.Rngs(0),
+    )
+    graphdef, theta, fixed_state = nnx.split(module, nnx.Param, ...)
+    nested = {}
+    for name in data.files:
+        if name == "__meta__":
+            continue
+        node = nested
+        *parents, leaf = name.split("/")
+        for part in parents:
+            node = node.setdefault(int(part) if part.isdigit() else part, {})
+        node[int(leaf) if leaf.isdigit() else leaf] = jnp.asarray(
+            data[name], dtype=dtype
+        )
+    theta.replace_by_pure_dict(nested)
+    return nnx.merge(graphdef, theta, fixed_state), meta
+
+
+# Content-addressed policy filenames: the key hashes every input that
+# determines the trained artifact, so existence of
+# <dir>/<model>_policy_<key>.npz is a cache hit for an identical run.
+def policy_cache_key(config):
+    canonical = json.dumps(config, sort_keys=True, default=float)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:12]
+
+
+def meta_lookup(meta, dotted):
+    node = meta
+    for part in dotted.split("."):
+        node = node[part]
+    return node
+
+
+# Scan saved policies and keep those whose meta matches every criterion;
+# criteria keys are dotted paths into the meta, e.g.
+# {"structural.sigma_crra": 2.0, "dtype": "float64"}.
+def find_saved_policies(directory, criteria=None):
+    matches = []
+    for path in sorted(pathlib.Path(directory).glob("*_policy_*.npz")):
+        meta = json.loads(str(np.load(path)["__meta__"]))
+        try:
+            matched = all(
+                meta_lookup(meta, key) == value
+                for key, value in (criteria or {}).items()
+            )
+        except KeyError:
+            continue
+        if matched:
+            matches.append((path, meta))
+    return matches
 
 
 def production(z, k, p):
@@ -675,11 +781,14 @@ def collocation_step_diagnostics(times):
     }
 
 
+# The shared NEOCLASSICAL_GROWTH_CONSTANTS (utilities.py) maps the Aruoba,
+# Fernandez-Villaverde & Rubio-Ramirez (2006 JEDC) benchmark values; the
+# stochastic variant solves this same model with stochastic TFP.
 def neoclassical_growth_nn_recursive(
-    a: float = 1 / 3,
-    delta: float = 0.1,
-    rho_hat: float = 0.11,
-    sigma_crra: float = 1.0,
+    a: float = CONSTANTS.a,
+    delta: float = CONSTANTS.delta,
+    rho_hat: float = CONSTANTS.rho_hat,
+    sigma_crra: float = CONSTANTS.sigma_crra,
     g: float = 0.0,
     z_0: float = 1.0,
     k_0: float = 1.0,
@@ -697,6 +806,12 @@ def neoclassical_growth_nn_recursive(
         geodesic_acceptance_ratio=0.541,
     ),
     stop_set: StoppingCriteria = StoppingCriteria(),
+    # Directory for content-addressed policy artifacts (e.g. ".results"): an
+    # existing artifact for this exact configuration is loaded instead of
+    # training, and a fresh solve is saved there. save_policy writes one
+    # explicit extra path.
+    policy_cache: str | None = None,
+    save_policy: str | None = None,
     verbose: bool = True,
 ):
     jax.config.update("jax_enable_x64", use_float64)
@@ -812,71 +927,137 @@ def neoclassical_growth_nn_recursive(
         ),
         data_set=data_set,
     )
-    solver = LevenbergMarquardt(
-        residual_fn,
-        init_damping=opt_set.init_damping,
-        damping_decrease=opt_set.damping_decrease,
-        damping_increase=opt_set.damping_increase,
-        geodesic_acceleration=opt_set.geodesic_acceleration,
-        geodesic_acceptance_ratio=opt_set.geodesic_acceptance_ratio,
+    # Two-part artifact key <problem>-<run>: the problem hash covers the deep
+    # structural parameters, dtype, and the training initial-condition design
+    # shared by any solver of the same problem, so a consumer can glob
+    # *_policy_<problem>-*.npz for a reference solution; the run hash covers
+    # the training minutiae. Test/benchmark settings enter neither, so
+    # changing them still reuses a cached policy.
+    problem_config = {
+        "a": a,
+        "delta": delta,
+        "rho_hat": rho_hat,
+        "sigma_crra": sigma_crra,
+        "g": g,
+        "z_0": z_0,
+        "k_0": k_0,
+        "use_float64": use_float64,
+        "train_ic": {
+            "num_train_trajectories": ic_set.num_train_trajectories,
+            "train_log_z_variance": ic_set.train_log_z_variance,
+            "train_log_k_variance": ic_set.train_log_k_variance,
+        },
+    }
+    run_config = {
+        "seed": seed,
+        "data_seed": ic_set.data_seed,
+        "train_points": data_set.train_points,
+        "train_T": data_set.train_T,
+        "hc_set": asdict(hc_set),
+        "opt_set": asdict(opt_set),
+        "stop_set": asdict(stop_set),
+    }
+    problem_key = policy_cache_key(problem_config)
+    run_key = policy_cache_key(run_config)
+    cache_key = f"{problem_key}-{run_key}"
+    cache_path = (
+        None
+        if policy_cache is None
+        else pathlib.Path(policy_cache)
+        / f"neoclassical_growth_nn_recursive_policy_{cache_key}.npz"
     )
-    _, theta_0, _ = nnx.split(
-        InvestmentPolicyNN(
-            hc_set, z_scale=z_0, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(init_key)
-        ),
-        nnx.Param,
-        ...,
-    )
-    callback = EpochCallback(
-        num_train_trajectories=ic_set.num_train_trajectories,
-        log_z_0=math.log(z_0),
-        log_k_0=math.log(k_0),
-        log_z_scale=math.sqrt(ic_set.train_log_z_variance),
-        log_k_scale=math.sqrt(ic_set.train_log_k_variance),
-        epoch_early_stopping=stop_set.epoch_early_stopping,
-    )
-    draw = DrawInvestmentPolicy(hc_set, dtype, z_0, k_0)
-    # The per-step tolerance is sound only while the training batch never
-    # changes; across epochs, convergence is judged at the boundaries instead.
-    atol = math.sqrt(stop_set.train_loss_threshold) if stop_set.num_epochs == 1 else 0.0
-
-    start_time = time.perf_counter()
-    result = solver.solve(
-        theta_0,
-        residual_args,
-        p=p,
-        max_steps=stop_set.num_epochs * stop_set.max_steps,
-        atol=atol,
-        callback=callback,
-        multi_start=MultiStart(
-            key=multi_start_key,
-            num_starts=stop_set.num_attempts,
-            draw=draw,
-        ),
-        max_steps_is_success=not stop_set.epoch_early_stopping,
-    )
-    jax.block_until_ready(result)
-    train_time = time.perf_counter() - start_time
-    total_fit_time = time.perf_counter() - fit_start
-    setup_time = start_time - fit_start
-    steps = int(result.steps)
-    # info.loss can describe the pre-swap batch when an epoch boundary stopped
-    # the solve, so the loss is recomputed at the returned (x, args).
-    r = residual_fn(result.x, result.args, p)
-    train_loss = float(jnp.sum(r * r))
-    epochs_run = -(-steps // stop_set.max_steps)
-    stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
-    attempt = int(result.multi_start.attempt) + 1
-    if verbose:
-        print(
-            f"attempt {attempt}: {stopping_reason} after {steps} steps "
-            f"(epoch {epochs_run}/{stop_set.num_epochs}), "
-            f"train_loss={train_loss:.3e} ({train_time:.2f}s)"
+    cache_hit = cache_path is not None and cache_path.exists()
+    if cache_hit:
+        policy, cached_meta = load_investment_policy(cache_path)
+        theta_final, solve_args = nnx.split(policy, nnx.Param, ...)[1], residual_args
+        steps = 0
+        epochs_run = 0
+        attempt = 0
+        stopping_reason = "cached"
+        final_damping = float("nan")
+        solver_accepted = bool(cached_meta["solution_accepted"])
+        train_time = 0.0
+        total_fit_time = time.perf_counter() - fit_start
+        setup_time = total_fit_time
+        r = residual_fn(theta_final, solve_args, p)
+        train_loss = float(jnp.sum(r * r))
+        if verbose:
+            print(f"loaded {cache_path}, train_loss={train_loss:.3e}")
+    else:
+        solver = LevenbergMarquardt(
+            residual_fn,
+            init_damping=opt_set.init_damping,
+            damping_decrease=opt_set.damping_decrease,
+            damping_increase=opt_set.damping_increase,
+            geodesic_acceleration=opt_set.geodesic_acceleration,
+            geodesic_acceptance_ratio=opt_set.geodesic_acceptance_ratio,
         )
-    policy = nnx.merge(graphdef, result.x, fixed_state)
+        _, theta_0, _ = nnx.split(
+            InvestmentPolicyNN(
+                hc_set, z_scale=z_0, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(init_key)
+            ),
+            nnx.Param,
+            ...,
+        )
+        callback = EpochCallback(
+            num_train_trajectories=ic_set.num_train_trajectories,
+            log_z_0=math.log(z_0),
+            log_k_0=math.log(k_0),
+            log_z_scale=math.sqrt(ic_set.train_log_z_variance),
+            log_k_scale=math.sqrt(ic_set.train_log_k_variance),
+            epoch_early_stopping=stop_set.epoch_early_stopping,
+        )
+        draw = DrawInvestmentPolicy(hc_set, dtype, z_0, k_0)
+        # The per-step tolerance is sound only while the training batch never
+        # changes; across epochs, convergence is judged at the boundaries
+        # instead.
+        atol = (
+            math.sqrt(stop_set.train_loss_threshold)
+            if stop_set.num_epochs == 1
+            else 0.0
+        )
+
+        start_time = time.perf_counter()
+        result = solver.solve(
+            theta_0,
+            residual_args,
+            p=p,
+            max_steps=stop_set.num_epochs * stop_set.max_steps,
+            atol=atol,
+            callback=callback,
+            multi_start=MultiStart(
+                key=multi_start_key,
+                num_starts=stop_set.num_attempts,
+                draw=draw,
+            ),
+            max_steps_is_success=not stop_set.epoch_early_stopping,
+        )
+        jax.block_until_ready(result)
+        train_time = time.perf_counter() - start_time
+        total_fit_time = time.perf_counter() - fit_start
+        setup_time = start_time - fit_start
+        steps = int(result.steps)
+        # info.loss can describe the pre-swap batch when an epoch boundary
+        # stopped the solve, so the loss is recomputed at the returned
+        # (x, args).
+        theta_final, solve_args = result.x, result.args
+        r = residual_fn(theta_final, solve_args, p)
+        train_loss = float(jnp.sum(r * r))
+        epochs_run = -(-steps // stop_set.max_steps)
+        stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
+        attempt = int(result.multi_start.attempt) + 1
+        final_damping = float(result.lm_state.damping)
+        solver_accepted = bool(result.multi_start.accepted)
+        if verbose:
+            print(
+                f"attempt {attempt}: {stopping_reason} after {steps} steps "
+                f"(epoch {epochs_run}/{stop_set.num_epochs}), "
+                f"train_loss={train_loss:.3e} ({train_time:.2f}s)"
+            )
+        policy = nnx.merge(graphdef, theta_final, fixed_state)
 
     # Training diagnostics use the batch the solution was returned on.
-    train_batch_log_states = result.args.initial_log_states
+    train_batch_log_states = solve_args.initial_log_states
     train_batch_initial_conditions = jnp.exp(train_batch_log_states)
     train_solution = collocation_rollout(policy, train_batch_log_states, p, data_set)
     train_log_states = train_solution.xs
@@ -935,7 +1116,6 @@ def neoclassical_growth_nn_recursive(
     test_transversality_ok = bool(
         jnp.all(test_tvc_ok) and test_max_log_tvc < stop_set.log_tvc_threshold
     )
-    solver_accepted = bool(result.multi_start.accepted)
     max_train_euler = float(train_df["euler_residual"].abs().max())
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
     test_trajectory_euler = jnp.mean(jnp.abs(test_values["euler_residual"]), axis=1)
@@ -977,7 +1157,9 @@ def neoclassical_growth_nn_recursive(
         "train_loss": train_loss,
         "max_train_euler": max_train_euler,
         "max_test_euler": max_test_euler,
-        "final_damping": float(result.lm_state.damping),
+        "final_damping": final_damping,
+        "policy_cache_key": cache_key,
+        "policy_cache_hit": cache_hit,
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_values["euler_residual"]))),
         "test_trajectory_euler_mean_abs_p50": float(
             jnp.quantile(test_trajectory_euler, 0.5)
@@ -1169,6 +1351,31 @@ def neoclassical_growth_nn_recursive(
         "hyperparameters": hyperparameters,
         "test_summary_df": test_summary_df,
     }
+    structural = {
+        "a": a,
+        "delta": delta,
+        "rho_hat": rho_hat,
+        "sigma_crra": sigma_crra,
+        "g": g,
+    }
+    policy_extra = {
+        "model": "neoclassical_growth_nn_recursive",
+        "problem_key": problem_key,
+        "run_key": run_key,
+        "cache_key": cache_key,
+        "config": {"problem": problem_config, "run": run_config},
+        "solution_accepted": solver_accepted,
+        "train_loss": train_loss,
+        "test_euler_mean_abs": results["test_euler_mean_abs"],
+    }
+    if cache_path is not None and not cache_hit:
+        save_investment_policy(
+            cache_path, policy, hc_set, structural=structural, extra=policy_extra
+        )
+    if save_policy is not None:
+        save_investment_policy(
+            save_policy, policy, hc_set, structural=structural, extra=policy_extra
+        )
     return results, extras
 
 

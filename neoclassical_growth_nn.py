@@ -19,7 +19,13 @@ from nlls_gram import (
 )
 
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
-from utilities import ACTIVATIONS, unit_softplus
+from utilities import (
+    ACTIVATIONS,
+    unit_softplus,
+)
+from utilities import (
+    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
+)
 
 if __name__ == "__main__":
     jax.config.update("jax_enable_x64", True)
@@ -48,14 +54,14 @@ class StructuralParameters:
 
 @dataclass
 class DataSettings:
-    train_T: float = 40.0
-    train_points: int = 41
+    train_T: float = CONSTANTS.train_T
+    train_points: int = 101
     train_points_list: list[float] | None = None
-    test_T: float = 50.0
+    test_T: float = CONSTANTS.sequence_test_T
     test_points: int = 101
-    test_tvc_T: float = 200.0
-    benchmark_T: float = 80.0
-    benchmark_points: int = 300
+    test_tvc_T: float = CONSTANTS.transversality_T
+    benchmark_T: float = CONSTANTS.benchmark_T
+    benchmark_points: int = CONSTANTS.benchmark_points
 
 
 @dataclass(frozen=True)
@@ -249,15 +255,17 @@ def snapshot(data, model, p):
     return df
 
 
+# The shared NEOCLASSICAL_GROWTH_CONSTANTS (utilities.py) maps the Aruoba,
+# Fernandez-Villaverde & Rubio-Ramirez (2006 JEDC) benchmark values.
 def neoclassical_growth_nn(
-    a: float = 1 / 3,
-    delta: float = 0.1,
-    rho_hat: float = 0.11,
+    a: float = CONSTANTS.a,
+    delta: float = CONSTANTS.delta,
+    rho_hat: float = CONSTANTS.rho_hat,
     k_0: float = 1.0,
     A: float | None = None,
     b_1: float | None = None,
     b_2: float | None = None,
-    sigma_crra: float = 1.0,
+    sigma_crra: float = CONSTANTS.sigma_crra,
     seed: int = 0,
     use_float64: bool = True,
     data_set: DataSettings = DataSettings(),

@@ -1216,8 +1216,13 @@ def collect(output_dir: str = ".results", include_uno: bool = True):
                 if include_uno
                 else {}
             ),
+            # The all-70 basin contract is the float64 caption's claim; a
+            # float32 collection reports n_basin_correct as data (platform
+            # rounding moves which knife-edge point misclassifies).
             "neoclassical_growth_concave_convex_kernel": (
-                neoclassical_growth_concave_convex_kernel(out)
+                neoclassical_growth_concave_convex_kernel(
+                    out, require_all=residual_dtype == "float64"
+                )
             ),
             # require_all=False for both NNs: solver acceptance is scored
             # separately from basin correctness, so a rejected grid point is

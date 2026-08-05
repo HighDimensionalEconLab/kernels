@@ -1411,7 +1411,11 @@ def stochastic_open_economy_growth_nn_recursive(
     )
 
     rejection_reasons = []
-    if not solver_accepted or train_loss > stop_set.train_loss_threshold:
+    # A cached policy trained on other batches: only its saved solver
+    # acceptance applies, never the fresh-batch loss.
+    if not solver_accepted or (
+        not cache_hit and train_loss > stop_set.train_loss_threshold
+    ):
         rejection_reasons.append("train_loss")
     if not train_path_ok:
         rejection_reasons.append("train_path")

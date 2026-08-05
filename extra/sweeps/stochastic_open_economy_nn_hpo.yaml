@@ -2,7 +2,9 @@
 # default: bayes over MLP capacity, the num_epochs x max_steps split (frequent
 # resamples vs long polishing), the shock ladder, LM settings, and trajectory
 # count. Objective: median-seed test_euler_mean_abs_success (NaN when the
-# solution is rejected, so acceptance and held-out accuracy optimize jointly).
+# solution is rejected, so acceptance and held-out accuracy optimize
+# jointly). Gates calibrated locally: an accepted float32 default solve
+# reaches mean 1.7e-4 and per-head max 8.4e-3.
 # continuation_epochs > num_epochs combos raise and count as crashes.
 # Launch: `wandb sweep extra/sweeps/stochastic_open_economy_nn_hpo.yaml`, then
 # wandb agents (extra/sweeps/wandb_sweep_agent.sbatch; VENV=.venv-gpu on GPU).
@@ -29,8 +31,8 @@ parameters:
   verbose:                             {value: false}
   use_float64:                         {value: false}
   stop_set.train_loss_threshold:       {value: 1e-6}
-  tolerance_set.test_euler_mean_abs:   {value: 1e-2}
-  tolerance_set.test_euler_max:        {value: 1e-1}
+  tolerance_set.test_euler_mean_abs:   {value: 2e-3}
+  tolerance_set.test_euler_max:        {value: 5e-2}
   # --- MLP axes ---
   nn_set.width:                 {values: [16, 32, 64, 128]}
   nn_set.depth:                 {values: [2, 3, 4]}

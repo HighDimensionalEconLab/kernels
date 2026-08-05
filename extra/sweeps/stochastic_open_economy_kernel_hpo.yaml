@@ -10,6 +10,9 @@
 #       --tolerance_set.test_euler_max 1e-1 \
 #       --ic_set.num_train_trajectories $n --policy_cache .results
 #   done
+# Gates calibrated locally: the float64 default reaches mean 2.9e-3 / max
+# 6.6e-2; the float32 solver settings are part of the search (default gtol
+# is unreachable in float32).
 # The kernel driver takes no NN seed; the wrapper's seed varies the design
 # noise through ic_set.data_seed instead.
 # Launch: `wandb sweep extra/sweeps/stochastic_open_economy_kernel_hpo.yaml`.
@@ -37,7 +40,8 @@ parameters:
   verbose:                             {value: false}
   use_float64:                         {value: false}
   policy_dir:                          {value: .results}
-  tolerance_set.test_euler_max:        {value: 1e-1}
+  tolerance_set.test_euler_mean_abs:   {value: 2e-2}
+  tolerance_set.test_euler_max:        {value: 2e-1}
   # --- kernel geometry ---
   kernel_set.lengthscale:    {distribution: log_uniform_values, min: 0.2, max: 2.0}
   kernel_set.amplitude:      {distribution: log_uniform_values, min: 0.3, max: 3.0}
@@ -48,7 +52,7 @@ parameters:
   # --- ridge-LM axes ---
   stop_set.max_steps:        {values: [25, 50, 150, 300]}
   stop_set.residual_atol:    {distribution: log_uniform_values, min: 1e-6, max: 1e-4}
-  stop_set.gtol:             {distribution: log_uniform_values, min: 1e-9, max: 1e-6}
+  stop_set.gtol:             {distribution: log_uniform_values, min: 1e-8, max: 1e-4}
   # Upper range crosses the float32 ridge floor (~3.5e-4).
   stop_set.ridge:            {distribution: log_uniform_values, min: 1e-12, max: 1e-3}
   opt_set.init_damping:      {distribution: log_uniform_values, min: 1e-8, max: 1e-3}

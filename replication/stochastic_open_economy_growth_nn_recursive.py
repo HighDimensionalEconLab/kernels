@@ -39,7 +39,7 @@ def run(
     # Float32 runs pass a looser solver threshold and acceptance gates; the
     # float64 run uses the solver defaults.
     stop = {} if use_float64 else dict(train_loss_threshold=1e-6)
-    tol = {} if use_float64 else dict(test_euler_mean_abs=1e-2, test_euler_max=1e-1)
+    tol = {} if use_float64 else dict(test_euler_mean_abs=2e-3, test_euler_max=5e-2)
 
     def go(name, experiment_n_seeds, **experiment):
         print(f"{name}: {experiment_n_seeds} seeds -> {output_dir}/")

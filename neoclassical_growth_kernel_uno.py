@@ -48,8 +48,11 @@ class SolverSettings:
     time_limit: float | None = None
 
 
-# Kinked production needs the fail-fast budget: near the basin threshold the NLP
-# can wander, and the sweep classifies a slow solve as rejected.
+# Kinked production needs the fail-fast budget: near the basin threshold the
+# NLP can wander, and the sweep classifies a slow solve as rejected. Both
+# limits are calibrated to the kinked experiments' 41-point training design
+# (the replication drivers pass it; the smooth-model default is 101 points,
+# where 25 iterations alone cost ~1 s and the wall fires spuriously).
 KINKED_SOLVER_SETTINGS = SolverSettings(max_iterations=25, time_limit=0.15)
 
 

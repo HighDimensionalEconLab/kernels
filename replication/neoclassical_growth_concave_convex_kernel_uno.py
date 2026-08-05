@@ -28,7 +28,14 @@ def run(
         neoclassical_growth_concave_convex_kernel_uno.neoclassical_growth_concave_convex_kernel_uno,
         "k_0",
         [float(k_0) for k_0 in grid],
-        options={"verbose": verbose},
+        options={
+            "verbose": verbose,
+            # The kinked basin experiments keep their own calibrated grid:
+            # paths settle by T = 40, and the file defaults carry the smooth
+            # model's longer horizon (where the 25-iteration/0.15 s kinked
+            # fail-fast budget fires spuriously).
+            "data_set": dict(train_T=40.0, train_points=41, test_T=50.0),
+        },
     )
 
     # Ex-post basin classification of each finite-horizon path (side of the

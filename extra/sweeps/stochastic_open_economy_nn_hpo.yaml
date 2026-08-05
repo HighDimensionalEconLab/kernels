@@ -6,6 +6,9 @@
 # optimize jointly). Solver thresholds and acceptance gates are the module's
 # float64 defaults; the accepted default solve reaches mean 3.1e-6 and
 # per-head max 3.9e-4, far inside the 5e-3 / 5e-2 bars.
+# num_attempts is pinned to 2 (module default 4): a config that needs three
+# restarts is a bad config, and rejecting it early buys trials -- a full
+# 8-epoch x 250-step attempt is ~10 CPU-minutes at the T = 60 defaults.
 # continuation_epochs > num_epochs combos raise and count as crashes.
 # Launch: `wandb sweep extra/sweeps/stochastic_open_economy_nn_hpo.yaml`, then
 # wandb agents (extra/sweeps/wandb_sweep_agent.sbatch; VENV=.venv-gpu on GPU).
@@ -24,20 +27,21 @@ parameters:
   # --- wrapper config ---
   sweep_settings.script:               {value: stochastic_open_economy_growth_nn_recursive.py}
   sweep_settings.sort_criteria:        {value: test_euler_mean_abs_success}
-  sweep_settings.num_seeds:            {value: 5}
+  sweep_settings.num_seeds:            {value: 3}
   sweep_settings.starting_seed:        {value: 0}
-  sweep_settings.min_successful_seeds: {value: 3}
+  sweep_settings.min_successful_seeds: {value: 2}
   sweep_settings.log_tables:           {value: "false"}
   # --- fixed solver settings ---
   verbose:                             {value: false}
   use_float64:                         {value: true}
+  stop_set.num_attempts:               {value: 2}
   # --- MLP axes ---
   nn_set.width:                 {values: [16, 32, 64, 128]}
   nn_set.depth:                 {values: [2, 3, 4]}
   nn_set.hidden_activation:     {values: [tanh, silu, gelu, softplus]}
   # --- epoch / ladder axes ---
   stop_set.num_epochs:          {values: [2, 3, 5, 8]}
-  stop_set.max_steps:           {values: [25, 50, 100, 250, 500]}
+  stop_set.max_steps:           {values: [25, 50, 100, 250]}
   stop_set.initial_shock_scale: {distribution: uniform, min: 0.05, max: 0.5}
   stop_set.continuation_epochs: {values: [1, 2, 3]}
   # --- LM axes ---
@@ -46,4 +50,4 @@ parameters:
   opt_set.damping_increase:      {distribution: log_uniform_values, min: 1.5, max: 10.0}
   opt_set.geodesic_acceptance_ratio: {distribution: uniform, min: 0.5, max: 0.99}
   # --- data axes ---
-  ic_set.num_train_trajectories: {values: [2, 4, 8, 16]}
+  ic_set.num_train_trajectories: {values: [1, 2, 4, 8]}

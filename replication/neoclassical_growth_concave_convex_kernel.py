@@ -20,17 +20,21 @@ def run(output_dir: str | None = None, use_float64: bool = True):
     configure_process()
     if output_dir is None:
         output_dir = ".results" if use_float64 else ".results_float32"
-    # Float32 runs pass looser solver thresholds and acceptance gates; the
-    # float64 run uses the solver defaults.
+    # Float32 runs pass looser solver thresholds; the float64 run uses the
+    # solver defaults. gtol stays tight relative to the other float32 kernel
+    # drivers: it resolves the free (c_0, mu_0) selection, and the saddle
+    # dynamics amplify any slack into a wrong-basin path over the test
+    # horizon. The acceptance gates then reject wrong-branch solutions
+    # rather than admitting them.
     lm = (
         {}
         if use_float64
-        else dict(residual_atol=5e-5, ridge=1e-7, gtol=1e-5, max_steps=100)
+        else dict(residual_atol=5e-5, ridge=1e-7, gtol=1e-6, max_steps=200)
     )
     tol = (
         {}
         if use_float64
-        else dict(train_residual=5e-3, validation_residual=5e-2, mpk_bound=5e-3)
+        else dict(train_residual=1e-3, validation_residual=1e-2, mpk_bound=5e-3)
     )
     n_points = 70
     grid = np.linspace(0.5, 4.0, n_points)
@@ -42,7 +46,7 @@ def run(output_dir: str | None = None, use_float64: bool = True):
         ()
         if use_float64
         else (
-            {"lm_set": dict(residual_atol=5e-5, ridge=3e-7, gtol=1e-5, max_steps=200)},
+            {"lm_set": dict(residual_atol=5e-5, ridge=3e-7, gtol=1e-6, max_steps=200)},
         )
     )
     results_df, frames, hyperparameters = sweep(

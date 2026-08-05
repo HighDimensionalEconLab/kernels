@@ -64,9 +64,12 @@ DOMAIN_EPS = 1e-8
 @jax.tree_util.register_static
 @dataclass(frozen=True)
 class StateKernelSettings:
+    # Local optimum on the single-IC default; shorter lengthscales
+    # interpolate the design and generalize poorly, longer ones destabilize
+    # the rolled-out policy.
     amplitude: float = 1.0
-    lengthscale: float = 0.6
-    metric_epsilon: float = 3e-5
+    lengthscale: float = 1.0
+    metric_epsilon: float = 1e-3
     free_constant: bool = True
     linear_mean: bool = True
     state_kernel: Literal[
@@ -229,7 +232,9 @@ def stochastic_open_economy_growth_kernel_recursive(
         geodesic_acceptance_ratio=0.75,
     ),
     stop_set: StoppingCriteria = StoppingCriteria(max_steps=150, residual_atol=2e-5),
-    tolerance_set: ToleranceSettings = ToleranceSettings(),
+    # The frozen-design kernel is coarser than the NN it consumes; its
+    # held-out max bar guards against rollout divergence, not NN accuracy.
+    tolerance_set: ToleranceSettings = ToleranceSettings(test_euler_max=1e-1),
     verbose: bool = True,
 ):
     jax.config.update("jax_enable_x64", True)

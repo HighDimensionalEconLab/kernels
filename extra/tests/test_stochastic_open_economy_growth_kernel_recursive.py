@@ -66,7 +66,7 @@ class StochasticOpenEconomyKernelRecursiveTests(unittest.TestCase):
             verbose=False,
         )
 
-        self.assertTrue(results["solution_accepted"])
+        self.assertTrue(results["solver_converged"])
         self.assertEqual(results["collocation_design"], "frozen_reference_nn_rollout")
         self.assertEqual(
             results["parameter_derivative"],

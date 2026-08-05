@@ -106,6 +106,17 @@ class StoppingCriteria:
     residual_atol: float = 1e-5
     gtol: float = 1e-7
     ridge: float = 1e-12
+    # ridge_init=None solves at the fixed ridge above; a value enables ridge
+    # continuation annealed from ridge_init down to `ridge` (the floor) by
+    # factors of `ridge_decrease` on inner stationarity. The metric's
+    # factorization never involves the ridge, so the anneal composes
+    # unchanged.
+    ridge_init: float | None = None
+    ridge_decrease: float = 0.1
+    # Relative stationarity threshold that triggers the next ridge level:
+    # looser anneals faster (fewer steps per level), tighter solves each
+    # level out more completely before descending.
+    ridge_grad_rtol: float = 1e-2
     log_tvc_threshold: float = 0.0
 
 

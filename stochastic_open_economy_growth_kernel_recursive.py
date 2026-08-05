@@ -12,7 +12,12 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 from flax import struct
-from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
+from nlls_gram import (
+    AnnealRidge,
+    LMStatus,
+    RepeatedFactorMetric,
+    RidgeLevenbergMarquardt,
+)
 
 from kernels import (
     MATERN_STATE_FAMILIES,
@@ -290,6 +295,13 @@ def stochastic_open_economy_growth_kernel_recursive(
         raise ValueError("residual_atol and gtol must be positive")
     if stop_set.ridge <= 0.0:
         raise ValueError("ridge must be positive")
+    if stop_set.ridge_init is not None:
+        if stop_set.ridge_init <= stop_set.ridge:
+            raise ValueError("ridge_init must exceed the ridge floor")
+        if not 0.0 < stop_set.ridge_decrease < 1.0:
+            raise ValueError("ridge_decrease must lie strictly between 0 and 1")
+        if stop_set.ridge_grad_rtol <= 0.0:
+            raise ValueError("ridge_grad_rtol must be positive")
     tolerances = (
         tolerance_set.test_euler_mean_abs,
         tolerance_set.test_euler_max,
@@ -445,10 +457,24 @@ def stochastic_open_economy_growth_kernel_recursive(
         theta_0 = theta_0 + (jnp.zeros(2, dtype=dtype),)
     if kernel_set.linear_mean:
         theta_0 = theta_0 + (jnp.zeros((4, 2), dtype=dtype),)
+    if stop_set.ridge_init is None:
+        initial_ridge = stop_set.ridge
+        continuation_options = {}
+    else:
+        initial_ridge = stop_set.ridge_init
+        callback = AnnealRidge(
+            ridge_floor=stop_set.ridge,
+            decrease=stop_set.ridge_decrease,
+            grad_rtol=stop_set.ridge_grad_rtol,
+        )
+        continuation_options = {
+            "callback": callback,
+            "user_state": callback.init_state(dtype),
+        }
     lm_solver = RidgeLevenbergMarquardt(
         partial(residual_fn, kernel_set=kernel_set),
         metric=metric,
-        ridge=stop_set.ridge,
+        ridge=initial_ridge,
         init_damping=opt_set.init_damping,
         damping_decrease=opt_set.damping_decrease,
         damping_increase=opt_set.damping_increase,
@@ -466,6 +492,7 @@ def stochastic_open_economy_growth_kernel_recursive(
         atol=stop_set.residual_atol,
         gtol=stop_set.gtol,
         max_steps_is_success=False,
+        **continuation_options,
     )
     solve_time = solve_timer.elapsed(result)
     total_fit_time = fit_timer.elapsed()
@@ -601,6 +628,9 @@ def stochastic_open_economy_growth_kernel_recursive(
         "metric_epsilon": kernel_set.metric_epsilon,
         "metric": "shifted_rkhs_gram",
         "ridge": stop_set.ridge,
+        "ridge_init": stop_set.ridge_init,
+        "ridge_decrease": stop_set.ridge_decrease,
+        "ridge_grad_rtol": stop_set.ridge_grad_rtol,
         "free_constant": kernel_set.free_constant,
         "linear_mean": kernel_set.linear_mean,
         "train_loss": train_loss,

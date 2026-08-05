@@ -808,6 +808,7 @@ def save_sequential_policy(path, policy, nn_set, *, structural, initial_state, e
         "initial_state": initial_state,
         **extra,
     }
+    pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
     np.savez(path, __meta__=np.asarray(json.dumps(meta)), **arrays)
 
 
@@ -1477,6 +1478,10 @@ def stochastic_open_economy_growth_nn_recursive(
         "train_euler_mean_abs": float(jnp.mean(jnp.abs(train_euler))),
         "train_euler_max_abs": float(jnp.max(jnp.abs(train_euler))),
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_euler))),
+        # NaN when rejected: the HPO sweeps sort on this.
+        "test_euler_mean_abs_success": (
+            float(jnp.mean(jnp.abs(test_euler))) if solution_accepted else np.nan
+        ),
         "test_c_euler_mean_abs": float(test_mean_abs[0]),
         "test_q_euler_mean_abs": float(test_mean_abs[1]),
         "test_c_euler_max_abs": float(test_max_abs[0]),

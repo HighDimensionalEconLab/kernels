@@ -584,6 +584,12 @@ def stochastic_open_economy_growth_kernel_recursive(
         "train_euler_mean_abs": float(jnp.mean(jnp.abs(train_euler))),
         "train_euler_max_abs": float(jnp.max(jnp.abs(train_euler))),
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_euler))),
+        # NaN when rejected: the HPO sweeps sort on this.
+        "test_euler_mean_abs_success": (
+            float(jnp.mean(jnp.abs(test_euler)))
+            if acceptance["solution_accepted"]
+            else np.nan
+        ),
         "test_euler_max_abs": test_euler_max_abs,
         "test_c_euler_mean_abs": float(test_mean_abs[0]),
         "test_q_euler_mean_abs": float(test_mean_abs[1]),

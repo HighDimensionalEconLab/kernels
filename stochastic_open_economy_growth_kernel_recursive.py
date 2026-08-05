@@ -179,7 +179,8 @@ def make_policy(theta, args, kernel_set):
 def residual_fn(theta, args, p, kernel_set):
     policy = make_policy(theta, args, kernel_set)
     residuals = euler_residual_terms(policy, args.train_states, p)[0]
-    return residuals.reshape(-1) / jnp.sqrt(residuals.size)
+    count = jnp.asarray(residuals.size, dtype=residuals.dtype)
+    return residuals.reshape(-1) / jnp.sqrt(count)
 
 
 # Best accepted artifact for this problem hash by held-out residual; no
@@ -392,8 +393,8 @@ def stochastic_open_economy_growth_kernel_recursive(
         )
 
     fit_timer = Stopwatch()
-    # Frozen design at full shock scale; fold_in(train_ic_key, 1) must match
-    # the NN driver's training noise stream.
+    # Frozen design at full shock scale on the NN driver's training noise
+    # key (fold_in index 1); the discretization is deliberately coarser.
     train_noise = sample_trajectory_noise(
         solver,
         jax.random.fold_in(train_ic_key, 1),
@@ -411,16 +412,17 @@ def stochastic_open_economy_growth_kernel_recursive(
         p,
         data_set,
     )
-    if not bool(jnp.all(train_solution.ok)):
+    # Fixed-step solve_sde reports ok even on divergence: gate on finiteness.
+    if not bool(jnp.all(jnp.isfinite(train_solution.xs))):
         raise RuntimeError("reference-policy collocation rollout failed")
     train_states = train_solution.xs
     args = build_residual_args(train_states, kernel_set, reference_policy)
     n_train = args.centers.shape[0]
     shifted_gram = args.gram + kernel_set.metric_epsilon * jnp.eye(n_train, dtype=dtype)
-    metric = RepeatedFactorMetric(
-        jnp.linalg.cholesky(shifted_gram, upper=True),
-        repeats=2,
-    )
+    factor = jnp.linalg.cholesky(shifted_gram, upper=True)
+    if not bool(jnp.all(jnp.isfinite(factor))):
+        raise RuntimeError("shifted gram factorization failed")
+    metric = RepeatedFactorMetric(factor, repeats=2)
     theta_0 = (
         jnp.zeros(n_train, dtype=dtype),
         jnp.zeros(n_train, dtype=dtype),
@@ -441,7 +443,7 @@ def stochastic_open_economy_growth_kernel_recursive(
     )
 
     solve_timer = Stopwatch()
-    setup_time = fit_timer.elapsed()
+    setup_time = fit_timer.elapsed(factor)
     result = lm_solver.solve(
         theta_0,
         args,
@@ -540,6 +542,8 @@ def stochastic_open_economy_growth_kernel_recursive(
         rejection_reasons.append("solver")
     if not test_path_ok:
         rejection_reasons.append("test_path")
+    if not float(jnp.mean(jnp.abs(test_euler))) <= tolerance_set.test_euler_mean_abs:
+        rejection_reasons.append("test_euler_mean")
     if test_euler_max_abs > tolerance_set.test_euler_max:
         rejection_reasons.append("test_euler_max")
     if not reference_path_ok:

@@ -46,13 +46,14 @@ parameters:
   kernel_set.free_constant:  {values: [true, false]}
   kernel_set.linear_mean:    {values: [true, false]}
   # --- ridge-LM axes ---
-  stop_set.max_steps:        {values: [50, 150, 300]}
+  stop_set.max_steps:        {values: [25, 50, 150, 300]}
   stop_set.residual_atol:    {distribution: log_uniform_values, min: 1e-6, max: 1e-4}
   stop_set.gtol:             {distribution: log_uniform_values, min: 1e-9, max: 1e-6}
-  stop_set.ridge:            {distribution: log_uniform_values, min: 1e-14, max: 1e-8}
+  # Upper range crosses the float32 ridge floor (~3.5e-4).
+  stop_set.ridge:            {distribution: log_uniform_values, min: 1e-12, max: 1e-3}
   opt_set.init_damping:      {distribution: log_uniform_values, min: 1e-8, max: 1e-3}
   opt_set.damping_decrease:  {distribution: uniform, min: 0.1, max: 0.9}
-  opt_set.damping_increase:  {distribution: log_uniform_values, min: 1.5, max: 32.0}
+  opt_set.damping_increase:  {distribution: log_uniform_values, min: 1.5, max: 10.0}
   # --- design axes (does extra data help?) ---
   ic_set.num_train_trajectories: {values: [2, 4, 8]}
   data_set.train_points:         {values: [17, 33, 65]}

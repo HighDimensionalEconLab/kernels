@@ -615,14 +615,11 @@ def collocation_residuals(solver, policy, initial_states, noise, p, data_set):
     residuals = euler_residual_terms(policy, states.reshape(-1, 4), p)[0].reshape(
         *states.shape[:2], 2
     )
-    # Mean-squared normalization; a failed trajectory is a loud inf, never a
-    # fitted prefix.
+    # Mean-squared normalization; a diverged trajectory surfaces as a
+    # nonfinite loss the solver rejects (fixed-step solve_sde never sets
+    # ok=False, so there is no mask to apply).
     count = jnp.asarray(residuals.size, dtype=residuals.dtype)
-    return jnp.where(
-        solution.ok[:, None, None],
-        residuals / jnp.sqrt(count),
-        jnp.full_like(residuals, jnp.inf),
-    )
+    return residuals / jnp.sqrt(count)
 
 
 def residual_fn(theta, args, p):
@@ -1417,7 +1414,7 @@ def stochastic_open_economy_growth_nn_recursive(
     # A cached policy trained on other batches: only its saved solver
     # acceptance applies, never the fresh-batch loss.
     if not solver_accepted or (
-        not cache_hit and train_loss > stop_set.train_loss_threshold
+        not cache_hit and not train_loss <= stop_set.train_loss_threshold
     ):
         rejection_reasons.append("train_loss")
     if not train_path_ok:
@@ -1554,7 +1551,9 @@ def stochastic_open_economy_growth_nn_recursive(
         "train_time": train_time,
         "setup_time": setup_time,
         "total_fit_time": total_fit_time,
-        "train_time_success": train_time if solver_accepted else np.nan,
+        "train_time_success": (
+            train_time if solver_accepted and not cache_hit else np.nan
+        ),
         "total_params": int(theta_flat.size),
         "residual_count": int(train_residual.size),
         "parameter_to_residual_ratio": float(theta_flat.size / train_residual.size),

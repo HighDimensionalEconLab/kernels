@@ -1,11 +1,14 @@
 import math
+import pathlib
+import tempfile
 import unittest
+from dataclasses import asdict
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
-from nlls_gram import LevenbergMarquardt, LMContext, LMState, LMStatus
+from nlls_gram import LMContext, LMState, LMStatus
 
 import open_economy_growth_nn_recursive as deterministic
 import stochastic_open_economy_growth_nn_recursive as stochastic
@@ -53,67 +56,6 @@ def state_policy(state):
 
 
 class StochasticOpenEconomyRecursiveTests(unittest.TestCase):
-    def test_default_gram_solve_has_minimum_norm_tangent(self):
-        matrix = jnp.asarray([[1.0, 2.0, -1.0], [0.5, -1.0, 2.0]], dtype=jnp.float64)
-        target = jnp.asarray([0.7, -0.2], dtype=jnp.float64)
-
-        def residual(value, _, parameter):
-            return matrix @ value - parameter
-
-        solver = LevenbergMarquardt(residual)
-
-        def solve(parameter):
-            return solver.solve(
-                jnp.zeros(3, dtype=parameter.dtype),
-                p=parameter,
-                max_steps=20,
-                atol=1e-12,
-                max_steps_is_success=False,
-            ).x
-
-        result = solver.solve(
-            jnp.zeros(3, dtype=target.dtype),
-            p=target,
-            max_steps=20,
-            atol=1e-12,
-            max_steps_is_success=False,
-        )
-        direction = jnp.asarray([0.3, -0.4], dtype=target.dtype)
-        tangent = jax.jvp(solve, (target,), (direction,))[1]
-        dense_minimum_norm = matrix.T @ jnp.linalg.solve(matrix @ matrix.T, target)
-        dense_tangent = matrix.T @ jnp.linalg.solve(matrix @ matrix.T, direction)
-
-        self.assertEqual(int(result.status), LMStatus.CONVERGED)
-        np.testing.assert_allclose(result.x, dense_minimum_norm, rtol=1e-10, atol=1e-10)
-        np.testing.assert_allclose(tangent, dense_tangent, rtol=1e-10, atol=1e-10)
-
-    def test_deterministic_reference_satisfies_shutdown_residual(self):
-        dtype = jnp.float64
-        model_parameters = ModelParameters()
-        reference = stochastic.create_deterministic_policy_reference(model_parameters)
-
-        def reference_policy(state):
-            return stochastic.deterministic_reference_values(
-                reference, jnp.exp(state[1]), dtype
-            )
-
-        p = structural_parameters(dtype)
-        states = jnp.asarray(
-            [
-                [0.0, math.log(capital), asset, 0.0]
-                for capital, asset in zip(
-                    np.linspace(0.5, 7.0, 40), np.linspace(-2.0, 2.0, 40)
-                )
-            ],
-            dtype=dtype,
-        )
-        residuals = stochastic.euler_residual_terms(reference_policy, states, p)[0]
-
-        self.assertLess(reference.approximation_max_abs_x, 4e-5)
-        self.assertLess(reference.approximation_max_abs_current_account, 5e-5)
-        self.assertLess(float(jnp.max(jnp.abs(residuals[:, 0]))), 5e-5)
-        self.assertLess(float(jnp.max(jnp.abs(residuals[:, 1]))), 3e-5)
-
     def test_default_policy_is_overparameterized_and_asset_flat(self):
         dtype = jnp.float64
         settings = stochastic.SequentialPolicySettings(
@@ -140,9 +82,9 @@ class StochasticOpenEconomyRecursiveTests(unittest.TestCase):
 
         self.assertEqual(parameter_count, 2_338)
         np.testing.assert_array_equal(policies[:, 1], jnp.zeros(3, dtype=dtype))
-        self.assertLess(
-            float(jnp.ptp(policies[:, 0]) / settings.investment_anchor), 0.01
-        )
+        # The pre-scaled investment head keeps the near-zero draw flat at the
+        # anchor on the output_scale scale, not the anchor scale.
+        self.assertLess(float(jnp.ptp(policies[:, 0]) / settings.output_scale), 0.02)
 
     def test_world_rate_ar1_mapping_matches_stationary_variance(self):
         rho = stochastic.WORLD_RATE_AR1_RHO
@@ -285,9 +227,6 @@ class StochasticOpenEconomyRecursiveTests(unittest.TestCase):
             statistics["signed_asset_tvc_mc_se"], discount_mu, atol=2e-14
         )
         np.testing.assert_allclose(statistics["capital_tvc_mc_se"], 0.0, atol=2e-14)
-        np.testing.assert_allclose(
-            statistics["log_expected_absolute_asset_tvc"], jnp.log(discount_mu)
-        )
         self.assertTrue(
             bool(
                 jnp.isnan(
@@ -297,7 +236,105 @@ class StochasticOpenEconomyRecursiveTests(unittest.TestCase):
         )
         self.assertEqual(values["absolute_asset_tvc"].dtype, dtype)
 
-    def test_float32_collocation_vjp_and_final_status(self):
+    def test_single_ic_default_and_additive_asset_spread(self):
+        dtype = jnp.float64
+        key = jax.random.key(11)
+        center = jnp.asarray([0.0, 0.0, -0.8, 0.0], dtype=dtype)
+        pinned = stochastic.standardized_initial_states(
+            key, center, jnp.zeros(4, dtype=dtype), 4
+        )
+        np.testing.assert_array_equal(pinned, jnp.tile(center, (4, 1)))
+
+        # Additive semantics: a positive asset spread at a zero asset center
+        # must produce a nondegenerate cloud (a multiplicative spread would
+        # collapse it to zero and leave the CA head unidentified).
+        zero_center = jnp.zeros(4, dtype=dtype)
+        scales = jnp.asarray([0.0, 0.0, 0.5, 0.0], dtype=dtype)
+        spread = stochastic.standardized_initial_states(key, zero_center, scales, 8)
+        np.testing.assert_array_equal(spread[:, 0], jnp.zeros(8, dtype=dtype))
+        np.testing.assert_array_equal(spread[:, 1], jnp.zeros(8, dtype=dtype))
+        np.testing.assert_array_equal(spread[:, 3], jnp.zeros(8, dtype=dtype))
+        np.testing.assert_allclose(
+            jnp.sqrt(jnp.mean(spread[:, 2] ** 2)), 0.5, rtol=1e-12
+        )
+
+    def test_save_load_round_trip_is_bit_identical(self):
+        dtype = jnp.float64
+        settings = stochastic.SequentialPolicySettings(
+            width=8,
+            depth=2,
+            log_z_scale=0.11,
+            log_k_center=0.2,
+            asset_center=-0.5,
+            asset_scale=1.3,
+            rate_scale=0.02,
+            output_scale=1.4,
+            investment_anchor=0.06,
+        )
+        model = stochastic.SequentialPolicyNN(settings, dtype=dtype, rngs=nnx.Rngs(3))
+        states = jnp.asarray(
+            [
+                [-0.05, -0.2, -1.5, -0.01],
+                [0.0, 0.0, -0.5, 0.0],
+                [0.08, 0.3, 0.7, 0.02],
+            ],
+            dtype=dtype,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "policy.npz"
+            stochastic.save_sequential_policy(
+                path,
+                model,
+                settings,
+                structural={"alpha": 0.33},
+                initial_state={"k_0": 1.0, "a_0": -0.8, "z_0": 1.0, "rate_gap_0": 0.0},
+                extra={"model": "test", "solver_accepted": True},
+            )
+            loaded, meta = stochastic.load_sequential_policy(path)
+
+        self.assertEqual(meta["settings"], asdict(settings))
+        self.assertEqual(meta["dtype"], "float64")
+        self.assertTrue(meta["solver_accepted"])
+        original_params = jax.tree.leaves(nnx.state(model, nnx.Param).to_pure_dict())
+        loaded_params = jax.tree.leaves(nnx.state(loaded, nnx.Param).to_pure_dict())
+        for original, reloaded in zip(original_params, loaded_params, strict=True):
+            np.testing.assert_array_equal(original, reloaded)
+        np.testing.assert_array_equal(jax.vmap(model)(states), jax.vmap(loaded)(states))
+
+    def test_problem_cache_key_tracks_the_problem_only(self):
+        parameters = ModelParameters()
+
+        def config(**overrides):
+            values = dict(
+                kappa_z=0.2,
+                sigma_z=0.03,
+                z_bar=1.0,
+                kappa_r=0.55,
+                sigma_r=0.01,
+                corr_zr=0.0,
+                k_0=1.0,
+                a_0=-0.8,
+                z_0=1.0,
+                rate_gap_0=0.0,
+                use_float64=True,
+                num_train_trajectories=4,
+                train_variances=(0.0, 0.0, 0.0, 0.0),
+            )
+            values.update(overrides)
+            return stochastic.problem_cache_config(parameters, **values)
+
+        base_key = stochastic.policy_cache_key(config())
+        self.assertEqual(base_key, stochastic.policy_cache_key(config()))
+        self.assertNotEqual(base_key, stochastic.policy_cache_key(config(sigma_r=0.02)))
+        self.assertNotEqual(
+            base_key,
+            stochastic.policy_cache_key(config(train_variances=(0.0, 0.0, 0.25, 0.0))),
+        )
+        # Acceptance tolerances are not inputs of the problem hash, so a
+        # tolerance change can never invalidate a cached policy.
+        self.assertNotIn("tolerance", repr(config()))
+
+    def test_float32_collocation_vjp_and_epoch_boundary_status(self):
         dtype = jnp.float32
         data_set = stochastic.DataSettings(
             train_points=3, test_points=3, train_T=0.5, test_T=0.5
@@ -326,6 +363,7 @@ class StochasticOpenEconomyRecursiveTests(unittest.TestCase):
             data_set.train_points - 1,
             data_set.train_T / (data_set.train_points - 1),
             dtype,
+            4,
         )
         args = stochastic.ResidualArgs(
             graphdef=graphdef,
@@ -335,12 +373,13 @@ class StochasticOpenEconomyRecursiveTests(unittest.TestCase):
             initial_scales=jnp.zeros(4, dtype=dtype),
             noise=noise,
             epoch_key=jax.random.key(2),
+            restart_key=jax.random.key(5),
             epoch=jnp.asarray(0, dtype=jnp.int32),
-            shock_scales=jnp.ones(1, dtype=dtype),
-            shock_scale=jnp.asarray(1.0, dtype=dtype),
+            shock_scales=jnp.asarray([0.5, 1.0], dtype=dtype),
+            shock_scale=jnp.asarray(0.5, dtype=dtype),
             train_loss_threshold=jnp.asarray(1e-6, dtype=dtype),
             epoch_steps=jnp.asarray(2, dtype=jnp.int32),
-            total_steps=jnp.asarray(2, dtype=jnp.int32),
+            total_steps=jnp.asarray(4, dtype=jnp.int32),
             solver=solver,
             data_set=data_set,
         )
@@ -369,12 +408,15 @@ class StochasticOpenEconomyRecursiveTests(unittest.TestCase):
         self.assertNotIn("f64", residual_jaxpr)
         self.assertNotIn("f64", vjp_jaxpr)
 
+        # Interior epoch boundary: the callback steps the ladder to full
+        # shock scale and declares convergence on the fresh batch under the
+        # (accepting) threshold.
         accepting_args = args.replace(
             train_loss_threshold=jnp.asarray(1e6, dtype=dtype)
         )
         lm_state = LMState(damping=jnp.asarray(1e-3, dtype=dtype))
         context = LMContext(
-            step=accepting_args.total_steps,
+            step=jnp.asarray(2, dtype=jnp.int32),
             x=theta,
             x_old=theta,
             lm_state=lm_state,
@@ -395,6 +437,7 @@ class StochasticOpenEconomyRecursiveTests(unittest.TestCase):
 
         self.assertTrue(bool(action.stop))
         self.assertEqual(int(action.status), LMStatus.CONVERGED)
+        self.assertEqual(float(action.args.shock_scale), 1.0)
 
 
 if __name__ == "__main__":

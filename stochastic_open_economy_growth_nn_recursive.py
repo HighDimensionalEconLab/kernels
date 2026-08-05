@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import hashlib
+import json
 import math
-import time
+import pathlib
 from dataclasses import asdict, dataclass, replace
-from functools import lru_cache, partial
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -16,16 +16,39 @@ from jax.flatten_util import ravel_pytree
 from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
 from tinydiffeq import SRA1, EulerMaruyama, Milstein, SaveAt, solve_sde
 
+from neoclassical_growth_nn_recursive import (
+    policy_cache_key,
+    standardized_initial_states,
+)
 from open_economy_growth import ModelParameters, marginal_product, production
 from open_economy_growth_benchmark import open_economy_growth_benchmark
+from stochastic_growth_nn_recursive import sample_trajectory_noise
 from utilities import (
     ACTIVATIONS,
     NEOCLASSICAL_GROWTH_CONSTANTS,
+    STATUS_TO_REASON,
     OptimizerSettings,
+    Stopwatch,
+    acceptance_fields,
     unit_softplus,
 )
 
+# Stochastic small open economy in recursive (state-space) form on the state
+# (log z, log k, a / output_scale, rate_gap): OU log-TFP, capital, net foreign
+# assets scaled by initial output, and the world-rate gap, with the TFP and
+# world-rate shocks correlated through corr_zr. The neural policy supplies
+# positive investment expenditure and the signed current account; q and c are
+# recovered algebraically. No terminal, TVC, no-Ponzi, steady-state, or
+# benchmark information enters the residual or initialization; the
+# deterministic benchmark appears only in ex-post reported diagnostics.
 DOMAIN_EPS = 1e-8
+
+# World real-rate gap OU process mapped from an annual AR(1)
+# (rho, innovation sd) the same way the TFP calibration is mapped:
+# e^(-kappa_r) = rho and the OU innovation scale matches the AR(1) stationary
+# variance, sigma_r^2 / (2 kappa_r) = sd^2 / (1 - rho^2). The process
+# mean-reverts to interest_rate_mean, so rate_gap = 0 recovers the
+# deterministic model's constant world rate.
 WORLD_RATE_AR1_RHO = 0.572
 WORLD_RATE_AR1_INNOVATION_SD = 0.0196
 WORLD_RATE_KAPPA = -math.log(WORLD_RATE_AR1_RHO)
@@ -39,20 +62,9 @@ SDE_SOLVERS = {
     "euler_maruyama": EulerMaruyama(),
 }
 
-SMOOTH_ACTIVATIONS = {
-    "gelu",
-    "identity",
-    "silu",
-    "softplus",
-    "tanh",
-    "unit_softplus",
-}
-
-STATUS_TO_REASON = {
-    LMStatus.CONVERGED: "converged",
-    LMStatus.NONFINITE: "nonfinite",
-    LMStatus.MAX_STEPS: "max_steps",
-}
+# The Euler residual differentiates the policy twice (nested jvp along the
+# diffusion directions), so the kinked activation is excluded.
+SMOOTH_ACTIVATIONS = frozenset(ACTIVATIONS) - {"relu"}
 
 
 @struct.dataclass
@@ -81,24 +93,36 @@ class StructuralParameters:
 
 @dataclass(frozen=True)
 class DataSettings:
-    train_points: int = 21
-    test_points: int = 41
-    tvc_points: int = 41
-    train_T: float = 10.0
-    test_T: float = 10.0
-    tvc_T: float = 20.0
+    # Fixed-step SDE rollout on the integrator's own states: n points from
+    # n - 1 steps including the initial condition, nothing interpolated.
+    # train_T = 40 covers ~5 half-lives of the deterministic capital
+    # transition (stable root ~ -0.089), matching the deterministic sibling.
+    train_points: int = 65
+    test_points: int = 51
+    tvc_points: int = 161
+    train_T: float = 40.0
+    test_T: float = 50.0
+    tvc_T: float = 160.0
 
 
 @dataclass(frozen=True)
 class InitialConditionSettings:
+    # One data_seed fixes independent train and test draws around the single
+    # initial state, separate from the NN seed. Spreads are ABSOLUTE standard
+    # deviations applied additively per state coordinate (log z and log k in
+    # logs, a / output_scale and rate_gap in levels) -- never proportional to
+    # the center, which would degenerate at a_0 = 0. The default is a single
+    # initial condition: every trajectory starts at the same point and
+    # differs only by its shock realization; positive spreads are experiment
+    # territory, not defaults. None test variances inherit the training ones.
     data_seed: int = 0
-    num_train_trajectories: int = 8
-    num_test_trajectories: int = 16
+    num_train_trajectories: int = 4
+    num_test_trajectories: int = 8
     num_tvc_trajectories: int = 128
-    train_log_z_variance: float | None = None
-    train_log_k_variance: float = 0.01
-    train_asset_variance: float = 0.25
-    train_rate_variance: float | None = None
+    train_log_z_variance: float = 0.0
+    train_log_k_variance: float = 0.0
+    train_asset_variance: float = 0.0
+    train_rate_variance: float = 0.0
     test_log_z_variance: float | None = None
     test_log_k_variance: float | None = None
     test_asset_variance: float | None = None
@@ -107,18 +131,30 @@ class InitialConditionSettings:
 
 @dataclass(frozen=True)
 class StoppingCriteria:
-    max_steps: int = 12
-    train_loss_threshold: float | None = None
-    test_euler_mean_abs_threshold: float = 5e-3
-    test_euler_max_threshold: float = 5e-2
-    test_diffusion_max_abs_threshold: float = 5e-2
-    test_terminal_capital_relative_threshold: float = 0.25
-    num_attempts: int = 1
-    num_epochs: int = 8
+    # max_steps is the LM-update budget per epoch; the noise realization (and
+    # the training ICs when their variance is positive) is redrawn at each
+    # interior epoch boundary. The shock-continuation ladder is the
+    # benchmark-free homotopy replacing any pretraining: early epochs train
+    # at scaled-down diffusions, rising geometrically from
+    # initial_shock_scale to 1.0 over continuation_epochs, and convergence is
+    # only ever declared at scale 1.0.
+    max_steps: int = 250
+    train_loss_threshold: float = 1e-10
+    num_attempts: int = 4
+    num_epochs: int = 3
     epoch_early_stopping: bool = True
     shock_continuation: bool = True
     initial_shock_scale: float = 0.25
-    continuation_epochs: int = 3
+    continuation_epochs: int = 2
+
+
+# Acceptance gates, CLI-reachable so a float32 caller can pass its own bar
+# (the float32 replication driver does).
+@dataclass(frozen=True)
+class ToleranceSettings:
+    test_euler_mean_abs: float = 5e-3
+    test_euler_max: float = 5e-2
+    test_diffusion_max_abs: float = 5e-2
 
 
 @dataclass(frozen=True)
@@ -138,33 +174,10 @@ class SequentialPolicySettings:
     current_account_anchor: float = 0.0
 
 
-@dataclass(frozen=True)
-class InitializationSettings:
-    enabled: bool = True
-    grid_size: int = 65
-    max_steps: int = 40
-    loss_threshold: float = 1e-10
-
-
-@dataclass(frozen=True, eq=False)
-class DeterministicPolicyReference:
-    coefficients: np.ndarray
-    k_lo: float
-    k_hi: float
-    approximation_max_abs_x: float
-    approximation_max_abs_current_account: float
-    cache_key: str
-
-    def __hash__(self):
-        return hash((DeterministicPolicyReference, self.cache_key))
-
-    def __eq__(self, other):
-        return (
-            isinstance(other, DeterministicPolicyReference)
-            and self.cache_key == other.cache_key
-        )
-
-
+# Training ICs, the noise realization, keys, and the shock-ladder position
+# live in args (the epoch callback may rewrite args only), so the implicit
+# derivative is conditional on the carried batch of initial conditions and
+# shocks.
 @struct.dataclass
 class ResidualArgs:
     graphdef: nnx.GraphDef
@@ -174,6 +187,7 @@ class ResidualArgs:
     initial_scales: jax.Array
     noise: object
     epoch_key: jax.Array
+    restart_key: jax.Array
     epoch: jax.Array
     shock_scales: jax.Array
     shock_scale: jax.Array
@@ -184,20 +198,47 @@ class ResidualArgs:
     data_set: DataSettings = struct.field(pytree_node=False)
 
 
-@struct.dataclass
-class PolicyInitializationArgs:
-    graphdef: nnx.GraphDef
-    fixed_state: nnx.State
-    states: jax.Array
-    targets: jax.Array
-
-
+# First-layer mask: only the log k input feeds the hidden stack at the draw,
+# so with the near-zero investment head and the zero current-account head the
+# initial policy is exactly the deterministic sibling's ansatz -- investment
+# ~ delta * k_0, current account = 0. The z/asset/rate columns are zero at
+# the draw, not frozen: training is free to grow them.
 def capital_only_kernel_init(key, shape, dtype):
     kernel = nnx.initializers.lecun_normal()(key, shape, dtype)
     mask = jnp.asarray([0.0, 1.0, 0.0, 0.0], dtype=dtype)[:, None]
     return kernel * mask
 
 
+# Per-axis normalization shared by the NN and the kernel-recursive policy:
+# linear centering on the log z / log k / rate_gap axes and the bounded
+# 2 tanh(u/2) squash on the asset axis, so any rolled-out asset excursion
+# maps into (-2, 2) (the squash is ~95% saturated near |u| ~ 3.7, i.e. 3.7
+# asset scales from the center).
+def normalize_state(state, center, scale):
+    u = (state - center) / scale
+    return u.at[2].set(2.0 * jnp.tanh(u[2] / 2.0))
+
+
+# Output maps shared by the NN and the kernel-recursive policy. Both raw
+# heads are near zero at the draw, so the policy starts at
+# (investment_anchor, current_account_anchor). The investment head is
+# pre-scaled by output_scale / investment_anchor so both heads carry the same
+# O(output_scale) output Jacobian; without it the investment rows are
+# anchor / output_scale (~1/16 at the default calibration) times smaller
+# than the current-account rows.
+def policy_outputs(raw, investment_anchor, current_account_anchor, output_scale):
+    investment = investment_anchor * unit_softplus(
+        (output_scale / investment_anchor) * raw[0]
+    )
+    current_account = current_account_anchor + output_scale * raw[1]
+    return jnp.stack([investment, current_account])
+
+
+# Save/load contract: nnx.Param leaves are the only persisted state. Every
+# non-Param Variable below is a pure function of (settings, dtype), so
+# load_sequential_policy reconstructs the module from the saved settings and
+# swaps the Params in. A new non-Param Variable that is not derived from
+# settings breaks reload silently -- the round-trip test guards this.
 class SequentialPolicyNN(nnx.Module):
     def __init__(
         self,
@@ -207,18 +248,28 @@ class SequentialPolicyNN(nnx.Module):
         rngs: nnx.Rngs,
     ):
         self.hidden_activation = ACTIVATIONS[settings.hidden_activation]
-        self.log_z_center = nnx.Variable(
-            jnp.asarray(settings.log_z_center, dtype=dtype)
+        self.state_center = nnx.Variable(
+            jnp.asarray(
+                [
+                    settings.log_z_center,
+                    settings.log_k_center,
+                    settings.asset_center,
+                    0.0,
+                ],
+                dtype=dtype,
+            )
         )
-        self.log_z_scale = nnx.Variable(jnp.asarray(settings.log_z_scale, dtype=dtype))
-        self.log_k_center = nnx.Variable(
-            jnp.asarray(settings.log_k_center, dtype=dtype)
+        self.state_scale = nnx.Variable(
+            jnp.asarray(
+                [
+                    settings.log_z_scale,
+                    1.0,
+                    settings.asset_scale,
+                    settings.rate_scale,
+                ],
+                dtype=dtype,
+            )
         )
-        self.asset_center = nnx.Variable(
-            jnp.asarray(settings.asset_center, dtype=dtype)
-        )
-        self.asset_scale = nnx.Variable(jnp.asarray(settings.asset_scale, dtype=dtype))
-        self.rate_scale = nnx.Variable(jnp.asarray(settings.rate_scale, dtype=dtype))
         self.output_scale = nnx.Variable(
             jnp.asarray(settings.output_scale, dtype=dtype)
         )
@@ -270,43 +321,43 @@ class SequentialPolicyNN(nnx.Module):
         )
 
     def __call__(self, state):
-        log_z, log_k, asset_scaled, rate_gap = state
-        normalized_asset = 2.0 * jnp.tanh(
-            (asset_scaled - self.asset_center[...]) / (2.0 * self.asset_scale[...])
-        )
-        h = jnp.stack(
-            [
-                (log_z - self.log_z_center[...]) / self.log_z_scale[...],
-                log_k - self.log_k_center[...],
-                normalized_asset,
-                rate_gap / self.rate_scale[...],
-            ]
-        )
+        h = normalize_state(state, self.state_center[...], self.state_scale[...])
         for layer in self.layers:
             h = self.hidden_activation(layer(h))
-        raw_investment = self.investment_head(h)[0]
-        raw_current_account = self.current_account_head(h)[0]
-        investment = self.investment_anchor[...] * unit_softplus(raw_investment)
-        current_account = (
-            self.current_account_anchor[...]
-            + self.output_scale[...] * raw_current_account
+        raw = jnp.stack([self.investment_head(h)[0], self.current_account_head(h)[0]])
+        return policy_outputs(
+            raw,
+            self.investment_anchor[...],
+            self.current_account_anchor[...],
+            self.output_scale[...],
         )
-        return jnp.stack([investment, current_account])
 
 
+# nlls_gram.DrawNNXModule cannot be used here: it splits on nnx.Param alone,
+# which is a non-exhaustive filter for a policy carrying non-Param scaling
+# Variables. Restarts draw a fresh net from the retry key and re-chain a
+# fresh epoch-key stream from args.restart_key so each attempt sees its own
+# batch realization schedule; multi-start chains each attempt's *initial*
+# args, so the shock ladder restarts at epoch 0 and the first scale.
+# Value-hashable on the spec so equal draws share one jit compilation.
 class DrawSequentialPolicy:
     def __init__(self, settings, dtype):
         self.settings = settings
         self.dtype = dtype
 
-    def __call__(self, key, _, args_old):
+    def __call__(self, key, _, args):
         module = SequentialPolicyNN(
             self.settings,
             dtype=self.dtype,
             rngs=nnx.Rngs(key),
         )
         _, theta, _ = nnx.split(module, nnx.Param, ...)
-        return theta, args_old
+        restart_key, epoch_key = jax.random.split(args.restart_key)
+        return theta, args.replace(
+            epoch_key=epoch_key,
+            restart_key=restart_key,
+            epoch=jnp.asarray(0, dtype=jnp.int32),
+        )
 
     def __hash__(self):
         return hash((DrawSequentialPolicy, self.settings, self.dtype))
@@ -317,96 +368,6 @@ class DrawSequentialPolicy:
             and self.settings == other.settings
             and self.dtype == other.dtype
         )
-
-
-def evaluate_chebyshev(coefficients, coordinate):
-    next_value = jnp.zeros_like(coefficients[0])
-    next_next_value = jnp.zeros_like(coefficients[0])
-    for index in range(coefficients.shape[0] - 1, 0, -1):
-        value = 2.0 * coordinate * next_value - next_next_value + coefficients[index]
-        next_next_value = next_value
-        next_value = value
-    return coordinate * next_value - next_next_value + coefficients[0]
-
-
-@lru_cache(maxsize=None)
-def create_deterministic_policy_reference(
-    parameters,
-    k_lo=0.4,
-    k_hi=8.0,
-    degree=20,
-):
-    if not 0.0 < k_lo < k_hi:
-        raise ValueError("reference capital bounds must satisfy zero < lo < hi")
-    if degree < 1:
-        raise ValueError("reference degree must be positive")
-    time_grid = np.linspace(0.0, 160.0, 5001)
-    path_values = []
-    for initial_capital in (k_lo, k_hi):
-        evaluate, diagnostics = open_economy_growth_benchmark(
-            initial_capital,
-            0.0,
-            time_grid,
-            parameters=parameters,
-        )
-        if abs(diagnostics["present_value_residual"]) > 1e-8:
-            raise RuntimeError("deterministic reference present-value check failed")
-        values = evaluate(time_grid)
-        path_values.append(
-            np.column_stack([values["k"], values["x"], values["current_account"]])
-        )
-    raw = np.concatenate(path_values)
-    raw = raw[np.argsort(raw[:, 0])]
-    fitting_capital = np.linspace(k_lo, k_hi, 2001)
-    fitting_values = np.column_stack(
-        [np.interp(fitting_capital, raw[:, 0], raw[:, column]) for column in (1, 2)]
-    )
-    coordinate = 2.0 * (fitting_capital - k_lo) / (k_hi - k_lo) - 1.0
-    coefficients = np.column_stack(
-        [
-            np.polynomial.chebyshev.chebfit(
-                coordinate, fitting_values[:, column], degree
-            )
-            for column in range(fitting_values.shape[1])
-        ]
-    )
-    approximation = np.column_stack(
-        [
-            np.polynomial.chebyshev.chebval(coordinate, coefficients[:, column])
-            for column in range(coefficients.shape[1])
-        ]
-    )
-    approximation_max_abs = np.max(np.abs(approximation - fitting_values), axis=0)
-    digest = hashlib.sha256()
-    digest.update(repr((parameters, k_lo, k_hi, degree)).encode())
-    digest.update(coefficients.tobytes())
-    return DeterministicPolicyReference(
-        coefficients=coefficients,
-        k_lo=k_lo,
-        k_hi=k_hi,
-        approximation_max_abs_x=float(approximation_max_abs[0]),
-        approximation_max_abs_current_account=float(approximation_max_abs[1]),
-        cache_key=digest.hexdigest(),
-    )
-
-
-def deterministic_reference_values(reference, capital, dtype):
-    coordinate = (
-        2.0 * (capital - reference.k_lo) / (reference.k_hi - reference.k_lo) - 1.0
-    )
-    return evaluate_chebyshev(
-        jnp.asarray(reference.coefficients, dtype=dtype), coordinate
-    )
-
-
-def policy_initialization_residual(theta, args, p):
-    policy = nnx.merge(args.graphdef, theta, args.fixed_state)
-    predictions = jax.vmap(policy)(args.states)
-    investment_residual = jnp.log(predictions[:, 0] / args.targets[:, 0])
-    current_account_residual = (predictions[:, 1] - args.targets[:, 1]) / p.output_scale
-    residual = jnp.stack([investment_residual, current_account_residual], axis=-1)
-    count = jnp.asarray(residual.size, dtype=residual.dtype)
-    return residual.reshape(-1) / jnp.sqrt(count)
 
 
 def state_levels(state, p):
@@ -455,11 +416,22 @@ def state_drift(policy, state, p):
     )
 
 
+# ONE shock covariance, written twice. The SDE rollout uses this diagonal
+# diffusion with PRE-MIXED noise: correlate_noise rotates the raw increments
+# so the (z, rate) pair carries corr_zr. The Euler residual instead loads the
+# same covariance through the two explicit direction rows of
+# diffusion_directions. Editing either representation alone silently
+# decorrelates the simulated paths from the equation being solved; the
+# directional-generator-vs-dense-Hessian test guards the pairing.
 def state_diffusion(state, p):
     zero = jnp.zeros_like(state[0])
     return jnp.stack([p.sigma_z, zero, zero, p.sigma_r])
 
 
+# The residual's factorization of the same covariance: two independent
+# Brownian directions loading the state as [sigma_z, 0, 0, corr_zr sigma_r]
+# and [0, 0, 0, sigma_r sqrt(1 - corr_zr^2)], so directions.T @ directions
+# reproduces the mixed-noise covariance of the rollout exactly.
 def diffusion_directions(p):
     zero = jnp.zeros_like(p.sigma_z)
     second_loading = p.sigma_r * jnp.sqrt(1.0 - p.corr_zr**2)
@@ -476,10 +448,19 @@ def log_policy_quantities(policy, state, p):
     return jnp.stack([jnp.log(values["c"]), jnp.log(values["q"])])
 
 
-# With l = log(c), v = log(q), and Gamma the diffusion covariance product:
-#   L l - gamma Gamma(l,l)/2 = (r_star - rho)/gamma
-#   L v + Gamma(v,v)/2 - gamma Gamma(v,l)
-#       = r_star + delta - (1-eta) chi s^eta - MPK/q.
+# The two HJB Euler residuals, from Ito on l = log c and v = log q. With L
+# the generator (drift derivative plus half the sum of second directional
+# derivatives along the diffusion directions), Gamma(f, g) the diffusion
+# covariance product first.T @ first of first directional derivatives, and
+# r = interest_rate_mean + rate_gap:
+#   consumption: L l - gamma Gamma(l, l) / 2 = (r - rho) / gamma
+#   Tobin's q:   L v + Gamma(v, v) / 2 - gamma Gamma(v, l)
+#                  = r + delta - (1 - eta) chi s^eta - MPK / q
+# The consumption equation is the drift of u'(c) = e^(-gamma l) set to
+# (rho - r) u'(c); the q equation prices installed capital under the
+# risk-adjusted return, with the -gamma Gamma(v, l) term from the covariance
+# of q with marginal utility. Both are computed with nested jvp per
+# direction, never a dense Hessian.
 def euler_residual_at_state(policy, state, p):
     drift = state_drift(policy, state, p)
     directions = diffusion_directions(p)
@@ -535,25 +516,11 @@ def euler_residual_terms(policy, states, p):
     return residuals, diffusion_terms, log_values
 
 
-def standardized_initial_states(key, center, scales, num_trajectories):
-    if num_trajectories == 1:
-        return center[None, :]
-    raw = jax.random.normal(key, (num_trajectories, center.size), dtype=center.dtype)
-    centered = raw - jnp.mean(raw, axis=0)
-    standardized = centered / jnp.sqrt(jnp.mean(centered**2, axis=0))
-    return center + standardized * scales
-
-
-def sample_trajectory_noise(solver, key, num_trajectories, n_steps, dt, dtype):
-    reference_state = jnp.zeros(4, dtype=dtype)
-    dt = jnp.asarray(dt, dtype=dtype)
-    return jax.vmap(
-        lambda trajectory_key: solver.sample_noise(
-            reference_state, trajectory_key, n_steps, dt, dtype
-        )
-    )(jax.random.split(key, num_trajectories))
-
-
+# The linear corr_zr mixing applied leaf-wise over the solver noise pytree
+# (SRA1 carries a (d_w, d_z) pair): valid because every leaf is an
+# independent Gaussian family and the mixing commutes with the solver's
+# linear combinations of increments. This is the rollout half of the
+# covariance pairing documented at state_diffusion.
 def correlate_noise(noise, corr_zr):
     orthogonal_loading = jnp.sqrt(1.0 - corr_zr**2)
 
@@ -566,6 +533,10 @@ def correlate_noise(noise, corr_zr):
     return jax.tree.map(transform, noise)
 
 
+# At each interior epoch boundary: redraw the shock realization (and the
+# training ICs when configured), step the shock-continuation ladder, stop on
+# a nonfinite or converged fresh-batch loss, else continue with damping
+# reset. Convergence is only declared at full shock scale.
 @dataclass(frozen=True)
 class EpochCallback:
     num_train_trajectories: int
@@ -580,6 +551,9 @@ class EpochCallback:
         epoch = ctx.args.epoch + 1
         shock_scale = ctx.args.shock_scales[epoch]
         if self.resample_initial_states:
+            # The stochastic axes' IC spread rides the shock ladder: partial-
+            # scale epochs draw z / rate starts with proportionally shrunk
+            # dispersion (inert at the zero-variance default).
             scale_mask = jnp.asarray([shock_scale, 1.0, 1.0, shock_scale], dtype=dtype)
             initial_states = standardized_initial_states(
                 draw_key,
@@ -598,6 +572,7 @@ class EpochCallback:
                 self.n_steps,
                 self.dt,
                 dtype,
+                4,
             ),
             epoch_key=epoch_key,
             epoch=epoch,
@@ -606,9 +581,10 @@ class EpochCallback:
         residual = residual_fn(ctx.x, fresh, ctx.p)
         loss = jnp.sum(residual * residual)
         nonfinite = ~jnp.isfinite(loss)
-        converged = jnp.asarray(False)
         if self.epoch_early_stopping:
             converged = (shock_scale == 1.0) & (loss < fresh.train_loss_threshold)
+        else:
+            converged = jnp.asarray(False)
         status = jnp.where(
             nonfinite,
             jnp.asarray(LMStatus.NONFINITE, dtype=jnp.int32),
@@ -620,40 +596,12 @@ class EpochCallback:
         )
         return nonfinite | converged, status, fresh, ctx.initial_lm_state.damping
 
-    def continue_epoch(self, ctx):
+    def mid_epoch(self, ctx):
         return (
             jnp.asarray(False),
             jnp.asarray(LMStatus.RUNNING, dtype=jnp.int32),
             ctx.args,
             ctx.lm_state.damping,
-        )
-
-    def finish_epoch(self, ctx):
-        residual = residual_fn(ctx.x, ctx.args, ctx.p)
-        loss = jnp.sum(residual * residual)
-        nonfinite = ~jnp.isfinite(loss)
-        converged = (ctx.args.shock_scale == 1.0) & (
-            loss < ctx.args.train_loss_threshold
-        )
-        status = jnp.where(
-            nonfinite,
-            jnp.asarray(LMStatus.NONFINITE, dtype=jnp.int32),
-            jnp.where(
-                converged,
-                jnp.asarray(LMStatus.CONVERGED, dtype=jnp.int32),
-                jnp.asarray(LMStatus.RUNNING, dtype=jnp.int32),
-            ),
-        )
-        return nonfinite | converged, status, ctx.args, ctx.lm_state.damping
-
-    def mid_epoch(self, ctx):
-        if not self.epoch_early_stopping:
-            return self.continue_epoch(ctx)
-        return jax.lax.cond(
-            ctx.step == ctx.args.total_steps,
-            self.finish_epoch,
-            self.continue_epoch,
-            ctx,
         )
 
     def __call__(self, ctx):
@@ -672,15 +620,11 @@ class EpochCallback:
 
 
 def drift_field(state, _, args, p):
-    if args is not None:
-        raise ValueError("drift_field does not accept solver args")
     policy, structural = p
     return state_drift(policy, state, structural)
 
 
 def diffusion_field(state, _, args, p):
-    if args is not None:
-        raise ValueError("diffusion_field does not accept solver args")
     _, structural = p
     return state_diffusion(state, structural)
 
@@ -729,7 +673,11 @@ def collocation_residuals(solver, policy, initial_states, noise, p, data_set):
     residuals = euler_residual_terms(policy, states.reshape(-1, 4), p)[0].reshape(
         *states.shape[:2], 2
     )
+    # Mean squared residual, so the loss threshold means the same thing at
+    # any number of trajectories or collocation points.
     count = jnp.asarray(residuals.size, dtype=residuals.dtype)
+    # A nonfinite trajectory did not cover the requested economic horizon.
+    # Make that a loud optimizer failure instead of fitting a prefix.
     return jnp.where(
         solution.ok[:, None, None],
         residuals / jnp.sqrt(count),
@@ -739,6 +687,9 @@ def collocation_residuals(solver, policy, initial_states, noise, p, data_set):
 
 def residual_fn(theta, args, p):
     policy = nnx.merge(args.graphdef, theta, args.fixed_state)
+    # The ladder scales both diffusions through p, so the rollout and the
+    # residual see the same shrunk covariance; corr_zr is scale-free and is
+    # never touched.
     stage_parameters = p.replace(
         sigma_z=p.sigma_z * args.shock_scale,
         sigma_r=p.sigma_r * args.shock_scale,
@@ -812,19 +763,13 @@ def transversality_statistics(values):
     absolute_asset_tvc = values["absolute_asset_tvc"][:, -1]
     signed_asset_tvc = values["signed_asset_tvc"][:, -1]
     capital_tvc = values["capital_tvc"][:, -1]
-    expected_absolute_asset_tvc = jnp.mean(absolute_asset_tvc)
-    expected_capital_tvc = jnp.mean(capital_tvc)
     return {
-        "expected_absolute_asset_tvc": expected_absolute_asset_tvc,
-        "expected_capital_tvc": expected_capital_tvc,
+        "expected_absolute_asset_tvc": jnp.mean(absolute_asset_tvc),
+        "expected_capital_tvc": jnp.mean(capital_tvc),
         "signed_expected_asset_tvc": jnp.mean(signed_asset_tvc),
         "absolute_asset_tvc_mc_se": monte_carlo_standard_error(absolute_asset_tvc),
         "signed_asset_tvc_mc_se": monte_carlo_standard_error(signed_asset_tvc),
         "capital_tvc_mc_se": monte_carlo_standard_error(capital_tvc),
-        "log_expected_absolute_asset_tvc": jnp.log(expected_absolute_asset_tvc),
-        "log_expected_capital_tvc": jnp.log(expected_capital_tvc),
-        "max_log_absolute_asset_tvc": jnp.max(jnp.log(absolute_asset_tvc)),
-        "max_log_capital_tvc": jnp.max(jnp.log(capital_tvc)),
     }
 
 
@@ -864,45 +809,108 @@ def transversality_expectation_frame(values, times):
     )
 
 
-def residual_jacobian_diagnostics(theta, args, p, damping):
-    theta_flat, unravel = ravel_pytree(theta)
-    jacobian = jax.jacrev(lambda flat: residual_fn(unravel(flat), args, p))(theta_flat)
-    singular_values = jnp.linalg.svd(jacobian, compute_uv=False)
-    jax.block_until_ready(singular_values)
-    largest = float(singular_values[0])
-    smallest = float(singular_values[-1])
-    tolerance = (
-        np.finfo(np.asarray(singular_values).dtype).eps * max(jacobian.shape) * largest
-    )
-    rank = int(jnp.sum(singular_values > tolerance))
-    smallest_retained = float(singular_values[rank - 1]) if rank > 0 else 0.0
-    condition_number = (
-        largest / smallest_retained if smallest_retained > 0.0 else math.inf
-    )
-    gram_minimum_eigenvalue = smallest**2 if rank == jacobian.shape[0] else 0.0
-    damped_gram_condition_number = (largest**2 + damping) / (
-        gram_minimum_eigenvalue + damping
-    )
+# The problem half of the two-part artifact key, shared verbatim with any
+# consumer that looks up a saved policy for the same problem (e.g. the
+# stochastic open-economy kernel-recursive collocation generator). Test,
+# tvc, and tolerance settings enter neither hash, so a consumer running its
+# own held-out design still globs the same problem prefix.
+def problem_cache_config(
+    parameters,
+    kappa_z,
+    sigma_z,
+    z_bar,
+    kappa_r,
+    sigma_r,
+    corr_zr,
+    k_0,
+    a_0,
+    z_0,
+    rate_gap_0,
+    use_float64,
+    num_train_trajectories,
+    train_variances,
+):
     return {
-        "jacobian_sigma_max": largest,
-        "jacobian_sigma_min": smallest,
-        "jacobian_sigma_min_retained": smallest_retained,
-        "jacobian_condition_number": condition_number,
-        "undamped_gram_condition_number": (
-            condition_number**2 if rank == jacobian.shape[0] else math.inf
-        ),
-        "damped_gram_condition_number": damped_gram_condition_number,
-        "jacobian_effective_rank": rank,
-        "jacobian_nullity": int(jacobian.shape[1] - rank),
-        "jacobian_row_rank_deficiency": int(jacobian.shape[0] - rank),
-        "jacobian_row_count": int(jacobian.shape[0]),
-        "jacobian_column_count": int(jacobian.shape[1]),
+        **asdict(parameters),
+        "kappa_z": kappa_z,
+        "sigma_z": sigma_z,
+        "z_bar": z_bar,
+        "kappa_r": kappa_r,
+        "sigma_r": sigma_r,
+        "corr_zr": corr_zr,
+        "k_0": k_0,
+        "a_0": a_0,
+        "z_0": z_0,
+        "rate_gap_0": rate_gap_0,
+        "use_float64": use_float64,
+        "train_ic": {
+            "num_train_trajectories": num_train_trajectories,
+            "train_log_z_variance": train_variances[0],
+            "train_log_k_variance": train_variances[1],
+            "train_asset_variance": train_variances[2],
+            "train_rate_variance": train_variances[3],
+        },
     }
 
 
+# One .npz per trained policy: the nnx.Param state through nnx's supported
+# State.to_pure_dict / replace_by_pure_dict conversion (keys joined with
+# "/", list indices numeric), plus a JSON block with the resolved
+# architecture settings, dtype, structural scalars, and the initial state,
+# so a load is rollout-ready without the training driver (e.g. as the
+# frozen-design generator for the kernel-recursive solver).
+def save_sequential_policy(path, policy, nn_set, *, structural, initial_state, extra):
+    def flatten(prefix, node, out):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                flatten((*prefix, str(key)), value, out)
+        else:
+            out["/".join(prefix)] = np.asarray(node)
+        return out
+
+    arrays = flatten((), nnx.state(policy, nnx.Param).to_pure_dict(), {})
+    meta = {
+        "settings": asdict(nn_set),
+        "dtype": str(next(iter(arrays.values())).dtype),
+        "structural": structural,
+        "initial_state": initial_state,
+        **extra,
+    }
+    np.savez(path, __meta__=np.asarray(json.dumps(meta)), **arrays)
+
+
+def load_sequential_policy(path):
+    data = np.load(path)
+    meta = json.loads(str(data["__meta__"]))
+    settings = SequentialPolicySettings(**meta["settings"])
+    dtype = jnp.dtype(meta["dtype"])
+    module = SequentialPolicyNN(settings, dtype=dtype, rngs=nnx.Rngs(0))
+    graphdef, theta, fixed_state = nnx.split(module, nnx.Param, ...)
+    nested = {}
+    for name in data.files:
+        if name == "__meta__":
+            continue
+        node = nested
+        *parents, leaf = name.split("/")
+        for part in parents:
+            node = node.setdefault(int(part) if part.isdigit() else part, {})
+        node[int(leaf) if leaf.isdigit() else leaf] = jnp.asarray(
+            data[name], dtype=dtype
+        )
+    theta.replace_by_pure_dict(nested)
+    return nnx.merge(graphdef, theta, fixed_state), meta
+
+
+# The TFP process reuses the neoclassical growth family's calibration:
+# kappa_z is that family's eta (quarterly AR(1) rho = 0.95) and sigma_z its
+# high-variance innovation map, so every stochastic recursive variant faces
+# the identical z process.
 def stochastic_open_economy_growth_nn_recursive(
     k_0: float = 1.0,
-    a_0: float = 0.0,
+    # Debtor economy: the default NFA position is about half of steady-state
+    # output of net debt, in the range of emerging-economy calibrations
+    # (Mendoza & Villalvazo 2020).
+    a_0: float = -0.8,
     z_0: float = 1.0,
     rate_gap_0: float = 0.0,
     parameters: ModelParameters = ModelParameters(),
@@ -926,22 +934,19 @@ def stochastic_open_economy_growth_nn_recursive(
         geodesic_acceptance_ratio=0.541,
     ),
     stop_set: StoppingCriteria = StoppingCriteria(),
-    init_set: InitializationSettings = InitializationSettings(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
     asset_shift_scale: float = 0.5,
-    deterministic_reference: bool = True,
-    reference_k_lo: float = 0.4,
-    reference_k_hi: float = 8.0,
-    reference_degree: int = 20,
-    diagnose_jacobian: bool = False,
+    # Directory for content-addressed policy artifacts (e.g. ".results"): an
+    # existing artifact for this exact configuration is loaded instead of
+    # training, and a fresh solve is saved there. save_policy writes one
+    # explicit extra path.
+    policy_cache: str | None = None,
+    save_policy: str | None = None,
     verbose: bool = True,
 ):
-    driver_start = time.perf_counter()
-    if use_float64 and not jax.config.jax_enable_x64:
-        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    if stop_set.train_loss_threshold is None:
-        threshold = 1e-8 if dtype == jnp.float64 else 1e-6
-        stop_set = replace(stop_set, train_loss_threshold=threshold)
     if k_0 <= 0.0:
         raise ValueError("k_0 must be positive")
     if z_0 <= 0.0 or z_bar <= 0.0:
@@ -972,6 +977,11 @@ def stochastic_open_economy_growth_nn_recursive(
         raise ValueError("continuation_epochs must lie in [1, num_epochs]")
     if not 0.0 < stop_set.initial_shock_scale <= 1.0:
         raise ValueError("initial_shock_scale must lie in (0, 1]")
+    if not (
+        math.isfinite(stop_set.train_loss_threshold)
+        and stop_set.train_loss_threshold > 0.0
+    ):
+        raise ValueError("train_loss_threshold must be positive")
     if nn_set.width < 1 or nn_set.depth < 1:
         raise ValueError("network width and depth must be positive")
     if nn_set.hidden_activation not in SMOOTH_ACTIVATIONS:
@@ -982,67 +992,32 @@ def stochastic_open_economy_growth_nn_recursive(
         raise ValueError("investment_head_init_scale must be nonnegative")
     if asset_shift_scale <= 0.0:
         raise ValueError("asset_shift_scale must be positive")
-    if init_set.grid_size < 2 or init_set.max_steps < 1:
-        raise ValueError("initialization grid_size and max_steps must be positive")
-    if not math.isfinite(init_set.loss_threshold) or init_set.loss_threshold <= 0.0:
-        raise ValueError("initialization loss_threshold must be positive")
-    if init_set.enabled and not deterministic_reference:
-        raise ValueError("policy initialization requires a deterministic reference")
-    if init_set.enabled and stop_set.num_attempts != 1:
-        raise ValueError("reference-initialized training requires num_attempts=1")
-    if deterministic_reference and z_bar != 1.0:
-        raise ValueError("deterministic reference requires unit mean productivity")
-    if deterministic_reference and not math.isclose(
-        parameters.interest_rate, parameters.r
-    ):
-        raise ValueError(
-            "deterministic reference requires equal interest and preference rates"
-        )
-    if deterministic_reference and not 0.0 < reference_k_lo < reference_k_hi:
-        raise ValueError("reference capital bounds must satisfy zero < lo < hi")
-    if deterministic_reference and reference_degree < 1:
-        raise ValueError("reference_degree must be positive")
-    if deterministic_reference and not reference_k_lo <= k_0 <= reference_k_hi:
-        raise ValueError("initial capital must lie inside the reference bounds")
-    if stop_set.train_loss_threshold is None or not (
-        math.isfinite(stop_set.train_loss_threshold)
-        and stop_set.train_loss_threshold > 0.0
-    ):
-        raise ValueError("train_loss_threshold must be positive")
-    test_thresholds = (
-        stop_set.test_euler_mean_abs_threshold,
-        stop_set.test_euler_max_threshold,
-        stop_set.test_diffusion_max_abs_threshold,
-        stop_set.test_terminal_capital_relative_threshold,
+    tolerances = (
+        tolerance_set.test_euler_mean_abs,
+        tolerance_set.test_euler_max,
+        tolerance_set.test_diffusion_max_abs,
     )
-    if any(not math.isfinite(value) or value <= 0.0 for value in test_thresholds):
-        raise ValueError("test thresholds must be positive")
+    if any(not math.isfinite(value) or value <= 0.0 for value in tolerances):
+        raise ValueError("acceptance tolerances must be positive")
 
-    z_ergodic_variance = sigma_z**2 / (2.0 * kappa_z)
-    rate_ergodic_variance = sigma_r**2 / (2.0 * kappa_r)
     train_variances = (
-        z_ergodic_variance
-        if ic_set.train_log_z_variance is None
-        else ic_set.train_log_z_variance,
+        ic_set.train_log_z_variance,
         ic_set.train_log_k_variance,
         ic_set.train_asset_variance,
-        rate_ergodic_variance
-        if ic_set.train_rate_variance is None
-        else ic_set.train_rate_variance,
+        ic_set.train_rate_variance,
     )
-    test_variances = (
-        train_variances[0]
-        if ic_set.test_log_z_variance is None
-        else ic_set.test_log_z_variance,
-        train_variances[1]
-        if ic_set.test_log_k_variance is None
-        else ic_set.test_log_k_variance,
-        train_variances[2]
-        if ic_set.test_asset_variance is None
-        else ic_set.test_asset_variance,
-        train_variances[3]
-        if ic_set.test_rate_variance is None
-        else ic_set.test_rate_variance,
+    test_variances = tuple(
+        train if test is None else test
+        for train, test in zip(
+            train_variances,
+            (
+                ic_set.test_log_z_variance,
+                ic_set.test_log_k_variance,
+                ic_set.test_asset_variance,
+                ic_set.test_rate_variance,
+            ),
+            strict=True,
+        )
     )
     if any(not math.isfinite(value) or value < 0.0 for value in train_variances):
         raise ValueError("training initial-condition variances must be nonnegative")
@@ -1059,6 +1034,8 @@ def stochastic_open_economy_growth_nn_recursive(
     ):
         raise ValueError("multiple test trajectories are required for nonzero spread")
 
+    z_ergodic_variance = sigma_z**2 / (2.0 * kappa_z)
+    rate_ergodic_variance = sigma_r**2 / (2.0 * kappa_r)
     output_scale = float(production(k_0, z_0, parameters))
     initial_center = jnp.asarray(
         [math.log(z_0), math.log(k_0), a_0 / output_scale, rate_gap_0],
@@ -1066,32 +1043,6 @@ def stochastic_open_economy_growth_nn_recursive(
     )
     train_scales = jnp.sqrt(jnp.asarray(train_variances, dtype=dtype))
     test_scales = jnp.sqrt(jnp.asarray(test_variances, dtype=dtype))
-    reference_start = time.perf_counter()
-    if deterministic_reference:
-        reference = create_deterministic_policy_reference(
-            parameters,
-            k_lo=reference_k_lo,
-            k_hi=reference_k_hi,
-            degree=reference_degree,
-        )
-        reference_terminal = max(200.0, data_set.test_T)
-        reference_grid = np.linspace(0.0, reference_terminal, 401)
-        reference_policy, reference_diagnostics = open_economy_growth_benchmark(
-            k_0,
-            a_0,
-            reference_grid,
-            parameters=parameters,
-        )
-        reference_values = reference_policy(np.asarray([data_set.test_T]))
-        deterministic_terminal_capital = float(reference_values["k"][0])
-        deterministic_terminal_asset = float(reference_values["a"][0])
-        if abs(reference_diagnostics["present_value_residual"]) > 1e-8:
-            raise RuntimeError("deterministic reference present-value check failed")
-    else:
-        reference = None
-        deterministic_terminal_capital = math.nan
-        deterministic_terminal_asset = math.nan
-    reference_setup_time = time.perf_counter() - reference_start
     investment_anchor = max(parameters.delta * k_0, DOMAIN_EPS)
     current_account_anchor = 0.0
     nn_set = replace(
@@ -1104,6 +1055,8 @@ def stochastic_open_economy_growth_nn_recursive(
         ),
         log_k_center=math.log(k_0),
         asset_center=a_0 / output_scale,
+        # One initial output unit floors the asset scale, so the tanh squash
+        # stays responsive when the IC spread is zero or tiny.
         asset_scale=max(math.sqrt(train_variances[2]), 1.0),
         rate_scale=max(
             math.sqrt(rate_ergodic_variance),
@@ -1179,119 +1132,15 @@ def stochastic_open_economy_growth_nn_recursive(
         ic_set.num_test_trajectories,
     )
 
-    fit_start = time.perf_counter()
+    fit_timer = Stopwatch()
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
-    initial_model = SequentialPolicyNN(
-        nn_set,
-        dtype=dtype,
-        rngs=nnx.Rngs(init_key),
-    )
+    initial_model = SequentialPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(init_key))
     graphdef, theta_0, fixed_state = nnx.split(initial_model, nnx.Param, ...)
-    diagnostic_k_lo = reference_k_lo if reference is not None else 0.8 * k_0
-    diagnostic_k_hi = reference_k_hi if reference is not None else 1.2 * k_0
-    initialization_capital = jnp.linspace(
-        diagnostic_k_lo,
-        diagnostic_k_hi,
-        init_set.grid_size,
-        dtype=dtype,
-    )
-    initialization_states = jnp.column_stack(
-        [
-            jnp.full_like(initialization_capital, math.log(z_bar)),
-            jnp.log(initialization_capital),
-            jnp.full_like(initialization_capital, a_0 / output_scale),
-            jnp.zeros_like(initialization_capital),
-        ]
-    )
-    raw_predictions = jax.vmap(initial_model)(initialization_states)
-    jax.block_until_ready(raw_predictions)
-    raw_investment_relative_range = float(
-        (jnp.max(raw_predictions[:, 0]) - jnp.min(raw_predictions[:, 0]))
-        / investment_anchor
-    )
-    raw_current_account_max_abs = float(jnp.max(jnp.abs(raw_predictions[:, 1])))
-
-    initialization_loss_before = math.nan
-    initialization_loss = math.nan
-    initialization_steps = 0
-    initialization_status = "disabled"
-    initialization_time = 0.0
-    initialization_investment_log_error_max = math.nan
-    initialization_current_account_error_max = math.nan
-    if reference is not None:
-        initialization_targets = jax.vmap(
-            lambda capital: deterministic_reference_values(reference, capital, dtype)
-        )(initialization_capital)
-        initialization_args = PolicyInitializationArgs(
-            graphdef=graphdef,
-            fixed_state=fixed_state,
-            states=initialization_states,
-            targets=initialization_targets,
-        )
-        residual_before = policy_initialization_residual(
-            theta_0, initialization_args, p
-        )
-        initialization_loss_before = float(jnp.sum(residual_before * residual_before))
-        if init_set.enabled:
-            initialization_solver = LevenbergMarquardt(
-                policy_initialization_residual,
-                init_damping=opt_set.init_damping,
-                damping_decrease=opt_set.damping_decrease,
-                damping_increase=opt_set.damping_increase,
-                geodesic_acceleration=opt_set.geodesic_acceleration,
-                geodesic_acceptance_ratio=opt_set.geodesic_acceptance_ratio,
-            )
-            initialization_start = time.perf_counter()
-            initialization_result = initialization_solver.solve(
-                theta_0,
-                initialization_args,
-                p=p,
-                max_steps=init_set.max_steps,
-                atol=math.sqrt(init_set.loss_threshold),
-                max_steps_is_success=False,
-            )
-            jax.block_until_ready(initialization_result)
-            initialization_time = time.perf_counter() - initialization_start
-            theta_0 = initialization_result.x
-            initialization_residual = policy_initialization_residual(
-                theta_0, initialization_args, p
-            )
-            initialization_loss = float(
-                jnp.sum(initialization_residual * initialization_residual)
-            )
-            initialization_steps = int(initialization_result.steps)
-            initialization_status = STATUS_TO_REASON.get(
-                int(initialization_result.status), "unknown"
-            )
-            initialized_policy = nnx.merge(graphdef, theta_0, fixed_state)
-            initialized_predictions = jax.vmap(initialized_policy)(
-                initialization_states
-            )
-            jax.block_until_ready(initialized_predictions)
-            initialization_investment_log_error_max = float(
-                jnp.max(
-                    jnp.abs(
-                        jnp.log(
-                            initialized_predictions[:, 0] / initialization_targets[:, 0]
-                        )
-                    )
-                )
-            )
-            initialization_current_account_error_max = float(
-                jnp.max(
-                    jnp.abs(
-                        initialized_predictions[:, 1] - initialization_targets[:, 1]
-                    )
-                )
-            )
-            if not math.isfinite(initialization_loss) or (
-                initialization_loss > init_set.loss_threshold
-            ):
-                raise RuntimeError(
-                    "deterministic policy initialization did not meet its loss "
-                    f"threshold: {initialization_loss:.3e}"
-                )
-
+    # The initial training draws consume train_ic_key itself; the noise,
+    # epoch, and restart streams chain from independent fold-ins of the same
+    # key, and the held-out streams chain from test_ic_key. fold_in index 1
+    # of train_ic_key is the training noise stream: the kernel-recursive
+    # consumer regenerates this exact stream to rebuild the frozen design.
     train_noise_key = jax.random.fold_in(train_ic_key, 1)
     test_noise_key = jax.random.fold_in(test_ic_key, 1)
     tvc_noise_key = jax.random.fold_in(test_ic_key, 3)
@@ -1308,8 +1157,10 @@ def stochastic_open_economy_growth_nn_recursive(
             n_train_steps,
             train_dt,
             dtype,
+            4,
         ),
         epoch_key=jax.random.fold_in(train_ic_key, 2),
+        restart_key=jax.random.fold_in(train_ic_key, 4),
         epoch=jnp.asarray(0, dtype=jnp.int32),
         shock_scales=shock_scales,
         shock_scale=shock_scales[0],
@@ -1321,50 +1172,134 @@ def stochastic_open_economy_growth_nn_recursive(
         solver=solver,
         data_set=data_set,
     )
-    lm_solver = LevenbergMarquardt(
-        residual_fn,
-        init_damping=opt_set.init_damping,
-        damping_decrease=opt_set.damping_decrease,
-        damping_increase=opt_set.damping_increase,
-        geodesic_acceleration=opt_set.geodesic_acceleration,
-        geodesic_acceptance_ratio=opt_set.geodesic_acceptance_ratio,
+    # Two-part artifact key <problem>-<run>: the problem hash covers the deep
+    # structural parameters, dtype, and the training initial-condition design
+    # shared by any solver of the same problem, so a consumer can glob
+    # *_policy_<problem>-*.npz for a reference solution; the run hash covers
+    # the training minutiae. Test, tvc, and tolerance settings enter neither,
+    # so changing them still reuses a cached policy.
+    problem_config = problem_cache_config(
+        parameters,
+        kappa_z,
+        sigma_z,
+        z_bar,
+        kappa_r,
+        sigma_r,
+        corr_zr,
+        k_0,
+        a_0,
+        z_0,
+        rate_gap_0,
+        use_float64,
+        ic_set.num_train_trajectories,
+        train_variances,
     )
-    callback = EpochCallback(
-        num_train_trajectories=ic_set.num_train_trajectories,
-        n_steps=n_train_steps,
-        dt=train_dt,
-        epoch_early_stopping=stop_set.epoch_early_stopping,
-        resample_initial_states=any(value > 0.0 for value in train_variances),
+    run_config = {
+        "seed": seed,
+        "data_seed": ic_set.data_seed,
+        "sde_solver": sde_solver,
+        "train_points": data_set.train_points,
+        "train_T": data_set.train_T,
+        "nn_set": asdict(nn_set),
+        "opt_set": asdict(opt_set),
+        "stop_set": asdict(stop_set),
+    }
+    problem_key = policy_cache_key(problem_config)
+    run_key = policy_cache_key(run_config)
+    cache_key = f"{problem_key}-{run_key}"
+    cache_path = (
+        None
+        if policy_cache is None
+        else pathlib.Path(policy_cache)
+        / f"stochastic_open_economy_growth_nn_recursive_policy_{cache_key}.npz"
     )
-    atol = math.sqrt(stop_set.train_loss_threshold) if stop_set.num_epochs == 1 else 0.0
+    cache_hit = cache_path is not None and cache_path.exists()
+    if cache_hit:
+        policy, cached_meta = load_sequential_policy(cache_path)
+        theta_final = nnx.split(policy, nnx.Param, ...)[1]
+        # The saved policy is the end of the shock ladder: diagnostics must
+        # run at full shock scale and the final epoch index, never at the
+        # fractional scale a fresh residual_args starts from.
+        solve_args = residual_args.replace(
+            shock_scale=jnp.asarray(1.0, dtype=dtype),
+            epoch=jnp.asarray(stop_set.num_epochs - 1, dtype=jnp.int32),
+        )
+        steps = 0
+        epochs_run = 0
+        attempt = 0
+        stopping_reason = "cached"
+        final_damping = float("nan")
+        solver_accepted = bool(cached_meta["solver_accepted"])
+        train_time = 0.0
+        total_fit_time = fit_timer.elapsed()
+        setup_time = total_fit_time
+        train_residual = residual_fn(theta_final, solve_args, p)
+        train_loss = float(jnp.sum(train_residual * train_residual))
+        if verbose:
+            print(f"loaded {cache_path}, train_loss={train_loss:.3e}")
+    else:
+        lm_solver = LevenbergMarquardt(
+            residual_fn,
+            init_damping=opt_set.init_damping,
+            damping_decrease=opt_set.damping_decrease,
+            damping_increase=opt_set.damping_increase,
+            geodesic_acceleration=opt_set.geodesic_acceleration,
+            geodesic_acceptance_ratio=opt_set.geodesic_acceptance_ratio,
+        )
+        callback = EpochCallback(
+            num_train_trajectories=ic_set.num_train_trajectories,
+            n_steps=n_train_steps,
+            dt=train_dt,
+            epoch_early_stopping=stop_set.epoch_early_stopping,
+            resample_initial_states=any(value > 0.0 for value in train_variances),
+        )
+        # The per-step tolerance is sound only while the training batch never
+        # changes; across epochs, convergence is judged at the boundaries and
+        # by the multi-start acceptance test instead.
+        atol = (
+            math.sqrt(stop_set.train_loss_threshold)
+            if stop_set.num_epochs == 1
+            else 0.0
+        )
+        train_timer = Stopwatch()
+        result = lm_solver.solve(
+            theta_0,
+            residual_args,
+            p=p,
+            max_steps=stop_set.num_epochs * stop_set.max_steps,
+            atol=atol,
+            callback=callback,
+            multi_start=MultiStart(
+                key=multi_start_key,
+                num_starts=stop_set.num_attempts,
+                draw=DrawSequentialPolicy(nn_set, dtype),
+                accept=accept_training,
+            ),
+            max_steps_is_success=False,
+        )
+        train_time = train_timer.elapsed(result)
+        total_fit_time = fit_timer.elapsed()
+        setup_time = total_fit_time - train_time
+        theta_final, solve_args = result.x, result.args
+        train_residual = residual_fn(theta_final, solve_args, p)
+        train_loss = float(jnp.sum(train_residual * train_residual))
+        steps = int(result.steps)
+        epochs_run = int(solve_args.epoch) + 1
+        attempt = int(result.multi_start.attempt) + 1
+        stopping_reason = STATUS_TO_REASON.get(int(result.status), "unknown")
+        final_damping = float(result.lm_state.damping)
+        solver_accepted = bool(result.multi_start.accepted)
+        if verbose:
+            print(
+                f"attempt {attempt}: {stopping_reason} after {steps} steps "
+                f"(epoch {epochs_run}/{stop_set.num_epochs}, shock scale "
+                f"{float(solve_args.shock_scale):.3f}), "
+                f"train_loss={train_loss:.3e} ({train_time:.2f}s)"
+            )
+        policy = nnx.merge(graphdef, theta_final, fixed_state)
 
-    start_time = time.perf_counter()
-    result = lm_solver.solve(
-        theta_0,
-        residual_args,
-        p=p,
-        max_steps=stop_set.num_epochs * stop_set.max_steps,
-        atol=atol,
-        callback=callback,
-        multi_start=MultiStart(
-            key=multi_start_key,
-            num_starts=stop_set.num_attempts,
-            draw=DrawSequentialPolicy(nn_set, dtype),
-            accept=accept_training,
-        ),
-        max_steps_is_success=False,
-    )
-    jax.block_until_ready(result)
-    train_time = time.perf_counter() - start_time
-    total_fit_time = time.perf_counter() - fit_start
-    setup_time = start_time - fit_start
-    theta_final = result.x
-    solve_args = result.args
-    policy = nnx.merge(graphdef, theta_final, fixed_state)
-    train_residual = residual_fn(theta_final, solve_args, p)
-    train_loss = float(jnp.sum(train_residual * train_residual))
-    evaluation_start = time.perf_counter()
-
+    # Training diagnostics use the batch (ICs, noise, shock scale) the
+    # solution was returned on.
     train_stage_parameters = p.replace(
         sigma_z=p.sigma_z * solve_args.shock_scale,
         sigma_r=p.sigma_r * solve_args.shock_scale,
@@ -1385,6 +1320,7 @@ def stochastic_open_economy_growth_nn_recursive(
         n_test_steps,
         test_dt,
         dtype,
+        4,
     )
     test_solution = rollout_steps(
         solver,
@@ -1398,9 +1334,7 @@ def stochastic_open_economy_growth_nn_recursive(
     jax.block_until_ready((train_solution, train_values, test_solution))
     test_states = jnp.where(test_solution.ok[:, None, None], test_solution.xs, jnp.nan)
     test_values = trajectory_values(policy, test_states, p)
-    jax.block_until_ready(test_values)
 
-    tvc_evaluation_start = time.perf_counter()
     tvc_initial_states = jnp.broadcast_to(
         initial_center,
         (ic_set.num_tvc_trajectories, initial_center.size),
@@ -1412,6 +1346,7 @@ def stochastic_open_economy_growth_nn_recursive(
         n_tvc_steps,
         tvc_dt,
         dtype,
+        4,
     )
     tvc_solution = rollout_steps(
         solver,
@@ -1431,7 +1366,6 @@ def stochastic_open_economy_growth_nn_recursive(
     )
     tvc_statistics = transversality_statistics(tvc_values)
     jax.block_until_ready((tvc_solution, tvc_values, tvc_statistics))
-    tvc_evaluation_time = time.perf_counter() - tvc_evaluation_start
 
     train_df = trajectory_frame(train_values, train_solution.ts)
     test_df = trajectory_frame(test_values, test_solution.ts)
@@ -1450,13 +1384,6 @@ def stochastic_open_economy_growth_nn_recursive(
         axis=-1,
     )
     test_diffusion_max_abs = jnp.max(jnp.abs(test_diffusion), axis=(0, 1))
-    test_diffusion_p95_abs = jnp.quantile(jnp.abs(test_diffusion), 0.95, axis=(0, 1))
-    test_terminal_capital_mean = jnp.mean(test_values["k"][:, -1])
-    terminal_capital_relative_error = (
-        jnp.asarray(jnp.nan, dtype=dtype)
-        if reference is None
-        else jnp.abs(test_terminal_capital_mean / deterministic_terminal_capital - 1.0)
-    )
     train_path_ok = bool(
         jnp.all(train_solution.ok)
         and jnp.all(jnp.isfinite(train_solution.xs))
@@ -1490,6 +1417,10 @@ def stochastic_open_economy_growth_nn_recursive(
         and jnp.all(tvc_feasible_observations)
     )
 
+    # Asset-shift diagnostic: paired rollouts from NFA positions shifted a
+    # fixed number of output units below and above a_0, on common noise, so
+    # the asset axis of the learned policy is exercised even when the IC
+    # spread is zero.
     paired_states = jnp.broadcast_to(
         initial_center,
         (ic_set.num_test_trajectories, initial_center.size),
@@ -1528,8 +1459,8 @@ def stochastic_open_economy_growth_nn_recursive(
     low_euler = jnp.stack([low_values["c_euler"], low_values["q_euler"]], axis=-1)
     high_euler = jnp.stack([high_values["c_euler"], high_values["q_euler"]], axis=-1)
     hysteresis_euler = jnp.concatenate([low_euler, high_euler], axis=0)
-    hysteresis_euler_mean_abs = jnp.mean(jnp.abs(hysteresis_euler), axis=(0, 1))
-    hysteresis_euler_max_abs = jnp.max(jnp.abs(hysteresis_euler), axis=(0, 1))
+    hysteresis_euler_mean_abs = float(jnp.mean(jnp.abs(hysteresis_euler)))
+    hysteresis_euler_max_abs = float(jnp.max(jnp.abs(hysteresis_euler)))
     hysteresis_paths_ok = bool(
         jnp.all(low_solution.ok)
         and jnp.all(high_solution.ok)
@@ -1546,101 +1477,68 @@ def stochastic_open_economy_growth_nn_recursive(
         and jnp.min(low_values["x"]) > 0.0
         and jnp.min(high_values["x"]) > 0.0
     )
+    hysteresis_terminal_asset_difference = float(
+        jnp.mean(high_values["a"][:, -1] - low_values["a"][:, -1])
+    )
 
-    numerical_rejection_reasons = []
-    economic_rejection_reasons = []
-    solver_accepted = bool(result.multi_start.accepted)
+    # Ex-post reported diagnostics only: the deterministic open economy from
+    # the same initial state, evaluated at the test horizon. Never enters
+    # residuals, initialization, or acceptance.
+    benchmark_grid = np.linspace(0.0, max(200.0, data_set.test_T), 401)
+    benchmark = open_economy_growth_benchmark(
+        k_0,
+        a_0,
+        benchmark_grid,
+        parameters=parameters,
+    )[0]
+    benchmark_values = benchmark(np.asarray([data_set.test_T]))
+    deterministic_terminal_capital = float(benchmark_values["k"][0])
+    deterministic_terminal_asset = float(benchmark_values["a"][0])
+    test_terminal_capital_mean = float(jnp.mean(test_values["k"][:, -1]))
+    test_terminal_capital_relative_error = abs(
+        test_terminal_capital_mean / deterministic_terminal_capital - 1.0
+    )
+
+    rejection_reasons = []
     if not solver_accepted or train_loss > stop_set.train_loss_threshold:
-        numerical_rejection_reasons.append("train_loss")
+        rejection_reasons.append("train_loss")
     if not train_path_ok:
-        numerical_rejection_reasons.append("train_path")
+        rejection_reasons.append("train_path")
     if not test_path_ok:
-        numerical_rejection_reasons.append("test_path")
+        rejection_reasons.append("test_path")
+    if bool(jnp.any(test_mean_abs > tolerance_set.test_euler_mean_abs)):
+        rejection_reasons.append("test_euler_mean")
+    if bool(jnp.any(test_max_abs > tolerance_set.test_euler_max)):
+        rejection_reasons.append("test_euler_max")
+    if bool(jnp.any(test_diffusion_max_abs > tolerance_set.test_diffusion_max_abs)):
+        rejection_reasons.append("test_diffusion_max")
     if not hysteresis_paths_ok:
-        numerical_rejection_reasons.append("hysteresis_path")
-    if bool(
-        jnp.any(hysteresis_euler_mean_abs > stop_set.test_euler_mean_abs_threshold)
-    ):
-        numerical_rejection_reasons.append("hysteresis_euler_mean")
-    if bool(jnp.any(hysteresis_euler_max_abs > stop_set.test_euler_max_threshold)):
-        numerical_rejection_reasons.append("hysteresis_euler_max")
-    if reference is not None and (
-        float(jnp.min(train_values["k"])) < reference.k_lo
-        or float(jnp.max(train_values["k"])) > reference.k_hi
-        or float(jnp.min(test_values["k"])) < reference.k_lo
-        or float(jnp.max(test_values["k"])) > reference.k_hi
-        or float(jnp.min(low_values["k"])) < reference.k_lo
-        or float(jnp.max(low_values["k"])) > reference.k_hi
-        or float(jnp.min(high_values["k"])) < reference.k_lo
-        or float(jnp.max(high_values["k"])) > reference.k_hi
-    ):
-        economic_rejection_reasons.append("reference_domain")
-    if bool(jnp.any(test_mean_abs > stop_set.test_euler_mean_abs_threshold)):
-        numerical_rejection_reasons.append("test_euler_mean")
-    if bool(jnp.any(test_max_abs > stop_set.test_euler_max_threshold)):
-        numerical_rejection_reasons.append("test_euler_max")
-    if bool(
-        jnp.any(test_diffusion_max_abs > stop_set.test_diffusion_max_abs_threshold)
-    ):
-        economic_rejection_reasons.append("test_diffusion_max")
-    if reference is not None and bool(
-        terminal_capital_relative_error
-        > stop_set.test_terminal_capital_relative_threshold
-    ):
-        economic_rejection_reasons.append("test_terminal_capital")
-    numerical_solution_accepted = not numerical_rejection_reasons
-    economic_solution_accepted = not economic_rejection_reasons
-    rejection_reasons = numerical_rejection_reasons + economic_rejection_reasons
-    solution_accepted = numerical_solution_accepted and economic_solution_accepted
+        rejection_reasons.append("hysteresis_path")
+    if hysteresis_euler_mean_abs > tolerance_set.test_euler_mean_abs:
+        rejection_reasons.append("hysteresis_euler_mean")
+    if hysteresis_euler_max_abs > tolerance_set.test_euler_max:
+        rejection_reasons.append("hysteresis_euler_max")
+    acceptance = acceptance_fields(rejection_reasons)
+    solution_accepted = acceptance["solution_accepted"]
 
     theta_flat, _ = ravel_pytree(theta_final)
     observed_assets = np.asarray(test_values["a"]).reshape(-1)
     observed_rates = np.asarray(test_values["interest_rate"]).reshape(-1)
     test_asset_change = test_values["a"][:, -1] - test_values["a"][:, 0]
-    hysteresis_terminal_asset_difference = jnp.mean(
-        high_values["a"][:, -1] - low_values["a"][:, -1]
+    # Fraction of the tanh squash range the held-out asset paths reach: near
+    # one the policy input saturates and the heads lose asset sensitivity.
+    test_normalized_asset = (
+        test_states[..., 2] - nn_set.asset_center
+    ) / nn_set.asset_scale
+    test_asset_squash_saturation = float(
+        jnp.nanmax(jnp.abs(jnp.tanh(test_normalized_asset / 2.0)))
     )
     results = {
         **asdict(parameters),
         "variant": "stochastic_recursive_open_economy_nn",
         "state_coordinate": "(log z, log k, a/output_scale, rate_gap)",
         "policy": "investment_current_account",
-        "policy_initialization": (
-            "deterministic_reference_pretraining"
-            if init_set.enabled
-            else "flat_replacement_investment_zero_current_account"
-        ),
-        "deterministic_reference": deterministic_reference,
-        "initial_investment_anchor": investment_anchor,
-        "initial_current_account_anchor": current_account_anchor,
-        "raw_initial_investment_relative_range": (raw_investment_relative_range),
-        "raw_initial_current_account_max_abs": raw_current_account_max_abs,
-        "initialization_loss_before": initialization_loss_before,
-        "initialization_loss": initialization_loss,
-        "initialization_loss_threshold": init_set.loss_threshold,
-        "initialization_steps": initialization_steps,
-        "initialization_status": initialization_status,
-        "initialization_time": initialization_time,
-        "initialization_investment_log_error_max": (
-            initialization_investment_log_error_max
-        ),
-        "initialization_current_account_error_max": (
-            initialization_current_account_error_max
-        ),
-        "reference_k_lo": reference_k_lo,
-        "reference_k_hi": reference_k_hi,
-        "reference_degree": reference_degree,
-        "reference_approximation_max_abs_x": (
-            np.nan if reference is None else reference.approximation_max_abs_x
-        ),
-        "reference_approximation_max_abs_current_account": (
-            np.nan
-            if reference is None
-            else reference.approximation_max_abs_current_account
-        ),
-        "reference_setup_time": reference_setup_time,
-        "deterministic_terminal_capital": deterministic_terminal_capital,
-        "deterministic_terminal_asset": deterministic_terminal_asset,
+        "initialization": "replacement_investment_zero_current_account",
         "k_0": k_0,
         "a_0": a_0,
         "z_0": z_0,
@@ -1651,46 +1549,37 @@ def stochastic_open_economy_growth_nn_recursive(
         "z_bar": z_bar,
         "kappa_r": kappa_r,
         "sigma_r": sigma_r,
-        "world_rate_ar1_rho": WORLD_RATE_AR1_RHO,
-        "world_rate_ar1_innovation_sd": WORLD_RATE_AR1_INNOVATION_SD,
         "corr_zr": corr_zr,
-        "rate_ergodic_sd": math.sqrt(rate_ergodic_variance),
         "z_ergodic_sd": math.sqrt(z_ergodic_variance),
+        "rate_ergodic_sd": math.sqrt(rate_ergodic_variance),
         "seed": seed,
         "data_seed": ic_set.data_seed,
-        "residual_dtype": str(jnp.dtype(dtype)),
+        # Measured, not requested: a float64 leak upstream shows up here.
+        "residual_dtype": str(train_residual.dtype),
         "sde_solver": sde_solver,
-        "train_loss_threshold": stop_set.train_loss_threshold,
         "train_loss": train_loss,
         "train_euler_mean_abs": float(jnp.mean(jnp.abs(train_euler))),
         "train_euler_max_abs": float(jnp.max(jnp.abs(train_euler))),
+        "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_euler))),
         "test_c_euler_mean_abs": float(test_mean_abs[0]),
         "test_q_euler_mean_abs": float(test_mean_abs[1]),
         "test_c_euler_max_abs": float(test_max_abs[0]),
         "test_q_euler_max_abs": float(test_max_abs[1]),
         "test_c_euler_p95_abs": float(test_p95_abs[0]),
         "test_q_euler_p95_abs": float(test_p95_abs[1]),
-        "test_euler_mean_abs_threshold": stop_set.test_euler_mean_abs_threshold,
-        "test_euler_max_threshold": stop_set.test_euler_max_threshold,
         "test_c_diffusion_max_abs": float(test_diffusion_max_abs[0]),
         "test_q_diffusion_max_abs": float(test_diffusion_max_abs[1]),
-        "test_c_diffusion_p95_abs": float(test_diffusion_p95_abs[0]),
-        "test_q_diffusion_p95_abs": float(test_diffusion_p95_abs[1]),
-        "test_diffusion_max_abs_threshold": (stop_set.test_diffusion_max_abs_threshold),
         "min_test_consumption": float(jnp.min(test_values["c"])),
         "min_test_interest_rate": float(np.min(observed_rates)),
         "test_negative_rate_fraction": float(np.mean(observed_rates < 0.0)),
         "test_asset_p025": float(np.quantile(observed_assets, 0.025)),
         "test_asset_p50": float(np.quantile(observed_assets, 0.5)),
         "test_asset_p975": float(np.quantile(observed_assets, 0.975)),
+        "test_asset_squash_saturation": test_asset_squash_saturation,
         "test_terminal_asset_mean": float(jnp.mean(test_values["a"][:, -1])),
         "test_terminal_asset_sd": float(jnp.std(test_values["a"][:, -1])),
-        "test_terminal_capital_mean": float(test_terminal_capital_mean),
+        "test_terminal_capital_mean": test_terminal_capital_mean,
         "test_terminal_capital_sd": float(jnp.std(test_values["k"][:, -1])),
-        "test_terminal_capital_relative_error": float(terminal_capital_relative_error),
-        "test_terminal_capital_relative_threshold": (
-            stop_set.test_terminal_capital_relative_threshold
-        ),
         "test_min_capital": float(jnp.min(test_values["k"])),
         "test_max_capital": float(jnp.max(test_values["k"])),
         "test_asset_change_mean": float(jnp.mean(test_asset_change)),
@@ -1698,20 +1587,13 @@ def stochastic_open_economy_growth_nn_recursive(
         "test_terminal_current_account_mean": float(
             jnp.mean(test_values["current_account"][:, -1])
         ),
-        "tvc_definition": (
-            "E[exp(-preference_rate*T)*c_T^(-gamma)*|a_T|] and "
-            "E[exp(-preference_rate*T)*c_T^(-gamma)*q_T*k_T]"
-        ),
+        "deterministic_terminal_capital": deterministic_terminal_capital,
+        "deterministic_terminal_asset": deterministic_terminal_asset,
+        "test_terminal_capital_relative_error": test_terminal_capital_relative_error,
         "tvc_T": data_set.tvc_T,
         "tvc_points": data_set.tvc_points,
         "num_tvc_trajectories": ic_set.num_tvc_trajectories,
         "tvc_paths_ok": tvc_paths_ok,
-        "tvc_solver_path_fraction": float(jnp.mean(tvc_solution.ok.astype(dtype))),
-        "tvc_feasible_observation_fraction": float(
-            jnp.mean(tvc_feasible_observations.astype(dtype))
-        ),
-        "min_tvc_consumption": float(jnp.nanmin(tvc_values["c"])),
-        "min_tvc_capital": float(jnp.nanmin(tvc_values["k"])),
         "ex_post_expected_absolute_asset_tvc": float(
             tvc_statistics["expected_absolute_asset_tvc"]
         ),
@@ -1726,63 +1608,41 @@ def stochastic_open_economy_growth_nn_recursive(
             tvc_statistics["signed_asset_tvc_mc_se"]
         ),
         "ex_post_capital_tvc_mc_se": float(tvc_statistics["capital_tvc_mc_se"]),
-        "ex_post_log_expected_absolute_asset_tvc": float(
-            tvc_statistics["log_expected_absolute_asset_tvc"]
-        ),
-        "ex_post_log_expected_capital_tvc": float(
-            tvc_statistics["log_expected_capital_tvc"]
-        ),
-        "ex_post_max_log_absolute_asset_tvc": float(
-            tvc_statistics["max_log_absolute_asset_tvc"]
-        ),
-        "ex_post_max_log_capital_tvc": float(tvc_statistics["max_log_capital_tvc"]),
-        "tvc_evaluation_time": tvc_evaluation_time,
         "asset_shift": asset_shift,
-        "hysteresis_terminal_k_mean_difference": float(
-            jnp.mean(high_values["k"][:, -1] - low_values["k"][:, -1])
-        ),
-        "hysteresis_terminal_c_mean_difference": float(
-            jnp.mean(high_values["c"][:, -1] - low_values["c"][:, -1])
-        ),
-        "hysteresis_terminal_current_account_mean_difference": float(
-            jnp.mean(
-                high_values["current_account"][:, -1]
-                - low_values["current_account"][:, -1]
-            )
-        ),
-        "hysteresis_terminal_asset_mean_difference": float(
+        "hysteresis_terminal_asset_mean_difference": (
             hysteresis_terminal_asset_difference
         ),
-        "hysteresis_asset_persistence_ratio": float(
+        "hysteresis_asset_persistence_ratio": (
             hysteresis_terminal_asset_difference / (2.0 * asset_shift)
         ),
         "hysteresis_paths_ok": hysteresis_paths_ok,
-        "hysteresis_c_euler_mean_abs": float(hysteresis_euler_mean_abs[0]),
-        "hysteresis_q_euler_mean_abs": float(hysteresis_euler_mean_abs[1]),
-        "hysteresis_c_euler_max_abs": float(hysteresis_euler_max_abs[0]),
-        "hysteresis_q_euler_max_abs": float(hysteresis_euler_max_abs[1]),
-        "steps": int(result.steps),
-        "epochs_run": int(solve_args.epoch) + 1,
-        "max_steps_per_epoch": stop_set.max_steps,
+        "hysteresis_euler_mean_abs": hysteresis_euler_mean_abs,
+        "hysteresis_euler_max_abs": hysteresis_euler_max_abs,
+        "steps": steps,
         "num_epochs": stop_set.num_epochs,
+        "epochs_run": epochs_run,
         "shock_continuation_scales": tuple(
             float(value) for value in np.asarray(shock_scales)
         ),
         "final_training_shock_scale": float(solve_args.shock_scale),
-        "attempt": int(result.multi_start.attempt) + 1,
-        "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
-        "final_damping": float(result.lm_state.damping),
+        "attempt": attempt,
+        "stopping_reason": stopping_reason,
+        "final_damping": final_damping,
+        "policy_cache_key": cache_key,
+        "policy_cache_hit": cache_hit,
         "train_time": train_time,
         "setup_time": setup_time,
         "total_fit_time": total_fit_time,
-        "trainable_params": int(theta_flat.size),
-        "reference_coefficient_count": (
-            0 if reference is None else int(reference.coefficients.size)
-        ),
+        "train_time_success": train_time if solver_accepted else np.nan,
+        "total_params": int(theta_flat.size),
         "residual_count": int(train_residual.size),
         "parameter_to_residual_ratio": float(theta_flat.size / train_residual.size),
         "num_train_trajectories": ic_set.num_train_trajectories,
         "num_test_trajectories": ic_set.num_test_trajectories,
+        "train_log_z_variance": train_variances[0],
+        "train_log_k_variance": train_variances[1],
+        "train_asset_variance": train_variances[2],
+        "train_rate_variance": train_variances[3],
         "train_points": data_set.train_points,
         "test_points": data_set.test_points,
         "train_T": data_set.train_T,
@@ -1790,56 +1650,13 @@ def stochastic_open_economy_growth_nn_recursive(
         "train_path_ok": train_path_ok,
         "test_path_ok": test_path_ok,
         "solver_accepted": solver_accepted,
-        "numerical_solution_accepted": numerical_solution_accepted,
-        "economic_solution_accepted": economic_solution_accepted,
-        "solution_accepted": solution_accepted,
-        "acceptance_scope": "numerical_and_economic_gates",
-        "numerical_rejection_reason": (
-            "accepted"
-            if numerical_solution_accepted
-            else ",".join(numerical_rejection_reasons)
-        ),
-        "economic_rejection_reason": (
-            "accepted"
-            if economic_solution_accepted
-            else ",".join(economic_rejection_reasons)
-        ),
-        "rejection_reason": (
-            "accepted" if solution_accepted else ",".join(rejection_reasons)
-        ),
+        "solver_converged": solver_accepted,
+        **acceptance,
         "lm_linear_system": "default_auto_dual_gram_when_overparameterized",
         "parameter_derivative": (
-            "minimum_euclidean_norm_svd_conditional_on_fixed_reference_"
-            "pretraining_and_carried_training_batch"
+            "minimum_euclidean_norm_svd_conditional_on_carried_training_batch"
         ),
     }
-    results["postfit_evaluation_time"] = time.perf_counter() - evaluation_start
-    diagnostic_start = time.perf_counter()
-    if diagnose_jacobian and bool(jnp.all(jnp.isfinite(train_residual))):
-        results.update(
-            residual_jacobian_diagnostics(
-                theta_final,
-                solve_args,
-                p,
-                float(result.lm_state.damping),
-            )
-        )
-    else:
-        results.update(
-            jacobian_sigma_max=np.nan,
-            jacobian_sigma_min=np.nan,
-            jacobian_sigma_min_retained=np.nan,
-            jacobian_condition_number=np.nan,
-            undamped_gram_condition_number=np.nan,
-            damped_gram_condition_number=np.nan,
-            jacobian_effective_rank=0,
-            jacobian_nullity=np.nan,
-            jacobian_row_rank_deficiency=np.nan,
-            jacobian_row_count=int(train_residual.size),
-            jacobian_column_count=int(theta_flat.size),
-        )
-    results["jacobian_diagnostic_time"] = time.perf_counter() - diagnostic_start
-    results["total_run_time"] = time.perf_counter() - driver_start
 
     hyperparameters = {
         "parameters": asdict(parameters),
@@ -1851,23 +1668,70 @@ def stochastic_open_economy_growth_nn_recursive(
             "sigma_r": sigma_r,
             "corr_zr": corr_zr,
         },
-        "deterministic_reference": {
-            "enabled": deterministic_reference,
-            "k_lo": reference_k_lo,
-            "k_hi": reference_k_hi,
-            "degree": reference_degree,
-        },
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
         "nn_set": asdict(nn_set),
         "opt_set": asdict(opt_set),
         "stop_set": asdict(stop_set),
-        "init_set": asdict(init_set),
+        "tolerance_set": asdict(tolerance_set),
+        "initial_conditions": {
+            "k_0": k_0,
+            "a_0": a_0,
+            "z_0": z_0,
+            "rate_gap_0": rate_gap_0,
+        },
     }
     if verbose:
         print("\nFinal results:")
         for name, value in results.items():
             print(f"  {name}: {value}")
+
+    structural = {
+        "alpha": parameters.alpha,
+        "gamma": parameters.gamma,
+        "delta": parameters.delta,
+        "preference_rate": parameters.r,
+        "investment_eta": parameters.eta,
+        "interest_rate_mean": parameters.interest_rate,
+        "chi": parameters.chi,
+        "kappa_z": kappa_z,
+        "sigma_z": sigma_z,
+        "log_z_bar": math.log(z_bar),
+        "kappa_r": kappa_r,
+        "sigma_r": sigma_r,
+        "corr_zr": corr_zr,
+        "output_scale": output_scale,
+    }
+    initial_state = {"k_0": k_0, "a_0": a_0, "z_0": z_0, "rate_gap_0": rate_gap_0}
+    policy_extra = {
+        "model": "stochastic_open_economy_growth_nn_recursive",
+        "problem_key": problem_key,
+        "run_key": run_key,
+        "cache_key": cache_key,
+        "config": {"problem": problem_config, "run": run_config},
+        "solver_accepted": solver_accepted,
+        "solution_accepted": solution_accepted,
+        "train_loss": train_loss,
+        "test_euler_mean_abs": results["test_euler_mean_abs"],
+    }
+    if cache_path is not None and not cache_hit:
+        save_sequential_policy(
+            cache_path,
+            policy,
+            nn_set,
+            structural=structural,
+            initial_state=initial_state,
+            extra=policy_extra,
+        )
+    if save_policy is not None:
+        save_sequential_policy(
+            save_policy,
+            policy,
+            nn_set,
+            structural=structural,
+            initial_state=initial_state,
+            extra=policy_extra,
+        )
     return results, {
         "model": policy,
         "parameters": p,
@@ -1884,6 +1748,4 @@ def stochastic_open_economy_growth_nn_recursive(
 
 
 if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
     jsonargparse.CLI(stochastic_open_economy_growth_nn_recursive)

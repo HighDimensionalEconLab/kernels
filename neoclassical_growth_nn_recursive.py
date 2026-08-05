@@ -16,7 +16,7 @@ import pandas as pd
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
-from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
+from tinydiffeq import RK4, ConstantStepSize, IController, SaveAt, Tsit5, solve_ode
 
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from utilities import (
@@ -51,8 +51,17 @@ class StructuralParameters:
 
 @dataclass(frozen=True)
 class DataSettings:
-    # Fixed-step RK4 on the integrator's own states: n points from n - 1
-    # steps including the initial condition, so nothing is interpolated.
+    # Training collocation on the integrator's own states: n points from
+    # n - 1 steps including the initial condition, so nothing is
+    # interpolated. ode_solver "rk4" spends the budget on a fixed grid;
+    # "tsit5" spends the same budget adaptively and enforces residuals on
+    # the accepted steps only, concentrating points where the transition is
+    # fast. rtol/atol are the adaptive error thresholds and initial_dt the
+    # adaptive starting step (None: the fixed grid's train_T / (n - 1));
+    # all three are ignored under rk4. Test/tvc rollouts stay fixed-step.
+    # Thresholds much below 1e-6 demand more steps than a ~32-step budget
+    # allows while the interim policy is still wrong, so training dies on
+    # inf residuals instead of adapting.
     train_points: int = 65
     test_points: int = 41
     tvc_steps: int = 256
@@ -62,6 +71,10 @@ class DataSettings:
     policy_grid_size: int = 100
     benchmark_T: float = CONSTANTS.benchmark_T
     benchmark_points: int = CONSTANTS.benchmark_points
+    ode_solver: str = "rk4"
+    rtol: float = 1e-6
+    atol: float = 1e-8
+    initial_dt: float | None = None
 
 
 @dataclass(frozen=True)
@@ -486,14 +499,36 @@ def batched_rollout(policy, initial_log_states, T, budget, dt_0, p):
 @partial(jax.jit, static_argnames=("data_set",))
 def collocation_rollout(policy, initial_log_states, p, data_set):
     budget = data_set.train_points - 1
-    return batched_rollout(
-        policy,
-        initial_log_states,
-        data_set.train_T,
-        budget,
-        data_set.train_T / budget,
-        p,
+    if data_set.ode_solver == "rk4":
+        return batched_rollout(
+            policy,
+            initial_log_states,
+            data_set.train_T,
+            budget,
+            data_set.train_T / budget,
+            p,
+        )
+    dt_0 = (
+        data_set.train_T / budget
+        if data_set.initial_dt is None
+        else data_set.initial_dt
     )
+
+    def solve_one(initial_log_state):
+        return solve_ode(
+            log_state_drift_field,
+            Tsit5(),
+            0.0,
+            data_set.train_T,
+            initial_log_state,
+            dt_0=dt_0,
+            controller=IController(rtol=data_set.rtol, atol=data_set.atol),
+            max_steps=budget,
+            save_at=SaveAt(steps=True),
+            p=(policy, p),
+        )
+
+    return jax.vmap(solve_one)(initial_log_states)
 
 
 @partial(jax.jit, static_argnames=("T", "budget", "dt_0"))
@@ -508,13 +543,21 @@ def collocation_residuals(policy, initial_log_states, p, data_set):
         log_states.shape[:2]
     )
     # Mean squared residual, so the loss threshold means the same thing at any
-    # number of trajectories or collocation points.
-    count = jnp.asarray(euler.size, dtype=euler.dtype)
+    # number of trajectories or collocation points. An adaptive rollout only
+    # fills the accepted prefix of the step buffer, so both the residuals and
+    # the count are restricted to that prefix.
+    if data_set.ode_solver == "rk4":
+        count = jnp.asarray(euler.size, dtype=euler.dtype)
+        normalized = euler / jnp.sqrt(count)
+    else:
+        active = solution.accepted
+        count = jnp.maximum(jnp.sum(active), 1).astype(euler.dtype)
+        normalized = jnp.where(active, euler, 0.0) / jnp.sqrt(count)
     # A nonfinite trajectory did not cover the requested economic horizon. Make
     # that a loud optimizer failure instead of fitting a prefix.
     return jnp.where(
         solution.ok[:, None],
-        euler / jnp.sqrt(count),
+        normalized,
         jnp.full_like(euler, jnp.inf),
     )
 
@@ -770,15 +813,22 @@ def trajectory_frame(values, times, initial_conditions):
     return frame
 
 
-def collocation_step_diagnostics(times):
+def collocation_step_diagnostics(times, accepted=None):
+    # accepted (adaptive rollouts) masks the valid prefix of each step
+    # buffer; None means every saved step is a collocation state.
     times = np.asarray(times)
-    n_trajectories, states_per_trajectory = times.shape
+    if accepted is None:
+        accepted = np.ones(times.shape, dtype=bool)
+    else:
+        accepted = np.asarray(accepted)
+    step_sizes = np.concatenate(
+        [np.diff(row_times[row_mask]) for row_times, row_mask in zip(times, accepted)]
+    )
     return {
-        "num_collocation_states": int(n_trajectories * states_per_trajectory),
-        "collocation_states_per_trajectory": int(states_per_trajectory),
-        "collocation_dt": (
-            float(np.diff(times, axis=1).max()) if states_per_trajectory > 1 else np.nan
-        ),
+        "num_collocation_states": int(accepted.sum()),
+        "collocation_states_per_trajectory": int(accepted.sum(axis=1).max()),
+        "collocation_dt": float(step_sizes.max()) if step_sizes.size else np.nan,
+        "collocation_dt_min": float(step_sizes.min()) if step_sizes.size else np.nan,
     }
 
 
@@ -835,6 +885,16 @@ def neoclassical_growth_nn_recursive(
         raise ValueError("train_T must be positive")
     if data_set.train_points < 2:
         raise ValueError("train_points must be at least two")
+    if data_set.ode_solver not in {"rk4", "tsit5"}:
+        raise ValueError("ode_solver must be 'rk4' or 'tsit5'")
+    if not (math.isfinite(data_set.rtol) and data_set.rtol > 0.0):
+        raise ValueError("rtol must be positive")
+    if not (math.isfinite(data_set.atol) and data_set.atol > 0.0):
+        raise ValueError("atol must be positive")
+    if data_set.initial_dt is not None and not (
+        math.isfinite(data_set.initial_dt) and data_set.initial_dt > 0.0
+    ):
+        raise ValueError("initial_dt must be positive when set")
     if not (
         math.isfinite(stop_set.train_loss_threshold)
         and stop_set.train_loss_threshold > 0.0
@@ -949,6 +1009,10 @@ def neoclassical_growth_nn_recursive(
         "data_seed": ic_set.data_seed,
         "train_points": data_set.train_points,
         "train_T": data_set.train_T,
+        "ode_solver": data_set.ode_solver,
+        "rtol": data_set.rtol,
+        "atol": data_set.atol,
+        "initial_dt": data_set.initial_dt,
         "hc_set": asdict(hc_set),
         "opt_set": asdict(opt_set),
         "stop_set": asdict(stop_set),
@@ -1066,8 +1130,17 @@ def neoclassical_growth_nn_recursive(
         train_solution.ts,
         train_batch_initial_conditions,
     )
+    # Adaptive rollouts pad the step buffer past the accepted prefix; those
+    # rows are not collocation states and leave the frame here.
+    train_accepted = (
+        None if data_set.ode_solver == "rk4" else np.asarray(train_solution.accepted)
+    )
+    if train_accepted is not None:
+        train_df = train_df[train_accepted.reshape(-1)].reset_index(drop=True)
     train_df["collocation_step_index"] = train_df.groupby("trajectory").cumcount()
-    collocation_diagnostics = collocation_step_diagnostics(train_solution.ts)
+    collocation_diagnostics = collocation_step_diagnostics(
+        train_solution.ts, train_accepted
+    )
 
     test_initial_log_states = jnp.log(test_initial_conditions)
     test_solution = rollout_steps(
@@ -1207,7 +1280,10 @@ def neoclassical_growth_nn_recursive(
         "train_log_k_variance": ic_set.train_log_k_variance,
         "test_log_z_variance": test_log_z_variance,
         "test_log_k_variance": test_log_k_variance,
-        "ode_solver": "rk4",
+        "ode_solver": data_set.ode_solver,
+        "rtol": data_set.rtol,
+        "atol": data_set.atol,
+        "initial_dt": data_set.initial_dt,
         "train_points": data_set.train_points,
         "train_steps": data_set.train_points - 1,
         "test_points": data_set.test_points,

@@ -22,14 +22,16 @@ def run(output_dir: str | None = None, use_float64: bool = True):
         output_dir = ".results" if use_float64 else ".results_float32"
     # Float32 runs pass looser solver thresholds; the float64 run uses the
     # solver defaults. gtol stays tight relative to the other float32 kernel
-    # drivers: it resolves the free (c_0, mu_0) selection, and the saddle
+    # drivers (it resolves the free (c_0, mu_0) selection, and the saddle
     # dynamics amplify any slack into a wrong-basin path over the test
-    # horizon. The acceptance gates then reject wrong-branch solutions
-    # rather than admitting them.
+    # horizon), and the raised ridge steadies the float32 selection so the
+    # settled paths land inside the classifier's steady-state ball. The
+    # acceptance gates then reject wrong-branch solutions rather than
+    # admitting them.
     lm = (
         {}
         if use_float64
-        else dict(residual_atol=5e-5, ridge=1e-7, gtol=1e-6, max_steps=200)
+        else dict(residual_atol=5e-5, ridge=3e-7, gtol=1e-6, max_steps=200)
     )
     tol = (
         {}
@@ -46,7 +48,7 @@ def run(output_dir: str | None = None, use_float64: bool = True):
         ()
         if use_float64
         else (
-            {"lm_set": dict(residual_atol=5e-5, ridge=3e-7, gtol=1e-6, max_steps=200)},
+            {"lm_set": dict(residual_atol=5e-5, ridge=1e-6, gtol=1e-6, max_steps=200)},
         )
     )
     results_df, frames, hyperparameters = sweep(

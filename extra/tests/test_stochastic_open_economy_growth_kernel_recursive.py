@@ -59,6 +59,10 @@ class StochasticOpenEconomyKernelRecursiveTests(unittest.TestCase):
         results, extras = kernel.stochastic_open_economy_growth_kernel_recursive(
             policy_dir=self.tmp.name,
             data_set=KERNEL_DATA_SET,
+            # The driver default asks for eight training trajectories; the
+            # cached NN reference above ran at the NN default, and the
+            # problem hash must match.
+            ic_set=nn.InitialConditionSettings(),
             tolerance_set=nn.ToleranceSettings(
                 test_euler_mean_abs=5e-2,
                 test_euler_max=5e-1,
@@ -77,6 +81,7 @@ class StochasticOpenEconomyKernelRecursiveTests(unittest.TestCase):
         )
         self.assertEqual(results["rkhs_coefficients"], 2 * 4 * 17)
         theta = extras["theta"]
+        self.assertEqual(len(theta), 4)
         self.assertEqual(theta[0].shape, (4 * 17,))
         self.assertEqual(theta[1].shape, (4 * 17,))
         self.assertEqual(theta[2].shape, (2,))

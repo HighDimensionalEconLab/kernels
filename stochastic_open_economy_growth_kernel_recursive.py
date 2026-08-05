@@ -64,13 +64,14 @@ DOMAIN_EPS = 1e-8
 @jax.tree_util.register_static
 @dataclass(frozen=True)
 class StateKernelSettings:
-    # Local optimum on the single-IC default; shorter lengthscales
-    # interpolate the design and generalize poorly, longer ones destabilize
-    # the rolled-out policy (at the T = 60 horizon the collapse starts by
-    # lengthscale 0.9).
-    amplitude: float = 1.0
-    lengthscale: float = 0.8
-    metric_epsilon: float = 3e-3
+    # Joint optimum from the T = 60 W&B sweep, chosen for cross-seed rollout
+    # stability over raw objective: the sweep's sharper ell ~ 1.9 /
+    # epsilon ~ 2e-5 geometry scores better on its certified seeds but its
+    # held-out rollout diverges on most local data seeds. The fields move
+    # together -- retune jointly rather than per field.
+    amplitude: float = 2.87
+    lengthscale: float = 1.13
+    metric_epsilon: float = 1.58e-3
     free_constant: bool = True
     linear_mean: bool = True
     state_kernel: Literal[
@@ -222,23 +223,32 @@ def stochastic_open_economy_growth_kernel_recursive(
     use_float64: bool = True,
     sde_solver: str = "sra1",
     policy_dir: str = ".results",
-    # The NN's horizons at half its density: the frozen design needs
-    # coverage, not accuracy, and the shared train/test protocol keeps the
-    # two solvers' held-out euler errors directly comparable.
-    data_set: DataSettings = DataSettings(train_points=49),
-    ic_set: InitialConditionSettings = InitialConditionSettings(),
+    # The NN's horizons at its full density: the shared train/test protocol
+    # keeps the two solvers' held-out euler errors directly comparable.
+    data_set: DataSettings = DataSettings(train_points=97),
+    ic_set: InitialConditionSettings = InitialConditionSettings(
+        num_train_trajectories=8
+    ),
     kernel_set: StateKernelSettings = StateKernelSettings(),
+    # Damping schedule from the W&B sweep winner alongside the kernel
+    # geometry and stopping defaults below.
     opt_set: OptimizerSettings = OptimizerSettings(
-        init_damping=1e-6,
-        damping_decrease=0.25,
-        damping_increase=4.0,
+        init_damping=1.81e-4,
+        damping_decrease=0.353,
+        damping_increase=1.62,
         geodesic_acceleration=True,
         geodesic_acceptance_ratio=0.75,
     ),
-    stop_set: StoppingCriteria = StoppingCriteria(max_steps=150, residual_atol=2e-5),
+    stop_set: StoppingCriteria = StoppingCriteria(
+        max_steps=300,
+        residual_atol=4.4e-5,
+        gtol=1.23e-7,
+        ridge=3.07e-10,
+    ),
     # The frozen-design kernel is coarser than the NN it consumes; its
     # held-out max bar guards against rollout divergence, not NN accuracy
-    # (the T = 60 single-IC floor sits at max ~1.5e-1; blow-ups land at 1e3+).
+    # (the defaults' held-out max ranges ~6e-2 to ~3.6e-1 across data seeds,
+    # so marginal seeds reject here; blow-ups land at 1e3+).
     tolerance_set: ToleranceSettings = ToleranceSettings(test_euler_max=3e-1),
     verbose: bool = True,
 ):

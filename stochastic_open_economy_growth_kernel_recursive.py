@@ -66,10 +66,11 @@ DOMAIN_EPS = 1e-8
 class StateKernelSettings:
     # Local optimum on the single-IC default; shorter lengthscales
     # interpolate the design and generalize poorly, longer ones destabilize
-    # the rolled-out policy.
+    # the rolled-out policy (at the T = 60 horizon the collapse starts by
+    # lengthscale 0.9).
     amplitude: float = 1.0
-    lengthscale: float = 1.0
-    metric_epsilon: float = 1e-3
+    lengthscale: float = 0.8
+    metric_epsilon: float = 3e-3
     free_constant: bool = True
     linear_mean: bool = True
     state_kernel: Literal[
@@ -221,8 +222,10 @@ def stochastic_open_economy_growth_kernel_recursive(
     use_float64: bool = True,
     sde_solver: str = "sra1",
     policy_dir: str = ".results",
-    # Half the NN's density: the frozen design needs coverage, not accuracy.
-    data_set: DataSettings = DataSettings(train_points=33),
+    # The NN's horizons at half its density: the frozen design needs
+    # coverage, not accuracy, and the shared train/test protocol keeps the
+    # two solvers' held-out euler errors directly comparable.
+    data_set: DataSettings = DataSettings(train_points=49),
     ic_set: InitialConditionSettings = InitialConditionSettings(),
     kernel_set: StateKernelSettings = StateKernelSettings(),
     opt_set: OptimizerSettings = OptimizerSettings(
@@ -234,8 +237,9 @@ def stochastic_open_economy_growth_kernel_recursive(
     ),
     stop_set: StoppingCriteria = StoppingCriteria(max_steps=150, residual_atol=2e-5),
     # The frozen-design kernel is coarser than the NN it consumes; its
-    # held-out max bar guards against rollout divergence, not NN accuracy.
-    tolerance_set: ToleranceSettings = ToleranceSettings(test_euler_max=1e-1),
+    # held-out max bar guards against rollout divergence, not NN accuracy
+    # (the T = 60 single-IC floor sits at max ~1.5e-1; blow-ups land at 1e3+).
+    tolerance_set: ToleranceSettings = ToleranceSettings(test_euler_max=3e-1),
     verbose: bool = True,
 ):
     jax.config.update("jax_enable_x64", True)

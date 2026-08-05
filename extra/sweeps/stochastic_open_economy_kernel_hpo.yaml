@@ -1,18 +1,18 @@
-# HPO for the stochastic open-economy kernel-recursive solver: bayes over
-# kernel geometry, ridge-LM settings, and design size. Metrics are euler
+# HPO for the float64 stochastic open-economy kernel-recursive solver: bayes
+# over kernel geometry, ridge-LM settings, and design size. Metrics are euler
 # errors and fit time only. num_train_trajectories is in the NN problem hash,
-# so every swept count needs a pre-cached accepted float32 NN artifact in
+# so every swept count needs a pre-cached accepted float64 NN artifact in
 # <policy_dir> BEFORE launching (a missing one is a loud FileNotFoundError):
 #   for n in 2 4 8; do
 #     python stochastic_open_economy_growth_nn_recursive.py \
-#       --use_float64 false --stop_set.train_loss_threshold 1e-6 \
-#       --tolerance_set.test_euler_mean_abs 1e-2 \
-#       --tolerance_set.test_euler_max 1e-1 \
 #       --ic_set.num_train_trajectories $n --policy_cache .results
 #   done
-# Gates calibrated locally: the float64 default reaches mean 2.9e-3 / max
-# 6.6e-2; the float32 solver settings are part of the search (default gtol
-# is unreachable in float32).
+# Gates are divergence guards, not accuracy bars: the T = 60 frozen design is
+# knife-edged in geometry x (trajectory count, design seed) -- the driver's
+# default geometry accepts its own design (mean 3.6e-3, max 1.5e-1) yet
+# diverges on redrawn designs, and near-miss designs span max ~2e-1 to ~9e-1
+# while blow-ups land at 1e3+. The bayes objective ranks configs; the gates
+# only cull blow-ups. The driver's tighter defaults still govern single runs.
 # The kernel driver takes no NN seed; the wrapper's seed varies the design
 # noise through ic_set.data_seed instead.
 # Launch: `wandb sweep extra/sweeps/stochastic_open_economy_kernel_hpo.yaml`.
@@ -36,16 +36,16 @@ parameters:
   sweep_settings.starting_seed:        {value: 0}
   sweep_settings.min_successful_seeds: {value: 2}
   sweep_settings.log_tables:           {value: "false"}
-  # --- fixed solver settings (float32 artifacts) ---
+  # --- fixed solver settings ---
   verbose:                             {value: false}
-  use_float64:                         {value: false}
+  use_float64:                         {value: true}
   policy_dir:                          {value: .results}
-  tolerance_set.test_euler_mean_abs:   {value: 2e-2}
-  tolerance_set.test_euler_max:        {value: 2e-1}
+  tolerance_set.test_euler_mean_abs:   {value: 5e-2}
+  tolerance_set.test_euler_max:        {value: 1e0}
   # --- kernel geometry ---
   kernel_set.lengthscale:    {distribution: log_uniform_values, min: 0.2, max: 2.0}
   kernel_set.amplitude:      {distribution: log_uniform_values, min: 0.3, max: 3.0}
-  kernel_set.metric_epsilon: {distribution: log_uniform_values, min: 1e-6, max: 1e-3}
+  kernel_set.metric_epsilon: {distribution: log_uniform_values, min: 1e-6, max: 3e-2}
   kernel_set.state_kernel:   {values: [ard_rbf, ard_matern52, additive_rbf]}
   kernel_set.free_constant:  {values: [true, false]}
   kernel_set.linear_mean:    {values: [true, false]}
@@ -53,11 +53,10 @@ parameters:
   stop_set.max_steps:        {values: [25, 50, 150, 300]}
   stop_set.residual_atol:    {distribution: log_uniform_values, min: 1e-6, max: 1e-4}
   stop_set.gtol:             {distribution: log_uniform_values, min: 1e-8, max: 1e-4}
-  # Upper range crosses the float32 ridge floor (~3.5e-4).
   stop_set.ridge:            {distribution: log_uniform_values, min: 1e-12, max: 1e-3}
   opt_set.init_damping:      {distribution: log_uniform_values, min: 1e-8, max: 1e-3}
   opt_set.damping_decrease:  {distribution: uniform, min: 0.1, max: 0.9}
   opt_set.damping_increase:  {distribution: log_uniform_values, min: 1.5, max: 10.0}
   # --- design axes (does extra data help?) ---
   ic_set.num_train_trajectories: {values: [2, 4, 8]}
-  data_set.train_points:         {values: [17, 33, 65]}
+  data_set.train_points:         {values: [25, 49, 97]}

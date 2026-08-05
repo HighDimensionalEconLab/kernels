@@ -51,3 +51,7 @@ parameters:
   opt_set.geodesic_acceptance_ratio: {distribution: uniform, min: 0.5, max: 0.99}
   # --- data axes ---
   ic_set.num_train_trajectories: {values: [1, 2, 4, 8]}
+  # Collocation density (train dt 1.9 / 1.25 / 0.94 / 0.625 at T = 60): cost
+  # is ~linear in points, and a coarse grid may already integrate accurately
+  # enough to accept. The held-out test grid stays fixed across trials.
+  data_set.train_points:         {values: [33, 49, 65, 97]}

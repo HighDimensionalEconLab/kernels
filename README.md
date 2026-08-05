@@ -53,6 +53,7 @@ The core pipeline covers:
 - `open_economy_growth_kernel_uno.py`
 - `open_economy_growth_nn.py`
 - `open_economy_growth_nn_recursive.py`
+- `stochastic_open_economy_growth_nn_recursive.py`
 - `multicountry_growth_kernel.py`
 - `multicountry_growth_nn.py`
 
@@ -171,6 +172,16 @@ The main NN modules are deliberately limited:
   minimum-parameter-step bias from a near-zero head, with no ridge or RKHS
   norm; the stable-manifold gap is reported ex post rather than imposed.
 - `open_economy_growth_nn_recursive.py`: the open-economy state-space policy.
+- `stochastic_open_economy_growth_nn_recursive.py`: the stochastic small open
+  economy on the recursive state `(log z, log k, a / output_scale, rate_gap)`
+  with correlated OU TFP and world-rate shocks. Two anchored heads supply
+  positive investment and the signed current account; training rolls SDE
+  collocation paths from a single initial state by default (trajectories
+  differ only by their shock realization -- initial-condition dispersion is a
+  CLI experiment) and a shock-continuation ladder is the only homotopy: no
+  benchmark, steady-state, or pretraining information enters the residual or
+  initialization. The deterministic open-economy benchmark appears only in
+  ex-post reported diagnostics.
 - `multicountry_growth_nn.py`: the reduced one-good multicountry sequential NN;
   consumption, investment, and the common rate are calculated from its four
   country path blocks inside the residual evaluation.
@@ -184,8 +195,8 @@ The main NN modules are deliberately limited:
 
 Shared activation and transform helpers are in `utilities.py`.
 
-Every solver returns `(results, extras)`, writes nothing itself, and exposes a
-`jsonargparse` CLI. For example:
+Every solver returns `(results, extras)`, writes nothing itself (beyond the
+opt-in policy artifacts below), and exposes a `jsonargparse` CLI. For example:
 
 ```bash
 uv run python neoclassical_growth_kernel.py --kernel_set.ell 5.0
@@ -247,6 +258,25 @@ from one `jax.jacrev` — the consumption Gini and terminal NFA dispersion
 respond country-by-country to the initial bond and capital positions
 while the r(t=10) row confirms bond-redistribution neutrality at machine
 zero.
+
+The stochastic recursive NN drivers (`stochastic_growth_nn_recursive.py`,
+`stochastic_open_economy_growth_nn_recursive.py`) additionally accept
+`--policy_cache <dir>`: the trained policy is saved there as a
+content-addressed `<model>_policy_<problem>-<run>.npz` artifact, and an
+existing artifact for the identical configuration is loaded instead of
+retraining (`--save_policy <path>` writes one explicit extra copy). The
+kernel-recursive consumers glob the problem half of that key under
+`--policy_dir` and freeze the best accepted NN policy's own collocation
+rollout as their design, so the workflow is two-stage:
+
+```bash
+uv run python stochastic_growth_nn_recursive.py --policy_cache .results
+uv run python stochastic_growth_kernel_recursive.py --policy_dir .results
+```
+
+The replication drivers deliberately do not pass `--policy_cache` (cached
+runs would corrupt the timing tables), so the kernel-recursive stage needs
+its NN stage run manually first.
 
 or import directly:
 

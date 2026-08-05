@@ -38,6 +38,7 @@ python -m replication.stochastic_growth_nn_recursive --use_float64 "$use_float64
 python -m replication.open_economy_growth_kernel --use_float64 "$use_float64"
 python -m replication.open_economy_growth_nn --use_float64 "$use_float64"
 python -m replication.open_economy_growth_nn_recursive --use_float64 "$use_float64"
+python -m replication.stochastic_open_economy_growth_nn_recursive --use_float64 "$use_float64"
 python -m replication.multicountry_growth_kernel --use_float64 "$use_float64"
 python -m replication.multicountry_growth_nn --use_float64 "$use_float64"
 

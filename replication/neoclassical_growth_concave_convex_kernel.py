@@ -35,6 +35,16 @@ def run(output_dir: str | None = None, use_float64: bool = True):
     n_points = 70
     grid = np.linspace(0.5, 4.0, n_points)
     print(f"threshold sweep: {n_points} initial conditions -> {output_dir}/")
+    # Near the basin threshold the float32 ridge-LM path can stall off-grid
+    # at the base ridge; a mildly more regularized preset converges there and
+    # is tried only for rejected grid points.
+    retries = (
+        ()
+        if use_float64
+        else (
+            {"lm_set": dict(residual_atol=5e-5, ridge=3e-7, gtol=1e-5, max_steps=200)},
+        )
+    )
     results_df, frames, hyperparameters = sweep(
         neoclassical_growth_concave_convex_kernel.neoclassical_growth_concave_convex_kernel,
         "k_0",
@@ -48,6 +58,7 @@ def run(output_dir: str | None = None, use_float64: bool = True):
             "lm_set": lm,
             "tolerance_set": tol,
         },
+        retries=retries,
     )
 
     # Ex-post basin classification of each finite-horizon path (side of the

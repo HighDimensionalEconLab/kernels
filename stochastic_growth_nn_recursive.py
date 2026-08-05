@@ -29,7 +29,7 @@ from neoclassical_growth_nn_recursive import (
     policy_cache_key,
     production,
     save_investment_policy,
-    standardized_log_initial_states,
+    standardized_initial_states,
     trajectory_frame,
 )
 from stochastic_growth_benchmark import stochastic_growth_benchmark
@@ -196,8 +196,10 @@ def euler_residuals(policy, log_states, p):
     return euler_residual_terms(policy, log_states, p)[0]
 
 
-def sample_trajectory_noise(solver, key, num_trajectories, n_steps, dt, dtype):
-    reference_state = jnp.zeros(2, dtype=dtype)
+def sample_trajectory_noise(
+    solver, key, num_trajectories, n_steps, dt, dtype, state_size
+):
+    reference_state = jnp.zeros(state_size, dtype=dtype)
     dt = jnp.asarray(dt, dtype=dtype)
     return jax.vmap(
         lambda trajectory_key: solver.sample_noise(
@@ -225,7 +227,7 @@ class EpochCallback:
         epoch_key, draw_key, noise_key = jax.random.split(ctx.args.epoch_key, 3)
         dtype = ctx.args.initial_log_states.dtype
         if self.resample_initial_states:
-            initial_log_states = standardized_log_initial_states(
+            initial_log_states = standardized_initial_states(
                 draw_key,
                 jnp.asarray([self.log_z_0, self.log_k_0], dtype),
                 jnp.asarray([self.log_z_scale, self.log_k_scale], dtype),
@@ -242,6 +244,7 @@ class EpochCallback:
                 self.n_steps,
                 self.dt,
                 dtype,
+                2,
             ),
             epoch_key=epoch_key,
             epoch=ctx.args.epoch + 1,
@@ -673,6 +676,7 @@ def stochastic_growth_nn_recursive(
             n_train_steps,
             train_dt,
             dtype,
+            2,
         ),
         epoch_key=jax.random.fold_in(train_ic_key, 1),
         restart_key=jax.random.fold_in(train_ic_key, 2),
@@ -843,6 +847,7 @@ def stochastic_growth_nn_recursive(
         n_test_steps,
         test_T / n_test_steps,
         dtype,
+        2,
     )
     test_solution = rollout_steps(
         solver,
@@ -873,6 +878,7 @@ def stochastic_growth_nn_recursive(
         data_set.tvc_steps,
         data_set.train_tvc_T / data_set.tvc_steps,
         dtype,
+        2,
     )
     max_log_tvc, train_terminal_log_tvc, tvc_ok = log_tvc_residual(
         solver,
@@ -895,6 +901,7 @@ def stochastic_growth_nn_recursive(
         data_set.tvc_steps,
         data_set.train_tvc_T / data_set.tvc_steps,
         dtype,
+        2,
     )
     _, test_terminal_log_tvc, test_tvc_ok = log_tvc_residual(
         solver,

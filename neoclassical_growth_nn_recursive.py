@@ -345,12 +345,19 @@ def draw_initial_conditions(
     return jnp.exp(jnp.log(base)[None, :] + scales[None, :] * standardized)
 
 
-def standardized_log_initial_states(key, log_base, scales, num_trajectories):
-    # Trace-safe core of draw_initial_conditions on the log scale.
-    draws = jax.random.normal(key, (num_trajectories, 2), dtype=log_base.dtype)
+def standardized_initial_states(key, center, scales, num_trajectories):
+    # Trace-safe standardized draws, ADDITIVE in the caller's coordinate:
+    # center + scales * standardized normals, dimension-generic, so a zero
+    # scale pins its axis at the center whatever the center's value. Its
+    # neighbour draw_initial_conditions is the multiplicative (log-scale)
+    # variant -- do not merge them: additive spreads are what keep a level
+    # axis (e.g. net foreign assets) non-degenerate at a zero center.
+    if num_trajectories == 1:
+        return center[None, :]
+    draws = jax.random.normal(key, (num_trajectories, center.size), dtype=center.dtype)
     centered = draws - jnp.mean(draws, axis=0, keepdims=True)
     standardized = centered / jnp.sqrt(jnp.mean(centered**2, axis=0, keepdims=True))
-    return log_base[None, :] + scales[None, :] * standardized
+    return center[None, :] + scales[None, :] * standardized
 
 
 # At each interior epoch boundary: redraw the training ICs, stop on a
@@ -368,7 +375,7 @@ class EpochCallback:
         epoch_key, draw_key = jax.random.split(ctx.args.epoch_key)
         dtype = ctx.args.initial_log_states.dtype
         fresh = ctx.args.replace(
-            initial_log_states=standardized_log_initial_states(
+            initial_log_states=standardized_initial_states(
                 draw_key,
                 jnp.asarray([self.log_z_0, self.log_k_0], dtype),
                 jnp.asarray([self.log_z_scale, self.log_k_scale], dtype),

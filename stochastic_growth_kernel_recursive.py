@@ -235,6 +235,7 @@ def stochastic_growth_kernel_recursive(
         n_train_steps,
         train_dt,
         dtype,
+        2,
     )
     train_solution = collocation_rollout(
         solver,
@@ -314,6 +315,7 @@ def stochastic_growth_kernel_recursive(
         n_test_steps,
         test_T / n_test_steps,
         dtype,
+        2,
     )
     test_solution = rollout_steps(
         solver,
@@ -361,6 +363,7 @@ def stochastic_growth_kernel_recursive(
         data_set.tvc_steps,
         data_set.train_tvc_T / data_set.tvc_steps,
         dtype,
+        2,
     )
     max_log_tvc, train_terminal_log_tvc, tvc_ok = log_tvc_residual(
         solver,
@@ -383,6 +386,7 @@ def stochastic_growth_kernel_recursive(
         data_set.tvc_steps,
         data_set.train_tvc_T / data_set.tvc_steps,
         dtype,
+        2,
     )
     _, test_terminal_log_tvc, test_tvc_ok = log_tvc_residual(
         solver,

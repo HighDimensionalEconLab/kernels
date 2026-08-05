@@ -14,11 +14,13 @@ Drivers and figure scripts that regenerate the core paper data and figures
   `all_results.json`; runs last.
 - `utilities.py` -- shared ensemble, repeated timing, I/O, and plotting helpers.
 
-Deterministic solvers run five times with JAX's persistent compilation cache
-enabled. Their reported solve times are medians, and the individual timing runs
-are saved in `<model>_<experiment>_timing_df.parquet`. Core stochastic NN
-baselines use 100 seeds and report medians across accepted seeds. The two
-open-economy asset scenarios used only in the transition figure retain one
+Deterministic solvers run with JAX's persistent compilation cache enabled;
+`DETERMINISTIC_TIMING_REPETITIONS` in `utilities.py` sets the repetition count,
+the timing runs are saved in `<model>_<experiment>_timing_df.parquet`, and the
+reported solve time is their median. NN ensembles report medians across
+accepted seeds: 11 seeds for the sequence-space baselines, 5 for the recursive
+baselines, and one for the recursive growth driver's variant experiments. The
+two open-economy asset scenarios used only in the transition figure retain one
 displayed seed each.
 
 ## Generate everything

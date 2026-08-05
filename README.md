@@ -48,6 +48,7 @@ The core pipeline covers:
 - `neoclassical_growth_nn.py`
 - `neoclassical_growth_nn_recursive.py`
 - `neoclassical_growth_kernel_recursive.py`
+- `stochastic_growth_nn_recursive.py`
 - `open_economy_growth_kernel.py`
 - `open_economy_growth_kernel_uno.py`
 - `open_economy_growth_nn.py`
@@ -57,17 +58,20 @@ The core pipeline covers:
 
 Each driver in `replication/` writes Parquet data and summary JSON. Figure
 drivers read those saved results, and `replication/collect_json.py` assembles
-the authoritative paper-number file. Core NN baselines use 100 seeds, except the open-economy sequence-space NN
-(21 seeds, at roughly two seconds per solve) and
-the multicountry NN replication, which uses five seeds and also pins a
-10-country width-32/depth-4 experiment without changing the solver defaults.
+the authoritative paper-number file. Sequence-space NN baselines use 11 seeds;
+recursive NN baselines (neoclassical, stochastic, open-economy) use 5 seeds,
+with the recursive growth driver's variant experiments at one seed each; the
+multicountry NN replication uses five seeds and also pins a 10-country
+width-32/depth-4 experiment without changing the solver defaults.
 Every NN driver allows each seed up to five multi-start restarts
 (`stop_set.num_attempts`), so `frac_accepted` measures acceptance within that
 restart budget rather than first-try robustness.
 The two open-economy paths included only
 for the transition figure use one displayed seed each. A deterministic kernel
-specification is solved five times with the persistent JAX cache enabled; its
-JSON reports median solve time and its five raw timings are retained in Parquet.
+specification is solved with the persistent JAX cache enabled;
+`DETERMINISTIC_TIMING_REPETITIONS` in `replication/utilities.py` sets the
+repetition count, the timing runs are retained in Parquet, and the JSON reports
+their median.
 
 ## Canonical solvers
 

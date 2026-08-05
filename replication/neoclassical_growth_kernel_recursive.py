@@ -42,18 +42,19 @@ MULTI_IC = {
 MULTI_IC_X4 = {**MULTI_IC, "num_train_trajectories": 20}
 # Multi-IC homothetic runs fail fast on the base kernel geometry and retry a
 # data seed under the longer, more regularized geometry.
-RETRIES = ({"kernel_set": {"lengthscale": 0.6, "metric_epsilon": 3e-4}},)
-# Non-homothetic kernels use the sweep-validated per-dimension lengthscales:
-# at g = 0 the long-z/short-k balance cuts the OOD errors severalfold, while
-# at g = 0.02 (log z sweeps [0, 2] in training) the longer k bandwidth stays.
+RETRIES = ({"kernel_set": {"lengthscale": 1.1, "metric_epsilon": 3e-4}},)
+# Non-homothetic kernels use the sweep-validated per-dimension lengthscales
+# for the calibrated state geometry (k_ss ~ 3.6): at g = 0 a balanced
+# (0.6, 0.65); at g = 0.02 (log z sweeps [0, 2] in training) both bandwidths
+# stretch with the visited ranges.
 NONHOM_G0 = {
     "homothetic_representation": False,
     "state_kernel": "ard_rbf",
     "linear_mean": True,
     "log_z_lengthscale": 0.6,
-    "log_k_lengthscale": 0.45,
+    "log_k_lengthscale": 0.65,
 }
-NONHOM_G02 = {**NONHOM_G0, "log_k_lengthscale": 0.9}
+NONHOM_G02 = {**NONHOM_G0, "log_z_lengthscale": 0.8, "log_k_lengthscale": 1.3}
 # Out-of-distribution test samples (g = 0 training): the ID baseline at the
 # OOD sample size, a joint unequal (z, k) center shift, and a wider spread.
 OOD_TESTS = {
@@ -86,7 +87,7 @@ def report(name, results_df):
 
 def run(
     output_dir: str = ".results",
-    n_data_seeds: int = 5,
+    n_data_seeds: int = 1,
     use_float64: bool = True,
     experiments: list[str] | None = None,
     verbose: bool = False,
@@ -107,18 +108,13 @@ def run(
         "multi_ic_g0_x4_nonhom": (0.0, MULTI_IC_X4, NONHOM_G0, ()),
         "multi_ic_g02_x4_nonhom": (0.02, MULTI_IC_X4, NONHOM_G02, ()),
     }
-    for train_tag, train_ic in (("n5", MULTI_IC), ("n20", MULTI_IC_X4)):
-        for rep_tag, kernel_set, retries in (
-            ("hom", None, RETRIES),
-            ("nonhom", NONHOM_G0, ()),
-        ):
-            for test_tag, test_ic in OOD_TESTS.items():
-                all_experiments[f"ood_{rep_tag}_{train_tag}_{test_tag}"] = (
-                    0.0,
-                    {**train_ic, **OOD_BASE, **test_ic},
-                    kernel_set,
-                    retries,
-                )
+    for test_tag, test_ic in OOD_TESTS.items():
+        all_experiments[f"ood_nonhom_n20_{test_tag}"] = (
+            0.0,
+            {**MULTI_IC_X4, **OOD_BASE, **test_ic},
+            NONHOM_G0,
+            (),
+        )
     run_single = experiments is None or "single_ic_g0" in experiments
     if experiments is not None:
         unknown = set(experiments) - set(all_experiments) - {"single_ic_g0"}
@@ -128,9 +124,8 @@ def run(
             name: spec for name, spec in all_experiments.items() if name in experiments
         }
 
-    # The kernel is deterministic given its data draw: the single-IC case is
-    # timed over repeated solves, while the multi-IC cases sweep the data seed
-    # so the sensitivity to the drawn initial conditions is measured.
+    # The kernel is deterministic given its data draw: the single-IC case runs
+    # through the timing harness, while the multi-IC cases sweep the data seed.
     if run_single:
         print(f"single_ic_g0 -> {output_dir}/")
         results_df, frames, hyperparameters = ensemble(

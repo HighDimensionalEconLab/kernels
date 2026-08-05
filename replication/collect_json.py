@@ -11,7 +11,7 @@ import subprocess
 import jsonargparse
 import pandas as pd
 
-from replication.utilities import QUANTILES
+from replication.utilities import DETERMINISTIC_TIMING_REPETITIONS, QUANTILES
 
 # Collect every number embedded in the paper into a single authoritative JSON,
 # .results/all_results.json. Selection and rounding to copy/paste form happen
@@ -623,6 +623,63 @@ def neoclassical_growth_nn_recursive(out):
     }
 
 
+def stochastic_growth_nn_recursive(out):
+    prefix = "stochastic_growth_nn_recursive"
+    hp = load(out, f"{prefix}_baseline_hyperparameters")
+    j = load(out, f"{prefix}_baseline")
+    df = pd.read_parquet(out / f"{prefix}_baseline_results.parquet")
+    accepted = df[df["solution_accepted"]]
+    if accepted.empty:
+        raise RuntimeError("stochastic growth recursive NN has no accepted seeds")
+
+    return {
+        "parameters": hp["parameters"],
+        "initial_conditions": hp["initial_conditions"],
+        "data": hp["data_set"],
+        "architecture": {
+            "width": hp["hc_set"]["mlp_width"],
+            "depth": hp["hc_set"]["mlp_depth"],
+            "hidden_activation": hp["hc_set"]["hidden_activation"],
+            "total_params": int(med(j["total_params"])),
+        },
+        "stopping": hp["stop_set"],
+        "n_seeds": int(j["n_seeds"]),
+        "experiments": {
+            "baseline": {
+                "frac_accepted": sig(j["frac_accepted"]),
+                "test_mean_abs_k_rel_error_median": sci(
+                    float(accepted["test_mean_abs_k_rel_error"].median())
+                ),
+                "test_mean_abs_c_rel_error_median": sci(
+                    float(accepted["test_mean_abs_c_rel_error"].median())
+                ),
+                "policy_mean_abs_c_rel_error_median": sci(
+                    float(accepted["policy_mean_abs_c_rel_error"].median())
+                ),
+                "test_euler_mean_abs_median": sci(
+                    float(accepted["test_euler_mean_abs"].median())
+                ),
+                "max_test_euler_median": sci(
+                    float(accepted["max_test_euler"].median())
+                ),
+                # FD-HJBE benchmark residual floor: NN-vs-FD relative errors are
+                # only interpretable down to this scale.
+                "fd_test_euler_mean_abs": sci(med(j["fd_test_euler_mean_abs"])),
+                "max_log_tvc_residual_median": sig(
+                    float(accepted["max_log_tvc_residual"].median()), 4
+                ),
+                "train_time_median": sig(float(accepted["train_time"].median())),
+                "steps_median": sig(float(accepted["steps"].median())),
+                **final_damping_summary(accepted),
+                "sde_solver": str(accepted["sde_solver"].iloc[0]),
+                "num_collocation_states": int(med(j["num_collocation_states"])),
+                "num_train_trajectories": int(med(j["num_train_trajectories"])),
+                "num_test_trajectories": int(med(j["num_test_trajectories"])),
+            }
+        },
+    }
+
+
 def neoclassical_growth_kernel_recursive(out):
     prefix = "neoclassical_growth_kernel_recursive"
     hp = load(out, f"{prefix}_single_ic_g0_hyperparameters")
@@ -897,11 +954,11 @@ def multicountry_growth_nn(out):
 
 
 def performance_comparisons(out):
-    def accepted(prefix):
-        frame = pd.read_parquet(out / f"{prefix}_baseline_results.parquet")
+    def accepted(prefix, experiment="baseline"):
+        frame = pd.read_parquet(out / f"{prefix}_{experiment}_results.parquet")
         accepted_frame = frame[frame["solution_accepted"]]
         if accepted_frame.empty:
-            raise RuntimeError(f"{prefix} baseline has no accepted solutions")
+            raise RuntimeError(f"{prefix} {experiment} has no accepted solutions")
         return accepted_frame
 
     asset_kernel = load(out, "asset_pricing_kernel_baseline")
@@ -917,7 +974,7 @@ def performance_comparisons(out):
     growth_kernel = load(out, "neoclassical_growth_kernel_baseline")
     growth_uno = load(out, "neoclassical_growth_kernel_uno_baseline")
     growth_sequential_nn = accepted("neoclassical_growth_nn")
-    growth_recursive_nn = accepted("neoclassical_growth_nn_recursive")
+    growth_recursive_nn = accepted("neoclassical_growth_nn_recursive", "single_ic_g0")
     growth_kernel_time = med(growth_kernel["wall_time"])
     growth_kernel_error = max(
         med(growth_kernel["k_rel_error_mean"]),
@@ -1051,16 +1108,19 @@ def performance_comparisons(out):
 
 
 def validate_replication_contract(out):
+    # (headline experiment, expected seed count) per NN prefix; the recursive
+    # growth driver's headline experiment is single_ic_g0, not baseline.
     nn_seed_counts = {
-        "asset_pricing_nn": 100,
-        "neoclassical_growth_nn": 100,
-        "neoclassical_growth_nn_recursive": 100,
-        "open_economy_growth_nn": 21,
-        "open_economy_growth_nn_recursive": 100,
-        "multicountry_growth_nn": 5,
+        "asset_pricing_nn": ("baseline", 11),
+        "neoclassical_growth_nn": ("baseline", 11),
+        "neoclassical_growth_nn_recursive": ("single_ic_g0", 5),
+        "open_economy_growth_nn": ("baseline", 11),
+        "open_economy_growth_nn_recursive": ("baseline", 5),
+        "multicountry_growth_nn": ("baseline", 5),
+        "stochastic_growth_nn_recursive": ("baseline", 5),
     }
-    for prefix, expected in nn_seed_counts.items():
-        summary = load(out, f"{prefix}_baseline")
+    for prefix, (experiment, expected) in nn_seed_counts.items():
+        summary = load(out, f"{prefix}_{experiment}")
         if summary["n_seeds"] != expected:
             raise RuntimeError(
                 f"{prefix} must use {expected} seeds, got {summary['n_seeds']}"
@@ -1079,8 +1139,10 @@ def validate_replication_contract(out):
     )
     for prefix in kernel_prefixes:
         timing = pd.read_parquet(out / f"{prefix}_baseline_timing_df.parquet")
-        if len(timing) != 5:
-            raise RuntimeError(f"{prefix} must retain five timing runs")
+        if len(timing) != DETERMINISTIC_TIMING_REPETITIONS:
+            raise RuntimeError(
+                f"{prefix} must retain {DETERMINISTIC_TIMING_REPETITIONS} timing runs"
+            )
 
 
 def collect(output_dir: str = ".results"):
@@ -1096,8 +1158,9 @@ def collect(output_dir: str = ".results"):
                     "form here (replication/collect_json.py) and must never be "
                     "recomputed or re-rounded downstream. Cross-seed statistics "
                     "are medians (suffix _median); deterministic wall_time values "
-                    "are medians of five cached solves; error magnitudes below "
-                    "0.001 are LaTeX math-mode strings from sci()."
+                    f"are medians of {DETERMINISTIC_TIMING_REPETITIONS} cached "
+                    "solve(s); error magnitudes below 0.001 are LaTeX math-mode "
+                    "strings from sci()."
                 ),
                 "generated": datetime.datetime.now()
                 .astimezone()
@@ -1140,6 +1203,7 @@ def collect(output_dir: str = ".results"):
             "neoclassical_growth_kernel_recursive": neoclassical_growth_kernel_recursive(
                 out
             ),
+            "stochastic_growth_nn_recursive": stochastic_growth_nn_recursive(out),
             "open_economy_growth_kernel": open_economy_growth_kernel(out),
             "open_economy_growth_kernel_uno": open_economy_growth_kernel(
                 out,

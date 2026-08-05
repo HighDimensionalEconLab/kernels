@@ -41,30 +41,32 @@ def run(
             hyperparameters=hyperparameters,
         )
 
-    # QE figure experiments.
+    # QE figure experiments. The sparse grid keeps the baseline's front-loaded
+    # relative spacing over the full train_T; far_steady_state trains on the
+    # first ~2 e-foldings of the saddle path only.
     go("baseline")
     go(
         "sparse",
         data_set=dict(
             train_points_list=[
                 0.0,
-                1.0,
-                3.0,
-                5.0,
-                10.0,
-                15.0,
-                20.0,
+                2.5,
+                7.5,
+                12.5,
                 25.0,
-                30.0,
-                35.0,
-                38.0,
-                40.0,
+                37.5,
+                50.0,
+                62.5,
+                75.0,
+                87.5,
+                95.0,
+                100.0,
             ]
         ),
     )
     go(
         "far_steady_state",
-        data_set=dict(train_T=10.0, train_points=11, test_T=15.0),
+        data_set=dict(train_T=20.0, train_points=21, test_T=30.0),
     )
 
     # nu / ell robustness table rows. The (nu=1/2, ell=10) row aliases the

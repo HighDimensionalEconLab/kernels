@@ -23,7 +23,9 @@ SOLVER = neoclassical_growth_nn.neoclassical_growth_nn
 
 def run(
     output_dir: str = ".results",
-    n_seeds: int = 100,
+    # Multi-start retries inside each solve keep acceptance high, so a small
+    # seed ensemble suffices for the cross-seed medians.
+    n_seeds: int = 11,
     use_float64: bool = True,
     verbose: bool = False,
 ):

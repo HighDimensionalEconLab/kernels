@@ -23,7 +23,7 @@ SOLVER = open_economy_growth_nn.open_economy_growth_nn
 
 def run(
     output_dir: str = ".results",
-    n_seeds: int = 21,
+    n_seeds: int = 11,
     use_float64: bool = True,
     verbose: bool = False,
 ):

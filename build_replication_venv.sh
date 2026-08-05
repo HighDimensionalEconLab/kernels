@@ -21,8 +21,9 @@
 # nlls-gram, tinydiffeq, jsonargparse) plus matplotlib for the figure scripts.
 # No unopy: the float32 pipeline skips the uno/IPOPT baselines.
 #
-# Module and wheel versions below are Vulcan's -- confirm with `module spider`
-# and `avail_wheels jax jax_cuda12_plugin jax_cuda12_pjrt` per cluster.
+# Module and wheel versions below are Vulcan's (verified 2026-08:
+# jax/jaxlib 0.9.1 with the cuda12 plugin twins) -- confirm with
+# `module spider` and `avail_wheels jax "jax_cuda*"` per cluster.
 set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE="${1:-cpu}"
@@ -31,8 +32,8 @@ WHEELS="jax jaxlib flax jsonargparse numpy pandas scipy matplotlib"
 GRAM_DEPS="jaxtyping wadler-lindig lineax equinox"   # nlls-gram runtime deps
 
 case "$MODE" in
-  cpu) module load gcc arrow python/3.12;                     VENV=.venv-cpu ;;
-  gpu) module load gcc arrow python/3.12 cuda cudnn;          VENV=.venv-gpu
+  cpu) module load gcc arrow python/3.12;                              VENV=.venv-cpu ;;
+  gpu) module load gcc arrow python/3.12 cuda/12.9 cudnn/9.13.1.26;    VENV=.venv-gpu
        WHEELS="$WHEELS jax_cuda12_plugin jax_cuda12_pjrt" ;;
   *)   echo "usage: ./build_replication_venv.sh [cpu|gpu]" >&2; exit 1 ;;
 esac

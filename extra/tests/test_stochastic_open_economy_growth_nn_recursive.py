@@ -245,9 +245,8 @@ class StochasticOpenEconomyRecursiveTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(pinned, jnp.tile(center, (4, 1)))
 
-        # Additive semantics: a positive asset spread at a zero asset center
-        # must produce a nondegenerate cloud (a multiplicative spread would
-        # collapse it to zero and leave the CA head unidentified).
+        # Additive semantics: a positive spread at a zero center must not
+        # collapse.
         zero_center = jnp.zeros(4, dtype=dtype)
         scales = jnp.asarray([0.0, 0.0, 0.5, 0.0], dtype=dtype)
         spread = stochastic.standardized_initial_states(key, zero_center, scales, 8)
@@ -408,9 +407,7 @@ class StochasticOpenEconomyRecursiveTests(unittest.TestCase):
         self.assertNotIn("f64", residual_jaxpr)
         self.assertNotIn("f64", vjp_jaxpr)
 
-        # Interior epoch boundary: the callback steps the ladder to full
-        # shock scale and declares convergence on the fresh batch under the
-        # (accepting) threshold.
+        # Interior boundary: ladder steps to full scale and converges.
         accepting_args = args.replace(
             train_loss_threshold=jnp.asarray(1e6, dtype=dtype)
         )

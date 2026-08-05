@@ -33,22 +33,12 @@ from utilities import (
     unit_softplus,
 )
 
-# Stochastic small open economy in recursive (state-space) form on the state
-# (log z, log k, a / output_scale, rate_gap): OU log-TFP, capital, net foreign
-# assets scaled by initial output, and the world-rate gap, with the TFP and
-# world-rate shocks correlated through corr_zr. The neural policy supplies
-# positive investment expenditure and the signed current account; q and c are
-# recovered algebraically. No terminal, TVC, no-Ponzi, steady-state, or
-# benchmark information enters the residual or initialization; the
-# deterministic benchmark appears only in ex-post reported diagnostics.
+# Recursive stochastic small open economy on (log z, log k, a/output_scale,
+# rate_gap). No benchmark or steady-state information enters the residual or
+# initialization; the deterministic benchmark is ex-post diagnostics only.
 DOMAIN_EPS = 1e-8
 
-# World real-rate gap OU process mapped from an annual AR(1)
-# (rho, innovation sd) the same way the TFP calibration is mapped:
-# e^(-kappa_r) = rho and the OU innovation scale matches the AR(1) stationary
-# variance, sigma_r^2 / (2 kappa_r) = sd^2 / (1 - rho^2). The process
-# mean-reverts to interest_rate_mean, so rate_gap = 0 recovers the
-# deterministic model's constant world rate.
+# Annual AR(1) -> OU: e^(-kappa_r) = rho, sigma_r^2/(2 kappa_r) = sd^2/(1-rho^2).
 WORLD_RATE_AR1_RHO = 0.572
 WORLD_RATE_AR1_INNOVATION_SD = 0.0196
 WORLD_RATE_KAPPA = -math.log(WORLD_RATE_AR1_RHO)
@@ -62,8 +52,7 @@ SDE_SOLVERS = {
     "euler_maruyama": EulerMaruyama(),
 }
 
-# The Euler residual differentiates the policy twice (nested jvp along the
-# diffusion directions), so the kinked activation is excluded.
+# The residual differentiates the policy twice, so no kinked activation.
 SMOOTH_ACTIVATIONS = frozenset(ACTIVATIONS) - {"relu"}
 
 
@@ -93,10 +82,8 @@ class StructuralParameters:
 
 @dataclass(frozen=True)
 class DataSettings:
-    # Fixed-step SDE rollout on the integrator's own states: n points from
-    # n - 1 steps including the initial condition, nothing interpolated.
-    # train_T = 40 covers ~5 half-lives of the deterministic capital
-    # transition (stable root ~ -0.089), matching the deterministic sibling.
+    # Fixed-step SDE rollout on the integrator's own states; train_T = 40
+    # covers ~5 half-lives of the capital transition (stable root ~ -0.089).
     train_points: int = 65
     test_points: int = 51
     tvc_points: int = 161
@@ -107,14 +94,10 @@ class DataSettings:
 
 @dataclass(frozen=True)
 class InitialConditionSettings:
-    # One data_seed fixes independent train and test draws around the single
-    # initial state, separate from the NN seed. Spreads are ABSOLUTE standard
-    # deviations applied additively per state coordinate (log z and log k in
-    # logs, a / output_scale and rate_gap in levels) -- never proportional to
-    # the center, which would degenerate at a_0 = 0. The default is a single
-    # initial condition: every trajectory starts at the same point and
-    # differs only by its shock realization; positive spreads are experiment
-    # territory, not defaults. None test variances inherit the training ones.
+    # Spreads are absolute, applied additively per coordinate (never
+    # proportional to the center: that degenerates at a_0 = 0). Default is a
+    # single initial condition -- trajectories differ only by their shock
+    # realization; dispersion is an experiment. None test values inherit train.
     data_seed: int = 0
     num_train_trajectories: int = 4
     num_test_trajectories: int = 8
@@ -131,13 +114,9 @@ class InitialConditionSettings:
 
 @dataclass(frozen=True)
 class StoppingCriteria:
-    # max_steps is the LM-update budget per epoch; the noise realization (and
-    # the training ICs when their variance is positive) is redrawn at each
-    # interior epoch boundary. The shock-continuation ladder is the
-    # benchmark-free homotopy replacing any pretraining: early epochs train
-    # at scaled-down diffusions, rising geometrically from
-    # initial_shock_scale to 1.0 over continuation_epochs, and convergence is
-    # only ever declared at scale 1.0.
+    # max_steps is the per-epoch LM budget; noise (and dispersed ICs) redraw
+    # at epoch boundaries. The shock ladder rises geometrically to 1.0 over
+    # continuation_epochs; convergence is only declared at scale 1.0.
     max_steps: int = 250
     train_loss_threshold: float = 1e-10
     num_attempts: int = 4
@@ -148,8 +127,7 @@ class StoppingCriteria:
     continuation_epochs: int = 2
 
 
-# Acceptance gates, CLI-reachable so a float32 caller can pass its own bar
-# (the float32 replication driver does).
+# Acceptance gates; the float32 replication driver passes its own bar.
 @dataclass(frozen=True)
 class ToleranceSettings:
     test_euler_mean_abs: float = 5e-3
@@ -174,10 +152,8 @@ class SequentialPolicySettings:
     current_account_anchor: float = 0.0
 
 
-# Training ICs, the noise realization, keys, and the shock-ladder position
-# live in args (the epoch callback may rewrite args only), so the implicit
-# derivative is conditional on the carried batch of initial conditions and
-# shocks.
+# ICs, noise, keys, and ladder position live in args, so the implicit
+# derivative is conditional on the carried batch.
 @struct.dataclass
 class ResidualArgs:
     graphdef: nnx.GraphDef
@@ -198,34 +174,23 @@ class ResidualArgs:
     data_set: DataSettings = struct.field(pytree_node=False)
 
 
-# First-layer mask: only the log k input feeds the hidden stack at the draw,
-# so with the near-zero investment head and the zero current-account head the
-# initial policy is exactly the deterministic sibling's ansatz -- investment
-# ~ delta * k_0, current account = 0. The z/asset/rate columns are zero at
-# the draw, not frozen: training is free to grow them.
+# At the draw only log k feeds the net (investment ~ delta k_0, CA = 0);
+# the z/asset/rate columns are zero at the draw, not frozen.
 def capital_only_kernel_init(key, shape, dtype):
     kernel = nnx.initializers.lecun_normal()(key, shape, dtype)
     mask = jnp.asarray([0.0, 1.0, 0.0, 0.0], dtype=dtype)[:, None]
     return kernel * mask
 
 
-# Per-axis normalization shared by the NN and the kernel-recursive policy:
-# linear centering on the log z / log k / rate_gap axes and the bounded
-# 2 tanh(u/2) squash on the asset axis, so any rolled-out asset excursion
-# maps into (-2, 2) (the squash is ~95% saturated near |u| ~ 3.7, i.e. 3.7
-# asset scales from the center).
+# Shared with the kernel policy; the asset squash is bounded in (-2, 2) and
+# ~95% saturated near |u| ~ 3.7.
 def normalize_state(state, center, scale):
     u = (state - center) / scale
     return u.at[2].set(2.0 * jnp.tanh(u[2] / 2.0))
 
 
-# Output maps shared by the NN and the kernel-recursive policy. Both raw
-# heads are near zero at the draw, so the policy starts at
-# (investment_anchor, current_account_anchor). The investment head is
-# pre-scaled by output_scale / investment_anchor so both heads carry the same
-# O(output_scale) output Jacobian; without it the investment rows are
-# anchor / output_scale (~1/16 at the default calibration) times smaller
-# than the current-account rows.
+# Shared with the kernel policy. The pre-scaling gives both heads the same
+# O(output_scale) Jacobian; dropping it shrinks the investment rows ~16x.
 def policy_outputs(raw, investment_anchor, current_account_anchor, output_scale):
     investment = investment_anchor * unit_softplus(
         (output_scale / investment_anchor) * raw[0]
@@ -234,11 +199,8 @@ def policy_outputs(raw, investment_anchor, current_account_anchor, output_scale)
     return jnp.stack([investment, current_account])
 
 
-# Save/load contract: nnx.Param leaves are the only persisted state. Every
-# non-Param Variable below is a pure function of (settings, dtype), so
-# load_sequential_policy reconstructs the module from the saved settings and
-# swaps the Params in. A new non-Param Variable that is not derived from
-# settings breaks reload silently -- the round-trip test guards this.
+# Save/load contract: only nnx.Param leaves persist, so every non-Param
+# Variable must derive from (settings, dtype) or reload breaks silently.
 class SequentialPolicyNN(nnx.Module):
     def __init__(
         self,
@@ -333,13 +295,9 @@ class SequentialPolicyNN(nnx.Module):
         )
 
 
-# nlls_gram.DrawNNXModule cannot be used here: it splits on nnx.Param alone,
-# which is a non-exhaustive filter for a policy carrying non-Param scaling
-# Variables. Restarts draw a fresh net from the retry key and re-chain a
-# fresh epoch-key stream from args.restart_key so each attempt sees its own
-# batch realization schedule; multi-start chains each attempt's *initial*
-# args, so the shock ladder restarts at epoch 0 and the first scale.
-# Value-hashable on the spec so equal draws share one jit compilation.
+# DrawNNXModule splits on nnx.Param alone -- non-exhaustive here. Restarts
+# re-chain the epoch-key stream from restart_key; multi-start chains each
+# attempt's initial args, so the ladder restarts at epoch 0.
 class DrawSequentialPolicy:
     def __init__(self, settings, dtype):
         self.settings = settings
@@ -416,22 +374,17 @@ def state_drift(policy, state, p):
     )
 
 
-# ONE shock covariance, written twice. The SDE rollout uses this diagonal
-# diffusion with PRE-MIXED noise: correlate_noise rotates the raw increments
-# so the (z, rate) pair carries corr_zr. The Euler residual instead loads the
-# same covariance through the two explicit direction rows of
-# diffusion_directions. Editing either representation alone silently
-# decorrelates the simulated paths from the equation being solved; the
-# directional-generator-vs-dense-Hessian test guards the pairing.
+# One covariance, written twice: diagonal diffusion + pre-mixed noise
+# (correlate_noise) in the rollout, explicit direction rows
+# (diffusion_directions) in the residual. Edit them together only; the
+# directional-generator test guards the pairing.
 def state_diffusion(state, p):
     zero = jnp.zeros_like(state[0])
     return jnp.stack([p.sigma_z, zero, zero, p.sigma_r])
 
 
-# The residual's factorization of the same covariance: two independent
-# Brownian directions loading the state as [sigma_z, 0, 0, corr_zr sigma_r]
-# and [0, 0, 0, sigma_r sqrt(1 - corr_zr^2)], so directions.T @ directions
-# reproduces the mixed-noise covariance of the rollout exactly.
+# Residual half of the pairing: directions.T @ directions reproduces the
+# rollout's mixed-noise covariance exactly.
 def diffusion_directions(p):
     zero = jnp.zeros_like(p.sigma_z)
     second_loading = p.sigma_r * jnp.sqrt(1.0 - p.corr_zr**2)
@@ -448,19 +401,11 @@ def log_policy_quantities(policy, state, p):
     return jnp.stack([jnp.log(values["c"]), jnp.log(values["q"])])
 
 
-# The two HJB Euler residuals, from Ito on l = log c and v = log q. With L
-# the generator (drift derivative plus half the sum of second directional
-# derivatives along the diffusion directions), Gamma(f, g) the diffusion
-# covariance product first.T @ first of first directional derivatives, and
-# r = interest_rate_mean + rate_gap:
-#   consumption: L l - gamma Gamma(l, l) / 2 = (r - rho) / gamma
-#   Tobin's q:   L v + Gamma(v, v) / 2 - gamma Gamma(v, l)
-#                  = r + delta - (1 - eta) chi s^eta - MPK / q
-# The consumption equation is the drift of u'(c) = e^(-gamma l) set to
-# (rho - r) u'(c); the q equation prices installed capital under the
-# risk-adjusted return, with the -gamma Gamma(v, l) term from the covariance
-# of q with marginal utility. Both are computed with nested jvp per
-# direction, never a dense Hessian.
+# With l = log c, v = log q, L the generator, Gamma the diffusion covariance
+# product, and r = interest_rate_mean + rate_gap:
+#   L l - gamma Gamma(l, l)/2 = (r - rho)/gamma
+#   L v + Gamma(v, v)/2 - gamma Gamma(v, l)
+#     = r + delta - (1 - eta) chi s^eta - MPK/q
 def euler_residual_at_state(policy, state, p):
     drift = state_drift(policy, state, p)
     directions = diffusion_directions(p)
@@ -516,11 +461,8 @@ def euler_residual_terms(policy, states, p):
     return residuals, diffusion_terms, log_values
 
 
-# The linear corr_zr mixing applied leaf-wise over the solver noise pytree
-# (SRA1 carries a (d_w, d_z) pair): valid because every leaf is an
-# independent Gaussian family and the mixing commutes with the solver's
-# linear combinations of increments. This is the rollout half of the
-# covariance pairing documented at state_diffusion.
+# Leaf-wise over the solver noise pytree (SRA1 carries (d_w, d_z)): valid
+# because each leaf is independent Gaussian and the mixing is linear.
 def correlate_noise(noise, corr_zr):
     orthogonal_loading = jnp.sqrt(1.0 - corr_zr**2)
 
@@ -533,10 +475,8 @@ def correlate_noise(noise, corr_zr):
     return jax.tree.map(transform, noise)
 
 
-# At each interior epoch boundary: redraw the shock realization (and the
-# training ICs when configured), step the shock-continuation ladder, stop on
-# a nonfinite or converged fresh-batch loss, else continue with damping
-# reset. Convergence is only declared at full shock scale.
+# Interior epoch boundaries redraw the batch, step the ladder, and stop on a
+# nonfinite or (full-scale) converged fresh-batch loss.
 @dataclass(frozen=True)
 class EpochCallback:
     num_train_trajectories: int
@@ -673,11 +613,9 @@ def collocation_residuals(solver, policy, initial_states, noise, p, data_set):
     residuals = euler_residual_terms(policy, states.reshape(-1, 4), p)[0].reshape(
         *states.shape[:2], 2
     )
-    # Mean squared residual, so the loss threshold means the same thing at
-    # any number of trajectories or collocation points.
+    # Mean-squared normalization; a failed trajectory is a loud inf, never a
+    # fitted prefix.
     count = jnp.asarray(residuals.size, dtype=residuals.dtype)
-    # A nonfinite trajectory did not cover the requested economic horizon.
-    # Make that a loud optimizer failure instead of fitting a prefix.
     return jnp.where(
         solution.ok[:, None, None],
         residuals / jnp.sqrt(count),
@@ -687,9 +625,8 @@ def collocation_residuals(solver, policy, initial_states, noise, p, data_set):
 
 def residual_fn(theta, args, p):
     policy = nnx.merge(args.graphdef, theta, args.fixed_state)
-    # The ladder scales both diffusions through p, so the rollout and the
-    # residual see the same shrunk covariance; corr_zr is scale-free and is
-    # never touched.
+    # The ladder scales both sigmas through p (rollout and residual agree);
+    # corr_zr is scale-free.
     stage_parameters = p.replace(
         sigma_z=p.sigma_z * args.shock_scale,
         sigma_r=p.sigma_r * args.shock_scale,
@@ -809,11 +746,8 @@ def transversality_expectation_frame(values, times):
     )
 
 
-# The problem half of the two-part artifact key, shared verbatim with any
-# consumer that looks up a saved policy for the same problem (e.g. the
-# stochastic open-economy kernel-recursive collocation generator). Test,
-# tvc, and tolerance settings enter neither hash, so a consumer running its
-# own held-out design still globs the same problem prefix.
+# Problem half of the two-part artifact key, shared with the kernel-recursive
+# consumer. Test/tvc/tolerance settings enter neither hash.
 def problem_cache_config(
     parameters,
     kappa_z,
@@ -853,12 +787,8 @@ def problem_cache_config(
     }
 
 
-# One .npz per trained policy: the nnx.Param state through nnx's supported
-# State.to_pure_dict / replace_by_pure_dict conversion (keys joined with
-# "/", list indices numeric), plus a JSON block with the resolved
-# architecture settings, dtype, structural scalars, and the initial state,
-# so a load is rollout-ready without the training driver (e.g. as the
-# frozen-design generator for the kernel-recursive solver).
+# One .npz per policy: Param state plus a JSON meta block with the resolved
+# settings, so a load is rollout-ready without the training driver.
 def save_sequential_policy(path, policy, nn_set, *, structural, initial_state, extra):
     def flatten(prefix, node, out):
         if isinstance(node, dict):
@@ -901,15 +831,12 @@ def load_sequential_policy(path):
     return nnx.merge(graphdef, theta, fixed_state), meta
 
 
-# The TFP process reuses the neoclassical growth family's calibration:
-# kappa_z is that family's eta (quarterly AR(1) rho = 0.95) and sigma_z its
-# high-variance innovation map, so every stochastic recursive variant faces
-# the identical z process.
+# kappa_z / sigma_z reuse the neoclassical family's calibration, so every
+# stochastic recursive variant faces the identical z process.
 def stochastic_open_economy_growth_nn_recursive(
     k_0: float = 1.0,
-    # Debtor economy: the default NFA position is about half of steady-state
-    # output of net debt, in the range of emerging-economy calibrations
-    # (Mendoza & Villalvazo 2020).
+    # Debtor default: net debt ~ half of steady-state output (cf. Mendoza &
+    # Villalvazo 2020).
     a_0: float = -0.8,
     z_0: float = 1.0,
     rate_gap_0: float = 0.0,
@@ -936,10 +863,8 @@ def stochastic_open_economy_growth_nn_recursive(
     stop_set: StoppingCriteria = StoppingCriteria(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     asset_shift_scale: float = 0.5,
-    # Directory for content-addressed policy artifacts (e.g. ".results"): an
-    # existing artifact for this exact configuration is loaded instead of
-    # training, and a fresh solve is saved there. save_policy writes one
-    # explicit extra path.
+    # Content-addressed artifact dir: an existing artifact for this exact
+    # configuration loads instead of training; a fresh solve saves there.
     policy_cache: str | None = None,
     save_policy: str | None = None,
     verbose: bool = True,
@@ -1055,9 +980,9 @@ def stochastic_open_economy_growth_nn_recursive(
         ),
         log_k_center=math.log(k_0),
         asset_center=a_0 / output_scale,
-        # One initial output unit floors the asset scale, so the tanh squash
-        # stays responsive when the IC spread is zero or tiny.
-        asset_scale=max(math.sqrt(train_variances[2]), 1.0),
+        # NFA travels ~an output unit per decade, so the squash scale floors
+        # at 0.1 * train_T; a unit floor saturates the tanh mid-transition.
+        asset_scale=max(math.sqrt(train_variances[2]), 0.1 * data_set.train_T, 1.0),
         rate_scale=max(
             math.sqrt(rate_ergodic_variance),
             math.sqrt(train_variances[3]),
@@ -1136,10 +1061,7 @@ def stochastic_open_economy_growth_nn_recursive(
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     initial_model = SequentialPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(init_key))
     graphdef, theta_0, fixed_state = nnx.split(initial_model, nnx.Param, ...)
-    # The initial training draws consume train_ic_key itself; the noise,
-    # epoch, and restart streams chain from independent fold-ins of the same
-    # key, and the held-out streams chain from test_ic_key. fold_in index 1
-    # of train_ic_key is the training noise stream: the kernel-recursive
+    # fold_in(train_ic_key, 1) is the training noise stream; the kernel
     # consumer regenerates this exact stream to rebuild the frozen design.
     train_noise_key = jax.random.fold_in(train_ic_key, 1)
     test_noise_key = jax.random.fold_in(test_ic_key, 1)
@@ -1172,12 +1094,8 @@ def stochastic_open_economy_growth_nn_recursive(
         solver=solver,
         data_set=data_set,
     )
-    # Two-part artifact key <problem>-<run>: the problem hash covers the deep
-    # structural parameters, dtype, and the training initial-condition design
-    # shared by any solver of the same problem, so a consumer can glob
-    # *_policy_<problem>-*.npz for a reference solution; the run hash covers
-    # the training minutiae. Test, tvc, and tolerance settings enter neither,
-    # so changing them still reuses a cached policy.
+    # <problem>-<run> key: consumers glob *_policy_<problem>-*.npz; the run
+    # hash covers training minutiae only.
     problem_config = problem_cache_config(
         parameters,
         kappa_z,
@@ -1217,9 +1135,8 @@ def stochastic_open_economy_growth_nn_recursive(
     if cache_hit:
         policy, cached_meta = load_sequential_policy(cache_path)
         theta_final = nnx.split(policy, nnx.Param, ...)[1]
-        # The saved policy is the end of the shock ladder: diagnostics must
-        # run at full shock scale and the final epoch index, never at the
-        # fractional scale a fresh residual_args starts from.
+        # The saved policy is the end of the ladder: diagnostics must run at
+        # full shock scale, never the fresh args' fractional scale.
         solve_args = residual_args.replace(
             shock_scale=jnp.asarray(1.0, dtype=dtype),
             epoch=jnp.asarray(stop_set.num_epochs - 1, dtype=jnp.int32),
@@ -1253,9 +1170,8 @@ def stochastic_open_economy_growth_nn_recursive(
             epoch_early_stopping=stop_set.epoch_early_stopping,
             resample_initial_states=any(value > 0.0 for value in train_variances),
         )
-        # The per-step tolerance is sound only while the training batch never
-        # changes; across epochs, convergence is judged at the boundaries and
-        # by the multi-start acceptance test instead.
+        # Per-step atol is sound only for a never-changing batch; epochs are
+        # judged at the boundaries and by the acceptance test.
         atol = (
             math.sqrt(stop_set.train_loss_threshold)
             if stop_set.num_epochs == 1
@@ -1298,8 +1214,7 @@ def stochastic_open_economy_growth_nn_recursive(
             )
         policy = nnx.merge(graphdef, theta_final, fixed_state)
 
-    # Training diagnostics use the batch (ICs, noise, shock scale) the
-    # solution was returned on.
+    # Training diagnostics use the batch the solution was returned on.
     train_stage_parameters = p.replace(
         sigma_z=p.sigma_z * solve_args.shock_scale,
         sigma_r=p.sigma_r * solve_args.shock_scale,
@@ -1417,10 +1332,8 @@ def stochastic_open_economy_growth_nn_recursive(
         and jnp.all(tvc_feasible_observations)
     )
 
-    # Asset-shift diagnostic: paired rollouts from NFA positions shifted a
-    # fixed number of output units below and above a_0, on common noise, so
-    # the asset axis of the learned policy is exercised even when the IC
-    # spread is zero.
+    # Paired common-noise rollouts from shifted NFA positions exercise the
+    # asset axis even at zero IC spread.
     paired_states = jnp.broadcast_to(
         initial_center,
         (ic_set.num_test_trajectories, initial_center.size),
@@ -1481,9 +1394,7 @@ def stochastic_open_economy_growth_nn_recursive(
         jnp.mean(high_values["a"][:, -1] - low_values["a"][:, -1])
     )
 
-    # Ex-post reported diagnostics only: the deterministic open economy from
-    # the same initial state, evaluated at the test horizon. Never enters
-    # residuals, initialization, or acceptance.
+    # Deterministic benchmark: reported ex post, never gated.
     benchmark_grid = np.linspace(0.0, max(200.0, data_set.test_T), 401)
     benchmark = open_economy_growth_benchmark(
         k_0,
@@ -1525,8 +1436,7 @@ def stochastic_open_economy_growth_nn_recursive(
     observed_assets = np.asarray(test_values["a"]).reshape(-1)
     observed_rates = np.asarray(test_values["interest_rate"]).reshape(-1)
     test_asset_change = test_values["a"][:, -1] - test_values["a"][:, 0]
-    # Fraction of the tanh squash range the held-out asset paths reach: near
-    # one the policy input saturates and the heads lose asset sensitivity.
+    # Near one, the squash saturates and the heads lose asset sensitivity.
     test_normalized_asset = (
         test_states[..., 2] - nn_set.asset_center
     ) / nn_set.asset_scale

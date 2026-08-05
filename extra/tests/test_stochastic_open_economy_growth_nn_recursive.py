@@ -123,6 +123,21 @@ class StochasticOpenEconomyRecursiveTests(unittest.TestCase):
                     rtol=2e-13,
                     atol=2e-13,
                 )
+                # Martingale-consumption nesting: interest_rate_mean = rho at
+                # the defaults, so the c residual is exactly d log c / dt.
+                drift = stochastic.state_drift(
+                    lifted_capital_policy, state, stochastic_parameters
+                )
+                dlog_c = jax.jvp(
+                    lambda s: jnp.log(
+                        stochastic.policy_values(
+                            lifted_capital_policy, s, stochastic_parameters
+                        )["c"]
+                    ),
+                    (state,),
+                    (drift,),
+                )[1]
+                np.testing.assert_allclose(residual[0], dlog_c, rtol=1e-12)
 
     def test_directional_generator_matches_dense_hessian(self):
         p = structural_parameters(

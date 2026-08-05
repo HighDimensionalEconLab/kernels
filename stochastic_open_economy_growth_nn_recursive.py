@@ -39,6 +39,8 @@ from utilities import (
 DOMAIN_EPS = 1e-8
 
 # Annual AR(1) -> OU: e^(-kappa_r) = rho, sigma_r^2/(2 kappa_r) = sd^2/(1-rho^2).
+# Annual-frequency calibration near the annualized world-rate AR(1) of
+# Uribe & Yue (2006, eq. 15); stationary sd ~2.4 percentage points.
 WORLD_RATE_AR1_RHO = 0.572
 WORLD_RATE_AR1_INNOVATION_SD = 0.0196
 WORLD_RATE_KAPPA = -math.log(WORLD_RATE_AR1_RHO)

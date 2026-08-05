@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from dataclasses import asdict, dataclass
 
 import jax
@@ -9,13 +8,12 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from nlls_gram import (
-    LMStatus,
-    RepeatedFactorMetric,
     RidgeLevenbergMarquardt,
 )
 
 from kernels import (
     integrated_kernel_matrices,
+    integrated_metric_factorization,
     normalize_kernel,
     rkhs_norm_squared,
 )
@@ -23,20 +21,14 @@ from neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
+from utilities import (
+    STATUS_TO_REASON,
+    Stopwatch,
+    acceptance_fields,
+    make_train_t_grid,
+)
 
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
-
-TRAIN_RESIDUAL_TOL = 1e-5
-VALIDATION_RESIDUAL_TOL = 5e-3
-MPK_BOUND_TOL = 1e-3
 DOMAIN_EPS = 1e-6
-STATUS_TO_REASON = {
-    LMStatus.CONVERGED: "converged",
-    LMStatus.NONFINITE: "nonfinite",
-    LMStatus.MAX_STEPS: "max_steps",
-}
 
 
 @dataclass(frozen=True)
@@ -57,6 +49,16 @@ class DataSettings:
     test_points: int = 100
     benchmark_T: float = CONSTANTS.benchmark_T
     benchmark_points: int = CONSTANTS.benchmark_points
+
+
+# Acceptance gates, CLI-reachable so a float32 caller can pass its own bar
+# (the float32 replication driver does). The mpk bound applies only under
+# kinked production.
+@dataclass(frozen=True)
+class ToleranceSettings:
+    train_residual: float = 1e-5
+    validation_residual: float = 5e-3
+    mpk_bound: float = 1e-3
 
 
 # The residual is nonlinear (production, mu*c products) but mildly so: with
@@ -103,13 +105,17 @@ def neoclassical_growth_kernel(
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
     lm_set: SolverSettings = SolverSettings(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
     c_0_guess: float | None = None,  # overrides the flat steady-flow warm start
 ):
-    if not jax.config.jax_enable_x64:
-        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
     if sigma_crra <= 0.0:
         raise ValueError("sigma_crra must be positive")
     dtype = jnp.float64 if use_float64 else jnp.float32
+    train_residual_tolerance = tolerance_set.train_residual
+    validation_residual_tolerance = tolerance_set.validation_residual
+    mpk_bound_tolerance = tolerance_set.mpk_bound
     kinked_parameter_count = sum(parameter is not None for parameter in (A, b_1, b_2))
     if kinked_parameter_count not in {0, 3}:
         raise ValueError("Set all of A, b_1, and b_2, or set none of them.")
@@ -120,12 +126,7 @@ def neoclassical_growth_kernel(
 
     kernel = normalize_kernel(kernel_set.kernel)
     ell, sigma = kernel_set.ell, kernel_set.sigma
-    if data_set.train_points_list is None:
-        train_data = jnp.linspace(
-            0, data_set.train_T, data_set.train_points, dtype=dtype
-        )
-    else:
-        train_data = jnp.sort(jnp.array(data_set.train_points_list, dtype=dtype))
+    train_data = make_train_t_grid(data_set, dtype)
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
     validation_points = max(data_set.test_points, data_set.benchmark_points)
     validation_data = jnp.linspace(0, data_set.train_T, validation_points, dtype=dtype)
@@ -156,13 +157,13 @@ def neoclassical_growth_kernel(
         dk_dt = K_eval @ alpha_k
         return k, c, mu, dk_dt, dmu_dt
 
-    metric_data = train_data.astype(jnp.float64)
-    K_metric, K_tilde_metric = integrated_kernel_matrices(
-        metric_data, metric_data, kernel, sigma, ell
+    # 3n nonlinear residuals in 3n + 2 unknowns: ridge LM on
+    # ||r||^2 + ridge * (a_mu'K a_mu + a_c'K a_c + a_k'K a_k) selects the
+    # interpolant minimizing the summed RKHS norms (the original objective)
+    # with the trailing (c_0, mu_0) in the unpenalized free block.
+    K_jax, K_tilde_jax, metric = integrated_metric_factorization(
+        train_data, kernel, sigma, ell, repeats=3
     )
-    K_metric = (K_metric + K_metric.T) / 2
-    K_jax = K_metric.astype(dtype)
-    K_tilde_jax = K_tilde_metric.astype(dtype)
 
     def train_path_values(theta):
         return path_values(theta, K_jax, K_tilde_jax)
@@ -180,17 +181,6 @@ def neoclassical_growth_kernel(
         euler = dmu_dt + mu * (marginal_product(k) - delta - rho_hat)
         shadow_price = mu * c**sigma_crra - 1.0
         return residual_scale * jnp.concatenate([resource, euler, shadow_price])
-
-    # 3n nonlinear residuals in 3n + 2 unknowns: ridge LM on
-    # ||r||^2 + ridge * (a_mu'K a_mu + a_c'K a_c + a_k'K a_k) selects the
-    # interpolant minimizing the summed RKHS norms (the original objective)
-    # with the trailing (c_0, mu_0) in the unpenalized free block. The metric
-    # takes the upper Cholesky factor F with K = F'F, computed in float64 and
-    # cast to the residual dtype.
-    metric = RepeatedFactorMetric(
-        jnp.linalg.cholesky(K_metric, upper=True).astype(dtype),
-        repeats=3,
-    )
 
     c_flow_guess = max(production(k_0) - delta * k_0, DOMAIN_EPS)
     if c_0_guess is not None:
@@ -211,7 +201,7 @@ def neoclassical_growth_kernel(
         damping_increase=lm_set.damping_increase,
     )
 
-    start = time.perf_counter()
+    timer = Stopwatch()
     result = solver.solve(
         theta_0,
         max_steps=lm_set.max_steps,
@@ -219,8 +209,7 @@ def neoclassical_growth_kernel(
         atol=lm_set.residual_atol,
         max_steps_is_success=False,
     )
-    jax.block_until_ready(result)
-    elapsed = time.perf_counter() - start
+    elapsed = timer.elapsed(result)
 
     theta = result.x
     alpha_mu, alpha_c, alpha_k, initial = theta
@@ -297,15 +286,18 @@ def neoclassical_growth_kernel(
     rejection_reasons = []
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > TRAIN_RESIDUAL_TOL:
+    if max_train_residual > train_residual_tolerance:
         rejection_reasons.append("train_residual")
-    if use_kinked_production and max_validation_residual > VALIDATION_RESIDUAL_TOL:
+    if (
+        use_kinked_production
+        and max_validation_residual > validation_residual_tolerance
+    ):
         rejection_reasons.append("validation_residual")
     if use_kinked_production and (
-        p_lower_violation > MPK_BOUND_TOL or p_upper_violation > MPK_BOUND_TOL
+        p_lower_violation > mpk_bound_tolerance
+        or p_upper_violation > mpk_bound_tolerance
     ):
         rejection_reasons.append("p_bound")
-    solution_accepted = not rejection_reasons
 
     results = {
         "a": a,
@@ -317,7 +309,8 @@ def neoclassical_growth_kernel(
         "b_1": b_1_value,
         "b_2": b_2_value,
         "use_kinked_production": use_kinked_production,
-        "residual_dtype": str(jnp.dtype(dtype)),
+        # Measured, not requested: a float64 leak upstream shows up here.
+        "residual_dtype": str(train_eval["euler"].dtype),
         "kernel": kernel,
         "ell": ell,
         "sigma": sigma,
@@ -327,12 +320,11 @@ def neoclassical_growth_kernel(
         "test_points": data_set.test_points,
         "c_0": float(c_0),
         "mu_0": float(mu_0),
-        # Unshifted alpha' K alpha, matching the IPOPT report (the metric
-        # norm includes the epsilon shift).
-        "rkhs_norm_k": float(rkhs_norm_squared(alpha_k, K_metric)),
-        "rkhs_norm_c": float(rkhs_norm_squared(alpha_c, K_metric)),
-        "rkhs_norm_mu": float(rkhs_norm_squared(alpha_mu, K_metric)),
+        "rkhs_norm_k": float(rkhs_norm_squared(alpha_k, K_jax)),
+        "rkhs_norm_c": float(rkhs_norm_squared(alpha_c, K_jax)),
+        "rkhs_norm_mu": float(rkhs_norm_squared(alpha_mu, K_jax)),
         "max_train_residual": max_train_residual,
+        "train_residual_tolerance": train_residual_tolerance,
         "max_validation_residual": max_validation_residual,
         "p_lower_violation": p_lower_violation,
         "p_upper_violation": p_upper_violation,
@@ -347,10 +339,7 @@ def neoclassical_growth_kernel(
         "final_damping": float(result.lm_state.damping),
         "steps": steps,
         "stopping_reason": STATUS_TO_REASON.get(status, "unknown"),
-        "solution_accepted": solution_accepted,
-        "rejection_reason": "accepted"
-        if solution_accepted
-        else ",".join(rejection_reasons),
+        **acceptance_fields(rejection_reasons),
     }
     train_df = pd.DataFrame(
         {

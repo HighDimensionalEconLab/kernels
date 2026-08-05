@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from dataclasses import asdict, dataclass
 
 import jax
@@ -13,12 +12,12 @@ from nlls_gram import (
     AnnealRidge,
     Cholesky,
     LMStatus,
-    RepeatedFactorMetric,
     RidgeLevenbergMarquardt,
 )
 
 from kernels import (
     integrated_kernel_matrices,
+    integrated_metric_factorization,
     normalize_kernel,
     rkhs_norm_squared,
 )
@@ -33,19 +32,21 @@ from open_economy_growth import (
     tvc_diagnostics,
 )
 from open_economy_growth_benchmark import open_economy_growth_benchmark
+from utilities import (
+    STATUS_TO_REASON,
+    Stopwatch,
+    acceptance_fields,
+    make_sampled_train_grid,
+)
 
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
 
-TRAIN_RESIDUAL_TOL = 1e-5
-VALIDATION_RESIDUAL_TOL = 1e-2
-BENCHMARK_MATCH_TOL = 1e-3
-STATUS_TO_REASON = {
-    LMStatus.CONVERGED: "converged",
-    LMStatus.NONFINITE: "nonfinite",
-    LMStatus.MAX_STEPS: "max_steps",
-}
+# Acceptance gates, CLI-reachable so a float32 caller can pass its own bar
+# (the float32 replication driver does).
+@dataclass(frozen=True)
+class ToleranceSettings:
+    train_residual: float = 1e-5
+    validation_residual: float = 1e-2
+    benchmark_match: float = 1e-3
 
 
 @dataclass(frozen=True)
@@ -123,45 +124,15 @@ def open_economy_growth_kernel(
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
     lm_set: SolverSettings = SolverSettings(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
 ):
-    if not jax.config.jax_enable_x64:
-        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
     if k_0 <= 0.0:
         raise ValueError("k_0 must be positive")
     kernel = normalize_kernel(kernel_set.kernel)
-    if data_set.train_points_list is None:
-        if data_set.sampling == "uniform":
-            train_data = jnp.linspace(
-                0.0, data_set.train_T, data_set.train_points, dtype=dtype
-            )
-        elif data_set.sampling == "front_loaded":
-            dense_points = data_set.train_points - data_set.tail_points
-            if (
-                dense_points < 2
-                or data_set.tail_points < 1
-                or not 0.0 < data_set.dense_T < data_set.train_T
-            ):
-                raise ValueError(
-                    "front_loaded sampling requires at least 2 dense points, "
-                    "1 tail point, and 0 < dense_T < train_T"
-                )
-            dense_data = jnp.linspace(0.0, data_set.dense_T, dense_points, dtype=dtype)
-            tail_data = jnp.linspace(
-                data_set.dense_T,
-                data_set.train_T,
-                data_set.tail_points + 1,
-                dtype=dtype,
-            )[1:]
-            train_data = jnp.concatenate([dense_data, tail_data])
-        else:
-            raise ValueError("sampling must be 'front_loaded' or 'uniform'")
-    else:
-        train_data = jnp.sort(jnp.asarray(data_set.train_points_list, dtype=dtype))
-    if len(train_data) < 3 or not bool(jnp.all(jnp.diff(train_data) > 0.0)):
-        raise ValueError("training points must be strictly increasing")
-    if float(train_data[0]) != 0.0:
-        raise ValueError("training points must start at zero")
+    train_data = make_sampled_train_grid(data_set, dtype)
     if data_set.test_T > float(train_data[-1]):
         raise ValueError("test_T must not exceed the training horizon")
     if data_set.benchmark_T < max(data_set.test_T, float(train_data[-1])):
@@ -177,17 +148,14 @@ def open_economy_growth_kernel(
     output_scale = steady["output"]
     consumption_scale = steady["g"]
 
-    metric_data = train_data.astype(jnp.float64)
-    K_metric, K_tilde_metric = integrated_kernel_matrices(
-        metric_data,
-        metric_data,
-        kernel,
-        kernel_set.sigma,
-        kernel_set.ell,
+    # There are 5n DAE equations in 5n + 3 unknowns. No terminal equation is
+    # appended: the ridge penalty supplies the three-dimensional selection.
+    # Every linear solver works on the whitened subproblem; the metric takes
+    # the upper Cholesky factor F with K = F'F and the trailing offsets stay
+    # in the unpenalized free block, untransformed.
+    K, K_tilde, metric = integrated_metric_factorization(
+        train_data, kernel, kernel_set.sigma, kernel_set.ell, repeats=5
     )
-    K_metric = (K_metric + K_metric.T) / 2.0
-    K = K_metric.astype(dtype)
-    K_tilde = K_tilde_metric.astype(dtype)
 
     # theta = (alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q,
     #          (c_offset, mu_offset, q_offset)), matching the metric blocks.
@@ -261,16 +229,6 @@ def open_economy_growth_kernel(
             ]
         )
 
-    # There are 5n DAE equations in 5n + 3 unknowns. No terminal equation is
-    # appended: the ridge penalty supplies the three-dimensional selection.
-    # Every linear solver works on the whitened subproblem; the metric takes
-    # the upper Cholesky factor F with K = F'F and the trailing offsets stay
-    # in the unpenalized free block, untransformed.
-    metric = RepeatedFactorMetric(
-        jnp.linalg.cholesky(K_metric, upper=True).astype(dtype),
-        repeats=5,
-    )
-
     # The zero coordinate contains no saddle-path or present-value information:
     # it is flat in the derivative RKHS at the model's scale normalizations.
     theta_0 = (
@@ -308,7 +266,7 @@ def open_economy_growth_kernel(
         damping_increase=lm_set.damping_increase,
     )
 
-    solve_start = time.perf_counter()
+    timer = Stopwatch()
     result = solver.solve(
         theta_0,
         max_steps=lm_set.max_steps,
@@ -317,8 +275,7 @@ def open_economy_growth_kernel(
         max_steps_is_success=False,
         **continuation_options,
     )
-    jax.block_until_ready(result)
-    solve_time = time.perf_counter() - solve_start
+    solve_time = timer.elapsed(result)
     theta = result.x
 
     def evaluate_grid(points):
@@ -454,20 +411,19 @@ def open_economy_growth_kernel(
         rejection_reasons.append("solver_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > TRAIN_RESIDUAL_TOL:
+    if max_train_residual > tolerance_set.train_residual:
         rejection_reasons.append("train_residual")
-    if max_validation_residual > VALIDATION_RESIDUAL_TOL:
+    if max_validation_residual > tolerance_set.validation_residual:
         rejection_reasons.append("validation_residual")
-    solution_accepted = not rejection_reasons
-    benchmark_match = max_benchmark_error <= BENCHMARK_MATCH_TOL
+    benchmark_match = max_benchmark_error <= tolerance_set.benchmark_match
 
     alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, initial = theta
     c_offset, mu_offset, q_offset = initial
-    rkhs_norm_mu = rkhs_norm_squared(alpha_mu, K_metric)
-    rkhs_norm_c = rkhs_norm_squared(alpha_c, K_metric)
-    rkhs_norm_k = rkhs_norm_squared(alpha_k, K_metric)
-    rkhs_norm_a = rkhs_norm_squared(alpha_a, K_metric)
-    rkhs_norm_q = rkhs_norm_squared(alpha_q, K_metric)
+    rkhs_norm_mu = rkhs_norm_squared(alpha_mu, K)
+    rkhs_norm_c = rkhs_norm_squared(alpha_c, K)
+    rkhs_norm_k = rkhs_norm_squared(alpha_k, K)
+    rkhs_norm_a = rkhs_norm_squared(alpha_a, K)
+    rkhs_norm_q = rkhs_norm_squared(alpha_q, K)
     rkhs_norm_total = (
         rkhs_norm_mu + rkhs_norm_c + rkhs_norm_k + rkhs_norm_a + rkhs_norm_q
     )
@@ -490,7 +446,8 @@ def open_economy_growth_kernel(
         "k_0": k_0,
         "a_0": a_0,
         "a_0_over_output_ss": a_0 / float(output_scale),
-        "residual_dtype": str(jnp.dtype(dtype)),
+        # Measured, not requested: a float64 leak upstream shows up here.
+        "residual_dtype": str(train_eval["capital"].dtype),
         "kernel": kernel,
         "ell": kernel_set.ell,
         "sigma": kernel_set.sigma,
@@ -557,10 +514,7 @@ def open_economy_growth_kernel(
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
-        "solution_accepted": solution_accepted,
-        "rejection_reason": (
-            "accepted" if solution_accepted else ",".join(rejection_reasons)
-        ),
+        **acceptance_fields(rejection_reasons),
         "c_offset": float(c_offset),
         "mu_offset": float(mu_offset),
     }

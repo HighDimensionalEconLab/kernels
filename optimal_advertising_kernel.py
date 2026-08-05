@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from dataclasses import asdict, dataclass
 
 import jax
@@ -9,28 +8,23 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from nlls_gram import (
-    LMStatus,
-    RepeatedFactorMetric,
     RidgeLevenbergMarquardt,
 )
 
 from kernels import (
     integrated_kernel_matrices,
+    integrated_metric_factorization,
     normalize_kernel,
     rkhs_norm_squared,
 )
+from utilities import (
+    STATUS_TO_REASON,
+    Stopwatch,
+    acceptance_fields,
+    make_train_t_grid,
+)
 
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
-
-TRAIN_RESIDUAL_TOL = 1e-8
 DOMAIN_EPS = 1e-8
-STATUS_TO_REASON = {
-    LMStatus.CONVERGED: "converged",
-    LMStatus.NONFINITE: "nonfinite",
-    LMStatus.MAX_STEPS: "max_steps",
-}
 
 
 @dataclass(frozen=True)
@@ -48,6 +42,13 @@ class DataSettings:
     test_T: float = 50.0
     test_points: int = 100
     validation_points: int = 300
+
+
+# Acceptance gates, CLI-reachable so a float32 caller can pass its own bar
+# (the float32 replication driver does).
+@dataclass(frozen=True)
+class ToleranceSettings:
+    train_residual: float = 1e-8
 
 
 @dataclass(frozen=True)
@@ -79,19 +80,15 @@ def optimal_advertising_kernel(
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
     lm_set: SolverSettings = SolverSettings(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = False,
 ):
-    if not jax.config.jax_enable_x64:
-        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
     kernel = normalize_kernel(kernel_set.kernel)
     ell, sigma = kernel_set.ell, kernel_set.sigma
-    if data_set.train_points_list is None:
-        train_data = jnp.linspace(
-            0.0, data_set.train_T, data_set.train_points, dtype=dtype
-        )
-    else:
-        train_data = jnp.sort(jnp.asarray(data_set.train_points_list, dtype=dtype))
+    train_data = make_train_t_grid(data_set, dtype)
     test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     validation_data = jnp.linspace(
         0.0,
@@ -101,13 +98,9 @@ def optimal_advertising_kernel(
     )
     n_train = len(train_data)
 
-    metric_data = train_data.astype(jnp.float64)
-    K_metric, K_tilde_metric = integrated_kernel_matrices(
-        metric_data, metric_data, kernel, sigma, ell
+    K, K_tilde, metric = integrated_metric_factorization(
+        train_data, kernel, sigma, ell, repeats=3
     )
-    K_metric = (K_metric + K_metric.T) / 2
-    K = K_metric.astype(dtype)
-    K_tilde = K_tilde_metric.astype(dtype)
     gamma = (beta + rho_hat) / c
     control_power = (1.0 - kappa) / kappa
 
@@ -135,10 +128,6 @@ def optimal_advertising_kernel(
             residuals(path_values(theta, K, K_tilde))
         )
 
-    metric = RepeatedFactorMetric(
-        jnp.linalg.cholesky(K_metric, upper=True).astype(dtype),
-        repeats=3,
-    )
     u_0_guess = max(beta * x_0 / max(1.0 - x_0, DOMAIN_EPS), DOMAIN_EPS)
     mu_0_guess = max(gamma / (rho_hat + beta + u_0_guess), DOMAIN_EPS)
     theta_0 = (
@@ -156,7 +145,7 @@ def optimal_advertising_kernel(
         damping_increase=lm_set.damping_increase,
     )
 
-    start = time.perf_counter()
+    timer = Stopwatch()
     result = solver.solve(
         theta_0,
         max_steps=lm_set.max_steps,
@@ -164,8 +153,7 @@ def optimal_advertising_kernel(
         atol=lm_set.residual_atol,
         max_steps_is_success=False,
     )
-    jax.block_until_ready(result)
-    elapsed = time.perf_counter() - start
+    elapsed = timer.elapsed(result)
     theta = result.x
     alpha_x, alpha_mu, alpha_u, initial = theta
     mu_0, u_0 = initial
@@ -209,7 +197,7 @@ def optimal_advertising_kernel(
         )
     )
     train_residual_tolerance = max(
-        TRAIN_RESIDUAL_TOL,
+        tolerance_set.train_residual,
         8.0 * float(jnp.finfo(dtype).eps),
     )
     rejection_reasons = []
@@ -217,7 +205,6 @@ def optimal_advertising_kernel(
         rejection_reasons.append("nonfinite_or_nonpositive")
     if max_train_residual > train_residual_tolerance:
         rejection_reasons.append("train_residual")
-    solution_accepted = not rejection_reasons
 
     @jax.jit
     def kernel_solution(points):
@@ -228,9 +215,9 @@ def optimal_advertising_kernel(
         return x, mu, u
 
     rkhs_norms = {
-        "x": rkhs_norm_squared(alpha_x, K_metric),
-        "mu": rkhs_norm_squared(alpha_mu, K_metric),
-        "u": rkhs_norm_squared(alpha_u, K_metric),
+        "x": rkhs_norm_squared(alpha_x, K),
+        "mu": rkhs_norm_squared(alpha_mu, K),
+        "u": rkhs_norm_squared(alpha_u, K),
     }
     results = {
         "rho_hat": rho_hat,
@@ -239,7 +226,8 @@ def optimal_advertising_kernel(
         "kappa": kappa,
         "x_0": x_0,
         "gamma": gamma,
-        "residual_dtype": str(jnp.dtype(dtype)),
+        # Measured, not requested: a float64 leak upstream shows up here.
+        "residual_dtype": str(train_eval["state"].dtype),
         "kernel": kernel,
         "ell": ell,
         "sigma": sigma,
@@ -263,10 +251,7 @@ def optimal_advertising_kernel(
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
-        "solution_accepted": solution_accepted,
-        "rejection_reason": (
-            "accepted" if solution_accepted else ",".join(rejection_reasons)
-        ),
+        **acceptance_fields(rejection_reasons),
     }
     if verbose:
         print(f"solve_time(s) = {elapsed}")

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import time
 from dataclasses import asdict, dataclass, replace
 from functools import partial
 
@@ -12,7 +11,7 @@ import numpy as np
 import pandas as pd
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
-from nlls_gram import LevenbergMarquardt, LMStatus, MultiStart
+from nlls_gram import LevenbergMarquardt, MultiStart
 from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 
 from open_economy_growth import (
@@ -25,7 +24,14 @@ from open_economy_growth import (
     tvc_diagnostics,
 )
 from open_economy_growth_benchmark import open_economy_growth_benchmark
-from utilities import ACTIVATIONS, unit_softplus
+from utilities import (
+    ACTIVATIONS,
+    STATUS_TO_REASON,
+    OptimizerSettings,
+    Stopwatch,
+    acceptance_fields,
+    unit_softplus,
+)
 
 # Sequential/state-space formulation. The neural policy supplies positive
 # investment expenditure x(k) and the signed current account CA(k). Capital and
@@ -34,19 +40,16 @@ from utilities import ACTIVATIONS, unit_softplus
 # root, whereas a smooth bounded CA(k) cannot represent the singular explosive
 # asset branch as capital converges. No terminal, TVC, no-Ponzi, steady-state,
 # or benchmark information enters the residual or initialization.
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
-
 DOMAIN_EPS = 1e-8
-TRAIN_RESIDUAL_TOL = 1e-5
-VALIDATION_RESIDUAL_TOL = 5e-3
-BENCHMARK_MATCH_TOL = 1e-3
-STATUS_TO_REASON = {
-    LMStatus.CONVERGED: "early_stopping_met",
-    LMStatus.NONFINITE: "loss_divergence",
-    LMStatus.MAX_STEPS: "max_steps",
-}
+
+
+# Acceptance gates, CLI-reachable so a float32 caller can pass its own bar
+# (the float32 replication driver does).
+@dataclass(frozen=True)
+class ToleranceSettings:
+    train_residual: float = 1e-5
+    validation_residual: float = 5e-3
+    benchmark_match: float = 1e-3
 
 
 @dataclass(frozen=True)
@@ -69,19 +72,10 @@ class DataSettings:
 @dataclass(frozen=True)
 class StoppingCriteria:
     max_steps: int = 250
-    train_loss_threshold: float | None = None
+    train_loss_threshold: float = 1e-14
     # frac_accepted measures acceptance within the restart budget, not first-try
     # robustness: a seed that stalls short of the loss threshold is redrawn.
     num_attempts: int = 5
-
-
-@dataclass(frozen=True)
-class SolverSettings:
-    init_damping: float = 3.26e-5
-    damping_decrease: float = 0.482
-    damping_increase: float = 2.71
-    geodesic_acceleration: bool = True
-    geodesic_acceptance_ratio: float = 0.541
 
 
 @dataclass(frozen=True)
@@ -389,18 +383,19 @@ def open_economy_growth_nn_recursive(
     use_float64: bool = True,
     data_set: DataSettings = DataSettings(),
     nn_set: SequentialPolicySettings = SequentialPolicySettings(),
-    lm_set: SolverSettings = SolverSettings(),
+    lm_set: OptimizerSettings = OptimizerSettings(
+        init_damping=3.26e-5,
+        damping_decrease=0.482,
+        damping_increase=2.71,
+        geodesic_acceptance_ratio=0.541,
+    ),
     stop_set: StoppingCriteria = StoppingCriteria(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
 ):
-    if not jax.config.jax_enable_x64:
-        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    if stop_set.train_loss_threshold is None:
-        # The float32 solve resolves 1e-12 and needs it to pass the independent
-        # path-residual and benchmark gates; 1e-10 stops prematurely.
-        threshold = 1e-14 if dtype == jnp.float64 else 1e-12
-        stop_set = replace(stop_set, train_loss_threshold=threshold)
     if k_0 <= 0.0:
         raise ValueError("k_0 must be positive")
     if data_set.train_points < 2:
@@ -409,7 +404,7 @@ def open_economy_growth_nn_recursive(
         raise ValueError("diagnostic_T must cover the train and test horizons")
     if data_set.benchmark_T < data_set.test_T:
         raise ValueError("benchmark_T must cover the test horizon")
-    if stop_set.train_loss_threshold is None or not (
+    if not (
         math.isfinite(stop_set.train_loss_threshold)
         and stop_set.train_loss_threshold > 0.0
     ):
@@ -448,7 +443,7 @@ def open_economy_growth_nn_recursive(
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
     atol = math.sqrt(stop_set.train_loss_threshold)
-    train_start = time.perf_counter()
+    timer = Stopwatch()
     result = solver.solve(
         theta_0,
         residual_args,
@@ -462,8 +457,7 @@ def open_economy_growth_nn_recursive(
         ),
         max_steps_is_success=False,
     )
-    jax.block_until_ready(result)
-    train_time = time.perf_counter() - train_start
+    train_time = timer.elapsed(result)
     attempt = int(result.multi_start.attempt) + 1
     policy = nnx.merge(graphdef, result.x, fixed_state)
 
@@ -517,11 +511,12 @@ def open_economy_growth_nn_recursive(
     rejection_reasons = []
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > TRAIN_RESIDUAL_TOL:
+    if max_train_residual > tolerance_set.train_residual:
         rejection_reasons.append("train_residual")
-    if max_validation_residual > VALIDATION_RESIDUAL_TOL:
+    if max_validation_residual > tolerance_set.validation_residual:
         rejection_reasons.append("validation_residual")
-    solution_accepted = not rejection_reasons
+    acceptance = acceptance_fields(rejection_reasons)
+    solution_accepted = acceptance["solution_accepted"]
 
     benchmark_grid = np.linspace(
         0.0,
@@ -565,9 +560,7 @@ def open_economy_growth_nn_recursive(
         float(jnp.max(c_relative_error)),
         float(jnp.max(a_scaled_error)),
     )
-    benchmark_match_tolerance = (
-        BENCHMARK_MATCH_TOL if dtype == jnp.float64 else 2.0 * BENCHMARK_MATCH_TOL
-    )
+    benchmark_match_tolerance = tolerance_set.benchmark_match
     benchmark_match = max_benchmark_error <= benchmark_match_tolerance
 
     terminal = {name: diagnostic_eval[name][-1] for name in diagnostic_eval}
@@ -620,7 +613,8 @@ def open_economy_growth_nn_recursive(
         "k_0": k_0,
         "a_0": a_0,
         "seed": seed,
-        "residual_dtype": str(jnp.dtype(dtype)),
+        # Measured, not requested: a float64 leak upstream shows up here.
+        "residual_dtype": str(train_eval["q_euler"].dtype),
         "solver": "nlls-gram",
         "ansatz": "sequential_investment_current_account_levels",
         "selection": "minimum_identity_metric_parameter_step",
@@ -673,10 +667,7 @@ def open_economy_growth_nn_recursive(
         "diagnostic_T": data_set.diagnostic_T,
         "ode_solver": "rk4",
         "train_steps": data_set.train_points - 1,
-        "solution_accepted": solution_accepted,
-        "rejection_reason": (
-            "accepted" if solution_accepted else ",".join(rejection_reasons)
-        ),
+        **acceptance,
     }
     if verbose:
         print("\nFinal results:")
@@ -723,6 +714,7 @@ def open_economy_growth_nn_recursive(
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
         "stop_set": asdict(stop_set),
+        "tolerance_set": asdict(tolerance_set),
         "initial_conditions": {"k_0": k_0, "a_0": a_0},
     }
     jax.block_until_ready(nnx.state(policy))

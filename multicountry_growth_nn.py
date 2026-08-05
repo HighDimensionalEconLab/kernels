@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import time
 from dataclasses import asdict, dataclass, replace
 
 import jax
@@ -16,7 +15,6 @@ from nlls_gram import (
     Cholesky,
     DrawNNXModule,
     LevenbergMarquardt,
-    LMStatus,
     MultiStart,
 )
 
@@ -33,26 +31,30 @@ from multicountry_growth import (
     multicountry_tvc_diagnostics,
 )
 from multicountry_growth_benchmark import multicountry_growth_benchmark
-from multicountry_growth_kernel import make_train_grid
-from utilities import ACTIVATIONS, unit_softplus
+from utilities import (
+    ACTIVATIONS,
+    STATUS_TO_REASON,
+    Stopwatch,
+    make_sampled_train_grid,
+    unit_softplus,
+)
 
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
-
-# Calibrated for the drawn heterogeneous initial conditions (measured
-# 1.17e-5 max train residual at the default seed and training budget;
-# 1e-5 was the symmetric-k_0 margin).
-TRAIN_RESIDUAL_TOL = 2e-5
-VALIDATION_RESIDUAL_TOL = 5e-3
-ACCOUNTING_RESIDUAL_TOL = 5e-5
+# Validity of the inputs, not an acceptance gate: checked in exact float64 on
+# the raw values, so it holds at any working dtype.
 INITIAL_CLEARING_TOL = 1e-10
-BENCHMARK_MATCH_TOL = 2e-3
-STATUS_TO_REASON = {
-    LMStatus.CONVERGED: "early_stopping_met",
-    LMStatus.NONFINITE: "loss_divergence",
-    LMStatus.MAX_STEPS: "max_steps",
-}
+
+
+# Equation-diagnostic gates, CLI-reachable so a float32 caller can pass its
+# own bar (the float32 replication driver does). The train gate is calibrated
+# for the drawn heterogeneous initial conditions (measured 1.17e-5 max train
+# residual at the default seed and training budget; 1e-5 was the
+# symmetric-k_0 margin).
+@dataclass(frozen=True)
+class ToleranceSettings:
+    train_residual: float = 2e-5
+    validation_residual: float = 5e-3
+    accounting: float = 5e-5
+    benchmark_match: float = 2e-3
 
 
 @dataclass(frozen=True)
@@ -260,11 +262,12 @@ def multicountry_growth_nn(
     nn_set: SequentialNNSettings = SequentialNNSettings(),
     lm_set: SolverSettings = SolverSettings(),
     stop_set: StoppingCriteria = StoppingCriteria(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
     long_run_diagnostics: bool = False,
     verbose: bool = True,
 ):
-    if not jax.config.jax_enable_x64:
-        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
     num_countries = parameters.num_countries
     # Identical initial conditions are degenerate (no cross-country
@@ -308,7 +311,7 @@ def multicountry_growth_nn(
     if stop_set.train_loss_threshold <= 0.0 or stop_set.num_attempts < 1:
         raise ValueError("stopping threshold and attempt count must be positive")
 
-    train_data = make_train_grid(data_set).astype(dtype)
+    train_data = make_sampled_train_grid(data_set, dtype)
     if data_set.test_T > float(train_data[-1]):
         raise ValueError("test_T must not exceed the training horizon")
     if data_set.benchmark_T < max(data_set.test_T, float(train_data[-1])):
@@ -327,12 +330,19 @@ def multicountry_growth_nn(
     )
     n_train = len(train_data)
     k_0_array = jnp.asarray(k_0, dtype=dtype)
-    a_0_array = jnp.asarray(a_0, dtype=dtype)
+    populations_np = np.asarray(parameters.populations, dtype=np.float64)
+    initial_asset_gap = float(
+        np.sum(populations_np * np.asarray(a_0, dtype=np.float64))
+        / float(multicountry_output_scale(parameters, jnp.float64))
+    )
+    if abs(initial_asset_gap) > INITIAL_CLEARING_TOL:
+        raise ValueError("population-weighted initial NFA positions must sum to zero")
     populations = jnp.asarray(parameters.populations, dtype=dtype)
     output_scale = multicountry_output_scale(parameters, dtype)
-    initial_asset_gap = jnp.sum(populations * a_0_array) / output_scale
-    if abs(float(initial_asset_gap)) > INITIAL_CLEARING_TOL:
-        raise ValueError("population-weighted initial NFA positions must sum to zero")
+    # Demeaning in the working dtype clears the cast residue a float32 copy
+    # of exactly-clearing float64 positions carries.
+    a_0_array = jnp.asarray(a_0, dtype=dtype)
+    a_0_array = a_0_array - jnp.sum(populations * a_0_array) / jnp.sum(populations)
     q_reference = jnp.full(
         num_countries,
         1.0 / parameters.eta,
@@ -387,7 +397,7 @@ def multicountry_growth_nn(
         nn_set,
         dtype=dtype,
     )
-    train_start = time.perf_counter()
+    timer = Stopwatch()
     result = solver.solve(
         theta_0,
         residual_args,
@@ -400,8 +410,7 @@ def multicountry_growth_nn(
             draw=draw,
         ),
     )
-    jax.block_until_ready(result)
-    train_time = time.perf_counter() - train_start
+    train_time = timer.elapsed(result)
     policy = nnx.merge(graphdef, result.x)
 
     def evaluate_grid(points):
@@ -456,13 +465,13 @@ def multicountry_growth_nn(
     diagnostic_reasons = []
     if not finite_positive:
         diagnostic_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > TRAIN_RESIDUAL_TOL:
+    if max_train_residual > tolerance_set.train_residual:
         diagnostic_reasons.append("train_residual")
-    if max_validation_residual > VALIDATION_RESIDUAL_TOL:
+    if max_validation_residual > tolerance_set.validation_residual:
         diagnostic_reasons.append("validation_residual")
-    if max_asset_clearing_residual > ACCOUNTING_RESIDUAL_TOL:
+    if max_asset_clearing_residual > tolerance_set.accounting:
         diagnostic_reasons.append("asset_clearing")
-    if max_rate_consistency_residual > ACCOUNTING_RESIDUAL_TOL:
+    if max_rate_consistency_residual > tolerance_set.accounting:
         diagnostic_reasons.append("rate_consistency")
     solution_accepted = bool(result.multi_start.accepted)
     equation_diagnostics_pass = not diagnostic_reasons
@@ -508,7 +517,7 @@ def multicountry_growth_nn(
             float(jnp.max(a_scaled_error)),
             float(jnp.max(interest_rate_scaled_error)),
         )
-        benchmark_match = max_benchmark_error <= BENCHMARK_MATCH_TOL
+        benchmark_match = max_benchmark_error <= tolerance_set.benchmark_match
     else:
         k_relative_error = jnp.asarray(jnp.nan)
         q_relative_error = jnp.asarray(jnp.nan)
@@ -546,7 +555,8 @@ def multicountry_growth_nn(
         **asdict(parameters),
         "num_countries": num_countries,
         "seed": seed,
-        "residual_dtype": str(jnp.dtype(dtype)),
+        # Measured, not requested: a float64 leak upstream shows up here.
+        "residual_dtype": str(train_eval["capital"].dtype),
         "solver": "nlls-gram",
         "linear_solver": lm_set.linear_solver,
         "ansatz": "reduced_sequential_time_level_nn",

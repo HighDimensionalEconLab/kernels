@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import time
 from dataclasses import asdict, dataclass, replace
 
 import jax
@@ -14,22 +13,21 @@ from jax.flatten_util import ravel_pytree
 from nlls_gram import (
     DrawNNXModule,
     LevenbergMarquardt,
-    LMStatus,
     MultiStart,
 )
 
 from neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from utilities import (
     ACTIVATIONS,
+    STATUS_TO_REASON,
+    OptimizerSettings,
+    Stopwatch,
+    make_train_t_grid,
     unit_softplus,
 )
 from utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
-
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
 
 DOMAIN_EPS = 1e-8
 
@@ -81,18 +79,6 @@ class StoppingCriteria:
     # frac_accepted measures acceptance within the restart budget, not first-try
     # robustness: a seed that stalls short of the loss threshold is redrawn.
     num_attempts: int = 5
-
-
-# Local 8-seed grid: dec 0.5 / inc 2.0 is ~25% faster than 0.35/8.0 at the
-# same 8/8 acceptance; geodesic acceleration is required (off fails to reach
-# the loss threshold at any swept damping).
-@dataclass(frozen=True)
-class SolverSettings:
-    init_damping: float = 1e-5
-    damping_decrease: float = 0.5
-    damping_increase: float = 2.0
-    geodesic_acceleration: bool = True
-    geodesic_acceptance_ratio: float = 0.8
 
 
 @dataclass(frozen=True)
@@ -166,24 +152,6 @@ class GrowthPolicyNN(nnx.Module):
             [self.k_scale, self.c_scale], dtype=self.head.kernel.dtype
         )
         return output_scale * unit_softplus(self.head(h))
-
-
-def make_train_t_grid(data_set, dtype):
-    if data_set.train_points_list is not None:
-        values = list(data_set.train_points_list)
-    else:
-        values = np.linspace(
-            0.0, data_set.train_T, data_set.train_points, dtype=np.float64
-        ).tolist()
-    values = sorted(set(float(value) for value in values))
-    return jnp.asarray(values, dtype=dtype)
-
-
-STATUS_TO_REASON = {
-    LMStatus.CONVERGED: "early_stopping_met",
-    LMStatus.NONFINITE: "loss_divergence",
-    LMStatus.MAX_STEPS: "max_steps",
-}
 
 
 def production(k, p):
@@ -270,12 +238,19 @@ def neoclassical_growth_nn(
     use_float64: bool = True,
     data_set: DataSettings = DataSettings(),
     nn_set: GrowthPolicySettings = GrowthPolicySettings(),
-    lm_set: SolverSettings = SolverSettings(),
+    # Local 8-seed grid: dec 0.5 / inc 2.0 is ~25% faster than 0.35/8.0 at
+    # the same 8/8 acceptance; geodesic acceleration is required (off fails
+    # to reach the loss threshold at any swept damping).
+    lm_set: OptimizerSettings = OptimizerSettings(
+        init_damping=1e-5,
+        damping_decrease=0.5,
+        damping_increase=2.0,
+    ),
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
 ):
-    if not jax.config.jax_enable_x64:
-        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
     kinked_parameter_count = sum(parameter is not None for parameter in (A, b_1, b_2))
     if kinked_parameter_count not in {0, 3}:
         raise ValueError("Set all of A, b_1, and b_2, or set none of them.")
@@ -369,7 +344,7 @@ def neoclassical_growth_nn(
         dtype=dtype,
     )
 
-    start_time = time.perf_counter()
+    timer = Stopwatch()
     result = solver.solve(
         theta_0,
         residual_args,
@@ -383,8 +358,7 @@ def neoclassical_growth_nn(
         ),
         max_steps_is_success=False,
     )
-    jax.block_until_ready(result)
-    train_time = time.perf_counter() - start_time
+    train_time = timer.elapsed(result)
     model = nnx.merge(graphdef, result.x)
     steps = int(result.steps)
     attempt = int(result.multi_start.attempt) + 1
@@ -421,7 +395,8 @@ def neoclassical_growth_nn(
         "b_2": b_2_value,
         "use_kinked_production": use_kinked_production,
         "seed": seed,
-        "residual_dtype": str(jnp.dtype(dtype)),
+        # Measured, not requested: a float64 leak upstream shows up here.
+        "residual_dtype": str(tvc_values["log_tvc"].dtype),
         "solver": "nlls-gram",
         "train_loss": train_loss,
         "final_damping": float(result.lm_state.damping),

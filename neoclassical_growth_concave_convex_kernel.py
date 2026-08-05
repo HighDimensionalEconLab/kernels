@@ -1,18 +1,14 @@
 from __future__ import annotations
 
-import jax
 import jsonargparse
 
 from neoclassical_growth_kernel import (
     DataSettings,
     KernelSettings,
     SolverSettings,
+    ToleranceSettings,
     neoclassical_growth_kernel,
 )
-
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
 
 
 def neoclassical_growth_concave_convex_kernel(
@@ -27,6 +23,7 @@ def neoclassical_growth_concave_convex_kernel(
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(test_points=41),
     lm_set: SolverSettings = SolverSettings(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
     c_0_guess: float | None = None,
 ):
     return neoclassical_growth_kernel(
@@ -41,6 +38,7 @@ def neoclassical_growth_concave_convex_kernel(
         kernel_set=kernel_set,
         data_set=data_set,
         lm_set=lm_set,
+        tolerance_set=tolerance_set,
         c_0_guess=c_0_guess,
     )
 

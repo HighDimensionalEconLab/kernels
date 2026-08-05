@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import time
 from dataclasses import asdict, dataclass, replace
 
 import jax
@@ -11,20 +10,16 @@ import numpy as np
 import pandas as pd
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
-from nlls_gram import DrawNNXModule, LevenbergMarquardt, LMStatus, MultiStart
+from nlls_gram import DrawNNXModule, LevenbergMarquardt, MultiStart
 
 from asset_pricing_benchmark import mu_f_array
-from utilities import ACTIVATIONS
-
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
-
-STATUS_TO_REASON = {
-    LMStatus.CONVERGED: "early_stopping_met",
-    LMStatus.NONFINITE: "loss_divergence",
-    LMStatus.MAX_STEPS: "max_steps",
-}
+from utilities import (
+    ACTIVATIONS,
+    STATUS_TO_REASON,
+    OptimizerSettings,
+    Stopwatch,
+    make_train_t_grid,
+)
 
 
 @dataclass(frozen=True)
@@ -109,20 +104,6 @@ class PricePolicyNN(nnx.Module):
         return self.head(h)[0]
 
 
-def make_train_t_grid(data_set, dtype):
-    if data_set.train_points_list is None:
-        values = np.linspace(
-            0.0,
-            data_set.train_T,
-            data_set.train_points,
-            dtype=np.float64,
-        ).tolist()
-    else:
-        values = list(data_set.train_points_list)
-    values = sorted(set(float(value) for value in values))
-    return jnp.asarray(values, dtype=dtype)
-
-
 def policy_values(model, t, r, c, g, x_0):
     price, price_derivative = jax.vmap(
         lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),))
@@ -171,11 +152,18 @@ def asset_pricing_nn(
     use_float64: bool = True,
     data_set: DataSettings = DataSettings(),
     nn_set: PricePolicySettings = PricePolicySettings(),
+    # Library-default LM damping schedule; pinned here so the CLI reaches it.
+    lm_set: OptimizerSettings = OptimizerSettings(
+        init_damping=1e-3,
+        damping_decrease=0.5,
+        damping_increase=4.0,
+        geodesic_acceptance_ratio=0.75,
+    ),
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
 ):
-    if not jax.config.jax_enable_x64:
-        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
     train_t = make_train_t_grid(data_set, dtype)
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
@@ -199,11 +187,16 @@ def asset_pricing_nn(
 
     solver = LevenbergMarquardt(
         residual_fn,
+        init_damping=lm_set.init_damping,
+        damping_decrease=lm_set.damping_decrease,
+        damping_increase=lm_set.damping_increase,
+        geodesic_acceleration=lm_set.geodesic_acceleration,
+        geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
     atol = math.sqrt(stop_set.train_loss_threshold)
     draw = DrawNNXModule(PricePolicyNN, nn_set, dtype=dtype)
 
-    start = time.perf_counter()
+    timer = Stopwatch()
     result = solver.solve(
         theta_0,
         residual_args,
@@ -217,8 +210,7 @@ def asset_pricing_nn(
         ),
         max_steps_is_success=False,
     )
-    jax.block_until_ready(result)
-    train_time = time.perf_counter() - start
+    train_time = timer.elapsed(result)
     model = nnx.merge(graphdef, result.x)
 
     train_df = snapshot(model, train_t, r, c, g, x_0)
@@ -232,7 +224,9 @@ def asset_pricing_nn(
         "g": g,
         "x_0": x_0,
         "seed": seed,
-        "residual_dtype": str(jnp.dtype(dtype)),
+        # Measured from the trained parameters, not requested: a float64 leak
+        # in the solve promotes them.
+        "residual_dtype": str(ravel_pytree(nnx.state(model, nnx.Param))[0].dtype),
         "solver": "nlls-gram",
         "ansatz": "sequential_time_level_nn",
         "metric": "identity_parameter_metric",
@@ -279,6 +273,7 @@ def asset_pricing_nn(
         "hyperparameters": {
             "nn_set": asdict(nn_set),
             "data_set": asdict(data_set),
+            "lm_set": asdict(lm_set),
             "stop_set": asdict(stop_set),
             "parameters": {"r": r, "c": c, "g": g},
             "initial_conditions": {"x_0": x_0},

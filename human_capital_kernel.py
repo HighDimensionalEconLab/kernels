@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from dataclasses import asdict, dataclass
 
 import jax
@@ -10,26 +9,20 @@ import numpy as np
 import pandas as pd
 from nlls_gram import (
     LevenbergMarquardt,
-    LMStatus,
-    RepeatedFactorMetric,
     RidgeLevenbergMarquardt,
 )
 
 from kernels import (
     integrated_kernel_matrices,
+    integrated_metric_factorization,
     normalize_kernel,
 )
-
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
-
-TRAIN_RESIDUAL_TOL = 1e-5
-STATUS_TO_REASON = {
-    LMStatus.CONVERGED: "converged",
-    LMStatus.NONFINITE: "nonfinite",
-    LMStatus.MAX_STEPS: "max_steps",
-}
+from utilities import (
+    STATUS_TO_REASON,
+    Stopwatch,
+    acceptance_fields,
+    make_train_t_grid,
+)
 
 
 def human_capital_initial_residual(params, batch):
@@ -55,8 +48,8 @@ def human_capital_initial_conditions(
     delta_h: float = 0.05,
     k_0: float = 1.5,
     iterations: int = 20,
+    dtype=jnp.float64,
 ):
-    dtype = jnp.float64
     batch = tuple(
         jnp.asarray(value, dtype=dtype) for value in (a_k, a_h, delta_k, delta_h, k_0)
     )
@@ -100,6 +93,13 @@ class DataSettings:
     validation_points: int = 300
 
 
+# Acceptance gates, CLI-reachable so a float32 caller can pass its own bar
+# (the float32 replication driver does).
+@dataclass(frozen=True)
+class ToleranceSettings:
+    train_residual: float = 1e-5
+
+
 @dataclass(frozen=True)
 class SolverSettings:
     init_damping: float = 1e-8
@@ -130,19 +130,15 @@ def human_capital_kernel(
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
     lm_set: SolverSettings = SolverSettings(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = False,
 ):
-    if not jax.config.jax_enable_x64:
-        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
     kernel = normalize_kernel(kernel_set.kernel)
     ell, sigma = kernel_set.ell, kernel_set.sigma
-    if data_set.train_points_list is None:
-        train_data = jnp.linspace(
-            0.0, data_set.train_T, data_set.train_points, dtype=dtype
-        )
-    else:
-        train_data = jnp.sort(jnp.asarray(data_set.train_points_list, dtype=dtype))
+    train_data = make_train_t_grid(data_set, dtype)
     test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     validation_data = jnp.linspace(
         0.0,
@@ -152,15 +148,11 @@ def human_capital_kernel(
     )
     n_train = len(train_data)
 
-    metric_data = train_data.astype(jnp.float64)
-    K_metric, K_tilde_metric = integrated_kernel_matrices(
-        metric_data, metric_data, kernel, sigma, ell
+    K, K_tilde, metric = integrated_metric_factorization(
+        train_data, kernel, sigma, ell, repeats=7
     )
-    K_metric = (K_metric + K_metric.T) / 2
-    K = K_metric.astype(dtype)
-    K_tilde = K_tilde_metric.astype(dtype)
     h_0_jax, c_0_init_jax, initial_residual, _ = human_capital_initial_conditions(
-        a_k, a_h, delta_k, delta_h, k_0
+        a_k, a_h, delta_k, delta_h, k_0, dtype=dtype
     )
     h_0 = float(h_0_jax)
     c_0_init = float(c_0_init_jax)
@@ -228,10 +220,6 @@ def human_capital_kernel(
             residuals(path_values(theta, K, K_tilde))
         )
 
-    metric = RepeatedFactorMetric(
-        jnp.linalg.cholesky(K_metric, upper=True).astype(dtype),
-        repeats=7,
-    )
     theta_0 = (
         jnp.zeros(n_train, dtype=dtype),
         jnp.zeros(n_train, dtype=dtype),
@@ -260,7 +248,7 @@ def human_capital_kernel(
         damping_increase=lm_set.damping_increase,
     )
 
-    start = time.perf_counter()
+    timer = Stopwatch()
     result = solver.solve(
         theta_0,
         max_steps=lm_set.max_steps,
@@ -268,8 +256,7 @@ def human_capital_kernel(
         atol=lm_set.residual_atol,
         max_steps_is_success=False,
     )
-    jax.block_until_ready(result)
-    elapsed = time.perf_counter() - start
+    elapsed = timer.elapsed(result)
     theta = result.x
     (
         alpha_k,
@@ -340,12 +327,12 @@ def human_capital_kernel(
             for name in positive_names
         )
     )
+    train_residual_tolerance = tolerance_set.train_residual
     rejection_reasons = []
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > TRAIN_RESIDUAL_TOL:
+    if max_train_residual > train_residual_tolerance:
         rejection_reasons.append("train_residual")
-    solution_accepted = not rejection_reasons
 
     @jax.jit
     def kernel_solution(points):
@@ -367,7 +354,6 @@ def human_capital_kernel(
     rkhs_norms = {
         name: float(alpha @ K @ alpha) for name, alpha in alpha_by_name.items()
     }
-    solution_accepted = not rejection_reasons
     results = {
         "a_k": a_k,
         "a_h": a_h,
@@ -376,7 +362,8 @@ def human_capital_kernel(
         "rho_hat": rho_hat,
         "k_0": k_0,
         "h_0": h_0,
-        "residual_dtype": str(jnp.dtype(dtype)),
+        # Measured, not requested: a float64 leak upstream shows up here.
+        "residual_dtype": str(train_eval["feasibility"].dtype),
         "kernel": kernel,
         "ell": ell,
         "sigma": sigma,
@@ -394,6 +381,7 @@ def human_capital_kernel(
         ),
         **{f"rkhs_norm_{name}": value for name, value in rkhs_norms.items()},
         "max_train_residual": max_train_residual,
+        "train_residual_tolerance": train_residual_tolerance,
         "max_validation_residual": max_validation_residual,
         "max_test_feasibility": float(jnp.max(jnp.abs(test_eval["feasibility"]))),
         "max_test_hidden_dae_residual": float(
@@ -410,10 +398,7 @@ def human_capital_kernel(
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
-        "solution_accepted": solution_accepted,
-        "rejection_reason": (
-            "accepted" if solution_accepted else ",".join(rejection_reasons)
-        ),
+        **acceptance_fields(rejection_reasons),
     }
     if verbose:
         print(f"solve_time(s) = {elapsed}")

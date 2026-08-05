@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import dataclasses
-import time
 from dataclasses import asdict, dataclass
 
 import jax
@@ -16,12 +15,12 @@ from nlls_gram import (
     BlockEigenPreconditioner,
     Cholesky,
     LMStatus,
-    RepeatedFactorMetric,
     RidgeLevenbergMarquardt,
 )
 
 from kernels import (
     integrated_kernel_matrices,
+    integrated_metric_factorization,
     normalize_kernel,
     rkhs_norm_squared,
 )
@@ -43,21 +42,16 @@ from multicountry_growth_preconditioner import (
     block_eigen_permutation,
     multicountry_block_eigen_families,
 )
+from utilities import (
+    STATUS_TO_REASON,
+    Stopwatch,
+    acceptance_fields,
+    make_sampled_train_grid,
+)
 
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
-
-TRAIN_RESIDUAL_TOL = 1e-5
-VALIDATION_RESIDUAL_TOL = 5e-3
-ACCOUNTING_RESIDUAL_TOL = 5e-5
+# Validity of the inputs, not an acceptance gate: checked in exact float64 on
+# the raw values, so it holds at any working dtype.
 INITIAL_CLEARING_TOL = 1e-10
-BENCHMARK_MATCH_TOL = 5e-3
-STATUS_TO_REASON = {
-    LMStatus.CONVERGED: "converged",
-    LMStatus.NONFINITE: "nonfinite",
-    LMStatus.MAX_STEPS: "max_steps",
-}
 
 
 @dataclass(frozen=True)
@@ -66,12 +60,12 @@ class ToleranceSettings:
     # residual on the collocation grid; at a fixed ridge the converged
     # residual floors at the O(ridge) bias, so a run at a deliberately
     # larger ridge (e.g. an iterative linear solver whose Krylov iteration
-    # count scales like 1/sqrt(ridge)) must pass a ridge-aware value here
-    # rather than the float64 production default.
-    train_residual: float = TRAIN_RESIDUAL_TOL
-    validation_residual: float = VALIDATION_RESIDUAL_TOL
-    accounting: float = ACCOUNTING_RESIDUAL_TOL
-    benchmark_match: float = BENCHMARK_MATCH_TOL
+    # count scales like 1/sqrt(ridge)) or in float32 must pass its own
+    # values here rather than the float64 production defaults.
+    train_residual: float = 1e-5
+    validation_residual: float = 5e-3
+    accounting: float = 5e-5
+    benchmark_match: float = 5e-3
 
 
 @dataclass(frozen=True)
@@ -163,38 +157,6 @@ class SolverSettings:
     ridge_stall_rtol: float = 0.0
 
 
-def make_train_grid(data_set):
-    if data_set.train_points_list is not None:
-        train_data = jnp.sort(jnp.asarray(data_set.train_points_list))
-    elif data_set.sampling == "uniform":
-        train_data = jnp.linspace(0.0, data_set.train_T, data_set.train_points)
-    elif data_set.sampling == "front_loaded":
-        dense_points = data_set.train_points - data_set.tail_points
-        if (
-            dense_points < 2
-            or data_set.tail_points < 1
-            or not 0.0 < data_set.dense_T < data_set.train_T
-        ):
-            raise ValueError(
-                "front_loaded sampling requires at least 2 dense points, "
-                "1 tail point, and 0 < dense_T < train_T"
-            )
-        dense_data = jnp.linspace(0.0, data_set.dense_T, dense_points)
-        tail_data = jnp.linspace(
-            data_set.dense_T,
-            data_set.train_T,
-            data_set.tail_points + 1,
-        )[1:]
-        train_data = jnp.concatenate([dense_data, tail_data])
-    else:
-        raise ValueError("sampling must be 'front_loaded' or 'uniform'")
-    if len(train_data) < 3 or not bool(jnp.all(jnp.diff(train_data) > 0.0)):
-        raise ValueError("training points must be strictly increasing")
-    if float(train_data[0]) != 0.0:
-        raise ValueError("training points must start at zero")
-    return train_data
-
-
 def multicountry_growth_kernel(
     k_0: tuple[float, ...] | None = None,
     a_0: tuple[float, ...] | None = None,
@@ -207,8 +169,8 @@ def multicountry_growth_kernel(
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     sensitivity_time: float | None = None,
 ):
-    if not jax.config.jax_enable_x64:
-        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
     num_countries = parameters.num_countries
     # Identical initial conditions are degenerate (no cross-country
@@ -229,7 +191,7 @@ def multicountry_growth_kernel(
         raise ValueError(f"linear_solver must be one of {supported_linear_solvers}")
 
     kernel = normalize_kernel(kernel_set.kernel)
-    train_data = make_train_grid(data_set).astype(dtype)
+    train_data = make_sampled_train_grid(data_set, dtype)
     if data_set.test_T > float(train_data[-1]):
         raise ValueError("test_T must not exceed the training horizon")
     if data_set.benchmark_T < max(data_set.test_T, float(train_data[-1])):
@@ -245,12 +207,19 @@ def multicountry_growth_kernel(
     benchmark_grid = np.linspace(0.0, data_set.benchmark_T, data_set.benchmark_points)
     n_train = len(train_data)
     k_0_array = jnp.asarray(k_0, dtype=dtype)
-    a_0_array = jnp.asarray(a_0, dtype=dtype)
-    populations = jnp.asarray(parameters.populations, dtype=k_0_array.dtype)
-    output_scale = multicountry_output_scale(parameters, k_0_array.dtype)
-    initial_asset_gap = jnp.sum(populations * a_0_array) / output_scale
-    if abs(float(initial_asset_gap)) > INITIAL_CLEARING_TOL:
+    populations_np = np.asarray(parameters.populations, dtype=np.float64)
+    initial_asset_gap = float(
+        np.sum(populations_np * np.asarray(a_0, dtype=np.float64))
+        / float(multicountry_output_scale(parameters, jnp.float64))
+    )
+    if abs(initial_asset_gap) > INITIAL_CLEARING_TOL:
         raise ValueError("population-weighted initial NFA positions must sum to zero")
+    populations = jnp.asarray(parameters.populations, dtype=dtype)
+    output_scale = multicountry_output_scale(parameters, dtype)
+    # Demeaning in the working dtype clears the cast residue a float32 copy
+    # of exactly-clearing float64 positions carries.
+    a_0_array = jnp.asarray(a_0, dtype=dtype)
+    a_0_array = a_0_array - jnp.sum(populations * a_0_array) / jnp.sum(populations)
     q_reference = jnp.full(
         num_countries,
         1.0 / parameters.eta,
@@ -258,17 +227,15 @@ def multicountry_growth_kernel(
     )
     mu_reference = multicountry_reference_mu(parameters, k_0_array.dtype)
 
-    metric_data = train_data.astype(jnp.float64)
-    K_metric, K_tilde_metric = integrated_kernel_matrices(
-        metric_data,
-        metric_data,
-        kernel,
-        kernel_set.sigma,
-        kernel_set.ell,
+    num_dynamic_functions = 4 * num_countries
+    num_rkhs_functions = num_dynamic_functions + 1
+    num_initial_values = 2 * num_countries + 1
+    # Every linear solver works on the whitened subproblem; the metric takes
+    # the upper Cholesky factor F with K = F'F and the trailing initial
+    # values stay in the unpenalized free block, untransformed.
+    K, K_tilde, metric = integrated_metric_factorization(
+        train_data, kernel, kernel_set.sigma, kernel_set.ell, repeats=num_rkhs_functions
     )
-    K_metric = (K_metric + K_metric.T) / 2.0
-    K = K_metric.astype(dtype)
-    K_tilde = K_tilde_metric.astype(dtype)
 
     # The structural parameters and initial conditions ride in the solver's
     # `p` argument so the solved paths are implicitly differentiable with
@@ -358,16 +325,6 @@ def multicountry_growth_kernel(
             ]
         )
 
-    num_dynamic_functions = 4 * num_countries
-    num_rkhs_functions = num_dynamic_functions + 1
-    num_initial_values = 2 * num_countries + 1
-    # Every linear solver works on the whitened subproblem; the metric takes
-    # the upper Cholesky factor F with K = F'F and the trailing initial
-    # values stay in the unpenalized free block, untransformed.
-    metric = RepeatedFactorMetric(
-        jnp.linalg.cholesky(K_metric, upper=True).astype(dtype),
-        repeats=num_rkhs_functions,
-    )
     theta_0 = (
         jnp.zeros((num_countries, n_train), dtype=dtype),
         jnp.zeros((num_countries, n_train), dtype=dtype),
@@ -471,7 +428,7 @@ def multicountry_growth_kernel(
         max_steps_is_success=False,
     )
 
-    solve_start = time.perf_counter()
+    timer = Stopwatch()
     result = solver.solve(
         theta_0,
         args,
@@ -479,8 +436,7 @@ def multicountry_growth_kernel(
         **solve_options,
         **continuation_options,
     )
-    jax.block_until_ready(result)
-    solve_time = time.perf_counter() - solve_start
+    solve_time = timer.elapsed(result)
     theta = result.x
 
     def evaluate_grid(points):
@@ -551,7 +507,6 @@ def multicountry_growth_kernel(
         rejection_reasons.append("asset_clearing")
     if max_rate_consistency_residual > tolerance_set.accounting:
         rejection_reasons.append("rate_consistency")
-    solution_accepted = not rejection_reasons
 
     benchmark_available = num_countries == 2
     benchmark_values = None
@@ -622,11 +577,11 @@ def multicountry_growth_kernel(
         "m": theta[3],
     }
     rkhs_norms = {
-        f"{name}_{country + 1}": rkhs_norm_squared(coefficients[country], K_metric)
+        f"{name}_{country + 1}": rkhs_norm_squared(coefficients[country], K)
         for name, coefficients in coefficient_groups.items()
         for country in range(num_countries)
     }
-    rkhs_norm_rate = rkhs_norm_squared(theta[4], K_metric)
+    rkhs_norm_rate = rkhs_norm_squared(theta[4], K)
     rkhs_norm_total = sum(rkhs_norms.values()) + rkhs_norm_rate
 
     sensitivity_df = None
@@ -693,7 +648,8 @@ def multicountry_growth_kernel(
         "r": parameters.r,
         "eta": parameters.eta,
         "num_countries": num_countries,
-        "residual_dtype": str(jnp.dtype(dtype)),
+        # Measured, not requested: a float64 leak upstream shows up here.
+        "residual_dtype": str(train_eval["capital"].dtype),
         "kernel": kernel,
         "ell": kernel_set.ell,
         "sigma": kernel_set.sigma,
@@ -767,10 +723,7 @@ def multicountry_growth_kernel(
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
-        "solution_accepted": solution_accepted,
-        "rejection_reason": (
-            "accepted" if solution_accepted else ",".join(rejection_reasons)
-        ),
+        **acceptance_fields(rejection_reasons),
     }
     for country in range(num_countries):
         suffix = country + 1

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import pathlib
 import time
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from functools import partial
 
 import jax
@@ -46,7 +46,6 @@ from utilities import (
 from utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
-    resolve_precision_default,
 )
 
 
@@ -120,29 +119,15 @@ def stochastic_growth_kernel_recursive(
         geodesic_acceleration=True,
         geodesic_acceptance_ratio=0.75,
     ),
-    stop_set: StoppingCriteria = StoppingCriteria(max_steps=150),
+    # The float64 ridge-LM residual floor of this representation on the 2-D
+    # stochastic state box sits at ~1.3e-5 RMS, slightly above the
+    # deterministic variant's floor.
+    stop_set: StoppingCriteria = StoppingCriteria(max_steps=150, residual_atol=2e-5),
     verbose: bool = True,
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    kernel_set = replace(
-        kernel_set,
-        metric_epsilon=resolve_precision_default(
-            kernel_set.metric_epsilon, dtype, 3e-5, 1e-4
-        ),
-    )
-    # The float64 ridge-LM residual floor of this representation on the 2-D
-    # stochastic state box sits at ~1.3e-5 RMS, slightly above the
-    # deterministic variant's floor.
-    stop_set = replace(
-        stop_set,
-        residual_atol=resolve_precision_default(
-            stop_set.residual_atol, dtype, 2e-5, 2e-4
-        ),
-        gtol=resolve_precision_default(stop_set.gtol, dtype, 1e-7, 1e-5),
-        ridge=resolve_precision_default(stop_set.ridge, dtype, 1e-12, 1e-8),
-    )
     if not 0.0 < a < 1.0:
         raise ValueError("a must lie strictly between zero and one")
     if sigma_crra <= 0.0:

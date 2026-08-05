@@ -39,7 +39,6 @@ from utilities import (
 from utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
-    resolve_precision_default,
 )
 
 DOMAIN_EPS = 1e-8
@@ -94,7 +93,7 @@ class StoppingCriteria:
     # the training ICs when their variance is positive) is redrawn at each
     # interior epoch boundary.
     max_steps: int = 250
-    train_loss_threshold: float | None = None
+    train_loss_threshold: float = 1e-14
     num_attempts: int = 4
     log_tvc_threshold: float = 0.0
     num_epochs: int = 3
@@ -561,12 +560,6 @@ def stochastic_growth_nn_recursive(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    stop_set = replace(
-        stop_set,
-        train_loss_threshold=resolve_precision_default(
-            stop_set.train_loss_threshold, dtype, 1e-14, 1e-10
-        ),
-    )
     if not 0.0 < a < 1.0:
         raise ValueError("a must lie strictly between zero and one")
     if sigma_crra <= 0.0:
@@ -591,7 +584,7 @@ def stochastic_growth_nn_recursive(
         raise ValueError("train_T must be positive")
     if data_set.train_points < 2:
         raise ValueError("train_points must be at least two")
-    if stop_set.train_loss_threshold is None or not (
+    if not (
         math.isfinite(stop_set.train_loss_threshold)
         and stop_set.train_loss_threshold > 0.0
     ):

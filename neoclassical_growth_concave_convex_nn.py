@@ -1,19 +1,14 @@
 from __future__ import annotations
 
-import jax
 import jsonargparse
 
 from neoclassical_growth_nn import (
     DataSettings,
     GrowthPolicySettings,
-    SolverSettings,
     StoppingCriteria,
     neoclassical_growth_nn,
 )
-
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
+from utilities import OptimizerSettings
 
 
 def neoclassical_growth_concave_convex_nn(
@@ -29,7 +24,11 @@ def neoclassical_growth_concave_convex_nn(
     use_float64: bool = True,
     data_set: DataSettings = DataSettings(test_points=41),
     nn_set: GrowthPolicySettings = GrowthPolicySettings(),
-    lm_set: SolverSettings = SolverSettings(),
+    lm_set: OptimizerSettings = OptimizerSettings(
+        init_damping=1e-5,
+        damping_decrease=0.5,
+        damping_increase=2.0,
+    ),
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
 ):

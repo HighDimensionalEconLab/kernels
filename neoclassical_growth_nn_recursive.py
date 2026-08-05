@@ -23,7 +23,6 @@ from utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
     OptimizerSettings,
-    resolve_precision_default,
     unit_softplus,
 )
 from utilities import (
@@ -103,7 +102,7 @@ class StoppingCriteria:
     # max_steps is the LM-update budget per epoch; training ICs are redrawn at
     # each interior epoch boundary, so num_epochs = 1 never resamples.
     max_steps: int = 250
-    train_loss_threshold: float | None = None
+    train_loss_threshold: float = 1e-14
     # Multi-start restarts with fresh parameter draws; later attempts run only
     # when an earlier one fails, so converging solves pay nothing.
     num_attempts: int = 5
@@ -811,12 +810,6 @@ def neoclassical_growth_nn_recursive(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    stop_set = replace(
-        stop_set,
-        train_loss_threshold=resolve_precision_default(
-            stop_set.train_loss_threshold, dtype, 1e-14, 1e-10
-        ),
-    )
     if not 0.0 < a < 1.0:
         raise ValueError("a must lie strictly between zero and one")
     if sigma_crra <= 0.0:
@@ -835,7 +828,7 @@ def neoclassical_growth_nn_recursive(
         raise ValueError("train_T must be positive")
     if data_set.train_points < 2:
         raise ValueError("train_points must be at least two")
-    if stop_set.train_loss_threshold is None or not (
+    if not (
         math.isfinite(stop_set.train_loss_threshold)
         and stop_set.train_loss_threshold > 0.0
     ):

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import time
 from dataclasses import asdict, dataclass, replace
 
 import jax
@@ -14,7 +13,6 @@ from jax.flatten_util import ravel_pytree
 from nlls_gram import (
     DrawNNXModule,
     LevenbergMarquardt,
-    LMStatus,
     MultiStart,
 )
 
@@ -29,15 +27,15 @@ from open_economy_growth import (
     tvc_diagnostics,
 )
 from open_economy_growth_benchmark import open_economy_growth_benchmark
-from utilities import ACTIVATIONS
+from utilities import (
+    ACTIVATIONS,
+    STATUS_TO_REASON,
+    OptimizerSettings,
+    Stopwatch,
+    acceptance_fields,
+    make_sampled_train_grid,
+)
 
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
-
-TRAIN_RESIDUAL_TOL = 1e-5
-VALIDATION_RESIDUAL_TOL = 1e-2
-BENCHMARK_MATCH_TOL = 1e-3
 RESIDUAL_NAMES = (
     "capital",
     "assets",
@@ -45,11 +43,15 @@ RESIDUAL_NAMES = (
     "marginal_wealth",
     "consumption_foc",
 )
-STATUS_TO_REASON = {
-    LMStatus.CONVERGED: "early_stopping_met",
-    LMStatus.NONFINITE: "loss_divergence",
-    LMStatus.MAX_STEPS: "max_steps",
-}
+
+
+# Acceptance gates, CLI-reachable so a float32 caller can pass its own bar
+# (the float32 replication driver does).
+@dataclass(frozen=True)
+class ToleranceSettings:
+    train_residual: float = 1e-5
+    validation_residual: float = 1e-2
+    benchmark_match: float = 1e-3
 
 
 # The kernel driver's collocation grid, reused verbatim so the sequence-space
@@ -76,15 +78,6 @@ class StoppingCriteria:
     # frac_accepted measures acceptance within the restart budget, not first-try
     # robustness: a seed that stalls short of the loss threshold is redrawn.
     num_attempts: int = 5
-
-
-@dataclass(frozen=True)
-class SolverSettings:
-    init_damping: float = 1e-5
-    damping_decrease: float = 0.5
-    damping_increase: float = 2.0
-    geodesic_acceleration: bool = True
-    geodesic_acceptance_ratio: float = 0.8
 
 
 @dataclass(frozen=True)
@@ -191,30 +184,6 @@ class SequencePathNN(nnx.Module):
         return self.head(h)
 
 
-def make_train_t_grid(data_set, dtype):
-    if data_set.train_points_list is not None:
-        return jnp.sort(jnp.asarray(data_set.train_points_list, dtype=dtype))
-    if data_set.sampling == "uniform":
-        return jnp.linspace(0.0, data_set.train_T, data_set.train_points, dtype=dtype)
-    if data_set.sampling != "front_loaded":
-        raise ValueError("sampling must be 'front_loaded' or 'uniform'")
-    dense_points = data_set.train_points - data_set.tail_points
-    if (
-        dense_points < 2
-        or data_set.tail_points < 1
-        or not 0.0 < data_set.dense_T < data_set.train_T
-    ):
-        raise ValueError(
-            "front_loaded sampling requires at least 2 dense points, "
-            "1 tail point, and 0 < dense_T < train_T"
-        )
-    dense_data = jnp.linspace(0.0, data_set.dense_T, dense_points, dtype=dtype)
-    tail_data = jnp.linspace(
-        data_set.dense_T, data_set.train_T, data_set.tail_points + 1, dtype=dtype
-    )[1:]
-    return jnp.concatenate([dense_data, tail_data])
-
-
 def path_values(model, t, p, scales):
     # k(0) = k_0 and a(0) = a_0 hold exactly by anchoring the two accumulating
     # paths on the network's own value at zero; c, mu, and q stay free there,
@@ -273,21 +242,22 @@ def open_economy_growth_nn(
     use_float64: bool = True,
     data_set: DataSettings = DataSettings(),
     nn_set: SequencePathSettings = SequencePathSettings(),
-    lm_set: SolverSettings = SolverSettings(),
+    lm_set: OptimizerSettings = OptimizerSettings(
+        init_damping=1e-5,
+        damping_decrease=0.5,
+        damping_increase=2.0,
+    ),
     stop_set: StoppingCriteria = StoppingCriteria(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
 ):
-    if not jax.config.jax_enable_x64:
-        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
     if k_0 <= 0.0:
         raise ValueError("k_0 must be positive")
     dtype = jnp.float64 if use_float64 else jnp.float32
 
-    train_t = make_train_t_grid(data_set, dtype)
-    if len(train_t) < 3 or not bool(jnp.all(jnp.diff(train_t) > 0.0)):
-        raise ValueError("training points must be strictly increasing")
-    if float(train_t[0]) != 0.0:
-        raise ValueError("training points must start at zero")
+    train_t = make_sampled_train_grid(data_set, dtype)
     if data_set.test_T > float(train_t[-1]):
         raise ValueError("test_T must not exceed the training horizon")
     if data_set.benchmark_T < max(data_set.test_T, float(train_t[-1])):
@@ -333,7 +303,7 @@ def open_economy_growth_nn(
     # sum of squared residuals.
     atol = math.sqrt(stop_set.train_loss_threshold)
 
-    train_start = time.perf_counter()
+    timer = Stopwatch()
     result = solver.solve(
         theta_0,
         residual_args,
@@ -347,8 +317,7 @@ def open_economy_growth_nn(
         ),
         max_steps_is_success=False,
     )
-    jax.block_until_ready(result)
-    train_time = time.perf_counter() - train_start
+    train_time = timer.elapsed(result)
     model = nnx.merge(graphdef, result.x)
     attempt = int(result.multi_start.attempt) + 1
 
@@ -441,11 +410,12 @@ def open_economy_growth_nn(
         rejection_reasons.append("solver_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > TRAIN_RESIDUAL_TOL:
+    if max_train_residual > tolerance_set.train_residual:
         rejection_reasons.append("train_residual")
-    if max_validation_residual > VALIDATION_RESIDUAL_TOL:
+    if max_validation_residual > tolerance_set.validation_residual:
         rejection_reasons.append("validation_residual")
-    solution_accepted = not rejection_reasons
+    acceptance = acceptance_fields(rejection_reasons)
+    solution_accepted = acceptance["solution_accepted"]
 
     n_train = len(train_t)
     results = {
@@ -455,7 +425,8 @@ def open_economy_growth_nn(
         "a_0": a_0,
         "a_0_over_output_ss": a_0 / output_scale,
         "seed": seed,
-        "residual_dtype": str(jnp.dtype(dtype)),
+        # Measured, not requested: a float64 leak upstream shows up here.
+        "residual_dtype": str(train_eval["capital"].dtype),
         "solver": "nlls-gram",
         "selection": "minimum_identity_metric_parameter_step",
         "initialization": "near_zero_head",
@@ -472,7 +443,7 @@ def open_economy_growth_nn(
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
         "max_benchmark_error": max_benchmark_error,
-        "benchmark_match": max_benchmark_error <= BENCHMARK_MATCH_TOL,
+        "benchmark_match": max_benchmark_error <= tolerance_set.benchmark_match,
         "terminal_residual_count": 0,
         "differential_residual_count": 4 * n_train,
         "algebraic_residual_count": n_train,
@@ -507,10 +478,7 @@ def open_economy_growth_nn(
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
         "nn_width": nn_set.width,
         "nn_depth": nn_set.depth,
-        "solution_accepted": solution_accepted,
-        "rejection_reason": (
-            "accepted" if solution_accepted else ",".join(rejection_reasons)
-        ),
+        **acceptance,
     }
 
     if verbose:
@@ -549,6 +517,7 @@ def open_economy_growth_nn(
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
         "stop_set": asdict(stop_set),
+        "tolerance_set": asdict(tolerance_set),
         "initial_conditions": {"k_0": k_0, "a_0": a_0},
     }
     return results, {

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from functools import partial
 from typing import Literal
 
@@ -46,7 +46,6 @@ from utilities import (
 from utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
-    resolve_precision_default,
     unit_softplus,
 )
 
@@ -76,9 +75,7 @@ class StateKernelSettings:
     # shorter values under-cover the capital span and stall the ridge-LM
     # solve, while ~0.9 converges too slowly for the replication step budget.
     lengthscale: float = 0.6
-    # None resolves per precision (3e-5 float64, 1e-4 float32): the float32
-    # Gram needs a larger shift to stay Cholesky-factorable.
-    metric_epsilon: float | None = None
+    metric_epsilon: float = 3e-5
     # With the free constant, theta is (alpha, h_const) and only alpha is
     # penalized; without it the policy is the pure RKHS expansion.
     free_constant: bool = True
@@ -100,15 +97,15 @@ class StateKernelSettings:
     linear_mean: bool = False
 
 
-# None thresholds resolve per precision inside the solver: RMS Euler at 1e-5
-# (float64) is far below economic significance, and the float32 defaults sit
-# above that precision's residual floor.
 @dataclass(frozen=True)
 class StoppingCriteria:
     max_steps: int = 100
-    residual_atol: float | None = None
-    gtol: float | None = None
-    ridge: float | None = None
+    # RMS Euler at 1e-5 is far below economic significance. The thresholds
+    # are float64-tuned; float32 callers pass looser values explicitly (the
+    # float32 replication driver carries them).
+    residual_atol: float = 1e-5
+    gtol: float = 1e-7
+    ridge: float = 1e-12
     log_tvc_threshold: float = 0.0
 
 
@@ -324,20 +321,6 @@ def neoclassical_growth_kernel_recursive(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    kernel_set = replace(
-        kernel_set,
-        metric_epsilon=resolve_precision_default(
-            kernel_set.metric_epsilon, dtype, 3e-5, 1e-4
-        ),
-    )
-    stop_set = replace(
-        stop_set,
-        residual_atol=resolve_precision_default(
-            stop_set.residual_atol, dtype, 1e-5, 1e-4
-        ),
-        gtol=resolve_precision_default(stop_set.gtol, dtype, 1e-7, 1e-5),
-        ridge=resolve_precision_default(stop_set.ridge, dtype, 1e-12, 1e-8),
-    )
     if not 0.0 < a < 1.0:
         raise ValueError("a must lie strictly between zero and one")
     if sigma_crra <= 0.0:

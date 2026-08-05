@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from dataclasses import asdict, dataclass
 
 import jax
@@ -9,28 +8,22 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from nlls_gram import (
-    LMStatus,
-    RepeatedFactorMetric,
     RidgeLevenbergMarquardt,
 )
 
 from asset_pricing_benchmark import mu_f_array
 from kernels import (
     integrated_kernel_matrices,
+    integrated_metric_factorization,
     normalize_kernel,
     rkhs_norm_squared,
 )
-
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
-
-TRAIN_RESIDUAL_TOL = 1e-8
-STATUS_TO_REASON = {
-    LMStatus.CONVERGED: "converged",
-    LMStatus.NONFINITE: "nonfinite",
-    LMStatus.MAX_STEPS: "max_steps",
-}
+from utilities import (
+    STATUS_TO_REASON,
+    Stopwatch,
+    acceptance_fields,
+    make_train_t_grid,
+)
 
 
 @dataclass(frozen=True)
@@ -47,6 +40,13 @@ class DataSettings:
     train_points_list: list[float] | None = None
     test_T: float = 50.0
     test_points: int = 100
+
+
+# Acceptance gates, CLI-reachable so a float32 caller can pass its own bar
+# (the float32 replication driver does).
+@dataclass(frozen=True)
+class ToleranceSettings:
+    train_residual: float = 1e-8
 
 
 # The affine residual rewards near-Gauss-Newton steps, so a tiny init_damping
@@ -88,18 +88,14 @@ def asset_pricing_kernel(
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
     lm_set: SolverSettings = SolverSettings(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
 ):
-    if not jax.config.jax_enable_x64:
-        raise RuntimeError("enable jax_enable_x64 in the process entry point")
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
     kernel = normalize_kernel(kernel_set.kernel)
     ell, sigma = kernel_set.ell, kernel_set.sigma
-    if data_set.train_points_list is None:
-        train_data = jnp.linspace(
-            0, data_set.train_T, data_set.train_points, dtype=dtype
-        )
-    else:
-        train_data = jnp.sort(jnp.array(data_set.train_points_list, dtype=dtype))
+    train_data = make_train_t_grid(data_set, dtype)
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
     n_train = len(train_data)
 
@@ -114,13 +110,14 @@ def asset_pricing_kernel(
         alpha, p_0 = theta
         return p_0 + K_tilde_eval @ alpha, K_eval @ alpha
 
-    metric_data = train_data.astype(jnp.float64)
-    K_metric, K_tilde_metric = integrated_kernel_matrices(
-        metric_data, metric_data, kernel, sigma, ell
+    # The residual is affine in theta, so each ridge-LM step is an exact
+    # kernel ridge solve converging to the minimizer of ||r||^2 + ridge * a'Ka
+    # with p_0 in the unpenalized free block -- the min-RKHS-norm selection
+    # (the original a'Ka objective) up to an O(ridge) bias.
+    K_metric, K_tilde_jax, metric = integrated_metric_factorization(
+        train_data, kernel, sigma, ell, repeats=1
     )
-    K_metric = (K_metric + K_metric.T) / 2
-    K_jax = K_metric.astype(dtype)
-    K_tilde_jax = K_tilde_metric.astype(dtype)
+    K_jax = K_metric
 
     def train_path_values(theta):
         return path_values(theta, K_jax, K_tilde_jax)
@@ -128,16 +125,6 @@ def asset_pricing_kernel(
     def residual_fn(theta):
         p, dp_dt = train_path_values(theta)
         return dp_dt - (r * p - x_train)
-
-    # The residual is affine in theta, so each ridge-LM step is an exact
-    # kernel ridge regression: the solve converges to the minimizer of
-    # ||r||^2 + ridge * a'Ka with p_0 in the unpenalized free block -- the
-    # min-RKHS-norm selection (the original a'Ka objective) up to an
-    # O(ridge) bias. The metric takes the upper Cholesky factor F with
-    # K = F'F, computed in float64 and cast to the residual dtype.
-    metric = RepeatedFactorMetric(
-        jnp.linalg.cholesky(K_metric, upper=True).astype(dtype),
-    )
 
     solver = RidgeLevenbergMarquardt(
         residual_fn,
@@ -152,7 +139,7 @@ def asset_pricing_kernel(
         jnp.asarray(lm_set.p0_init, dtype=dtype),
     )
 
-    start = time.perf_counter()
+    timer = Stopwatch()
     result = solver.solve(
         theta_0,
         max_steps=lm_set.max_steps,
@@ -160,8 +147,7 @@ def asset_pricing_kernel(
         atol=lm_set.residual_atol,
         max_steps_is_success=False,
     )
-    jax.block_until_ready(result)
-    elapsed = time.perf_counter() - start
+    elapsed = timer.elapsed(result)
 
     theta = result.x
     alpha, p_0 = theta
@@ -205,12 +191,12 @@ def asset_pricing_kernel(
         horizon_bias_p0 = float("nan")
 
     # Acceptance certifies the solution, not the stopping code: a solve that
-    # stalls at its float64 residual floor below TRAIN_RESIDUAL_TOL is
-    # feasible (the IPOPT baseline's FEASIBLE_SMALL_STEP semantics) -- the
-    # smooth kernels routinely end there because atol is unreachable for
-    # their ill-conditioned Grams. stopping_reason still reports the code.
+    # stalls at its residual floor below the train gate is feasible (the
+    # IPOPT baseline's FEASIBLE_SMALL_STEP semantics) -- the smooth kernels
+    # routinely end there because atol is unreachable for their
+    # ill-conditioned Grams. stopping_reason still reports the code.
     train_residual_tolerance = max(
-        TRAIN_RESIDUAL_TOL,
+        tolerance_set.train_residual,
         8.0 * float(jnp.finfo(dtype).eps),
     )
     finite = bool(jnp.all(jnp.isfinite(p_test)) and jnp.all(jnp.isfinite(p_benchmark)))
@@ -221,14 +207,14 @@ def asset_pricing_kernel(
         rejection_reasons.append("train_residual")
     if float(p_0) < 0.0:
         rejection_reasons.append("negative_p_0")
-    solution_accepted = not rejection_reasons
 
     results = {
         "r": r,
         "c": c,
         "g": g,
         "x_0": x_0,
-        "residual_dtype": str(jnp.dtype(dtype)),
+        # Measured, not requested: a float64 leak upstream shows up here.
+        "residual_dtype": str(train_residual.dtype),
         "kernel": kernel,
         "ell": ell,
         "sigma": sigma,
@@ -257,10 +243,7 @@ def asset_pricing_kernel(
         "final_damping": float(result.lm_state.damping),
         "steps": steps,
         "stopping_reason": STATUS_TO_REASON.get(status, "unknown"),
-        "solution_accepted": solution_accepted,
-        "rejection_reason": "accepted"
-        if solution_accepted
-        else ",".join(rejection_reasons),
+        **acceptance_fields(rejection_reasons),
     }
     print(
         f"solve_time(s) = {elapsed}, "

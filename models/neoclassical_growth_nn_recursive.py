@@ -18,14 +18,14 @@ from jax.flatten_util import ravel_pytree
 from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
 from tinydiffeq import RK4, ConstantStepSize, IController, SaveAt, Tsit5, solve_ode
 
-from neoclassical_growth_benchmark import neoclassical_growth_benchmark
-from utilities import (
+from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
+from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
     OptimizerSettings,
     unit_softplus,
 )
-from utilities import (
+from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
 

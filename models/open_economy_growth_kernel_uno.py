@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import asdict, dataclass
 
 import jax
@@ -7,21 +8,10 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from nlls_gram import (
-    QR,
-    AnnealRidge,
-    Cholesky,
-    LMStatus,
-    RidgeLevenbergMarquardt,
-)
+import unopy
 
-from kernels import (
-    integrated_kernel_matrices,
-    integrated_metric_factorization,
-    normalize_kernel,
-    rkhs_norm_squared,
-)
-from open_economy_growth import (
+from models.kernels import integrated_kernel_matrices, normalize_kernel
+from models.open_economy_growth import (
     ModelParameters,
     investment_expenditure,
     path_residuals,
@@ -31,116 +21,86 @@ from open_economy_growth import (
     tail_diagnostics,
     tvc_diagnostics,
 )
-from open_economy_growth_benchmark import open_economy_growth_benchmark
-from utilities import (
-    STATUS_TO_REASON,
-    Stopwatch,
-    acceptance_fields,
-    make_sampled_train_grid,
-)
+from models.open_economy_growth_benchmark import open_economy_growth_benchmark
+from models.open_economy_growth_kernel import DataSettings, KernelSettings
 
-
-# Acceptance gates, CLI-reachable so a float32 caller can pass its own bar
-# (the float32 replication driver does).
-@dataclass(frozen=True)
-class ToleranceSettings:
-    train_residual: float = 1e-5
-    validation_residual: float = 1e-2
-    benchmark_match: float = 1e-3
-
-
-@dataclass(frozen=True)
-class KernelSettings:
-    kernel: str = "matern12"
-    ell: float = 40.0
-    sigma: float = 1.0
-
-
-@dataclass(frozen=True)
-class DataSettings:
-    train_T: float = 160.0
-    train_points: int = 192
-    train_points_list: list[float] | None = None
-    sampling: str = "front_loaded"
-    dense_T: float = 40.0
-    tail_points: int = 15
-    test_T: float = 50.0
-    test_points: int = 201
-    validation_points: int = 401
-    benchmark_T: float = 200.0
-    benchmark_points: int = 241
+ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
+TRAIN_RESIDUAL_TOL = 1e-5
+VALIDATION_RESIDUAL_TOL = 1e-2
+BENCHMARK_MATCH_TOL = 1e-3
 
 
 @dataclass(frozen=True)
 class SolverSettings:
-    init_damping: float = 1e-8
-    damping_decrease: float = 0.1
-    damping_increase: float = 4.0
-    max_steps: int = 100
-    # Conjunctive stopping in the whitened variable y = F_bar theta the
-    # solver works in: gtol bounds the whitened stationarity
-    # ||J~'r + ridge [y_m; 0]||, residual_atol additionally demands the
-    # scaled residual norm solved (the converged residual floors at
-    # O(ridge * ||dual||), so residual_atol sits above it). The ridge keeps
-    # the minimizer O(ridge) from the pure RKHS-seminorm interpolant with
-    # the free offsets unpenalized (no epsilon shift anywhere).
-    # The whitened calibration recipe reads
-    # gtol ~ 1e-3 * ridge * sqrt(rkhs_norm_total) ~ 1e-14 at ridge 3e-12
-    # (sqrt(q) ~ 3.7); the retained 5e-8 is a much looser MEASURED value
-    # carried over from the unwhitened noise-floor calibration -- the
-    # whitened runs converge with it in 8-38 steps across the parameter
-    # variants with every quality gate intact, and residual_atol (sitting
-    # BETWEEN the ridge-floor residual ~1.3-2.9e-7 and the last
-    # intermediate continuation level's ~9e-7) is what pins the solve to
-    # the floor.
-    residual_atol: float = 5e-7
-    ridge: float = 3e-12
-    gtol: float = 5e-8
-    # ridge_init=None solves at the fixed ridge above; a value enables ridge
-    # continuation annealed from ridge_init down to `ridge` (the floor) by
-    # factors of `ridge_decrease` on inner stationarity. The metric's
-    # factorization never involves the ridge, so the anneal composes
-    # unchanged.
-    ridge_init: float | None = 1e-7
-    ridge_decrease: float = 0.01
-    # Relative stationarity threshold that triggers the next ridge level:
-    # looser anneals faster (fewer steps per level), tighter solves each
-    # level out more completely before descending.
-    ridge_grad_rtol: float = 1e-2
-    # "auto" (whitened cholesky) is the default: the whitened normal matrix
-    # J~'J~ + ridge*I_head has its spectral floor at the ridge, so the DAE
-    # Jacobian's scale spread no longer pushes the cholesky path past
-    # float64 at this ridge -- measured 1.8-3x faster wall-clock than the
-    # previously required "qr" at identical solution quality. "qr" and
-    # "cholesky" remain valid (all paths run whitened).
-    linear_solver: str = "auto"
+    preset: str = "ipopt"
+    max_iterations: int | None = None
+    time_limit: float | None = None
+    primal_tolerance: float = 1e-4
+    dual_tolerance: float = 1e-4
 
 
-def open_economy_growth_kernel(
+def open_economy_growth_kernel_uno(
     k_0: float = 1.0,
     a_0: float = 0.0,
     parameters: ModelParameters = ModelParameters(),
-    use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
-    lm_set: SolverSettings = SolverSettings(),
-    tolerance_set: ToleranceSettings = ToleranceSettings(),
+    solver_set: SolverSettings = SolverSettings(),
+    verbose: bool = False,
 ):
+    # IPOPT works in float64 C arrays, so this solver is float64-only.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
-    dtype = jnp.float64 if use_float64 else jnp.float32
     if k_0 <= 0.0:
         raise ValueError("k_0 must be positive")
+
     kernel = normalize_kernel(kernel_set.kernel)
-    train_data = make_sampled_train_grid(data_set, dtype)
+    if data_set.train_points_list is None:
+        if data_set.sampling == "uniform":
+            train_data = jnp.linspace(
+                0.0, data_set.train_T, data_set.train_points, dtype=jnp.float64
+            )
+        elif data_set.sampling == "front_loaded":
+            dense_points = data_set.train_points - data_set.tail_points
+            if (
+                dense_points < 2
+                or data_set.tail_points < 1
+                or not 0.0 < data_set.dense_T < data_set.train_T
+            ):
+                raise ValueError(
+                    "front_loaded sampling requires at least 2 dense points, "
+                    "1 tail point, and 0 < dense_T < train_T"
+                )
+            dense_data = jnp.linspace(
+                0.0, data_set.dense_T, dense_points, dtype=jnp.float64
+            )
+            tail_data = jnp.linspace(
+                data_set.dense_T,
+                data_set.train_T,
+                data_set.tail_points + 1,
+                dtype=jnp.float64,
+            )[1:]
+            train_data = jnp.concatenate([dense_data, tail_data])
+        else:
+            raise ValueError("sampling must be 'front_loaded' or 'uniform'")
+    else:
+        train_data = jnp.sort(
+            jnp.asarray(data_set.train_points_list, dtype=jnp.float64)
+        )
+    if len(train_data) < 3 or not bool(jnp.all(jnp.diff(train_data) > 0.0)):
+        raise ValueError("training points must be strictly increasing")
+    if float(train_data[0]) != 0.0:
+        raise ValueError("training points must start at zero")
     if data_set.test_T > float(train_data[-1]):
         raise ValueError("test_T must not exceed the training horizon")
     if data_set.benchmark_T < max(data_set.test_T, float(train_data[-1])):
         raise ValueError("benchmark_T must cover the train and test horizons")
 
-    test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
+    test_data = jnp.linspace(
+        0.0, data_set.test_T, data_set.test_points, dtype=jnp.float64
+    )
     validation_data = jnp.linspace(
-        0.0, float(train_data[-1]), data_set.validation_points, dtype=dtype
+        0.0, float(train_data[-1]), data_set.validation_points, dtype=jnp.float64
     )
     benchmark_grid = np.linspace(0.0, data_set.benchmark_T, data_set.benchmark_points)
     n_train = len(train_data)
@@ -148,20 +108,30 @@ def open_economy_growth_kernel(
     output_scale = steady["output"]
     consumption_scale = steady["g"]
 
-    # There are 5n DAE equations in 5n + 3 unknowns. No terminal equation is
-    # appended: the ridge penalty supplies the three-dimensional selection.
-    # Every linear solver works on the whitened subproblem; the metric takes
-    # the upper Cholesky factor F with K = F'F and the trailing offsets stay
-    # in the unpenalized free block, untransformed.
-    K, K_tilde, metric = integrated_metric_factorization(
-        train_data, kernel, kernel_set.sigma, kernel_set.ell, repeats=5
+    K, K_tilde = integrated_kernel_matrices(
+        train_data,
+        train_data,
+        kernel,
+        kernel_set.sigma,
+        kernel_set.ell,
     )
+    K = (K + K.T) / 2.0
 
-    # theta = (alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q,
-    #          (c_offset, mu_offset, q_offset)), matching the metric blocks.
-    def path_values(theta, K_eval, K_tilde_eval):
-        alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, initial = theta
-        c_offset, mu_offset, q_offset = initial
+    n_variables = 5 * n_train + 3
+    n_constraints = 5 * n_train
+
+    def unpack(x):
+        alpha_mu = x[:n_train]
+        alpha_c = x[n_train : 2 * n_train]
+        alpha_k = x[2 * n_train : 3 * n_train]
+        alpha_a = x[3 * n_train : 4 * n_train]
+        alpha_q = x[4 * n_train : 5 * n_train]
+        offsets = x[5 * n_train :]
+        return alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets
+
+    def path_values(x, K_eval, K_tilde_eval):
+        alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets = unpack(x)
+        c_offset, mu_offset, q_offset = offsets
         log_mu = (
             -parameters.gamma * jnp.log(consumption_scale)
             + mu_offset
@@ -191,10 +161,19 @@ def open_economy_growth_kernel(
             dlog_mu_dt,
         )
 
+    def objective(x):
+        alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, _ = unpack(x)
+        return (
+            alpha_mu @ K @ alpha_mu
+            + alpha_c @ K @ alpha_c
+            + alpha_k @ K @ alpha_k
+            + alpha_a @ K @ alpha_a
+            + alpha_q @ K @ alpha_q
+        )
+
     residual_scale = 1.0 / jnp.sqrt(5.0 * n_train)
 
-    def residual_fn(theta):
-        values = path_values(theta, K, K_tilde)
+    def constraints(x):
         (
             k,
             a,
@@ -205,7 +184,7 @@ def open_economy_growth_kernel(
             da_dt,
             dlog_q_dt,
             dlog_mu_dt,
-        ) = values
+        ) = path_values(x, K, K_tilde)
         residuals = path_residuals(
             k,
             a,
@@ -229,54 +208,106 @@ def open_economy_growth_kernel(
             ]
         )
 
-    # The zero coordinate contains no saddle-path or present-value information:
-    # it is flat in the derivative RKHS at the model's scale normalizations.
-    theta_0 = (
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(3, dtype=dtype),
-    )
-
-    if lm_set.ridge_init is None:
-        initial_ridge = lm_set.ridge
-        continuation_options = {}
-    else:
-        initial_ridge = lm_set.ridge_init
-        callback = AnnealRidge(
-            ridge_floor=lm_set.ridge,
-            decrease=lm_set.ridge_decrease,
-            grad_rtol=lm_set.ridge_grad_rtol,
+    def lagrangian(x, objective_multiplier, multipliers):
+        return objective_multiplier * objective(x) + jnp.dot(
+            multipliers, constraints(x)
         )
-        continuation_options = {
-            "callback": callback,
-            "user_state": callback.init_state(dtype),
-        }
-    solver = RidgeLevenbergMarquardt(
-        residual_fn,
-        metric=metric,
-        ridge=initial_ridge,
-        linear_solver={"auto": Cholesky(), "cholesky": Cholesky(), "qr": QR()}[
-            lm_set.linear_solver
-        ],
-        init_damping=lm_set.init_damping,
-        damping_decrease=lm_set.damping_decrease,
-        damping_increase=lm_set.damping_increase,
+
+    objective_value = jax.jit(objective)
+    objective_gradient = jax.jit(jax.grad(objective))
+    constraint_values = jax.jit(constraints)
+    constraint_jacobian = jax.jit(jax.jacfwd(constraints))
+    lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
+
+    x_initial = np.zeros(n_variables, dtype=np.float64)
+    x_initial_jax = jnp.asarray(x_initial)
+    zero_multipliers = jnp.zeros(n_constraints, dtype=jnp.float64)
+    jax.block_until_ready(objective_value(x_initial_jax))
+    jax.block_until_ready(objective_gradient(x_initial_jax))
+    jax.block_until_ready(constraint_values(x_initial_jax))
+    jax.block_until_ready(constraint_jacobian(x_initial_jax))
+    jax.block_until_ready(lagrangian_hessian(x_initial_jax, 1.0, zero_multipliers))
+
+    variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
+    variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
+    constraint_lower_bounds = np.zeros(n_constraints, dtype=np.float64)
+    constraint_upper_bounds = np.zeros(n_constraints, dtype=np.float64)
+    model = unopy.Model(
+        unopy.PROBLEM_NONLINEAR,
+        n_variables,
+        variable_lower_bounds,
+        variable_upper_bounds,
+        unopy.ZERO_BASED_INDEXING,
     )
 
-    timer = Stopwatch()
-    result = solver.solve(
-        theta_0,
-        max_steps=lm_set.max_steps,
-        gtol=lm_set.gtol,
-        atol=lm_set.residual_atol,
-        max_steps_is_success=False,
-        **continuation_options,
+    def objective_callback(x):
+        return float(objective_value(jnp.asarray(x)))
+
+    def objective_gradient_callback(x, gradient):
+        gradient[:] = np.asarray(objective_gradient(jnp.asarray(x)))
+
+    model.set_objective(unopy.MINIMIZE, objective_callback, objective_gradient_callback)
+
+    jacobian_rows = np.repeat(np.arange(n_constraints, dtype=np.int32), n_variables)
+    jacobian_columns = np.tile(np.arange(n_variables, dtype=np.int32), n_constraints)
+
+    def constraints_callback(x, constraint_output):
+        constraint_output[:] = np.asarray(constraint_values(jnp.asarray(x)))
+
+    def jacobian_callback(x, jacobian_output):
+        jacobian_output[:] = np.asarray(constraint_jacobian(jnp.asarray(x))).reshape(-1)
+
+    model.set_constraints(
+        n_constraints,
+        constraints_callback,
+        constraint_lower_bounds,
+        constraint_upper_bounds,
+        len(jacobian_rows),
+        jacobian_rows,
+        jacobian_columns,
+        jacobian_callback,
     )
-    solve_time = timer.elapsed(result)
-    theta = result.x
+
+    hessian_rows, hessian_columns = np.tril_indices(n_variables)
+    hessian_rows = hessian_rows.astype(np.int32)
+    hessian_columns = hessian_columns.astype(np.int32)
+
+    def hessian_callback(x, objective_multiplier, multipliers, hessian_output):
+        hessian = np.asarray(
+            lagrangian_hessian(
+                jnp.asarray(x),
+                float(objective_multiplier),
+                jnp.asarray(multipliers),
+            )
+        )
+        hessian_output[:] = hessian[hessian_rows, hessian_columns]
+
+    model.set_lagrangian_hessian(
+        len(hessian_rows),
+        unopy.LOWER_TRIANGLE,
+        hessian_rows,
+        hessian_columns,
+        hessian_callback,
+    )
+    model.set_lagrangian_sign_convention(unopy.MULTIPLIER_POSITIVE)
+    model.set_initial_primal_iterate(x_initial)
+
+    solver = unopy.UnoSolver()
+    solver.set_preset(solver_set.preset)
+    solver.set_option("primal_tolerance", solver_set.primal_tolerance)
+    solver.set_option("dual_tolerance", solver_set.dual_tolerance)
+    if not verbose:
+        solver.set_option("logger", "SILENT")
+        solver.set_option("print_solution", False)
+    if solver_set.max_iterations is not None:
+        solver.set_option("max_iterations", solver_set.max_iterations)
+    if solver_set.time_limit is not None:
+        solver.set_option("time_limit", solver_set.time_limit)
+
+    start = time.perf_counter()
+    result = solver.optimize(model)
+    elapsed = time.perf_counter() - start
+    x = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))
 
     def evaluate_grid(points):
         K_eval, K_tilde_eval = integrated_kernel_matrices(
@@ -296,7 +327,7 @@ def open_economy_growth_kernel(
             da_dt,
             dlog_q_dt,
             dlog_mu_dt,
-        ) = path_values(theta, K_eval, K_tilde_eval)
+        ) = path_values(x, K_eval, K_tilde_eval)
         z = jnp.ones_like(k)
         residuals = path_residuals(
             k,
@@ -311,9 +342,7 @@ def open_economy_growth_kernel(
             dlog_mu_dt,
             parameters,
         )
-        x = investment_expenditure(k, q, parameters)
-        output = production(k, z, parameters)
-        current_account = da_dt
+        investment = investment_expenditure(k, q, parameters)
         return {
             "t": points,
             "k": k,
@@ -321,9 +350,9 @@ def open_economy_growth_kernel(
             "q": q,
             "c": c,
             "mu": mu,
-            "x": x,
-            "output": output,
-            "current_account": current_account,
+            "x": investment,
+            "output": production(k, z, parameters),
+            "current_account": da_dt,
             **residuals,
         }
 
@@ -388,7 +417,6 @@ def open_economy_growth_kernel(
             for grid in (train_eval, validation_eval, test_eval)
         )
     )
-    c = train_eval["c"][0]
     pv_gap = present_value_gap(
         validation_eval["t"],
         validation_eval["k"],
@@ -406,27 +434,36 @@ def open_economy_growth_kernel(
         parameters,
     )
 
+    solve_time = result.cpu_time
+    if solve_time is None:
+        solve_time = elapsed
+    solver_status = str(result.optimization_status).split(".")[-1]
+    solution_status = str(result.solution_status).split(".")[-1]
     rejection_reasons = []
-    if int(result.status) != LMStatus.CONVERGED:
+    if solver_status != "SUCCESS":
         rejection_reasons.append("solver_status")
+    if solution_status not in ACCEPTED_SOLUTION_STATUSES:
+        rejection_reasons.append("solution_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > tolerance_set.train_residual:
+    if max_train_residual > TRAIN_RESIDUAL_TOL:
         rejection_reasons.append("train_residual")
-    if max_validation_residual > tolerance_set.validation_residual:
+    if max_validation_residual > VALIDATION_RESIDUAL_TOL:
         rejection_reasons.append("validation_residual")
-    benchmark_match = max_benchmark_error <= tolerance_set.benchmark_match
+    solution_accepted = not rejection_reasons
+    benchmark_match = max_benchmark_error <= BENCHMARK_MATCH_TOL
 
-    alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, initial = theta
-    c_offset, mu_offset, q_offset = initial
-    rkhs_norm_mu = rkhs_norm_squared(alpha_mu, K)
-    rkhs_norm_c = rkhs_norm_squared(alpha_c, K)
-    rkhs_norm_k = rkhs_norm_squared(alpha_k, K)
-    rkhs_norm_a = rkhs_norm_squared(alpha_a, K)
-    rkhs_norm_q = rkhs_norm_squared(alpha_q, K)
+    alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets = unpack(x)
+    c_offset, mu_offset, q_offset = offsets
+    rkhs_norm_mu = alpha_mu @ K @ alpha_mu
+    rkhs_norm_c = alpha_c @ K @ alpha_c
+    rkhs_norm_k = alpha_k @ K @ alpha_k
+    rkhs_norm_a = alpha_a @ K @ alpha_a
+    rkhs_norm_q = alpha_q @ K @ alpha_q
     rkhs_norm_total = (
         rkhs_norm_mu + rkhs_norm_c + rkhs_norm_k + rkhs_norm_a + rkhs_norm_q
     )
+    objective_norm_squared = objective_value(x)
 
     @jax.jit
     def kernel_solution(points):
@@ -437,7 +474,7 @@ def open_economy_growth_kernel(
             kernel_set.sigma,
             kernel_set.ell,
         )
-        k, a, q, c, *_ = path_values(theta, K_eval, K_tilde_eval)
+        k, a, q, c, *_ = path_values(x, K_eval, K_tilde_eval)
         return k, a, q, c
 
     results = {
@@ -446,8 +483,8 @@ def open_economy_growth_kernel(
         "k_0": k_0,
         "a_0": a_0,
         "a_0_over_output_ss": a_0 / float(output_scale),
-        # Measured, not requested: a float64 leak upstream shows up here.
-        "residual_dtype": str(train_eval["capital"].dtype),
+        "residual_dtype": "float64",
+        "metric_dtype": "float64",
         "kernel": kernel,
         "ell": kernel_set.ell,
         "sigma": kernel_set.sigma,
@@ -459,7 +496,7 @@ def open_economy_growth_kernel(
         "q_ss": float(steady["q"]),
         "output_ss": float(output_scale),
         "g_ss": float(consumption_scale),
-        "c": float(c),
+        "c": float(train_eval["c"][0]),
         "q_0": float(steady["q"] * jnp.exp(q_offset)),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
@@ -474,7 +511,7 @@ def open_economy_growth_kernel(
         "algebraic_rkhs_function_count": 1,
         "free_initial_value_count": 3,
         "metric_selection_dimension": 3,
-        "selection": "minimum_rkhs_norm_ridge",
+        "selection": "minimum_rkhs_norm_constrained",
         "initialization": "zero_coordinate",
         "k_relative_error_max": float(jnp.max(k_relative_error)),
         "q_relative_error_max": float(jnp.max(q_relative_error)),
@@ -503,20 +540,21 @@ def open_economy_growth_kernel(
         "rkhs_norm_a": float(rkhs_norm_a),
         "rkhs_norm_q": float(rkhs_norm_q),
         "rkhs_norm_total": float(rkhs_norm_total),
+        "objective_value": float(objective_norm_squared),
         "solve_time": solve_time,
-        "wall_time": solve_time,
-        "solver": "nlls-gram",
-        "linear_solver": lm_set.linear_solver,
-        "ridge": lm_set.ridge,
-        "gtol": lm_set.gtol,
-        "train_loss": float(result.info.resid_loss),
-        "final_grad_norm": float(result.info.grad_norm),
-        "final_damping": float(result.lm_state.damping),
-        "steps": int(result.steps),
-        "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
-        **acceptance_fields(rejection_reasons),
+        "wall_time": elapsed,
+        "solver": "uno",
+        "solver_status": solver_status,
+        "solution_status": solution_status,
+        "stationarity": result.solution_stationarity,
+        "primal_feasibility": result.solution_primal_feasibility,
+        "solution_accepted": solution_accepted,
+        "rejection_reason": (
+            "accepted" if solution_accepted else ",".join(rejection_reasons)
+        ),
         "c_offset": float(c_offset),
         "mu_offset": float(mu_offset),
+        "q_offset": float(q_offset),
     }
 
     frame_names = (
@@ -550,7 +588,7 @@ def open_economy_growth_kernel(
         "parameters": asdict(parameters),
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
-        "lm_set": asdict(lm_set),
+        "solver_set": asdict(solver_set),
         "initial_conditions": {"k_0": k_0, "a_0": a_0},
     }
     return results, {
@@ -562,4 +600,4 @@ def open_economy_growth_kernel(
 
 
 if __name__ == "__main__":
-    jsonargparse.CLI(open_economy_growth_kernel)
+    jsonargparse.CLI(open_economy_growth_kernel_uno)

@@ -4,8 +4,10 @@ import jax
 import jsonargparse
 import pandas as pd
 
-import neoclassical_growth_kernel_recursive
-import neoclassical_growth_nn_recursive
+from models import (
+    neoclassical_growth_kernel_recursive,
+    neoclassical_growth_nn_recursive,
+)
 from replication.utilities import (
     DETERMINISTIC_TIMING_REPETITIONS,
     enable_compilation_cache,

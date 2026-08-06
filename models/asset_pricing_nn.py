@@ -12,8 +12,8 @@ from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import DrawNNXModule, LevenbergMarquardt, MultiStart
 
-from asset_pricing_benchmark import mu_f_array
-from utilities import (
+from models.asset_pricing_benchmark import mu_f_array
+from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
     OptimizerSettings,

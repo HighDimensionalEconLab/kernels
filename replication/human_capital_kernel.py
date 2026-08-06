@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import jsonargparse
 
-import human_capital_kernel
+from models import human_capital_kernel
 from replication.utilities import (
     configure_process,
     ensemble,

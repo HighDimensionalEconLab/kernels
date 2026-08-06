@@ -16,7 +16,7 @@ from jax.flatten_util import ravel_pytree
 from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
 from tinydiffeq import SRA1, EulerMaruyama, Milstein, SaveAt, solve_sde
 
-from neoclassical_growth_nn_recursive import (
+from models.neoclassical_growth_nn_recursive import (
     DrawInvestmentPolicy,
     InitialConditionSettings,
     InvestmentPolicyNN,
@@ -32,11 +32,11 @@ from neoclassical_growth_nn_recursive import (
     standardized_initial_states,
     trajectory_frame,
 )
-from stochastic_growth_benchmark import stochastic_growth_benchmark
-from utilities import (
+from models.stochastic_growth_benchmark import stochastic_growth_benchmark
+from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
-from utilities import (
+from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
 )

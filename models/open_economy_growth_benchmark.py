@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.integrate import quad, solve_bvp, solve_ivp
 
-from open_economy_growth import (
+from models.open_economy_growth import (
     ModelParameters,
     consumption_annuity_rate,
     consumption_growth_rate,

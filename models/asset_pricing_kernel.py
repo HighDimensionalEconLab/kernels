@@ -11,14 +11,14 @@ from nlls_gram import (
     RidgeLevenbergMarquardt,
 )
 
-from asset_pricing_benchmark import mu_f_array
-from kernels import (
+from models.asset_pricing_benchmark import mu_f_array
+from models.kernels import (
     integrated_kernel_matrices,
     integrated_metric_factorization,
     normalize_kernel,
     rkhs_norm_squared,
 )
-from utilities import (
+from models.utilities import (
     STATUS_TO_REASON,
     Stopwatch,
     acceptance_fields,

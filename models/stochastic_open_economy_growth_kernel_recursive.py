@@ -19,21 +19,21 @@ from nlls_gram import (
     RidgeLevenbergMarquardt,
 )
 
-from kernels import (
+from models.kernels import (
     MATERN_STATE_FAMILIES,
     additive_matern_state_features,
     additive_rbf_state_features,
     ard_matern_state_features,
     ard_rbf_state_features,
 )
-from neoclassical_growth_kernel_recursive import StoppingCriteria
-from neoclassical_growth_nn_recursive import (
+from models.neoclassical_growth_kernel_recursive import StoppingCriteria
+from models.neoclassical_growth_nn_recursive import (
     policy_cache_key,
     standardized_initial_states,
 )
-from open_economy_growth import ModelParameters, production
-from stochastic_growth_nn_recursive import sample_trajectory_noise
-from stochastic_open_economy_growth_nn_recursive import (
+from models.open_economy_growth import ModelParameters, production
+from models.stochastic_growth_nn_recursive import sample_trajectory_noise
+from models.stochastic_open_economy_growth_nn_recursive import (
     SDE_SOLVERS,
     WORLD_RATE_KAPPA,
     WORLD_RATE_SIGMA,
@@ -51,7 +51,7 @@ from stochastic_open_economy_growth_nn_recursive import (
     trajectory_frame,
     trajectory_values,
 )
-from utilities import (
+from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS,
     STATUS_TO_REASON,
     OptimizerSettings,

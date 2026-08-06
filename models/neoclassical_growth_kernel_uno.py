@@ -10,9 +10,9 @@ import numpy as np
 import pandas as pd
 import unopy
 
-from kernels import integrated_kernel_matrices, rkhs_norm_squared
-from neoclassical_growth_benchmark import neoclassical_growth_benchmark
-from utilities import (
+from models.kernels import integrated_kernel_matrices, rkhs_norm_squared
+from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
+from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
 

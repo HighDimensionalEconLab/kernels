@@ -3,7 +3,7 @@ from __future__ import annotations
 import jsonargparse
 import numpy as np
 
-import neoclassical_growth_concave_convex_kernel_uno
+from models import neoclassical_growth_concave_convex_kernel_uno
 from replication.utilities import (
     classify_path_basin,
     configure_process,

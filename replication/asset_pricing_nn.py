@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import jsonargparse
 
-import asset_pricing_nn
+from models import asset_pricing_nn
 from replication.utilities import (
     configure_process,
     ensemble,

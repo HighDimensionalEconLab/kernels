@@ -18,7 +18,7 @@ from nlls_gram import (
     MultiStart,
 )
 
-from multicountry_growth import (
+from models.multicountry_growth import (
     InitialConditionSettings,
     MulticountryParameters,
     draw_initial_conditions,
@@ -30,8 +30,8 @@ from multicountry_growth import (
     multicountry_tail_diagnostics,
     multicountry_tvc_diagnostics,
 )
-from multicountry_growth_benchmark import multicountry_growth_benchmark
-from utilities import (
+from models.multicountry_growth_benchmark import multicountry_growth_benchmark
+from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
     Stopwatch,

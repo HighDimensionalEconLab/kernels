@@ -4,7 +4,7 @@ import math
 
 import jsonargparse
 
-import neoclassical_growth_nn_recursive
+from models import neoclassical_growth_nn_recursive
 from replication.utilities import (
     configure_process,
     ensemble,

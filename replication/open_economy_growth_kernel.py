@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import jsonargparse
 
-import open_economy_growth_kernel
-from open_economy_growth import ModelParameters, steady_state
+from models import open_economy_growth_kernel
+from models.open_economy_growth import ModelParameters, steady_state
 from replication.utilities import (
     configure_process,
     ensemble,

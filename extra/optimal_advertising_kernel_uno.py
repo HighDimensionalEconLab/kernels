@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import unopy
 
-from kernels import integrated_kernel_matrices, rkhs_norm_squared
+from models.kernels import integrated_kernel_matrices, rkhs_norm_squared
 
 if __name__ == "__main__":
     jax.config.update("jax_enable_x64", True)

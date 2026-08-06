@@ -22,7 +22,7 @@
 # bond redistributions (identical homothetic preferences) -- its a_0
 # gradient is the machine-zero row of the same Jacobian.
 #
-#   JAX_PLATFORMS=cpu uv run python -m multicountry_growth_transitions
+#   JAX_PLATFORMS=cpu uv run python -m models.multicountry_growth_transitions
 
 from __future__ import annotations
 
@@ -39,13 +39,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from multicountry_growth import (
+from models.multicountry_growth import (
     InitialConditionSettings,
     MulticountryParameters,
     multicountry_output_scale,
     weighted_gini,
 )
-from multicountry_growth_kernel import multicountry_growth_kernel
+from models.multicountry_growth_kernel import multicountry_growth_kernel
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")

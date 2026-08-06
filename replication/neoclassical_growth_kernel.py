@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import jsonargparse
 
-import neoclassical_growth_kernel
+from models import neoclassical_growth_kernel
 from replication.utilities import (
     configure_process,
     ensemble,

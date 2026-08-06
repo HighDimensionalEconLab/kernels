@@ -16,14 +16,14 @@ from jax.flatten_util import ravel_pytree
 from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
 from tinydiffeq import SRA1, EulerMaruyama, Milstein, SaveAt, solve_sde
 
-from neoclassical_growth_nn_recursive import (
+from models.neoclassical_growth_nn_recursive import (
     policy_cache_key,
     standardized_initial_states,
 )
-from open_economy_growth import ModelParameters, marginal_product, production
-from open_economy_growth_benchmark import open_economy_growth_benchmark
-from stochastic_growth_nn_recursive import sample_trajectory_noise
-from utilities import (
+from models.open_economy_growth import ModelParameters, marginal_product, production
+from models.open_economy_growth_benchmark import open_economy_growth_benchmark
+from models.stochastic_growth_nn_recursive import sample_trajectory_noise
+from models.utilities import (
     ACTIVATIONS,
     NEOCLASSICAL_GROWTH_CONSTANTS,
     STATUS_TO_REASON,

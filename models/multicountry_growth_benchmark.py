@@ -4,7 +4,7 @@ import numpy as np
 import scipy.linalg
 from scipy.integrate import solve_bvp
 
-from multicountry_growth import MulticountryParameters
+from models.multicountry_growth import MulticountryParameters
 
 
 def multicountry_growth_benchmark(

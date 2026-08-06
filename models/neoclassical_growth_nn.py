@@ -16,8 +16,8 @@ from nlls_gram import (
     MultiStart,
 )
 
-from neoclassical_growth_benchmark import neoclassical_growth_benchmark
-from utilities import (
+from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
+from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
     OptimizerSettings,
@@ -25,7 +25,7 @@ from utilities import (
     make_train_t_grid,
     unit_softplus,
 )
-from utilities import (
+from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
 

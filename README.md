@@ -191,16 +191,16 @@ Every solver returns `(results, extras)`, writes nothing itself (beyond the
 opt-in policy artifacts below), and exposes a `jsonargparse` CLI. For example:
 
 ```bash
-uv run python neoclassical_growth_kernel.py --kernel_set.ell 5.0
-uv run python neoclassical_growth_nn_recursive.py --seed 3 --data_set.train_points 49
-uv run python multicountry_growth_kernel.py --a_0 '[-0.5, 0.5]'
-uv run python multicountry_growth_kernel.py \
+uv run python -m models.neoclassical_growth_kernel --kernel_set.ell 5.0
+uv run python -m models.neoclassical_growth_nn_recursive --seed 3 --data_set.train_points 49
+uv run python -m models.multicountry_growth_kernel --a_0 '[-0.5, 0.5]'
+uv run python -m models.multicountry_growth_kernel \
   --parameters.populations '[1.0, 1.0, 1.0]' \
   --parameters.productivities '[1.0, 1.0, 1.0]' \
   --lm_set.linear_solver cg \
   --initial_set.seed 3
-uv run python multicountry_growth_kernel.py --sensitivity_time 10
-uv run python multicountry_growth_nn.py --a_0 '[-0.5, 0.5]' --seed 0
+uv run python -m models.multicountry_growth_kernel --sensitivity_time 10
+uv run python -m models.multicountry_growth_nn --a_0 '[-0.5, 0.5]' --seed 0
 ```
 
 The multicountry drivers DRAW heterogeneous initial conditions whenever
@@ -262,8 +262,8 @@ kernel-recursive consumers glob the problem half of that key under
 rollout as their design, so the workflow is two-stage:
 
 ```bash
-uv run python stochastic_growth_nn_recursive.py --policy_cache .results
-uv run python stochastic_growth_kernel_recursive.py --policy_dir .results
+uv run python -m models.stochastic_growth_nn_recursive --policy_cache .results
+uv run python -m models.stochastic_growth_kernel_recursive --policy_dir .results
 ```
 
 The replication drivers deliberately do not pass `--policy_cache` (cached
@@ -273,7 +273,7 @@ its NN stage run manually first.
 or import directly:
 
 ```python
-from neoclassical_growth_kernel import neoclassical_growth_kernel
+from models.neoclassical_growth_kernel import neoclassical_growth_kernel
 
 results, extras = neoclassical_growth_kernel()
 print(results["k_rel_error_mean"])

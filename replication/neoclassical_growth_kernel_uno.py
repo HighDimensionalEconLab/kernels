@@ -4,7 +4,7 @@ import math
 
 import jsonargparse
 
-import neoclassical_growth_kernel_uno
+from models import neoclassical_growth_kernel_uno
 from replication.utilities import (
     configure_process,
     ensemble,

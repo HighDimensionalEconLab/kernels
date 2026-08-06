@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import jsonargparse
 
-from neoclassical_growth_nn import (
+from models.neoclassical_growth_nn import (
     DataSettings,
     GrowthPolicySettings,
     StoppingCriteria,
     neoclassical_growth_nn,
 )
-from utilities import OptimizerSettings
+from models.utilities import OptimizerSettings
 
 
 def neoclassical_growth_concave_convex_nn(

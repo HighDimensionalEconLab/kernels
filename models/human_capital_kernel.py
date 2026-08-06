@@ -12,12 +12,12 @@ from nlls_gram import (
     RidgeLevenbergMarquardt,
 )
 
-from kernels import (
+from models.kernels import (
     integrated_kernel_matrices,
     integrated_metric_factorization,
     normalize_kernel,
 )
-from utilities import (
+from models.utilities import (
     STATUS_TO_REASON,
     Stopwatch,
     acceptance_fields,

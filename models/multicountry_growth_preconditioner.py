@@ -38,7 +38,7 @@ import jax.numpy as jnp
 import jax.scipy.linalg as jsp_linalg
 import numpy as np
 
-from multicountry_growth import multicountry_path_values
+from models.multicountry_growth import multicountry_path_values
 
 
 def block_eigen_permutation(num_countries, n_train):

@@ -12,14 +12,14 @@ import jsonargparse
 import numpy as np
 from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
 
-from neoclassical_growth_kernel_recursive import (
+from models.neoclassical_growth_kernel_recursive import (
     StateKernelSettings,
     StoppingCriteria,
     build_residual_args,
     make_policy,
     state_lengthscales,
 )
-from neoclassical_growth_nn_recursive import (
+from models.neoclassical_growth_nn_recursive import (
     InitialConditionSettings,
     collocation_step_diagnostics,
     draw_initial_conditions,
@@ -27,7 +27,7 @@ from neoclassical_growth_nn_recursive import (
     policy_cache_key,
     trajectory_frame,
 )
-from stochastic_growth_nn_recursive import (
+from models.stochastic_growth_nn_recursive import (
     SDE_SOLVERS,
     DataSettings,
     StructuralParameters,
@@ -40,10 +40,10 @@ from stochastic_growth_nn_recursive import (
     sample_trajectory_noise,
     trajectory_values,
 )
-from utilities import (
+from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
-from utilities import (
+from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
 )

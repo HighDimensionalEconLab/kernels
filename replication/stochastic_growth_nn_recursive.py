@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import jsonargparse
 
-import stochastic_growth_nn_recursive
+from models import stochastic_growth_nn_recursive
 from replication.utilities import (
     configure_process,
     ensemble,

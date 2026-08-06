@@ -18,13 +18,13 @@ from nlls_gram import (
     RidgeLevenbergMarquardt,
 )
 
-from kernels import (
+from models.kernels import (
     integrated_kernel_matrices,
     integrated_metric_factorization,
     normalize_kernel,
     rkhs_norm_squared,
 )
-from multicountry_growth import (
+from models.multicountry_growth import (
     InitialConditionSettings,
     MulticountryParameters,
     draw_initial_conditions,
@@ -37,12 +37,12 @@ from multicountry_growth import (
     multicountry_tail_diagnostics,
     multicountry_tvc_diagnostics,
 )
-from multicountry_growth_benchmark import multicountry_growth_benchmark
-from multicountry_growth_preconditioner import (
+from models.multicountry_growth_benchmark import multicountry_growth_benchmark
+from models.multicountry_growth_preconditioner import (
     block_eigen_permutation,
     multicountry_block_eigen_families,
 )
-from utilities import (
+from models.utilities import (
     STATUS_TO_REASON,
     Stopwatch,
     acceptance_fields,

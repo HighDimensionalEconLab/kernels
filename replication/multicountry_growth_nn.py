@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import jsonargparse
 
-import multicountry_growth_nn
-from multicountry_growth import MulticountryParameters, multicountry_output_scale
+from models import multicountry_growth_nn
+from models.multicountry_growth import MulticountryParameters, multicountry_output_scale
 from replication.utilities import (
     configure_process,
     ensemble,

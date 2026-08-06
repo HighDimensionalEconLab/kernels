@@ -11,17 +11,17 @@ from nlls_gram import (
     RidgeLevenbergMarquardt,
 )
 
-from kernels import (
+from models.kernels import (
     integrated_kernel_matrices,
     integrated_metric_factorization,
     normalize_kernel,
     rkhs_norm_squared,
 )
-from neoclassical_growth_benchmark import neoclassical_growth_benchmark
-from utilities import (
+from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
+from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
-from utilities import (
+from models.utilities import (
     STATUS_TO_REASON,
     Stopwatch,
     acceptance_fields,

@@ -14,7 +14,7 @@ import pandas as pd
 from flax import struct
 from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
 
-from kernels import (
+from models.kernels import (
     MATERN_STATE_FAMILIES,
     additive_matern_state_features,
     additive_rbf_state_features,
@@ -24,7 +24,7 @@ from kernels import (
     rbf_state_gram,
     rkhs_norm_squared,
 )
-from neoclassical_growth_nn_recursive import (
+from models.neoclassical_growth_nn_recursive import (
     InitialConditionSettings,
     StructuralParameters,
     add_benchmark_path_diagnostics,
@@ -40,10 +40,10 @@ from neoclassical_growth_nn_recursive import (
     trajectory_frame,
     trajectory_values,
 )
-from utilities import (
+from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
-from utilities import (
+from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
     unit_softplus,

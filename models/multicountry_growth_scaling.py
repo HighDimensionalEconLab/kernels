@@ -12,7 +12,7 @@
 # residual floor grows with N and would block the stopping certificate on a
 # solve that passes every quality gate.
 #
-#   JAX_PLATFORMS=cpu uv run python -m multicountry_growth_scaling \
+#   JAX_PLATFORMS=cpu uv run python -m models.multicountry_growth_scaling \
 #     --country_counts '[2,3,10,25,50]'
 
 from __future__ import annotations
@@ -29,8 +29,8 @@ import jax
 import jax.numpy as jnp
 import jsonargparse
 
-from multicountry_growth import InitialConditionSettings, MulticountryParameters
-from multicountry_growth_kernel import SolverSettings, multicountry_growth_kernel
+from models.multicountry_growth import InitialConditionSettings, MulticountryParameters
+from models.multicountry_growth_kernel import SolverSettings, multicountry_growth_kernel
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")

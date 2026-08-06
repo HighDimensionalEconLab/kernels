@@ -83,7 +83,7 @@ def asset_pricing_kernel(
     r: float = 0.1,
     c: float = 0.02,
     g: float = -0.2,
-    x_0: float = 1.0,
+    x_0: float = 0.01,
     use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),

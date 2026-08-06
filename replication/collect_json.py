@@ -177,6 +177,12 @@ def write_sequential_comparison_table(out):
         frame = pd.read_parquet(out / f"{name}_threshold_results.parquet")
         return f"{int(frame['basin_correct'].sum())}/{len(frame)}"
 
+    # The concave-convex experiment is a sweep over initial conditions, so the
+    # acceptance denominator is the sweep size rather than the n_seeds meta.
+    def sweep_accepted(name):
+        frame = pd.read_parquet(out / f"{name}_threshold_results.parquet")
+        return f"{int(frame['solution_accepted'].sum())}/{len(frame)}"
+
     def oe_max_error(j):
         return max(
             med(j["k_relative_error_max"]),
@@ -238,7 +244,7 @@ def write_sequential_comparison_table(out):
             None,
             basin_fraction("neoclassical_growth_concave_convex_kernel"),
             med(cc_kernel["solve_time"]),
-            accepted_cell(cc_kernel),
+            sweep_accepted("neoclassical_growth_concave_convex_kernel"),
         ),
         (
             "",
@@ -247,7 +253,7 @@ def write_sequential_comparison_table(out):
             None,
             basin_fraction("neoclassical_growth_concave_convex_nn"),
             med(cc_nn["train_time"]),
-            accepted_cell(cc_nn),
+            sweep_accepted("neoclassical_growth_concave_convex_nn"),
         ),
         (
             "Open economy",

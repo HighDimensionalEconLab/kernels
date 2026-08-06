@@ -24,6 +24,59 @@ def acceptance_fields(rejection_reasons):
     }
 
 
+# Directional derivative d/dtau f(x + tau v) at tau = 0 by central
+# differences, for double-checking implicit-AD sensitivities. Host-side and
+# jit-free: f maps a concrete pytree to a pytree of concrete arrays. eps_f
+# is the measured noise floor of f -- an iterative inner solver's stopping
+# tolerance usually sets it, far above machine eps -- and the step balances
+# that noise against the stencil's truncation order: h ~ eps_f^(1/5) for
+# the five-point order-4 stencil, h ~ (3 eps_f)^(1/3) for the two-point
+# order-2 one, scaled by the magnitude of x along the direction when that
+# exceeds one. Steps are taken along the unit direction, so h is the actual
+# perturbation size in x space. Returns (derivative, h).
+def finite_difference_directional(f, x, v, eps_f, order=4):
+    if eps_f <= 0.0:
+        raise ValueError("eps_f must be positive")
+    x_leaves = jax.tree_util.tree_leaves(x)
+    v_leaves = jax.tree_util.tree_leaves(v)
+    v_norm = math.sqrt(sum(float(jnp.sum(jnp.square(leaf))) for leaf in v_leaves))
+    if v_norm == 0.0:
+        raise ValueError("the direction v must be nonzero")
+    x_along_v = (
+        sum(
+            float(jnp.sum(x_leaf * v_leaf))
+            for x_leaf, v_leaf in zip(x_leaves, v_leaves, strict=True)
+        )
+        / v_norm
+    )
+    scale = max(1.0, abs(x_along_v))
+    if order == 4:
+        h = eps_f ** (1.0 / 5.0) * scale
+        stencil = ((-2.0, 1.0), (-1.0, -8.0), (1.0, 8.0), (2.0, -1.0))
+    elif order == 2:
+        h = (3.0 * eps_f) ** (1.0 / 3.0) * scale
+        stencil = ((-1.0, -1.0), (1.0, 1.0))
+    else:
+        raise ValueError("order must be 2 or 4")
+    outputs = [
+        f(
+            jax.tree_util.tree_map(
+                lambda x_leaf, v_leaf: x_leaf + (offset * h / v_norm) * v_leaf, x, v
+            )
+        )
+        for offset, _ in stencil
+    ]
+    # The stencil runs in tau with step h / v_norm, so the weighted sum over
+    # a denominator of (12 or 2) * (h / v_norm) is d f / d tau directly.
+    denominator = (12.0 if order == 4 else 2.0) * h / v_norm
+    weights = [weight / denominator for _, weight in stencil]
+    derivative = jax.tree_util.tree_map(
+        lambda *values: sum(w * value for w, value in zip(weights, values)),
+        *outputs,
+    )
+    return derivative, h
+
+
 # perf_counter anchored at construction; elapsed(x) blocks on x first so
 # asynchronous dispatch cannot leak out of the timed span.
 class Stopwatch:

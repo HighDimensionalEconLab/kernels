@@ -134,8 +134,9 @@ class InvestmentPolicySettings:
 
 
 # i = anchor * U(h), U the unit softplus with near-zero head: homothetic is
-# h(log(k/z)) anchored at delta * k, non-homothetic h(centered log z, log k)
-# anchored at the constant delta * k_scale; consumption Y - i stays unclamped.
+# h(log kappa) with kappa = k / z^{1/(1-a)} the detrended capital, anchored at
+# delta * k; non-homothetic h(centered log z, log k) anchored at the constant
+# delta * k_scale; consumption Y - i stays unclamped.
 class InvestmentPolicyNN(nnx.Module):
     def __init__(
         self,
@@ -186,7 +187,7 @@ class InvestmentPolicyNN(nnx.Module):
     def __call__(self, log_state, p):
         log_z, log_k = log_state
         if self.homothetic:
-            h = jnp.atleast_1d(log_k - log_z)
+            h = jnp.atleast_1d(log_k - log_z / (1.0 - p.a))
             anchor = p.delta * jnp.exp(log_k)
         else:
             h = jnp.stack([log_z - self.log_z_scale, log_k - self.log_k_scale])
@@ -292,12 +293,19 @@ def find_saved_policies(directory, criteria=None):
     return matches
 
 
+# Hicks-neutral technology: z is the TFP level, so Y = z k^a. Balanced growth
+# at per-capita rate g needs the TFP trend (1 - a) g; the labor-augmenting
+# index z^{1/(1-a)} grows at g and is the detrending scale for quantities.
 def production(z, k, p):
-    return z * (k / z) ** p.a
+    return z * k**p.a
 
 
 def mpk(z, k, p):
-    return p.a * (k / z) ** (p.a - 1.0)
+    return p.a * z * k ** (p.a - 1.0)
+
+
+def labor_augmenting_scale(z, p):
+    return z ** (1.0 / (1.0 - p.a))
 
 
 def consumption(policy, log_state, p):
@@ -309,7 +317,7 @@ def log_state_drift(policy, log_state, p):
     _, log_k = log_state
     k = jnp.exp(log_k)
     investment = policy(log_state, p)
-    return jnp.stack([p.g, investment / k - p.delta])
+    return jnp.stack([(1.0 - p.a) * p.g, investment / k - p.delta])
 
 
 def euler_residuals(policy, log_states, p):
@@ -647,7 +655,9 @@ def benchmark_trajectories(
         k_paths.append(k_path)
         c_paths.append(c_path)
     times = np.asarray(times)
-    z_paths = np.asarray(initial_conditions)[:, :1] * np.exp(g * times[None, :])
+    z_paths = np.asarray(initial_conditions)[:, :1] * np.exp(
+        (1.0 - a) * g * times[None, :]
+    )
     return z_paths, np.stack(k_paths), np.stack(c_paths)
 
 
@@ -674,8 +684,9 @@ def benchmark_policy_grid(a, delta, rho_hat, sigma_crra, g, kappa_grid, data_set
             benchmark_times,
             data_set,
         )
-        kappa_samples.append((k_path / z_path).reshape(-1))
-        c_tilde_samples.append((c_path / z_path).reshape(-1))
+        scale_path = z_path ** (1.0 / (1.0 - a))
+        kappa_samples.append((k_path / scale_path).reshape(-1))
+        c_tilde_samples.append((c_path / scale_path).reshape(-1))
 
     kappa_path = np.concatenate(kappa_samples)
     c_tilde_path = np.concatenate(c_tilde_samples)
@@ -704,11 +715,12 @@ def add_benchmark_path_diagnostics(
     c_error = (np.asarray(test_values["c"]) - c_benchmark) / np.abs(c_benchmark).clip(
         min=DOMAIN_EPS
     )
-    kappa_benchmark = k_benchmark / z_benchmark
-    c_tilde_benchmark = c_benchmark / z_benchmark
-    i_benchmark = z_benchmark * kappa_benchmark**a - c_benchmark
+    scale_benchmark = z_benchmark ** (1.0 / (1.0 - a))
+    kappa_benchmark = k_benchmark / scale_benchmark
+    c_tilde_benchmark = c_benchmark / scale_benchmark
+    i_benchmark = z_benchmark * k_benchmark**a - c_benchmark
     dk_benchmark = i_benchmark - delta * k_benchmark
-    dkappa_benchmark = i_benchmark / z_benchmark - (delta + g) * kappa_benchmark
+    dkappa_benchmark = i_benchmark / scale_benchmark - (delta + g) * kappa_benchmark
 
     columns = {
         "z_benchmark": z_benchmark,
@@ -733,7 +745,7 @@ def add_benchmark_path_diagnostics(
             "trajectory": np.arange(initial.shape[0]),
             "z_0": initial[:, 0],
             "k_0": initial[:, 1],
-            "kappa_0": initial[:, 1] / initial[:, 0],
+            "kappa_0": initial[:, 1] / initial[:, 0] ** (1.0 / (1.0 - a)),
             "mean_k_abs_rel_error": np.mean(np.abs(k_error), axis=1),
             "median_k_abs_rel_error": np.median(np.abs(k_error), axis=1),
             "mean_c_abs_rel_error": np.mean(np.abs(c_error), axis=1),
@@ -755,10 +767,11 @@ def trajectory_values(policy, log_states, p):
     )
     euler = euler_residuals(policy, flat_states, p).reshape(shape)
     z, k = jnp.moveaxis(jnp.exp(log_states), -1, 0)
-    kappa = k / z
+    scale = labor_augmenting_scale(z, p)
+    kappa = k / scale
     dk = investment - p.delta * k
-    dz = p.g * z
-    dkappa = investment / z - (p.delta + p.g) * kappa
+    dz = (1.0 - p.a) * p.g * z
+    dkappa = investment / scale - (p.delta + p.g) * kappa
     return {
         "z": z,
         "k": k,
@@ -775,14 +788,18 @@ def trajectory_values(policy, log_states, p):
 SCALE_INVARIANCE_LAMBDAS = (math.exp(-0.25), 1.0, math.exp(0.25))
 
 
-# i/k at matched kappa under common scales (z, k) -> (lam z, lam k); the
-# dispersion across columns is zero iff the policy is homothetic.
+# i/k at matched kappa under common scales (z, k) -> (lam^{1-a} z, lam k),
+# which hold kappa = k / z^{1/(1-a)} fixed; the dispersion across columns is
+# zero iff the policy is homothetic.
 def scale_invariance_columns(policy, kappa_grid, p, dtype, suffix):
     log_lambdas = jnp.log(jnp.asarray(SCALE_INVARIANCE_LAMBDAS, dtype=dtype))
     log_kappa = jnp.log(jnp.asarray(kappa_grid, dtype=dtype))
     states = jnp.stack(
         [
-            jnp.broadcast_to(log_lambdas[:, None], (len(log_lambdas), log_kappa.size)),
+            jnp.broadcast_to(
+                (1.0 - p.a) * log_lambdas[:, None],
+                (len(log_lambdas), log_kappa.size),
+            ),
             log_lambdas[:, None] + log_kappa[None, :],
         ],
         axis=-1,
@@ -805,7 +822,7 @@ def trajectory_frame(values, times, initial_conditions):
             "t": np.asarray(times).reshape(-1),
             "z_0": initial[trajectory, 0],
             "k_0": initial[trajectory, 1],
-            "kappa_0": initial[trajectory, 1] / initial[trajectory, 0],
+            "kappa_0": np.asarray(values["kappa"])[trajectory, 0],
         }
     )
     for name, value in values.items():
@@ -990,6 +1007,7 @@ def neoclassical_growth_nn_recursive(
     # the training minutiae. Test/benchmark settings enter neither, so
     # changing them still reuses a cached policy.
     problem_config = {
+        "technology": "hicks",
         "a": a,
         "delta": delta,
         "rho_hat": rho_hat,
@@ -1193,10 +1211,12 @@ def neoclassical_growth_nn_recursive(
     test_trajectory_euler = jnp.mean(jnp.abs(test_values["euler_residual"]), axis=1)
 
     train_kappa_0 = np.asarray(
-        train_batch_initial_conditions[:, 1] / train_batch_initial_conditions[:, 0]
+        train_batch_initial_conditions[:, 1]
+        / train_batch_initial_conditions[:, 0] ** (1.0 / (1.0 - a))
     )
     test_kappa_0 = np.asarray(
-        test_initial_conditions[:, 1] / test_initial_conditions[:, 0]
+        test_initial_conditions[:, 1]
+        / test_initial_conditions[:, 0] ** (1.0 / (1.0 - a))
     )
     train_kappa = train_df["kappa"].to_numpy()
     test_kappa = test_df["kappa"].to_numpy()
@@ -1210,7 +1230,9 @@ def neoclassical_growth_nn_recursive(
             else "delta_k0_unit_softplus"
         ),
         "state_coordinate": (
-            "log(k / z)" if hc_set.homothetic_representation else "(log z, log k)"
+            "log(k / z^(1/(1-a)))"
+            if hc_set.homothetic_representation
+            else "(log z, log k)"
         ),
         "a": a,
         "delta": delta,

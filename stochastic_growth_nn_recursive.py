@@ -137,6 +137,7 @@ def problem_cache_config(
     a, delta, rho_hat, sigma_crra, eta, sigma_z, z_bar, z_0, k_0, use_float64, ic_set
 ):
     return {
+        "technology": "hicks",
         "a": a,
         "delta": delta,
         "rho_hat": rho_hat,
@@ -506,7 +507,7 @@ def trajectory_values(policy, log_states, p):
     return {
         "z": z,
         "k": k,
-        "kappa": k / z,
+        "kappa": k / z ** (1.0 / (1.0 - p.a)),
         "i": investment,
         "c": c,
         "dlog_z": p.eta * (p.log_z_bar - jnp.log(z)),

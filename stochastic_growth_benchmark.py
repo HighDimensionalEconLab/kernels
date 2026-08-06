@@ -53,7 +53,7 @@ def stochastic_growth_benchmark(
 
     z_bar = np.exp(log_z_bar)
     kappa_ss = ((delta + rho_hat) / a) ** (1.0 / (a - 1.0))
-    k_ss = z_bar * kappa_ss
+    k_ss = z_bar ** (1.0 / (1.0 - a)) * kappa_ss
     if k_hi is None:
         k_hi = 1.5 * k_ss
     if not k_lo < k_ss < k_hi:
@@ -70,7 +70,7 @@ def stochastic_growth_benchmark(
 
     z = np.exp(x_grid)[:, None]
     k = np.exp(y_grid)[None, :]
-    f = z * (k / z) ** a
+    f = z * k**a
     c_zero_drift = f - delta * k
     if np.min(c_zero_drift) <= 0.0:
         raise ValueError("f - delta k must be positive on the whole grid")

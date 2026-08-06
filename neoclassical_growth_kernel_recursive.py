@@ -127,6 +127,8 @@ class ResidualArgs:
     gram: jax.Array
     state_offset: jax.Array
     k_scale: jax.Array
+    # 1/(1-a): log kappa = log k - z_detrend * log z for Hicks-neutral z.
+    z_detrend: jax.Array
 
 
 def state_lengthscales(kernel_set):
@@ -221,12 +223,13 @@ def fixed_collocation_data(
     )
 
 
-def build_residual_args(train_log_states, kernel_set, z_0=1.0, k_0=1.0):
+def build_residual_args(train_log_states, kernel_set, a, z_0=1.0, k_0=1.0):
     flat_states = train_log_states.reshape(-1, 2)
     dtype = flat_states.dtype
     state_offset = jnp.log(jnp.asarray([z_0, k_0], dtype))
+    z_detrend = jnp.asarray(1.0 / (1.0 - a), dtype)
     if kernel_set.homothetic_representation:
-        centers = flat_states[:, 1] - flat_states[:, 0]
+        centers = flat_states[:, 1] - z_detrend * flat_states[:, 0]
         gram = rbf_state_gram(
             centers,
             jnp.asarray(kernel_set.amplitude, dtype),
@@ -242,13 +245,14 @@ def build_residual_args(train_log_states, kernel_set, z_0=1.0, k_0=1.0):
         gram=gram,
         state_offset=state_offset,
         k_scale=jnp.asarray(k_0, dtype),
+        z_detrend=z_detrend,
     )
 
 
 def raw_policy(theta, args, log_state, kernel_set):
     alpha = theta[0]
     if kernel_set.homothetic_representation:
-        q = log_state[1] - log_state[0]
+        q = log_state[1] - args.z_detrend * log_state[0]
         features = rbf_state_features(
             q,
             args.centers,
@@ -403,7 +407,7 @@ def neoclassical_growth_kernel_recursive(
         data_set,
         dtype=dtype,
     )
-    args = build_residual_args(train_log_states, kernel_set, z_0, k_0)
+    args = build_residual_args(train_log_states, kernel_set, a, z_0, k_0)
     n_train = args.centers.shape[0]
     shifted_gram = args.gram + kernel_set.metric_epsilon * jnp.eye(n_train, dtype=dtype)
     metric = RepeatedFactorMetric(
@@ -464,7 +468,7 @@ def neoclassical_growth_kernel_recursive(
     train_c_benchmark_np = np.asarray(train_c_benchmark).reshape(-1)
     train_df["c_benchmark"] = train_c_benchmark_np
     train_df["i_benchmark"] = (
-        np.asarray(train_df["z"] * train_df["kappa"] ** a) - train_c_benchmark_np
+        np.asarray(train_df["z"] * train_df["k"] ** a) - train_c_benchmark_np
     )
     train_df["fixed_exact_center"] = True
 
@@ -544,10 +548,12 @@ def neoclassical_growth_kernel_recursive(
 
     gram_eigenvalues = jnp.linalg.eigvalsh(args.gram)
     train_kappa_0 = np.asarray(
-        train_initial_conditions[:, 1] / train_initial_conditions[:, 0]
+        train_initial_conditions[:, 1]
+        / train_initial_conditions[:, 0] ** (1.0 / (1.0 - a))
     )
     test_kappa_0 = np.asarray(
-        test_initial_conditions[:, 1] / test_initial_conditions[:, 0]
+        test_initial_conditions[:, 1]
+        / test_initial_conditions[:, 0] ** (1.0 / (1.0 - a))
     )
     train_kappa = train_df["kappa"].to_numpy()
     test_kappa = test_df["kappa"].to_numpy()
@@ -576,7 +582,9 @@ def neoclassical_growth_kernel_recursive(
             else "delta_k0_unit_softplus"
         ),
         "state_coordinate": (
-            "log(k / z)" if kernel_set.homothetic_representation else "(log z, log k)"
+            "log(k / z^(1/(1-a)))"
+            if kernel_set.homothetic_representation
+            else "(log z, log k)"
         ),
         "kernel": (
             "rbf" if kernel_set.homothetic_representation else kernel_set.state_kernel

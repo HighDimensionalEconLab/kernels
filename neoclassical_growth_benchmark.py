@@ -20,8 +20,10 @@ def neoclassical_growth_benchmark(
     # delta: depreciation
     # r: discount rate
     # sigma_crra: the constant relative risk aversion coefficient
-    # k_0, z_0: initial conditions for capital and the growing scale
-    # g: exogenous growth, dz/dt = g z. The legacy model is z_0=1, g=0.
+    # k_0, z_0: initial conditions for capital and Hicks-neutral TFP (Y = z k^a)
+    # g: per-capita balanced growth rate; TFP grows at (1-a) g so the
+    #   labor-augmenting scale z^{1/(1-a)} grows at g. The static model is
+    #   z_0=1, g=0.
     # t_grid: The grid for the normalized boundary-value solve. Truncation pins
     #   kappa(T) = kappa_ss; the necessary buffer past a diagnostic window is
     #   calibration dependent through the stable and unstable eigenvalues.
@@ -44,9 +46,11 @@ def neoclassical_growth_benchmark(
     if marginal_product_ss <= 0.0:
         raise ValueError("delta + r + sigma_crra * g must be positive")
 
-    # Homogeneous production is Y = z (k/z)^a. In detrended coordinates
-    # kappa=k/z and c_tilde=c/z, the balanced-growth boundary is stationary.
-    kappa_0 = k_0 / z_0
+    # Production is Y = z k^a with the labor-augmenting scale s = z^{1/(1-a)},
+    # so Y = s (k/s)^a. In detrended coordinates kappa=k/s and c_tilde=c/s, the
+    # balanced-growth boundary is stationary.
+    scale_0 = z_0 ** (1.0 / (1.0 - a))
+    kappa_0 = k_0 / scale_0
     kappa_ss = (marginal_product_ss / a) ** (1 / (a - 1))
     kappa_T = kappa_ss
 
@@ -96,7 +100,7 @@ def neoclassical_growth_benchmark(
         if t_grid[-1] > T_max:
             raise ValueError("Extrapolation not supported")
         val = solution.sol(t_grid)
-        z = z_0 * np.exp(g * np.asarray(t_grid))
-        return z * val[0], z * val[1]
+        scale = scale_0 * np.exp(g * np.asarray(t_grid))
+        return scale * val[0], scale * val[1]
 
     return interpolate_solution

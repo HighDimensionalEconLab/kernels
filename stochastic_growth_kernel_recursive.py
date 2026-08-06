@@ -105,12 +105,15 @@ def stochastic_growth_kernel_recursive(
         train_log_z_variance=CONSTANTS.z_ergodic_variance_high,
         train_log_k_variance=0.01,
     ),
+    # Lengthscales sized to the Hicks-neutral state cloud: output moves
+    # one-for-one with log z and k_ss with log z / (1 - a), so both directions
+    # need shorter scales than detrended-capital intuition suggests.
     kernel_set: StateKernelSettings = StateKernelSettings(
         homothetic_representation=False,
         state_kernel="ard_rbf",
         linear_mean=True,
-        log_z_lengthscale=0.6,
-        log_k_lengthscale=0.65,
+        log_z_lengthscale=0.4,
+        log_k_lengthscale=0.45,
     ),
     opt_set: OptimizerSettings = OptimizerSettings(
         init_damping=1e-6,
@@ -120,9 +123,8 @@ def stochastic_growth_kernel_recursive(
         geodesic_acceptance_ratio=0.75,
     ),
     # The float64 ridge-LM residual floor of this representation on the 2-D
-    # stochastic state box sits at ~1.3e-5 RMS, slightly above the
-    # deterministic variant's floor.
-    stop_set: StoppingCriteria = StoppingCriteria(max_steps=150, residual_atol=2e-5),
+    # stochastic state box sits at ~6e-5 RMS; the atol sits just above it.
+    stop_set: StoppingCriteria = StoppingCriteria(max_steps=150, residual_atol=7e-5),
     verbose: bool = True,
 ):
     jax.config.update("jax_enable_x64", True)
@@ -248,7 +250,7 @@ def stochastic_growth_kernel_recursive(
     if not bool(jnp.all(train_solution.ok)):
         raise RuntimeError("reference-policy collocation rollout failed")
     train_log_states = train_solution.xs
-    args = build_residual_args(train_log_states, kernel_set, z_bar, k_0)
+    args = build_residual_args(train_log_states, kernel_set, a, z_bar, k_0)
     n_train = args.centers.shape[0]
     shifted_gram = args.gram + kernel_set.metric_epsilon * jnp.eye(n_train, dtype=dtype)
     metric = RepeatedFactorMetric(

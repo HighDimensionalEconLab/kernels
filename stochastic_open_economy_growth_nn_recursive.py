@@ -39,10 +39,15 @@ from utilities import (
 DOMAIN_EPS = 1e-8
 
 # Annual AR(1) -> OU: e^(-kappa_r) = rho, sigma_r^2/(2 kappa_r) = sd^2/(1-rho^2).
-# Annual-frequency calibration near the annualized world-rate AR(1) of
-# Uribe & Yue (2006, eq. 15); stationary sd ~2.4 percentage points.
-WORLD_RATE_AR1_RHO = 0.572
-WORLD_RATE_AR1_INNOVATION_SD = 0.0196
+# World-rate process from Uribe & Yue (2006, eq. 15): quarterly rho = 0.83 on
+# log-devs of the annualized gross rate with innovation sd 0.007, so annual
+# rho = 0.83^4 and stationary sd ~1.04 * 0.007/sqrt(1-0.83^2) ~ 1.3 percentage
+# points in the rate level (kappa ~ 0.75/yr, half-life ~0.9y). Corroborated by
+# the international risk-free real rate in Fernandez-Villaverde et al. (2011
+# AER "Risk Matters"): monthly rho = 0.95 (kappa ~ 0.62/yr) with a 38bp
+# annualized innovation sd, stationary sd ~1.2pp.
+WORLD_RATE_AR1_RHO = 0.83**4
+WORLD_RATE_AR1_INNOVATION_SD = 0.0115
 WORLD_RATE_KAPPA = -math.log(WORLD_RATE_AR1_RHO)
 WORLD_RATE_SIGMA = WORLD_RATE_AR1_INNOVATION_SD * math.sqrt(
     2.0 * WORLD_RATE_KAPPA / (1.0 - WORLD_RATE_AR1_RHO**2)

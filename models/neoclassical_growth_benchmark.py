@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 from scipy.integrate import solve_bvp
 
@@ -104,3 +106,31 @@ def neoclassical_growth_benchmark(
         return scale * val[0], scale * val[1]
 
     return interpolate_solution
+
+
+# Closed-form steady state of the static model (z = 1, g = 0) and its exact
+# derivatives, the AD-free target the solver sensitivities are checked
+# against: f'(k_ss) = delta + rho_hat with f(k) = k^a gives
+# k_ss = (a / (delta + rho_hat))^(1/(1 - a)) and c_ss = k_ss^a - delta k_ss.
+# sigma_crra and k_0 do not enter, so those derivatives are exactly zero.
+def neoclassical_steady_state_sensitivities(a, delta, rho_hat):
+    mpk_ss = delta + rho_hat
+    k_ss = (a / mpk_ss) ** (1.0 / (1.0 - a))
+    c_ss = k_ss**a - delta * k_ss
+    d_k_ss_d_a = k_ss * (1.0 / (a * (1.0 - a)) + math.log(a / mpk_ss) / (1.0 - a) ** 2)
+    d_k_ss_d_delta = -k_ss / ((1.0 - a) * mpk_ss)
+    # a k_ss^(a-1) - delta = rho_hat collapses the chain rule for c_ss.
+    return {
+        "k_ss": k_ss,
+        "c_ss": c_ss,
+        "d_k_ss_d_a": d_k_ss_d_a,
+        "d_k_ss_d_delta": d_k_ss_d_delta,
+        "d_k_ss_d_rho_hat": d_k_ss_d_delta,
+        "d_k_ss_d_sigma_crra": 0.0,
+        "d_k_ss_d_k_0": 0.0,
+        "d_c_ss_d_a": k_ss**a * math.log(k_ss) + rho_hat * d_k_ss_d_a,
+        "d_c_ss_d_delta": rho_hat * d_k_ss_d_delta - k_ss,
+        "d_c_ss_d_rho_hat": rho_hat * d_k_ss_d_delta,
+        "d_c_ss_d_sigma_crra": 0.0,
+        "d_c_ss_d_k_0": 0.0,
+    }

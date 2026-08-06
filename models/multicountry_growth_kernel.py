@@ -32,6 +32,7 @@ from models.multicountry_growth import (
     production,
     relative_welfare_weights,
     resolved_steady_state,
+    sensitivity_fields_frame,
     steady_state,
     tail_diagnostics,
     tvc_diagnostics,
@@ -131,7 +132,7 @@ def multicountry_growth_kernel(
     data_set: DataSettings = DataSettings(),
     lm_set: SolverSettings = SolverSettings(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
-    sensitivity_time: float | None = None,
+    sensitivity_times: list[float] | None = None,
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
@@ -161,10 +162,10 @@ def multicountry_growth_kernel(
         raise ValueError("test_T must not exceed the training horizon")
     if data_set.benchmark_T < max(data_set.test_T, float(train_data[-1])):
         raise ValueError("benchmark_T must cover the train and test horizons")
-    if sensitivity_time is not None and not (
-        0.0 <= sensitivity_time <= float(train_data[-1])
+    if sensitivity_times is not None and any(
+        not 0.0 <= float(value) <= float(train_data[-1]) for value in sensitivity_times
     ):
-        raise ValueError("sensitivity_time must lie within the training horizon")
+        raise ValueError("sensitivity_times must lie within the training horizon")
     test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     validation_data = jnp.linspace(
         0.0, float(train_data[-1]), data_set.validation_points, dtype=dtype
@@ -498,9 +499,11 @@ def multicountry_growth_kernel(
     rkhs_norm_total = sum(rkhs_norms.values()) + rkhs_norm_rate
 
     sensitivity_df = None
-    if sensitivity_time is not None:
+    sensitivity_fields = {}
+    if sensitivity_times is not None:
+        sensitivity_times = [float(value) for value in sensitivity_times]
         K_sens, K_tilde_sens = integrated_kernel_matrices(
-            jnp.asarray([sensitivity_time], dtype=dtype),
+            jnp.asarray(sensitivity_times, dtype=dtype),
             train_data,
             kernel,
             kernel_set.sigma,
@@ -508,12 +511,14 @@ def multicountry_growth_kernel(
         )
 
         # One reverse-mode pass through the solve yields the comparative
-        # static of the global rate with respect to every structural
+        # statics of the world rate and every country's consumption and
+        # capital at every sensitivity time with respect to every structural
         # parameter and initial condition together: the implicit dependence
         # of the solved coefficients on p plus the direct dependence of the
-        # rate evaluation. The a_0 gradient is the projected one (demeaning
-        # inside path_coordinates), so it measures feasible redistributions.
-        def rate_at_sensitivity_time(p_value):
+        # path evaluation. The a_0 gradients are the projected ones
+        # (demeaning inside path_coordinates), so they measure feasible
+        # redistributions.
+        def observables_at_sensitivity_times(p_value):
             sensitivity_result = solver.solve(
                 theta_0,
                 None,
@@ -524,40 +529,51 @@ def multicountry_growth_kernel(
             coordinates = path_coordinates(
                 sensitivity_result.x, K_sens, K_tilde_sens, p_value
             )
-            return coordinates["interest_rate"][0], sensitivity_result.status
+            observables = jnp.column_stack(
+                [coordinates["interest_rate"], coordinates["c"], coordinates["k"]]
+            )
+            return observables, sensitivity_result.status
 
-        (rate_value, sensitivity_status), rate_grads = jax.value_and_grad(
-            rate_at_sensitivity_time, has_aux=True
+        jacobian, sensitivity_status = jax.jacrev(
+            observables_at_sensitivity_times, has_aux=True
         )(p)
-        jax.block_until_ready(rate_grads)
+        jax.block_until_ready(jacobian)
         # A non-converged re-solve would publish exactly zero implicit
         # tangents, indistinguishable from a genuine null effect.
         if int(sensitivity_status) != LMStatus.CONVERGED:
             raise RuntimeError("the sensitivity re-solve did not converge")
-        gradient_parameters = rate_grads["parameters"]
-        scalar_sensitivities = {
-            "alpha": float(gradient_parameters.alpha),
-            "delta": float(gradient_parameters.delta),
-            "r": float(gradient_parameters.r),
-            "eta": float(gradient_parameters.eta),
-        }
-        country_sensitivities = {
-            "gamma": np.asarray(gradient_parameters.gammas),
-            "productivity": np.asarray(gradient_parameters.productivities),
-            "population": np.asarray(gradient_parameters.populations),
-            "k_0": np.asarray(rate_grads["k_0"]),
-            "a_0": np.asarray(rate_grads["a_0"]),
-        }
-        sensitivity_df = pd.DataFrame(
+        primal_coordinates = path_coordinates(theta, K_sens, K_tilde_sens, p)
+        primal_observables = np.column_stack(
             [
-                {"name": name, "country": 0, "value": value}
-                for name, value in scalar_sensitivities.items()
+                np.asarray(primal_coordinates["interest_rate"]),
+                np.asarray(primal_coordinates["c"]),
+                np.asarray(primal_coordinates["k"]),
             ]
-            + [
-                {"name": name, "country": country + 1, "value": float(values[country])}
-                for name, values in country_sensitivities.items()
-                for country in range(num_countries)
-            ]
+        )
+        observable_labels = (
+            ["rate"]
+            + [f"c_{country + 1}" for country in range(num_countries)]
+            + [f"k_{country + 1}" for country in range(num_countries)]
+        )
+        gradient_parameters = jacobian["parameters"]
+        sensitivity_fields, sensitivity_df = sensitivity_fields_frame(
+            sensitivity_times,
+            observable_labels,
+            primal_observables,
+            {
+                "alpha": np.asarray(gradient_parameters.alpha),
+                "delta": np.asarray(gradient_parameters.delta),
+                "r": np.asarray(gradient_parameters.r),
+                "eta": np.asarray(gradient_parameters.eta),
+            },
+            {
+                "gamma": np.asarray(gradient_parameters.gammas),
+                "productivity": np.asarray(gradient_parameters.productivities),
+                "population": np.asarray(gradient_parameters.populations),
+                "k_0": np.asarray(jacobian["k_0"]),
+                "a_0": np.asarray(jacobian["a_0"]),
+            },
+            [float(value) for value in parameters.populations],
         )
 
     results = {
@@ -693,20 +709,11 @@ def multicountry_growth_kernel(
                 long_run["initial_wealth"][country]
             )
     results["rate_offset"] = float(theta_offsets[-1])
-    if sensitivity_time is not None:
-        results["sensitivity_time"] = sensitivity_time
-        results["interest_rate_at_sensitivity_time"] = float(rate_value)
-        results.update(
-            {f"d_rate_d_{name}": value for name, value in scalar_sensitivities.items()}
+    if sensitivity_times is not None:
+        results["sensitivity_times"] = ",".join(
+            f"{value:g}" for value in sensitivity_times
         )
-        for country in range(num_countries):
-            suffix = country + 1
-            results.update(
-                {
-                    f"d_rate_d_{name}_{suffix}": float(values[country])
-                    for name, values in country_sensitivities.items()
-                }
-            )
+        results.update(sensitivity_fields)
     if benchmark_available:
         results.update(
             {

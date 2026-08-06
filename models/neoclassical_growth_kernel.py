@@ -8,6 +8,7 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 from nlls_gram import (
+    LMStatus,
     RidgeLevenbergMarquardt,
 )
 
@@ -17,7 +18,10 @@ from models.kernels import (
     normalize_kernel,
     rkhs_norm_squared,
 )
-from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
+from models.neoclassical_growth_benchmark import (
+    neoclassical_growth_benchmark,
+    neoclassical_steady_state_sensitivities,
+)
 from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
@@ -107,6 +111,7 @@ def neoclassical_growth_kernel(
     lm_set: SolverSettings = SolverSettings(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     c_0_guess: float | None = None,  # overrides the flat steady-flow warm start
+    sensitivity_times: list[float] | None = None,
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
@@ -135,24 +140,38 @@ def neoclassical_growth_kernel(
     )
     n_train = len(train_data)
 
-    def production(k):
-        base = k**a
+    # The structural parameters and the initial condition ride in the
+    # solver's `p` argument so the solved paths are implicitly
+    # differentiable with respect to every one of them (nlls-gram's
+    # implicit JVP/VJP at the ridge stationary point). The kink family
+    # (A, b_1, b_2) stays static: sensitivities are gated to smooth
+    # production.
+    p = {
+        "a": jnp.asarray(a, dtype=dtype),
+        "delta": jnp.asarray(delta, dtype=dtype),
+        "rho_hat": jnp.asarray(rho_hat, dtype=dtype),
+        "sigma_crra": jnp.asarray(sigma_crra, dtype=dtype),
+        "k_0": jnp.asarray(k_0, dtype=dtype),
+    }
+
+    def production(k, a_p):
+        base = k**a_p
         return A_value * jnp.maximum(base, b_1_value * base - b_2_value)
 
-    def marginal_product(k):
-        base = k**a
+    def marginal_product(k, a_p):
+        base = k**a_p
         branch = jnp.where(b_1_value * base - b_2_value > base, b_1_value, 1.0)
-        return A_value * a * branch * k ** (a - 1.0)
+        return A_value * a_p * branch * k ** (a_p - 1.0)
 
     # theta is the tuple (alpha_mu, alpha_c, alpha_k, (c_0, mu_0)), which
     # flattens to [alpha_mu (n), alpha_c (n), alpha_k (n), c_0, mu_0] -- the
     # block order of the metric below.
-    def path_values(theta, K_eval, K_tilde_eval):
+    def path_values(theta, K_eval, K_tilde_eval, p):
         alpha_mu, alpha_c, alpha_k, initial = theta
         c_0, mu_0 = initial
         mu = mu_0 + K_tilde_eval @ alpha_mu
         c = c_0 + K_tilde_eval @ alpha_c
-        k = k_0 + K_tilde_eval @ alpha_k
+        k = p["k_0"] + K_tilde_eval @ alpha_k
         dmu_dt = K_eval @ alpha_mu
         dk_dt = K_eval @ alpha_k
         return k, c, mu, dk_dt, dmu_dt
@@ -165,24 +184,23 @@ def neoclassical_growth_kernel(
         train_data, kernel, sigma, ell, repeats=3
     )
 
-    def train_path_values(theta):
-        return path_values(theta, K_jax, K_tilde_jax)
-
     # The residual is scaled by 1/sqrt(3n) (the NN files' convention) so that
     # residual_atol is a scale-free per-point bound rather than tightening
     # with grid refinement.
     residual_scale = 1.0 / jnp.sqrt(3.0 * n_train)
 
     # CRRA first-order condition u'(c) = mu, i.e. mu c^sigma_crra = 1; the
-    # costate and resource residuals are utility-free.
-    def residual_fn(theta):
-        k, c, mu, dk_dt, dmu_dt = train_path_values(theta)
-        resource = dk_dt - (production(k) - delta * k - c)
-        euler = dmu_dt + mu * (marginal_product(k) - delta - rho_hat)
-        shadow_price = mu * c**sigma_crra - 1.0
+    # costate and resource residuals are utility-free. p carries the
+    # structural parameters and the initial condition for implicit
+    # differentiation; the model equations never read args.
+    def residual_fn(theta, _, p):
+        k, c, mu, dk_dt, dmu_dt = path_values(theta, K_jax, K_tilde_jax, p)
+        resource = dk_dt - (production(k, p["a"]) - p["delta"] * k - c)
+        euler = dmu_dt + mu * (marginal_product(k, p["a"]) - p["delta"] - p["rho_hat"])
+        shadow_price = mu * c ** p["sigma_crra"] - 1.0
         return residual_scale * jnp.concatenate([resource, euler, shadow_price])
 
-    c_flow_guess = max(production(k_0) - delta * k_0, DOMAIN_EPS)
+    c_flow_guess = max(production(k_0, a) - delta * k_0, DOMAIN_EPS)
     if c_0_guess is not None:
         c_flow_guess = max(float(c_0_guess), DOMAIN_EPS)
     theta_0 = (
@@ -201,14 +219,15 @@ def neoclassical_growth_kernel(
         damping_increase=lm_set.damping_increase,
     )
 
-    timer = Stopwatch()
-    result = solver.solve(
-        theta_0,
+    solve_options = dict(
         max_steps=lm_set.max_steps,
         gtol=lm_set.gtol,
         atol=lm_set.residual_atol,
         max_steps_is_success=False,
     )
+
+    timer = Stopwatch()
+    result = solver.solve(theta_0, None, p=p, **solve_options)
     elapsed = timer.elapsed(result)
 
     theta = result.x
@@ -221,15 +240,15 @@ def neoclassical_growth_kernel(
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             points_data, train_data, kernel, sigma, ell
         )
-        k, c, mu, dk_dt, dmu_dt = path_values(theta, K_eval, K_tilde_eval)
+        k, c, mu, dk_dt, dmu_dt = path_values(theta, K_eval, K_tilde_eval, p)
         return {
             "t": points_data,
             "k": k,
             "c": c,
             "mu": mu,
-            "Y": production(k),
-            "resource": dk_dt - (production(k) - delta * k - c),
-            "euler": dmu_dt + mu * (marginal_product(k) - delta - rho_hat),
+            "Y": production(k, a),
+            "resource": dk_dt - (production(k, a) - delta * k - c),
+            "euler": dmu_dt + mu * (marginal_product(k, a) - delta - rho_hat),
             "shadow_price": mu * c**sigma_crra - 1.0,
         }
 
@@ -248,7 +267,7 @@ def neoclassical_growth_kernel(
     def mpk_violations(grid):
         m1 = A_value * a * grid["k"] ** (a - 1.0)
         m2 = b_1_value * m1
-        implied = marginal_product(grid["k"]) - grid["euler"] / grid["mu"]
+        implied = marginal_product(grid["k"], a) - grid["euler"] / grid["mu"]
         lower = jnp.minimum(m1, m2)
         upper = jnp.maximum(m1, m2)
         return jnp.maximum(lower - implied, 0.0), jnp.maximum(implied - upper, 0.0)
@@ -267,7 +286,7 @@ def neoclassical_growth_kernel(
         K_test, K_tilde_test = integrated_kernel_matrices(
             test_points_data, train_data, kernel, sigma, ell
         )
-        k, c, _, _, _ = path_values(theta, K_test, K_tilde_test)
+        k, c, _, _, _ = path_values(theta, K_test, K_tilde_test, p)
         return k, c
 
     finite_positive = bool(
@@ -298,6 +317,60 @@ def neoclassical_growth_kernel(
         or p_upper_violation > mpk_bound_tolerance
     ):
         rejection_reasons.append("p_bound")
+
+    sensitivity_df = None
+    sensitivity_fields = {}
+    if sensitivity_times is not None:
+        if use_kinked_production:
+            raise ValueError("sensitivities require smooth production")
+        sensitivity_times = [float(value) for value in sensitivity_times]
+        if any(
+            not 0.0 <= value <= float(train_data[-1]) for value in sensitivity_times
+        ):
+            raise ValueError("sensitivity_times must lie within the training horizon")
+        K_sens, K_tilde_sens = integrated_kernel_matrices(
+            jnp.asarray(sensitivity_times, dtype=dtype), train_data, kernel, sigma, ell
+        )
+
+        # One reverse-mode pass through the solve yields d[k(t), c(t)]/dp at
+        # every sensitivity time together: the implicit dependence of the
+        # solved coefficients on p plus the direct dependence of the path
+        # evaluation.
+        def paths_at_sensitivity_times(p_value):
+            sensitivity_result = solver.solve(theta_0, None, p=p_value, **solve_options)
+            k, c, _, _, _ = path_values(
+                sensitivity_result.x, K_sens, K_tilde_sens, p_value
+            )
+            return jnp.column_stack([k, c]), sensitivity_result.status
+
+        jacobian, sensitivity_status = jax.jacrev(
+            paths_at_sensitivity_times, has_aux=True
+        )(p)
+        jax.block_until_ready(jacobian)
+        # A non-converged re-solve would publish exactly zero implicit
+        # tangents, indistinguishable from a genuine null effect.
+        if int(sensitivity_status) != LMStatus.CONVERGED:
+            raise RuntimeError("the sensitivity re-solve did not converge")
+        k_sens, c_sens, _, _, _ = path_values(theta, K_sens, K_tilde_sens, p)
+        rows = []
+        for index, time_value in enumerate(sensitivity_times):
+            suffix = f"T{time_value:g}".replace(".", "p")
+            sensitivity_fields[f"k_{suffix}"] = float(k_sens[index])
+            sensitivity_fields[f"c_{suffix}"] = float(c_sens[index])
+            for name in ("a", "delta", "rho_hat", "sigma_crra", "k_0"):
+                d_k = float(jacobian[name][index, 0])
+                d_c = float(jacobian[name][index, 1])
+                sensitivity_fields[f"d_k_{suffix}_d_{name}"] = d_k
+                sensitivity_fields[f"d_c_{suffix}_d_{name}"] = d_c
+                rows.append(
+                    {"time": time_value, "parameter": name, "d_k": d_k, "d_c": d_c}
+                )
+        sensitivity_df = pd.DataFrame(rows)
+        # The exact steady-state derivatives the large-T columns converge
+        # to; the sigma_crra and k_0 rows converge to zero.
+        sensitivity_fields.update(
+            neoclassical_steady_state_sensitivities(a, delta, rho_hat)
+        )
 
     results = {
         "a": a,
@@ -341,6 +414,11 @@ def neoclassical_growth_kernel(
         "stopping_reason": STATUS_TO_REASON.get(status, "unknown"),
         **acceptance_fields(rejection_reasons),
     }
+    if sensitivity_times is not None:
+        results["sensitivity_times"] = ",".join(
+            f"{value:g}" for value in sensitivity_times
+        )
+        results.update(sensitivity_fields)
     train_df = pd.DataFrame(
         {
             name: np.asarray(train_eval[name])
@@ -395,8 +473,27 @@ def neoclassical_growth_kernel(
         },
         "initial_conditions": {"k_0": k_0},
     }
+
+    # The full parametric solution map for implicit-AD functionals beyond
+    # the built-in sensitivities: re-solves at p_value and evaluates the
+    # paths, so jax.jvp/jax.grad through it differentiates any observable of
+    # the solution with respect to the parameters and initial condition in
+    # p. Callers away from the gated primal must check the returned
+    # solver_status: a non-converged re-solve yields exactly zero solution
+    # tangents, indistinguishable from a genuine null effect.
+    def parametric_model(points, p_value):
+        solved = solver.solve(theta_0, None, p=p_value, **solve_options)
+        K_eval, K_tilde_eval = integrated_kernel_matrices(
+            points, train_data, kernel, sigma, ell
+        )
+        k, c, mu, _, _ = path_values(solved.x, K_eval, K_tilde_eval, p_value)
+        return {"t": points, "k": k, "c": c, "mu": mu, "solver_status": solved.status}
+
     return results, {
         "model": kernel_solution,
+        "parametric_model": parametric_model,
+        "p": p,
+        "sensitivity_df": sensitivity_df,
         "train_df": train_df,
         "test_df": test_df,
         "hyperparameters": hyperparameters,

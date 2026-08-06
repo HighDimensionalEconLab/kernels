@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pandas as pd
 
 # Validity of the inputs, not an acceptance gate: checked in exact float64 on
 # the raw values, so it holds at any working dtype.
@@ -306,6 +307,70 @@ def path_residuals(
         # World bond clearing, per capita so the row size is N-free.
         "asset_clearing": jnp.sum(populations * a, axis=-1) / jnp.sum(populations),
     }
+
+
+# Flat results fields d_<observable>_T<t>_d_<parameter>[_<country>] plus the
+# observable levels <observable>_T<t>, and a long-form frame with one row per
+# derivative entry, shared by the kernel and NN sensitivity blocks so both
+# drivers publish identical names. The two-country a_0_transfer entry is the
+# derivative along the clearing-preserving transfer (1/L_1, -1/L_2): tau
+# world units of bonds moved from country 2 to country 1.
+def sensitivity_fields_frame(
+    times,
+    observable_labels,
+    primal_observables,
+    scalar_blocks,
+    country_blocks,
+    populations,
+):
+    num_countries = len(populations)
+    fields = {}
+    rows = []
+    for index, time_value in enumerate(times):
+        suffix = f"T{time_value:g}".replace(".", "p")
+        for column, label in enumerate(observable_labels):
+            fields[f"{label}_{suffix}"] = float(primal_observables[index, column])
+            for name, block in scalar_blocks.items():
+                value = float(block[index, column])
+                fields[f"d_{label}_{suffix}_d_{name}"] = value
+                rows.append(
+                    {
+                        "time": time_value,
+                        "observable": label,
+                        "parameter": name,
+                        "country": 0,
+                        "value": value,
+                    }
+                )
+            for name, block in country_blocks.items():
+                for country in range(num_countries):
+                    value = float(block[index, column, country])
+                    fields[f"d_{label}_{suffix}_d_{name}_{country + 1}"] = value
+                    rows.append(
+                        {
+                            "time": time_value,
+                            "observable": label,
+                            "parameter": name,
+                            "country": country + 1,
+                            "value": value,
+                        }
+                    )
+            if num_countries == 2:
+                transfer = float(
+                    country_blocks["a_0"][index, column, 0] / populations[0]
+                    - country_blocks["a_0"][index, column, 1] / populations[1]
+                )
+                fields[f"d_{label}_{suffix}_d_a_0_transfer"] = transfer
+                rows.append(
+                    {
+                        "time": time_value,
+                        "observable": label,
+                        "parameter": "a_0_transfer",
+                        "country": 0,
+                        "value": transfer,
+                    }
+                )
+    return fields, pd.DataFrame(rows)
 
 
 def tvc_diagnostics(t, values, parameters):

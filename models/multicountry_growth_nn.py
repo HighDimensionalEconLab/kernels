@@ -13,6 +13,7 @@ from jax.flatten_util import ravel_pytree
 from nlls_gram import (
     DrawNNXModule,
     LevenbergMarquardt,
+    LMStatus,
     MultiStart,
 )
 
@@ -28,6 +29,7 @@ from models.multicountry_growth import (
     production,
     relative_welfare_weights,
     resolved_steady_state,
+    sensitivity_fields_frame,
     steady_state,
     tail_diagnostics,
     tvc_diagnostics,
@@ -187,8 +189,13 @@ def path_values(model, t, p, scales):
     blocks_at_zero = raw_at_zero[: 5 * num_countries].reshape(5, num_countries)
     blocks_dt = raw_dt[:, : 5 * num_countries].reshape(-1, 5, num_countries)
 
+    # Population demeaning is a no-op at the primal point (the driver
+    # anchors cleared positions) and projects AD perturbations of a_0 onto
+    # the feasible clearing set, so every direction is meaningful.
+    populations = p.model.populations
+    a_0 = p.a_0 - jnp.sum(populations * p.a_0) / jnp.sum(populations)
     log_k = jnp.log(p.k_0) + (blocks[:, 0] - blocks_at_zero[0])
-    a = p.a_0 + scales.output * (blocks[:, 1] - blocks_at_zero[1])
+    a = a_0 + scales.output * (blocks[:, 1] - blocks_at_zero[1])
     log_q = scales.log_q_ss + blocks[:, 2]
     log_c = scales.log_consumption + blocks[:, 3]
     log_mu = -p.model.gammas * scales.log_consumption + blocks[:, 4]
@@ -259,6 +266,7 @@ def multicountry_growth_nn(
     stop_set: StoppingCriteria = StoppingCriteria(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
+    sensitivity_times: list[float] | None = None,
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
@@ -473,6 +481,77 @@ def multicountry_growth_nn(
     relative_weights = test_eval["relative_welfare_weights"][0]
     log_relative_weights = jnp.log(relative_weights)
 
+    sensitivity_df = None
+    sensitivity_fields = {}
+    if sensitivity_times is not None:
+        sensitivity_times = [float(value) for value in sensitivity_times]
+        if any(not 0.0 <= value <= float(train_t[-1]) for value in sensitivity_times):
+            raise ValueError("sensitivity_times must lie within the training horizon")
+        t_sens = jnp.asarray(sensitivity_times, dtype=dtype)
+
+        # Warm-started at the trained parameters and re-solved to the same
+        # residual tolerance, so the stationary point the implicit tangents
+        # are taken at moves smoothly with p; the multi-start draw is not
+        # re-run. The paths are the unique model solution, so the observable
+        # derivatives do not depend on which network parameterization the
+        # warm start selects.
+        def observables_at_sensitivity_times(p_value):
+            solved = solver.solve(
+                result.x,
+                residual_args,
+                p=p_value,
+                max_steps=stop_set.max_steps,
+                atol=atol,
+                max_steps_is_success=False,
+            )
+            values = path_values(nnx.merge(graphdef, solved.x), t_sens, p_value, scales)
+            observables = jnp.column_stack(
+                [values["interest_rate"], values["c"], values["k"]]
+            )
+            return observables, solved.status
+
+        jacobian, sensitivity_status = jax.jacrev(
+            observables_at_sensitivity_times, has_aux=True
+        )(residual_parameters)
+        jax.block_until_ready(jacobian)
+        # A non-converged re-solve would publish exactly zero implicit
+        # tangents, indistinguishable from a genuine null effect.
+        if int(sensitivity_status) != LMStatus.CONVERGED:
+            raise RuntimeError("the sensitivity re-solve did not converge")
+        primal_values = path_values(model, t_sens, residual_parameters, scales)
+        primal_observables = np.column_stack(
+            [
+                np.asarray(primal_values["interest_rate"]),
+                np.asarray(primal_values["c"]),
+                np.asarray(primal_values["k"]),
+            ]
+        )
+        observable_labels = (
+            ["rate"]
+            + [f"c_{country + 1}" for country in range(num_countries)]
+            + [f"k_{country + 1}" for country in range(num_countries)]
+        )
+        gradient_parameters = jacobian.model
+        sensitivity_fields, sensitivity_df = sensitivity_fields_frame(
+            sensitivity_times,
+            observable_labels,
+            primal_observables,
+            {
+                "alpha": np.asarray(gradient_parameters.alpha),
+                "delta": np.asarray(gradient_parameters.delta),
+                "r": np.asarray(gradient_parameters.r),
+                "eta": np.asarray(gradient_parameters.eta),
+            },
+            {
+                "gamma": np.asarray(gradient_parameters.gammas),
+                "productivity": np.asarray(gradient_parameters.productivities),
+                "population": np.asarray(gradient_parameters.populations),
+                "k_0": np.asarray(jacobian.k_0),
+                "a_0": np.asarray(jacobian.a_0),
+            },
+            [float(value) for value in parameters.populations],
+        )
+
     results = {
         "alpha": parameters.alpha,
         "delta": parameters.delta,
@@ -582,6 +661,11 @@ def multicountry_growth_nn(
             results[f"initial_wealth_{suffix}"] = float(
                 long_run["initial_wealth"][country]
             )
+    if sensitivity_times is not None:
+        results["sensitivity_times"] = ",".join(
+            f"{value:g}" for value in sensitivity_times
+        )
+        results.update(sensitivity_fields)
     if benchmark_available:
         results.update(
             {
@@ -657,8 +741,31 @@ def multicountry_growth_nn(
         "tolerance_set": asdict(tolerance_set),
         "initial_conditions": {"k_0": list(k_0), "a_0": list(a_0)},
     }
+
+    # The full parametric solution map for implicit-AD functionals beyond
+    # the built-in sensitivities: warm-starts at the trained parameters,
+    # re-solves at p_value, and evaluates the paths. Callers away from the
+    # gated primal must check the returned solver_status: a non-converged
+    # re-solve yields exactly zero solution tangents, indistinguishable
+    # from a genuine null effect.
+    def parametric_model(points, p_value):
+        solved = solver.solve(
+            result.x,
+            residual_args,
+            p=p_value,
+            max_steps=stop_set.max_steps,
+            atol=atol,
+            max_steps_is_success=False,
+        )
+        values = path_values(nnx.merge(graphdef, solved.x), points, p_value, scales)
+        values["solver_status"] = solved.status
+        return values
+
     return results, {
         "model": model,
+        "parametric_model": parametric_model,
+        "p": residual_parameters,
+        "sensitivity_df": sensitivity_df,
         "train_df": train_df,
         "validation_df": validation_df,
         "test_df": test_df,

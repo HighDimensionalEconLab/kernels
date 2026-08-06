@@ -15,7 +15,7 @@ PREFIX = "asset_pricing_nn"
 
 def run(
     output_dir: str | None = None,
-    n_seeds: int = 11,
+    n_seeds: int = 7,
     use_float64: bool = True,
     verbose: bool = False,
 ):

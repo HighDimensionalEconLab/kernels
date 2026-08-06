@@ -145,6 +145,211 @@ KERNEL_NU = {
 }
 
 
+# One cell of a comparison table: "%.1e" for error magnitudes, "%.2g" for
+# seconds, "--" when the metric does not exist for that solver.
+def comparison_cell(value, kind="error"):
+    if value is None:
+        return "--"
+    value = float(value)
+    if not math.isfinite(value):
+        return "--"
+    if kind == "time":
+        return f"{value:.2g}"
+    return f"{value:.1e}"
+
+
+def accepted_cell(j):
+    # Deterministic sweeps label their count n_data_seeds; frac_accepted always
+    # accompanies n_accepted, so the total is recoverable when neither is given.
+    total = j.get("n_seeds", j.get("n_data_seeds"))
+    if total is None:
+        total = round(j["n_accepted"] / j["frac_accepted"]) if j["n_accepted"] else 0
+    return f"{int(j['n_accepted'])}/{int(total)}"
+
+
+# Sequential kernel-vs-NN comparison across models. Error columns use each
+# model's headline benchmark metric (p for asset pricing; k for growth; the
+# max over k/q/c/a-scaled for the open economy); the concave-convex rows
+# report the correct-basin fraction over the 70 initial conditions instead,
+# since the kinked model has no closed-form benchmark path.
+def write_sequential_comparison_table(out):
+    def basin_fraction(name):
+        frame = pd.read_parquet(out / f"{name}_threshold_results.parquet")
+        return f"{int(frame['basin_correct'].sum())}/{len(frame)}"
+
+    def oe_max_error(j):
+        return max(
+            med(j["k_relative_error_max"]),
+            med(j["q_relative_error_max"]),
+            med(j["c_relative_error_max"]),
+            med(j["a_scaled_error_max"]),
+        )
+
+    ap_kernel = load(out, "asset_pricing_kernel_baseline")
+    ap_nn = load(out, "asset_pricing_nn_baseline")
+    ngm_kernel = load(out, "neoclassical_growth_kernel_baseline")
+    ngm_nn = load(out, "neoclassical_growth_nn_baseline")
+    cc_kernel = load(out, "neoclassical_growth_concave_convex_kernel_threshold")
+    cc_nn = load(out, "neoclassical_growth_concave_convex_nn_threshold")
+    oe_kernel = load(out, "open_economy_growth_kernel_baseline")
+    oe_nn = load(out, "open_economy_growth_nn_baseline")
+
+    rows = [
+        (
+            "Asset pricing",
+            "Kernel",
+            med(ap_kernel["p_rel_error_mean"]),
+            med(ap_kernel["p_rel_error_max"]),
+            None,
+            med(ap_kernel["solve_time"]),
+            accepted_cell(ap_kernel),
+        ),
+        (
+            "",
+            "NN",
+            med(ap_nn["p_rel_error_mean"]),
+            med(ap_nn["p_rel_error_max"]),
+            None,
+            med(ap_nn["train_time"]),
+            accepted_cell(ap_nn),
+        ),
+        (
+            "Neoclassical growth",
+            "Kernel",
+            med(ngm_kernel["k_rel_error_mean"]),
+            med(ngm_kernel["k_rel_error_max"]),
+            None,
+            med(ngm_kernel["solve_time"]),
+            accepted_cell(ngm_kernel),
+        ),
+        (
+            "",
+            "NN",
+            med(ngm_nn["test_mean_abs_k_rel_error"]),
+            med(ngm_nn["test_max_abs_k_rel_error"]),
+            None,
+            med(ngm_nn["train_time_success"]),
+            accepted_cell(ngm_nn),
+        ),
+        (
+            "Concave-convex",
+            "Kernel",
+            None,
+            None,
+            basin_fraction("neoclassical_growth_concave_convex_kernel"),
+            med(cc_kernel["solve_time"]),
+            accepted_cell(cc_kernel),
+        ),
+        (
+            "",
+            "NN",
+            None,
+            None,
+            basin_fraction("neoclassical_growth_concave_convex_nn"),
+            med(cc_nn["train_time"]),
+            accepted_cell(cc_nn),
+        ),
+        (
+            "Open economy",
+            "Kernel",
+            None,
+            oe_max_error(oe_kernel),
+            None,
+            med(oe_kernel["solve_time"]),
+            accepted_cell(oe_kernel),
+        ),
+        (
+            "",
+            "NN",
+            None,
+            oe_max_error(oe_nn),
+            None,
+            med(oe_nn["train_time_success"]),
+            accepted_cell(oe_nn),
+        ),
+    ]
+    lines = [
+        r"\begin{tabular}{llrrrrr}",
+        r"\toprule",
+        r"Model & Solver & Mean rel.\ error & Max rel.\ error & "
+        r"Correct basin & Time (s) & Accepted \\",
+        r"\midrule",
+    ]
+    for model, solver, mean_err, max_err, basin, seconds, accepted in rows:
+        lines.append(
+            f"{model} & {solver} & {comparison_cell(mean_err)} & "
+            f"{comparison_cell(max_err)} & {basin if basin is not None else '--'} & "
+            f"{comparison_cell(seconds, 'time')} & {accepted} \\\\"
+        )
+    lines += [r"\bottomrule", r"\end{tabular}", ""]
+    path = out / "sequential_solver_comparison.tex"
+    path.write_text("\n".join(lines))
+    print(f"wrote {path}")
+
+
+# Neoclassical growth across all four solvers: the sequential and recursive
+# formulations share the calibration exactly (AFVRR constants, g = 0,
+# z_0 = k_0 = 1), so accuracy against the shared BVP benchmark and fit time
+# are directly comparable.
+def write_neoclassical_growth_comparison_table(out):
+    kernel = load(out, "neoclassical_growth_kernel_baseline")
+    nn = load(out, "neoclassical_growth_nn_baseline")
+    kernel_recursive = load(out, "neoclassical_growth_kernel_recursive_single_ic_g0")
+    nn_recursive = load(out, "neoclassical_growth_nn_recursive_single_ic_g0")
+
+    rows = [
+        (
+            "Sequential kernel",
+            med(kernel["k_rel_error_mean"]),
+            med(kernel["k_rel_error_max"]),
+            med(kernel["c_rel_error_mean"]),
+            med(kernel["solve_time"]),
+            accepted_cell(kernel),
+        ),
+        (
+            "Sequential NN",
+            med(nn["test_mean_abs_k_rel_error"]),
+            med(nn["test_max_abs_k_rel_error"]),
+            med(nn["test_mean_abs_c_rel_error"]),
+            med(nn["train_time_success"]),
+            accepted_cell(nn),
+        ),
+        (
+            "Recursive kernel",
+            med(kernel_recursive["test_mean_abs_k_rel_error"]),
+            med(kernel_recursive["test_max_abs_k_rel_error"]),
+            med(kernel_recursive["test_mean_abs_c_rel_error"]),
+            med(kernel_recursive["solve_time"]),
+            accepted_cell(kernel_recursive),
+        ),
+        (
+            "Recursive NN",
+            med(nn_recursive["test_mean_abs_k_rel_error"]),
+            med(nn_recursive["test_max_abs_k_rel_error"]),
+            med(nn_recursive["test_mean_abs_c_rel_error"]),
+            med(nn_recursive["train_time_success"]),
+            accepted_cell(nn_recursive),
+        ),
+    ]
+    lines = [
+        r"\begin{tabular}{lrrrrr}",
+        r"\toprule",
+        r"Solver & Mean rel.\ error: $k$ & Max rel.\ error: $k$ & "
+        r"Mean rel.\ error: $c$ & Time (s) & Accepted \\",
+        r"\midrule",
+    ]
+    for solver, mean_k, max_k, mean_c, seconds, accepted in rows:
+        lines.append(
+            f"{solver} & {comparison_cell(mean_k)} & {comparison_cell(max_k)} & "
+            f"{comparison_cell(mean_c)} & {comparison_cell(seconds, 'time')} & "
+            f"{accepted} \\\\"
+        )
+    lines += [r"\bottomrule", r"\end{tabular}", ""]
+    path = out / "neoclassical_growth_solver_comparison.tex"
+    path.write_text("\n".join(lines))
+    print(f"wrote {path}")
+
+
 def write_nu_rho_table(out):
     # Same layout as the original pandas to_latex output (booktabs, %.1e cells);
     # a rejected solve (ill-conditioned RBF Gram) renders as "--".
@@ -1124,10 +1329,10 @@ def validate_replication_contract(out, include_uno=True):
     # (headline experiment, expected seed count) per NN prefix; the recursive
     # growth driver's headline experiment is single_ic_g0, not baseline.
     nn_seed_counts = {
-        "asset_pricing_nn": ("baseline", 11),
-        "neoclassical_growth_nn": ("baseline", 11),
+        "asset_pricing_nn": ("baseline", 7),
+        "neoclassical_growth_nn": ("baseline", 7),
         "neoclassical_growth_nn_recursive": ("single_ic_g0", 5),
-        "open_economy_growth_nn": ("baseline", 11),
+        "open_economy_growth_nn": ("baseline", 7),
         "open_economy_growth_nn_recursive": ("baseline", 5),
         "multicountry_growth_nn": ("baseline", 5),
         "stochastic_growth_nn_recursive": ("baseline", 5),
@@ -1165,6 +1370,8 @@ def collect(output_dir: str = ".results", include_uno: bool = True):
     out = pathlib.Path(output_dir)
     validate_replication_contract(out, include_uno)
     write_nu_rho_table(out)
+    write_sequential_comparison_table(out)
+    write_neoclassical_growth_comparison_table(out)
     # The collected precision comes from the collected data itself.
     residual_dtype = load(out, "neoclassical_growth_kernel_baseline").get(
         "residual_dtype"

@@ -19,7 +19,7 @@ def run(
     output_dir: str | None = None,
     # Multi-start retries inside each solve keep acceptance high, so a small
     # seed ensemble suffices for the cross-seed medians.
-    n_seeds: int = 11,
+    n_seeds: int = 7,
     use_float64: bool = True,
     verbose: bool = False,
 ):

@@ -52,6 +52,9 @@ def run(
                 "ic_set": {"data_seed": data_seed, **experiment.pop("ic_set", {})},
                 "stop_set": stop,
                 "tolerance_set": tol,
+                # Cache accepted policies so the kernel distillation driver can
+                # load the best baseline one as its frozen reference.
+                "policy_cache": output_dir,
                 **experiment,
             },
         )

@@ -51,6 +51,9 @@ def run(
             verbose=verbose,
             ic_set={"data_seed": data_seed},
             stop_set=stop,
+            # Cache each accepted policy so the kernel distillation driver can
+            # load the best one as its frozen reference.
+            policy_cache=output_dir,
         ),
     )
     save_experiment(

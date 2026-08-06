@@ -426,6 +426,8 @@ def neoclassical_growth_nn(
         results.update(
             test_mean_abs_k_rel_error=float(test_df["k_rel_error"].mean()),
             test_mean_abs_c_rel_error=float(test_df["c_rel_error"].mean()),
+            test_max_abs_k_rel_error=float(test_df["k_rel_error"].abs().max()),
+            test_max_abs_c_rel_error=float(test_df["c_rel_error"].abs().max()),
             train_mean_abs_k_rel_error=float(train_df["k_rel_error"].mean()),
             train_mean_abs_c_rel_error=float(train_df["c_rel_error"].mean()),
         )

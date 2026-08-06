@@ -11,7 +11,7 @@ from replication.utilities import style
 PREFIX = "multicountry_growth_kernel"
 SCENARIOS = (
     ("initial_debt", "Country 1 debt", "#b2182b"),
-    ("baseline", "Zero initial NFA", "#2166ac"),
+    ("baseline", "Drawn initial NFA", "#2166ac"),
     ("initial_assets", "Country 1 assets", "#1b7837"),
 )
 PANELS = (

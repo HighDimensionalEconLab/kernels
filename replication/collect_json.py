@@ -1049,10 +1049,7 @@ def multicountry_growth_kernel(out):
             "train_T": sig(med(j["train_T"]), 5),
             "max_train_residual": sci(med(j["max_train_residual"])),
             "max_validation_residual": sci(med(j["max_validation_residual"])),
-            "max_asset_clearing_residual": sci(med(j["max_asset_clearing_residual"])),
-            "max_rate_consistency_residual": sci(
-                med(j["max_rate_consistency_residual"])
-            ),
+            "max_resource_gap": sci(med(j["max_resource_gap"])),
             "max_benchmark_error": sci(med(j["max_benchmark_error"])),
             "ex_post_asset_tvc": sci(med(j["ex_post_asset_tvc"])),
             "ex_post_capital_tvc": sci(med(j["ex_post_capital_tvc"])),
@@ -1062,18 +1059,28 @@ def multicountry_growth_kernel(out):
         }
 
     baseline_hp = load(out, f"{prefix}_baseline_hyperparameters")
+    summary = load(out, f"{prefix}_summary")
+    if "bond_invariance" not in summary:
+        raise RuntimeError(
+            "multicountry kernel summary lacks bond_invariance; the "
+            "replication.multicountry_growth_kernel driver writes it after "
+            "write_summary, so rerun the driver rather than write_summary alone"
+        )
     return {
         "parameters": baseline_hp["parameters"],
         "kernel": baseline_hp["kernel_set"],
-        "selection": "minimum_shifted_rkhs_metric",
+        "selection": "minimum_rkhs_norm_ridge",
         "training_information": {"terminal_residual_count": 0},
+        # Max gap in (r*, k_i, q_i) paths across the three bond
+        # configurations: exactly zero in the common-gamma theory, so the
+        # measured gap is a solver-accuracy certificate.
+        "bond_invariance": summary["bond_invariance"],
         "experiments": {
             name: experiment(name)
             for name in (
                 "baseline",
                 "initial_debt",
                 "initial_assets",
-                "asymmetric_capital",
                 "three_countries",
                 "heterogeneous_countries",
             )
@@ -1104,17 +1111,11 @@ def multicountry_growth_nn(out):
                 "depth": hp["nn_set"]["depth"],
                 "hidden_activation": hp["nn_set"]["hidden_activation"],
                 "total_params": total_params,
-                "dynamic_output_count": int(
-                    accepted["dynamic_network_output_count"].median()
-                ),
             },
             "residual_count": residual_count,
             "parameter_surplus": total_params - residual_count,
             "n_seeds": int(summary["n_seeds"]),
             "fraction_accepted": sig(summary["frac_accepted"]),
-            "fraction_equation_diagnostics_passed": sig(
-                float(accepted["equation_diagnostics_pass"].mean())
-            ),
             "train_time_median": sig(float(accepted["train_time"].median())),
             "max_train_residual_median": sci(
                 float(accepted["max_train_residual"].median())
@@ -1122,11 +1123,8 @@ def multicountry_growth_nn(out):
             "max_validation_residual_median": sci(
                 float(accepted["max_validation_residual"].median())
             ),
-            "max_asset_clearing_residual_median": sci(
-                float(accepted["max_asset_clearing_residual"].median())
-            ),
-            "max_rate_consistency_residual_median": sci(
-                float(accepted["max_rate_consistency_residual"].median())
+            "max_resource_gap_median": sci(
+                float(accepted["max_resource_gap"].median())
             ),
             **final_damping_summary(accepted),
         }
@@ -1285,7 +1283,7 @@ def performance_comparisons(out, include_uno=True):
         "kernel": "median of five cached deterministic solves",
         "nn": (
             "median across accepted seeds from 100 initializations "
-            "(21 for the open-economy sequence-space NN, five for "
+            "(21 for the open-economy sequence-space NN, seven for "
             "multicountry growth), each seed allowed up to five "
             "multi-start restarts"
         ),
@@ -1340,7 +1338,7 @@ def validate_replication_contract(out, include_uno=True):
         "neoclassical_growth_nn_recursive": ("single_ic_g0", 5),
         "open_economy_growth_nn": ("baseline", 7),
         "open_economy_growth_nn_recursive": ("baseline", 5),
-        "multicountry_growth_nn": ("baseline", 5),
+        "multicountry_growth_nn": ("baseline", 7),
         "stochastic_growth_nn_recursive": ("baseline", 5),
     }
     for prefix, (experiment, expected) in nn_seed_counts.items():

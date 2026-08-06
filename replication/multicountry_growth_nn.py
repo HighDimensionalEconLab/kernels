@@ -3,7 +3,6 @@ from __future__ import annotations
 import jsonargparse
 
 from models import multicountry_growth_nn
-from models.multicountry_growth import MulticountryParameters, multicountry_output_scale
 from replication.utilities import (
     configure_process,
     ensemble,
@@ -17,24 +16,13 @@ SOLVER = multicountry_growth_nn.multicountry_growth_nn
 
 def run(
     output_dir: str | None = None,
-    n_seeds: int = 5,
+    n_seeds: int = 7,
     use_float64: bool = True,
     verbose: bool = False,
 ):
     configure_process()
     if output_dir is None:
         output_dir = ".results" if use_float64 else ".results_float32"
-    parameters = MulticountryParameters()
-    output_scale = float(multicountry_output_scale(parameters))
-    ten_country_parameters = MulticountryParameters(
-        populations=(1.0,) * 10,
-        productivities=(1.0,) * 10,
-    )
-    ten_country_output_scale = float(multicountry_output_scale(ten_country_parameters))
-    ten_country_a_0 = (-0.5 * ten_country_output_scale,) + (
-        0.5 * ten_country_output_scale / 9,
-    ) * 9
-
     # Float32 runs pass looser solver thresholds and acceptance gates; the
     # float64 run uses the solver defaults.
     stop = {} if use_float64 else dict(train_loss_threshold=1e-8)
@@ -44,7 +32,6 @@ def run(
         else dict(
             train_residual=5e-3,
             validation_residual=1e-2,
-            accounting=1e-3,
             benchmark_match=1e-2,
         )
     )
@@ -76,20 +63,15 @@ def run(
             hyperparameters=hyperparameters,
         )
 
-    go(
-        "baseline",
-        "two_country_initial_nfa",
-        a_0=(-0.5 * output_scale, 0.5 * output_scale),
-    )
+    go("baseline", "two_country_drawn_initial_conditions")
     go(
         "large_countries",
-        "equal_countries_balanced_initial_nfa",
-        a_0=ten_country_a_0,
-        parameters={
-            "populations": ten_country_parameters.populations,
-            "productivities": ten_country_parameters.productivities,
-        },
-        nn_set={"width": 32, "depth": 4},
+        "ten_country_drawn_initial_conditions",
+        parameters=dict(
+            gammas=(2.0,) * 10,
+            populations=(1.0,) * 10,
+            productivities=(1.0,) * 10,
+        ),
     )
     write_summary(
         output_dir,

@@ -17,6 +17,12 @@ def multicountry_growth_benchmark(
 ):
     if parameters.num_countries != 2:
         raise ValueError("the benchmark currently requires two countries")
+    gammas = np.asarray(parameters.gammas, dtype=float)
+    if np.unique(gammas).size != 1:
+        raise ValueError(
+            "the benchmark integrates the common-gamma Negishi sharing rule "
+            "and requires equal gammas"
+        )
     k_0 = np.asarray(k_0, dtype=float)
     a_0 = np.atleast_1d(np.asarray(a_0, dtype=float))
     t_grid = np.asarray(t_grid, dtype=float)
@@ -30,7 +36,7 @@ def multicountry_growth_benchmark(
         raise ValueError("t_grid must start at zero and be strictly increasing")
 
     alpha = parameters.alpha
-    gamma = parameters.gamma
+    gamma = float(gammas[0])
     delta = parameters.delta
     r = parameters.r
     elasticity = parameters.eta
@@ -82,6 +88,18 @@ def multicountry_growth_benchmark(
             - (1.0 - elasticity) * efficiency * investment_rate**elasticity
             - mpk / q
         )
+        # The index-1 rate: the per-country-gamma formula
+        # r* = sum_i L_i [(f'_i - x_i/k_i) kdot_i + r c_i/gamma_i
+        #                 + x_i G_1i/(1-eta)]
+        #      / sum_i L_i [c_i/gamma_i + x_i/(1-eta)],
+        # with G_1i = -q_intercept_i, evaluated in its common-gamma
+        # aggregate form: the sharing rule makes sum_i L_i c_i/gamma_i =
+        # aggregate_resources/gamma exactly, and the rate MUST be computed
+        # in this cancelled form -- writing the consumption terms per
+        # country reintroduces a roundoff-level dependence of the rate on
+        # the Negishi weight parameter, which solve_bvp's finite-difference
+        # parameter Jacobian amplifies until the collocation system goes
+        # singular.
         rate_denominator = aggregate_resources / gamma + np.sum(
             populations[:, None] * investment / (1.0 - elasticity), axis=0
         )
@@ -292,7 +310,14 @@ def multicountry_growth_benchmark(
             / scale,
             "asset_clearing_gap": np.sum(populations[:, None] * assets, axis=0) / scale,
             "interest_rate_index_gap": values["interest_rate"]
-            - (r + gamma * values["resource_drift"] / values["aggregate_resources"]),
+            - (
+                r
+                + values["resource_drift"]
+                / np.sum(
+                    populations[:, None] * values["consumption"] / gammas[:, None],
+                    axis=0,
+                )
+            ),
             "interest_rate_q_gap": q_rates - values["interest_rate"][None, :],
             "rate_denominator": values["rate_denominator"],
         }

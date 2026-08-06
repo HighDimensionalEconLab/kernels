@@ -42,7 +42,7 @@ import pandas as pd
 from models.multicountry_growth import (
     InitialConditionSettings,
     MulticountryParameters,
-    multicountry_output_scale,
+    steady_state,
     weighted_gini,
 )
 from models.multicountry_growth_kernel import multicountry_growth_kernel
@@ -60,6 +60,7 @@ def multicountry_growth_transitions(
     output_dir: str = ".results",
 ):
     parameters = MulticountryParameters(
+        gammas=(2.0,) * num_countries,
         populations=(1.0,) * num_countries,
         productivities=(1.0,) * num_countries,
     )
@@ -69,7 +70,7 @@ def multicountry_growth_transitions(
     )
     if not results["solution_accepted"]:
         raise SystemExit(f"solve rejected: {results['rejection_reason']}")
-    output_scale = multicountry_output_scale(parameters)
+    output_scale = steady_state(parameters)["output_scale"]
 
     grid = jnp.arange(0.0, time_stop + 0.5 * time_step, time_step)
     p = extras["p"]
@@ -91,14 +92,15 @@ def multicountry_growth_transitions(
         }
 
     # d/d gamma for every panel at once: the tangent pytree is zero except
-    # for a unit gamma direction, and one jax.jvp pass differentiates the
-    # full dictionary of paths through the solve.
+    # for a unit common-gamma direction (every country's gamma_i moved
+    # together), and one jax.jvp pass differentiates the full dictionary of
+    # paths through the solve.
     zero_tangent = jax.tree_util.tree_map(jnp.zeros_like, p)
     gamma_tangent = {
         **zero_tangent,
         "parameters": dataclasses.replace(
             zero_tangent["parameters"],
-            gamma=jnp.ones_like(p["parameters"].gamma),
+            gammas=jnp.ones_like(p["parameters"].gammas),
         ),
     }
     paths, gamma_paths = jax.jvp(aggregate_paths, (p,), (gamma_tangent,))
@@ -245,7 +247,7 @@ def multicountry_growth_transitions(
     summary = {
         "num_countries": num_countries,
         "initial_seed": initial_set.seed,
-        "gamma": parameters.gamma,
+        "gamma": parameters.gammas[0],
         "saving_rate_start": float(frame["saving_rate"].iloc[0]),
         "saving_rate_end": float(frame["saving_rate"].iloc[-1]),
         "output_gini_start": float(frame["output_gini"].iloc[0]),

@@ -231,9 +231,10 @@ def stochastic_open_economy_growth_kernel_recursive(
     # coverage, not resolution, and the shared train/test protocol keeps the
     # two solvers' held-out euler errors comparable.
     data_set: DataSettings = DataSettings(train_points=49),
-    ic_set: InitialConditionSettings = InitialConditionSettings(
-        num_train_trajectories=8
-    ),
+    # Matches the NN driver's default problem, so a module-default NN run
+    # with --policy_cache feeds a module-default kernel run; 8 trajectories
+    # roughly halve the held-out euler at ~2x the centers.
+    ic_set: InitialConditionSettings = InitialConditionSettings(),
     kernel_set: StateKernelSettings = StateKernelSettings(),
     # Damping schedule from the W&B sweep winner alongside the kernel
     # geometry and stopping defaults below.

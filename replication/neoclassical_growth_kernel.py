@@ -80,6 +80,18 @@ def run(
         data_set=dict(train_T=20.0, train_points=21, test_T=30.0),
     )
 
+    # Implicit-AD sensitivity experiment for the supplement's sensitivity
+    # appendix: train to T = 120 (the transition remnant is ~e^{-|lambda|T}
+    # ~ 3e-6) and differentiate k(T), c(T) through the solve; the exact
+    # steady-state derivatives ride along as the comparison target. Float64
+    # only: the float32 noise floor swamps that comparison.
+    if use_float64:
+        go(
+            "sensitivity",
+            data_set=dict(train_T=120.0, train_points=121),
+            sensitivity_times=[120.0],
+        )
+
     # nu / ell robustness table rows. The (nu=1/2, ell=10) row aliases the
     # baseline experiment in collect_json, so it is not re-run here.
     go("nu15_ell10", kernel_set=dict(kernel="matern32", ell=10.0))

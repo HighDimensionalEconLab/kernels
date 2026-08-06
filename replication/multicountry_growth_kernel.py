@@ -119,7 +119,14 @@ def run(output_dir: str | None = None, use_float64: bool = True):
         )
         validation_frames[name] = frames["validation_df"]
 
-    go("baseline")
+    # The baseline additionally publishes the implicit-AD sensitivity table
+    # for the supplement's sensitivity appendix (float64 only): d(r*, c_i,
+    # k_i) at T in {30, 100} with respect to every structural parameter and
+    # initial condition.
+    go(
+        "baseline",
+        **(dict(sensitivity_times=[30.0, 100.0]) if use_float64 else {}),
+    )
     go(
         "initial_debt",
         k_0=drawn_k_0,

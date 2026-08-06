@@ -379,6 +379,197 @@ def write_nu_rho_table(out):
     print(f"wrote {path}")
 
 
+# --- sensitivity appendix ---------------------------------------------------
+
+# (results-field name, LaTeX row label in the paper's notation: capital x,
+# consumption y, discount rate r, CRRA gamma, initial condition x_0);
+# sigma_crra and k_0 have exactly zero steady-state derivatives, so their
+# rows certify the invariance rather than a magnitude.
+NEOCLASSICAL_SENSITIVITY_ROWS = (
+    ("a", r"$a$"),
+    ("delta", r"$\delta$"),
+    ("rho_hat", r"$r$"),
+    ("sigma_crra", r"$\gamma$"),
+    ("k_0", r"$x_0$"),
+)
+MULTICOUNTRY_SENSITIVITY_TIMES = (30, 100)
+MULTICOUNTRY_SENSITIVITY_OBSERVABLES = ("rate", "c_1", "c_2", "k_1", "k_2")
+# Labels in the supplement's multicountry notation (k_{i,0} and b_{i,0}
+# initial conditions, capital share a); a_0_transfer is the
+# clearing-preserving bond transfer tau, and z_i scales country i's
+# technology (one in the baseline).
+MULTICOUNTRY_SENSITIVITY_ROWS = (
+    ("k_0_1", r"$k_{1,0}$"),
+    ("k_0_2", r"$k_{2,0}$"),
+    ("a_0_transfer", r"$\tau$"),
+    ("gamma_1", r"$\gamma_1$"),
+    ("gamma_2", r"$\gamma_2$"),
+    ("alpha", r"$a$"),
+    ("delta", r"$\delta$"),
+    ("r", r"$r$"),
+    ("eta", r"$\eta$"),
+    ("productivity_1", r"$z_1$"),
+    ("productivity_2", r"$z_2$"),
+)
+
+
+# Field accessors shared by the sensitivity tables and payloads: a collapsed
+# ensemble JSON for deterministic runs, accepted-seed parquet medians for the
+# NN ensembles (matching each family's existing convention).
+def json_values(j):
+    return lambda field: med(j[field])
+
+
+def accepted_values(out, stem):
+    frame = pd.read_parquet(out / f"{stem}_results.parquet")
+    accepted = frame[frame["solution_accepted"]]
+    if accepted.empty:
+        raise RuntimeError(f"{stem} has no accepted seeds")
+    return lambda field: float(accepted[field].median())
+
+
+def neoclassical_sensitivity_payload(value, reference=None):
+    derivatives = {}
+    closed_form_gaps = []
+    invariant_magnitudes = []
+    cross_solver_gaps = []
+    for name, _ in NEOCLASSICAL_SENSITIVITY_ROWS:
+        d_k = value(f"d_k_T120_d_{name}")
+        d_c = value(f"d_c_T120_d_{name}")
+        d_k_ss = value(f"d_k_ss_d_{name}")
+        d_c_ss = value(f"d_c_ss_d_{name}")
+        derivatives[name] = {
+            "d_k_T": sig(d_k, 6),
+            "d_c_T": sig(d_c, 6),
+            "d_k_ss": sig(d_k_ss, 6),
+            "d_c_ss": sig(d_c_ss, 6),
+        }
+        if name in ("sigma_crra", "k_0"):
+            invariant_magnitudes += [abs(d_k), abs(d_c)]
+        else:
+            closed_form_gaps += [abs(d_k - d_k_ss), abs(d_c - d_c_ss)]
+        if reference is not None:
+            cross_solver_gaps += [
+                abs(d_k - reference(f"d_k_T120_d_{name}")),
+                abs(d_c - reference(f"d_c_T120_d_{name}")),
+            ]
+    payload = {
+        "sensitivity_time": 120,
+        "train_T": value("train_T"),
+        "num_train_points": int(value("num_train_points")),
+        "k_T": sig(value("k_T120"), 6),
+        "c_T": sig(value("c_T120"), 6),
+        "k_ss": sig(value("k_ss"), 6),
+        "c_ss": sig(value("c_ss"), 6),
+        "derivatives": derivatives,
+        # (a, delta, rho_hat) rows against the exact steady-state
+        # derivatives; the residual is the finite-T transition remnant plus
+        # solver error.
+        "max_abs_gap_vs_closed_form": sci(max(closed_form_gaps)),
+        # (sigma_crra, k_0) rows are exactly zero in the closed form.
+        "max_abs_invariant_derivative": sci(max(invariant_magnitudes)),
+    }
+    if reference is not None:
+        payload["max_abs_gap_vs_kernel"] = sci(max(cross_solver_gaps))
+    return payload
+
+
+def multicountry_sensitivity_payload(value, reference=None):
+    levels = {}
+    derivatives = {}
+    cross_solver_gaps = []
+    for time in MULTICOUNTRY_SENSITIVITY_TIMES:
+        for observable in MULTICOUNTRY_SENSITIVITY_OBSERVABLES:
+            levels[f"{observable}_T{time}"] = sig(value(f"{observable}_T{time}"), 6)
+        block = {}
+        for suffix, _ in MULTICOUNTRY_SENSITIVITY_ROWS:
+            block[suffix] = {
+                observable: sig(value(f"d_{observable}_T{time}_d_{suffix}"), 6)
+                for observable in MULTICOUNTRY_SENSITIVITY_OBSERVABLES
+            }
+            if reference is not None:
+                cross_solver_gaps += [
+                    abs(
+                        value(f"d_{observable}_T{time}_d_{suffix}")
+                        - reference(f"d_{observable}_T{time}_d_{suffix}")
+                    )
+                    for observable in MULTICOUNTRY_SENSITIVITY_OBSERVABLES
+                ]
+        derivatives[f"T{time}"] = block
+    payload = {
+        "times": list(MULTICOUNTRY_SENSITIVITY_TIMES),
+        "levels": levels,
+        "derivatives": derivatives,
+    }
+    if reference is not None:
+        payload["max_abs_gap_vs_kernel"] = sci(max(cross_solver_gaps))
+    return payload
+
+
+def write_neoclassical_sensitivity_table(out):
+    kernel_value = json_values(load(out, "neoclassical_growth_kernel_sensitivity"))
+    nn_value = accepted_values(out, "neoclassical_growth_nn_sensitivity")
+
+    def cell(value):
+        return f"${sci(value, 4)}$"
+
+    lines = [
+        r"\begin{tabular}{lrrrrrr}",
+        r"\toprule",
+        r" & \multicolumn{3}{c}{$\partial x(T)/\partial \theta$} & "
+        r"\multicolumn{3}{c}{$\partial y(T)/\partial \theta$} \\",
+        r"\cmidrule(lr){2-4}\cmidrule(lr){5-7}",
+        r"$\theta$ & Kernel & NN & Closed Form & Kernel & NN & Closed Form \\",
+        r"\midrule",
+    ]
+    for name, label in NEOCLASSICAL_SENSITIVITY_ROWS:
+        cells = [
+            cell(kernel_value(f"d_k_T120_d_{name}")),
+            cell(nn_value(f"d_k_T120_d_{name}")),
+            cell(kernel_value(f"d_k_ss_d_{name}")),
+            cell(kernel_value(f"d_c_T120_d_{name}")),
+            cell(nn_value(f"d_c_T120_d_{name}")),
+            cell(kernel_value(f"d_c_ss_d_{name}")),
+        ]
+        lines.append(f"{label} & " + " & ".join(cells) + r" \\")
+    lines += [r"\bottomrule", r"\end{tabular}", ""]
+    path = out / "neoclassical_growth_sensitivity.tex"
+    path.write_text("\n".join(lines))
+    print(f"wrote {path}")
+
+
+def write_multicountry_sensitivity_table(out):
+    value = json_values(load(out, "multicountry_growth_kernel_baseline"))
+
+    def cell(x):
+        return f"${sci(x, 3)}$"
+
+    observable_header = (
+        r"$\theta$ & $r^{\star}(T)$ & $y_{1,1}(T)$ & $y_{1,2}(T)$ & "
+        r"$x_{1,1}(T)$ & $x_{1,2}(T)$ \\"
+    )
+    lines = [r"\begin{tabular}{lrrrrr}", r"\toprule"]
+    for time in MULTICOUNTRY_SENSITIVITY_TIMES:
+        lines += [
+            rf"\multicolumn{{6}}{{c}}{{$T = {time}$}} \\",
+            r"\midrule",
+            observable_header,
+            r"\midrule",
+        ]
+        for suffix, label in MULTICOUNTRY_SENSITIVITY_ROWS:
+            cells = [
+                cell(value(f"d_{observable}_T{time}_d_{suffix}"))
+                for observable in MULTICOUNTRY_SENSITIVITY_OBSERVABLES
+            ]
+            lines.append(f"{label} & " + " & ".join(cells) + r" \\")
+        if time != MULTICOUNTRY_SENSITIVITY_TIMES[-1]:
+            lines.append(r"\midrule")
+    lines += [r"\bottomrule", r"\end{tabular}", ""]
+    path = out / "multicountry_growth_sensitivity.tex"
+    path.write_text("\n".join(lines))
+    print(f"wrote {path}")
+
+
 def neoclassical_growth_kernel(out):
     prefix = "neoclassical_growth_kernel"
     hp = load(out, f"{prefix}_baseline_hyperparameters")
@@ -444,7 +635,7 @@ def neoclassical_growth_kernel(out):
         }
 
     baseline_kernel = hp["kernel_set"]["kernel"]
-    return {
+    payload = {
         "kernel": {
             "name": baseline_kernel,
             "nu": KERNEL_NU[baseline_kernel],
@@ -454,6 +645,15 @@ def neoclassical_growth_kernel(out):
         "experiments": experiments,
         "robustness_table": robustness_table,
     }
+    # The sensitivity experiment exists only in the float64 pass.
+    if (out / f"{prefix}_sensitivity.json").exists():
+        sensitivity = load(out, f"{prefix}_sensitivity")
+        if sensitivity["frac_accepted"] != 1.0:
+            raise RuntimeError("the neoclassical kernel sensitivity run was rejected")
+        payload["sensitivity"] = neoclassical_sensitivity_payload(
+            json_values(sensitivity)
+        )
+    return payload
 
 
 def neoclassical_growth_kernel_uno(out):
@@ -720,7 +920,7 @@ def neoclassical_growth_nn(out):
         raise RuntimeError("sequence-space growth NN has no accepted seeds")
     hp = load(out, f"{prefix}_baseline_hyperparameters")
 
-    return {
+    payload = {
         "parameters": hp["parameters"],
         "initial_conditions": hp["initial_conditions"],
         "data": hp["data_set"],
@@ -770,6 +970,14 @@ def neoclassical_growth_nn(out):
             }
         },
     }
+    # The sensitivity experiment exists only in the float64 pass; the kernel
+    # sensitivity is its cross-solver reference.
+    if (out / f"{prefix}_sensitivity.json").exists():
+        payload["sensitivity"] = neoclassical_sensitivity_payload(
+            accepted_values(out, f"{prefix}_sensitivity"),
+            reference=json_values(load(out, "neoclassical_growth_kernel_sensitivity")),
+        )
+    return payload
 
 
 RECURSIVE_EXPERIMENTS = ("single_ic_g0", "multi_ic_g0", "multi_ic_g02")
@@ -1066,7 +1274,7 @@ def multicountry_growth_kernel(out):
             "replication.multicountry_growth_kernel driver writes it after "
             "write_summary, so rerun the driver rather than write_summary alone"
         )
-    return {
+    payload = {
         "parameters": baseline_hp["parameters"],
         "kernel": baseline_hp["kernel_set"],
         "selection": "minimum_rkhs_norm_ridge",
@@ -1086,6 +1294,13 @@ def multicountry_growth_kernel(out):
             )
         },
     }
+    # The baseline carries the sensitivity fields only in the float64 pass.
+    baseline_json = load(out, f"{prefix}_baseline")
+    if "d_rate_T30_d_alpha" in baseline_json:
+        payload["sensitivity"] = multicountry_sensitivity_payload(
+            json_values(baseline_json)
+        )
+    return payload
 
 
 def multicountry_growth_nn(out):
@@ -1148,7 +1363,7 @@ def multicountry_growth_nn(out):
             ),
         }
     )
-    return {
+    payload = {
         "parameters": baseline_hp["parameters"],
         "architecture": experiments["baseline"]["architecture"],
         "selection": "minimum_identity_metric_parameter_step",
@@ -1160,6 +1375,14 @@ def multicountry_growth_nn(out):
         "n_seeds": int(baseline_summary["n_seeds"]),
         "experiments": experiments,
     }
+    # The baseline carries the sensitivity fields only in the float64 pass;
+    # the kernel baseline is the cross-solver reference.
+    if "d_rate_T30_d_alpha" in baseline_summary:
+        payload["sensitivity"] = multicountry_sensitivity_payload(
+            lambda field: float(baseline_accepted[field].median()),
+            reference=json_values(load(out, "multicountry_growth_kernel_baseline")),
+        )
+    return payload
 
 
 def performance_comparisons(out, include_uno=True):
@@ -1373,13 +1596,17 @@ def validate_replication_contract(out, include_uno=True):
 def collect(output_dir: str = ".results", include_uno: bool = True):
     out = pathlib.Path(output_dir)
     validate_replication_contract(out, include_uno)
-    write_nu_rho_table(out)
-    write_sequential_comparison_table(out)
-    write_neoclassical_growth_comparison_table(out)
     # The collected precision comes from the collected data itself.
     residual_dtype = load(out, "neoclassical_growth_kernel_baseline").get(
         "residual_dtype"
     )
+    write_nu_rho_table(out)
+    write_sequential_comparison_table(out)
+    write_neoclassical_growth_comparison_table(out)
+    # The sensitivity experiments run only in the float64 pass.
+    if residual_dtype == "float64":
+        write_neoclassical_sensitivity_table(out)
+        write_multicountry_sensitivity_table(out)
     payload = clean(
         {
             "_meta": {

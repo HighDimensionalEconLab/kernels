@@ -53,9 +53,38 @@ def run(
         hyperparameters=hyperparameters,
     )
 
+    # Implicit-AD sensitivity experiment for the supplement's sensitivity
+    # appendix: train to T = 120 and differentiate k(T), c(T) through a
+    # warm-started re-solve; the exact steady-state derivatives ride along
+    # as the comparison target. Float64 only: the float32 noise floor
+    # swamps that comparison.
+    if use_float64:
+        print(f"sensitivity: {n_seeds} seeds -> {output_dir}/")
+        results_df, frames, hyperparameters = ensemble(
+            SOLVER,
+            n_seeds,
+            options={
+                "use_float64": use_float64,
+                "verbose": verbose,
+                "k_0": 1.0,
+                "stop_set": stop,
+                "data_set": dict(train_T=120.0, train_points=121),
+                "sensitivity_times": [120.0],
+            },
+        )
+        save_experiment(
+            "sensitivity",
+            results_df,
+            frames,
+            output_dir,
+            {"n_seeds": n_seeds, "residual_dtype": "float64"},
+            prefix=PREFIX,
+            hyperparameters=hyperparameters,
+        )
+
     # Explicit set: the prefix is a strict prefix of
     # neoclassical_growth_nn_recursive, whose JSONs share the glob.
-    write_summary(output_dir, PREFIX, experiments={"baseline"})
+    write_summary(output_dir, PREFIX, experiments={"baseline", "sensitivity"})
 
 
 if __name__ == "__main__":

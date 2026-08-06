@@ -63,7 +63,14 @@ def run(
             hyperparameters=hyperparameters,
         )
 
-    go("baseline", "two_country_drawn_initial_conditions")
+    # The baseline additionally publishes the implicit-AD sensitivity table
+    # for the supplement's sensitivity appendix (float64 only), matching the
+    # kernel driver's fields.
+    go(
+        "baseline",
+        "two_country_drawn_initial_conditions",
+        **(dict(sensitivity_times=[30.0, 100.0]) if use_float64 else {}),
+    )
     go(
         "large_countries",
         "ten_country_drawn_initial_conditions",

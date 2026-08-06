@@ -3,17 +3,11 @@
 All wandb sweeps for this repo log to the **`kernels`** project. Every sweep yaml sets
 `project: kernels`; keep that consistent when adding new configs.
 
-`recursive_i_hpo.yaml` is the recursive `i(k)` solver's HPO: bayes over the MLP, LM,
-and adaptive-rollout axes under a hard 2 s training budget, scored by the median-seed
-`train_time_success` (time to a certified solve; NaN when not accepted, so acceptance
-is the gate and speed the objective) over 11 seeds via `wandb_sweep_wrapper.py`.
-Smoke-test one point locally with no wandb credentials:
-
-    uv run --group sweep python extra/sweeps/wandb_sweep_wrapper.py \
-        --sweep_settings.script=extra/neoclassical_growth_nn_recursive_adaptive.py \
-        --sweep_settings.sort_criteria=train_time_success \
-        --sweep_settings.num_seeds=2 --sweep_settings.wandb_mode=disabled \
-        --verbose=false --stop_set.max_steps=500
+The sweep configs are `stochastic_open_economy_kernel_hpo.yaml` and
+`stochastic_open_economy_nn_hpo.yaml`, run via `wandb_sweep_wrapper.py`.
+Smoke-test one point locally with no wandb credentials by passing the chosen
+yaml's `--sweep_settings.script` and parameters to the wrapper with
+`--sweep_settings.wandb_mode=disabled`.
 
 ## Cluster venv
 `build_cluster_venv.sh [cpu|gpu]` builds a persistent venv from the Alliance wheelhouse
@@ -27,7 +21,7 @@ login node:
 ## Launching on Digital Alliance Clusters
 1. `rsync` the repo to `/scratch/$USER/kernel_econ_alignment/` and build the venv (above).
 2. `wandb sweep extra/sweeps/<config>.yaml` → capture `entity/kernels/<id>`; write it to
-   `sweep_ids.json` (`{ "recursive_i_hpo": "entity/kernels/<id>" }`).
+   `sweep_ids.json` (`{ "stochastic_open_economy_nn_hpo": "entity/kernels/<id>" }`).
 3. Submit one `wandb agent` per array task with `extra/sweeps/wandb_sweep_agent.sbatch`
    (CPU on Fir: `--account=def-jlperla_cpu --cpus-per-task=4 --mem=32G --time=01:00:00
    --array=1-50`, `VENV=.venv-cpu`, unbounded — omit `AGENT_COUNT`). See the `clusters`

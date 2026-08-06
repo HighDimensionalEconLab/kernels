@@ -7,9 +7,7 @@ Perla, and Geoff Pleiss.
 The top level contains the canonical examples. Kernel solves use the released
 `nlls-gram` Levenberg--Marquardt implementation. Asset pricing and growth also
 include constrained UNO comparisons; nonessential variations live in
-[`extra/`](extra/README.md). The specialized
-multicountry trade-growth project lives in
-[`extra/trade_growth/`](extra/trade_growth/README.md).
+[`extra/`](extra/README.md).
 
 ## Setup
 
@@ -20,8 +18,7 @@ uv sync
 The numerical stack requires Python 3.13, `nlls-gram>=2.6.0`, and
 `tinydiffeq>=2.2.0`. Small kernel and NN examples use `nlls-gram`'s automatic
 linear-solver choice. The reduced one-good multicountry kernel also exposes a
-matrix-free preconditioned-CG path for large country counts; the specialized
-trade-growth project retains its own explicit solver settings.
+matrix-free preconditioned-CG path for large country counts.
 
 ## Main replication
 
@@ -102,7 +99,7 @@ The main kernel modules are:
   formulation, with the country consumption and investment FOCs substituted.
 
 Unqualified kernel filenames refer to the NLLS formulation; `_uno` identifies
-the constrained comparison. Every driver except `extra/trade_growth` uses
+the constrained comparison. Every driver uses
 `nlls_gram.RidgeLevenbergMarquardt`: the objective
 `||r||^2 + ridge * q(theta)` with the block seminorm
 `q = sum_j alpha_j' K alpha_j` supplied as a positive-definite
@@ -134,11 +131,6 @@ conjunctive `gtol`/`residual_atol` rule; the selection is resolved to
 `gtol / ridge` (the asset driver's free `p_0` needs `gtol ~ 1e-3 * ridge`,
 and the DAE drivers' atol is calibrated between the ridge-floor residual and
 the last continuation level's so the solve can only stop at the floor).
-`extra/trade_growth` keeps the metric-damped `LevenbergMarquardt`
-(`repeated_shifted_dense_metric`): its two-phase gram-CG + whitened-LSMR
-endgame builds Schur and time-block preconditioners in the metric's whitened
-coordinates, a migration deferred until those are re-derived for the ridge
-geometry.
 
 UNO comparisons are CPU/float64 reference solves. Their native optimization
 state and derivative buffers are host-side float64 arrays; NLLS and NN are the
@@ -290,31 +282,12 @@ print(results["k_rel_error_mean"])
 ## Optional examples
 
 [`extra/`](extra/README.md) contains the advertising and human-capital UNO
-comparisons, the integrated-derivative MLP, the separate RFF NN, the adaptive
-recursive kernel, the adaptive recursive NN, the unreduced
-one-good multicountry DAE,
-method-comparison drivers, and HPO sweep material. None are part of the main
-replication command.
-
-[`extra/trade_growth/`](extra/trade_growth/README.md) contains the full multicountry
-trade-growth model, kernel and NN solvers, comparative statics, specialized
-preconditioners, scaling driver, replication drivers, and tests. The simpler
-one-good model and its reduced kernel and NN solvers remain at the top level;
-the unreduced DAE variation is under `extra/`.
-
-The design and verification record for the open-economy and multicountry
-stepping stones is in [`docs/open_economy_growth.md`](docs/open_economy_growth.md).
-Adaptive integration is confined to the optional experiments under `extra/`;
-the recursive NN is described in
-[`extra/docs/neoclassical_growth_nn_recursive_adaptive.md`](extra/docs/neoclassical_growth_nn_recursive_adaptive.md).
-The recursive (state-space) kernel is described in
-[`docs/neoclassical_growth_kernel_recursive.md`](docs/neoclassical_growth_kernel_recursive.md).
+comparisons, the recursive kernel-vs-NN comparison driver, and HPO sweep
+material. None are part of the main replication command.
 
 ## Tests and lint
 
 ```bash
-uv run python -m unittest discover -s extra/tests -v
-uv run python -m unittest discover -s extra/trade_growth/tests -v
 uv run ruff check .
 uv run ruff format --check .
 ```

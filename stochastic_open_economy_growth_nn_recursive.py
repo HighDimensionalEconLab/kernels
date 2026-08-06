@@ -123,11 +123,11 @@ class StoppingCriteria:
     # continuation_epochs; convergence is only declared at scale 1.0.
     max_steps: int = 250
     train_loss_threshold: float = 1e-10
-    num_attempts: int = 4
-    num_epochs: int = 3
+    num_attempts: int = 2
+    num_epochs: int = 5
     epoch_early_stopping: bool = True
     shock_continuation: bool = True
-    initial_shock_scale: float = 0.25
+    initial_shock_scale: float = 0.238
     continuation_epochs: int = 2
 
 
@@ -141,7 +141,7 @@ class ToleranceSettings:
 
 @dataclass(frozen=True)
 class SequentialPolicySettings:
-    width: int = 32
+    width: int = 16
     depth: int = 3
     hidden_activation: str = "gelu"
     investment_head_init_scale: float = 1e-3
@@ -856,11 +856,11 @@ def stochastic_open_economy_growth_nn_recursive(
     ic_set: InitialConditionSettings = InitialConditionSettings(),
     nn_set: SequentialPolicySettings = SequentialPolicySettings(),
     opt_set: OptimizerSettings = OptimizerSettings(
-        init_damping=3.26e-5,
-        damping_decrease=0.482,
-        damping_increase=2.71,
+        init_damping=5.1e-4,
+        damping_decrease=0.195,
+        damping_increase=3.22,
         geodesic_acceleration=True,
-        geodesic_acceptance_ratio=0.541,
+        geodesic_acceptance_ratio=0.782,
     ),
     stop_set: StoppingCriteria = StoppingCriteria(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),

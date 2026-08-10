@@ -312,9 +312,13 @@ def path_residuals(
 # Flat results fields d_<observable>_T<t>_d_<parameter>[_<country>] plus the
 # observable levels <observable>_T<t>, and a long-form frame with one row per
 # derivative entry, shared by the kernel and NN sensitivity blocks so both
-# drivers publish identical names. The two-country a_0_transfer entry is the
-# derivative along the clearing-preserving transfer (1/L_1, -1/L_2): tau
-# world units of bonds moved from country 2 to country 1.
+# drivers publish identical names. Every country block also carries a
+# _common entry, the derivative along (1, ..., 1): the country count drops
+# out, so it is the one country-block statistic comparable across N. For a_0
+# that direction is infeasible and the demeaning projects it away, leaving a
+# measured zero. The two-country a_0_transfer entry is the derivative along
+# the clearing-preserving transfer (1/L_1, -1/L_2): tau world units of bonds
+# moved from country 2 to country 1.
 def sensitivity_fields_frame(
     times,
     observable_labels,
@@ -355,7 +359,18 @@ def sensitivity_fields_frame(
                             "value": value,
                         }
                     )
-            if num_countries == 2:
+                common = float(np.sum(block[index, column]))
+                fields[f"d_{label}_{suffix}_d_{name}_common"] = common
+                rows.append(
+                    {
+                        "time": time_value,
+                        "observable": label,
+                        "parameter": f"{name}_common",
+                        "country": 0,
+                        "value": common,
+                    }
+                )
+            if num_countries == 2 and "a_0" in country_blocks:
                 transfer = float(
                     country_blocks["a_0"][index, column, 0] / populations[0]
                     - country_blocks["a_0"][index, column, 1] / populations[1]

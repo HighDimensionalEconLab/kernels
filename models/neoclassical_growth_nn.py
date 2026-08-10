@@ -521,29 +521,8 @@ def neoclassical_growth_nn(
         "initial_conditions": {"k_0": k_0},
     }
 
-    # The full parametric solution map for implicit-AD functionals beyond
-    # the built-in sensitivities: warm-starts at the trained parameters,
-    # re-solves at p_value, and evaluates the paths. Callers away from the
-    # gated primal must check the returned solver_status: a non-converged
-    # re-solve yields exactly zero solution tangents, indistinguishable
-    # from a genuine null effect.
-    def parametric_model(points, p_value):
-        solved = solver.solve(
-            result.x,
-            residual_args,
-            p=p_value,
-            max_steps=stop_set.max_steps,
-            atol=atol,
-            max_steps_is_success=False,
-        )
-        values = policy_values(nnx.merge(graphdef, solved.x), points, p_value)
-        values["solver_status"] = solved.status
-        return values
-
     return results, {
         "model": model,
-        "parametric_model": parametric_model,
-        "p": p,
         "sensitivity_df": sensitivity_df,
         "train_df": train_df,
         "test_df": test_df,

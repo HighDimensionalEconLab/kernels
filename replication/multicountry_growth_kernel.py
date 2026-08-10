@@ -28,6 +28,12 @@ SOLVER = multicountry_growth_kernel.multicountry_growth_kernel
 # across configurations is the N-country analogue of the small open
 # economy's comparative-statics check.
 BOND_CONFIGURATIONS = ("initial_debt", "baseline", "initial_assets")
+# Sensitivity dates shared by the two-country and ten-country experiments.
+# The cross-check on d r*/d gamma_bar -- the same representative-agent
+# perturbation solved through a 1,920-row and a 9,792-row system -- only
+# compares at dates both tables report, so the two lists must stay equal.
+SENSITIVITY_TIMES = [0.0, 10.0, 30.0, 80.0]
+LARGE_COUNTRY_COUNT = 10
 
 
 def bond_invariance(validation_frames, num_countries, test_T):
@@ -119,14 +125,14 @@ def run(output_dir: str | None = None, use_float64: bool = True):
         )
         validation_frames[name] = frames["validation_df"]
 
-    # The baseline additionally publishes the implicit-AD sensitivity table
-    # for the supplement's sensitivity appendix (float64 only): d(r*, c_i,
-    # k_i) at T in {30, 100} with respect to every structural parameter and
-    # initial condition.
-    go(
-        "baseline",
-        **(dict(sensitivity_times=[30.0, 100.0]) if use_float64 else {}),
-    )
+    # The baseline and the ten-country experiment publish the implicit-AD
+    # sensitivity tables for the supplement's sensitivity appendix (float64
+    # only): every observable at every date in SENSITIVITY_TIMES against
+    # every structural parameter and initial condition. Two countries carry
+    # the per-country levels; ten carry the world aggregates, which is all a
+    # cross-section that wide can say.
+    sensitivity = dict(sensitivity_times=SENSITIVITY_TIMES) if use_float64 else {}
+    go("baseline", **sensitivity)
     go(
         "initial_debt",
         k_0=drawn_k_0,
@@ -152,6 +158,22 @@ def run(output_dir: str | None = None, use_float64: bool = True):
             productivities=(1.0, 1.1),
         ),
     )
+    # Symmetric in preferences, size, and technology: the only heterogeneity
+    # is the drawn capital and the drawn bond positions, so the aggregate
+    # comparative statics isolate what a wide cross-section adds over two
+    # countries rather than what asymmetric calibration adds.
+    # Forward mode here: this table reports one direction in gamma plus the
+    # per-country bond directions the neutrality check reads, so the tangent
+    # map is applied to exactly what gets published and nothing else.
+    go(
+        "ten_countries",
+        parameters=dict(
+            gammas=(2.0,) * LARGE_COUNTRY_COUNT,
+            populations=(1.0,) * LARGE_COUNTRY_COUNT,
+            productivities=(1.0,) * LARGE_COUNTRY_COUNT,
+        ),
+        **(dict(sensitivity_mode="forward", **sensitivity) if sensitivity else {}),
+    )
     write_summary(
         output_dir,
         PREFIX,
@@ -161,6 +183,7 @@ def run(output_dir: str | None = None, use_float64: bool = True):
             "initial_assets",
             "three_countries",
             "heterogeneous_countries",
+            "ten_countries",
         },
     )
     invariance = bond_invariance(

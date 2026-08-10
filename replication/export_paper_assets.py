@@ -28,6 +28,9 @@ MANIFEST = {
     "neoclassical_growth_solver_comparison.tex": "collect_json",
     "neoclassical_growth_sensitivity.tex": "collect_json",
     "multicountry_growth_sensitivity.tex": "collect_json",
+    "multicountry_growth_aggregate_sensitivity.tex": "collect_json",
+    "multicountry_growth_nn_sensitivity.tex": "collect_json",
+    "multicountry_growth_nn_aggregate_sensitivity.tex": "collect_json",
     "stochastic_growth_paths.pdf": "stochastic_growth_kernel_recursive_figures",
     "stochastic_open_economy_paths.pdf": (
         "stochastic_open_economy_growth_kernel_recursive_figures"

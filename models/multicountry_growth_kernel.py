@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 import jax
 import jax.numpy as jnp
@@ -37,6 +37,7 @@ from models.multicountry_growth import (
     tail_diagnostics,
     tvc_diagnostics,
     validate_initial_conditions,
+    weighted_gini,
 )
 from models.multicountry_growth_benchmark import multicountry_growth_benchmark
 from models.utilities import (
@@ -133,6 +134,7 @@ def multicountry_growth_kernel(
     lm_set: SolverSettings = SolverSettings(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     sensitivity_times: list[float] | None = None,
+    sensitivity_mode: str = "reverse",
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
@@ -155,6 +157,8 @@ def multicountry_growth_kernel(
         )
     if lm_set.linear_solver not in ("auto", "cholesky", "qr"):
         raise ValueError("linear_solver must be one of ('auto', 'cholesky', 'qr')")
+    if sensitivity_mode not in ("reverse", "forward"):
+        raise ValueError("sensitivity_mode must be one of ('reverse', 'forward')")
 
     kernel = normalize_kernel(kernel_set.kernel)
     train_data = make_sampled_train_grid(data_set, dtype)
@@ -510,70 +514,181 @@ def multicountry_growth_kernel(
             kernel_set.ell,
         )
 
-        # One reverse-mode pass through the solve yields the comparative
-        # statics of the world rate and every country's consumption and
-        # capital at every sensitivity time with respect to every structural
-        # parameter and initial condition together: the implicit dependence
-        # of the solved coefficients on p plus the direct dependence of the
-        # path evaluation. The a_0 gradients are the projected ones
-        # (demeaning inside path_coordinates), so they measure feasible
-        # redistributions.
+        # The world rate, three cross-sectional world statistics, and every
+        # country's consumption and capital. The per-country levels are the
+        # readable observables at N = 2; the aggregates are what survives a
+        # cross-section too wide to tabulate country by country.
+        def sensitivity_observables(coordinates, parameters_p):
+            populations_p = parameters_p.populations
+            weights = populations_p / jnp.sum(populations_p)
+            x = investment_expenditure(coordinates["k"], coordinates["q"], parameters_p)
+            output = production(
+                coordinates["k"], parameters_p.productivities, parameters_p
+            )
+            # World saving is world investment: with no outside world the
+            # aggregate current account is identically zero.
+            saving_rate = jnp.sum(weights * x, axis=-1) / jnp.sum(
+                weights * output, axis=-1
+            )
+            steady_p = steady_state(parameters_p, coordinates["a"].dtype)
+            nfa_dispersion = (
+                jnp.sqrt(jnp.sum(weights * coordinates["a"] ** 2, axis=-1))
+                / steady_p["output_scale"]
+            )
+            return jnp.column_stack(
+                [
+                    coordinates["interest_rate"],
+                    saving_rate,
+                    nfa_dispersion,
+                    weighted_gini(output, populations_p),
+                    coordinates["c"],
+                    coordinates["k"],
+                ]
+            )
+
+        # Differentiating this maps p to every observable at every
+        # sensitivity time through the solve: the implicit dependence of the
+        # solved coefficients on p plus the direct dependence of the path
+        # evaluation. The a_0 derivatives are the projected ones (demeaning
+        # inside path_coordinates), so they measure feasible redistributions.
+        # Warm-started at the solved coefficients with the ridge pinned at the
+        # level the continuation actually reached, so the re-solve lands on
+        # the primal's own stationary point in a step or two. Re-annealing
+        # from ridge_init would be free to settle at a different achieved
+        # ridge, and the implicit tangents are the tangents of whatever
+        # stationary point the solve returns.
+        sensitivity_solver = RidgeLevenbergMarquardt(
+            residual_fn,
+            metric=metric,
+            ridge=float(result.lm_state.ridge),
+            linear_solver={"auto": Cholesky(), "cholesky": Cholesky(), "qr": QR()}[
+                lm_set.linear_solver
+            ],
+            init_damping=lm_set.init_damping,
+            damping_decrease=lm_set.damping_decrease,
+            damping_increase=lm_set.damping_increase,
+        )
+
         def observables_at_sensitivity_times(p_value):
-            sensitivity_result = solver.solve(
-                theta_0,
+            sensitivity_result = sensitivity_solver.solve(
+                theta,
                 None,
                 p=p_value,
                 **solve_options,
-                **continuation_options,
             )
             coordinates = path_coordinates(
                 sensitivity_result.x, K_sens, K_tilde_sens, p_value
             )
-            observables = jnp.column_stack(
-                [coordinates["interest_rate"], coordinates["c"], coordinates["k"]]
+            return (
+                sensitivity_observables(coordinates, p_value["parameters"]),
+                sensitivity_result.status,
             )
-            return observables, sensitivity_result.status
 
-        jacobian, sensitivity_status = jax.jacrev(
-            observables_at_sensitivity_times, has_aux=True
-        )(p)
-        jax.block_until_ready(jacobian)
-        # A non-converged re-solve would publish exactly zero implicit
-        # tangents, indistinguishable from a genuine null effect.
-        if int(sensitivity_status) != LMStatus.CONVERGED:
-            raise RuntimeError("the sensitivity re-solve did not converge")
-        primal_coordinates = path_coordinates(theta, K_sens, K_tilde_sens, p)
-        primal_observables = np.column_stack(
-            [
-                np.asarray(primal_coordinates["interest_rate"]),
-                np.asarray(primal_coordinates["c"]),
-                np.asarray(primal_coordinates["k"]),
-            ]
-        )
         observable_labels = (
-            ["rate"]
+            ["rate", "saving_rate", "nfa_dispersion", "output_gini"]
             + [f"c_{country + 1}" for country in range(num_countries)]
             + [f"k_{country + 1}" for country in range(num_countries)]
         )
-        gradient_parameters = jacobian["parameters"]
-        sensitivity_fields, sensitivity_df = sensitivity_fields_frame(
-            sensitivity_times,
-            observable_labels,
-            primal_observables,
-            {
+        populations_list = [float(value) for value in parameters.populations]
+
+        if sensitivity_mode == "reverse":
+            # The full Jacobian: every observable against every parameter, at
+            # one reverse pass per output scalar. Any question about the
+            # solution can be read off it afterwards.
+            jacobian, sensitivity_status = jax.jacrev(
+                observables_at_sensitivity_times, has_aux=True
+            )(p)
+            jax.block_until_ready(jacobian)
+            primal_observables = np.asarray(
+                sensitivity_observables(
+                    path_coordinates(theta, K_sens, K_tilde_sens, p), p["parameters"]
+                )
+            )
+            gradient_parameters = jacobian["parameters"]
+            scalar_blocks = {
                 "alpha": np.asarray(gradient_parameters.alpha),
                 "delta": np.asarray(gradient_parameters.delta),
                 "r": np.asarray(gradient_parameters.r),
                 "eta": np.asarray(gradient_parameters.eta),
-            },
-            {
+            }
+            country_blocks = {
                 "gamma": np.asarray(gradient_parameters.gammas),
                 "productivity": np.asarray(gradient_parameters.productivities),
                 "population": np.asarray(gradient_parameters.populations),
                 "k_0": np.asarray(jacobian["k_0"]),
                 "a_0": np.asarray(jacobian["a_0"]),
-            },
-            [float(value) for value in parameters.populations],
+            }
+            rate_a_0_gradient = country_blocks["a_0"][:, 0, :]
+        else:
+            # One linearization at the solved point, then a tangent map
+            # applied to each reported direction: (1, ..., 1) in gamma and one
+            # bond direction per country. The number of applications follows
+            # the directions published rather than the 2N + 4 observables, and
+            # only those directions exist afterwards -- there is no Jacobian
+            # left over to answer a different question from. Wall time tracks
+            # reverse mode either way: the re-solve inside the differentiated
+            # function dominates both, so switching modes buys accuracy of
+            # intent, not speed.
+            primal, tangent_at_p, sensitivity_status = jax.linearize(
+                observables_at_sensitivity_times, p, has_aux=True
+            )
+            jax.block_until_ready(primal)
+            primal_observables = np.asarray(primal)
+            zero_tangent = jax.tree_util.tree_map(jnp.zeros_like, p)
+            # (1, ..., 1) in gamma: the country count cancels, so this is the
+            # representative-agent risk-aversion change at any N.
+            gamma_common = np.asarray(
+                tangent_at_p(
+                    {
+                        **zero_tangent,
+                        "parameters": replace(
+                            zero_tangent["parameters"],
+                            gammas=jnp.ones_like(p["parameters"].gammas),
+                        ),
+                    }
+                )
+            )
+            rate_a_0_gradient = np.column_stack(
+                [
+                    np.asarray(
+                        tangent_at_p(
+                            {
+                                **zero_tangent,
+                                "a_0": zero_tangent["a_0"].at[country].set(1.0),
+                            }
+                        )
+                    )[:, 0]
+                    for country in range(num_countries)
+                ]
+            )
+            scalar_blocks = {"gamma_common": gamma_common}
+            country_blocks = {}
+
+        # A non-converged re-solve would publish exactly zero implicit
+        # tangents, indistinguishable from a genuine null effect.
+        if int(sensitivity_status) != LMStatus.CONVERGED:
+            raise RuntimeError("the sensitivity re-solve did not converge")
+        sensitivity_fields, sensitivity_df = sensitivity_fields_frame(
+            sensitivity_times,
+            observable_labels,
+            primal_observables,
+            scalar_blocks,
+            country_blocks,
+            populations_list,
+        )
+
+        # Under identical homothetic preferences the world rate is invariant
+        # to every clearing-preserving reallocation of the initial bond
+        # positions, so the rate's bond derivatives are zero to solver
+        # tolerance. Reported as a measured scalar: it is the check on the
+        # implicit tangents themselves, not another comparative static.
+        for index, time_value in enumerate(sensitivity_times):
+            suffix = f"T{time_value:g}".replace(".", "p")
+            sensitivity_fields[f"rate_{suffix}_a_0_neutrality"] = float(
+                np.max(np.abs(rate_a_0_gradient[index]))
+            )
+        sensitivity_fields["rate_a_0_neutrality"] = float(
+            np.max(np.abs(rate_a_0_gradient))
         )
 
     results = {
@@ -796,38 +911,8 @@ def multicountry_growth_kernel(
         values["t"] = points
         return values
 
-    # The full parametric solution map for implicit-AD functionals beyond
-    # the built-in rate sensitivity: re-solves at p_value and evaluates the
-    # paths, so jax.jvp/jax.grad through it differentiates any observable
-    # of the solution with respect to the structural parameters and initial
-    # conditions carried in p (the primal pytree is exposed alongside).
-    # Callers at a p_value away from the gated primal must check the
-    # returned solver_status: a non-converged re-solve yields exactly zero
-    # solution tangents, indistinguishable from a genuine null effect.
-    def parametric_model(points, p_value):
-        solved = solver.solve(
-            theta_0,
-            None,
-            p=p_value,
-            **solve_options,
-            **continuation_options,
-        )
-        K_eval, K_tilde_eval = integrated_kernel_matrices(
-            points,
-            train_data,
-            kernel,
-            kernel_set.sigma,
-            kernel_set.ell,
-        )
-        values = evaluate_coordinates(solved.x, K_eval, K_tilde_eval, p_value)
-        values["t"] = points
-        values["solver_status"] = solved.status
-        return values
-
     return results, {
         "model": kernel_solution,
-        "parametric_model": parametric_model,
-        "p": p,
         "train_df": train_df,
         "validation_df": validation_df,
         "test_df": test_df,

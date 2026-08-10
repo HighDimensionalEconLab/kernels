@@ -34,6 +34,7 @@ from models.multicountry_growth import (
     tail_diagnostics,
     tvc_diagnostics,
     validate_initial_conditions,
+    weighted_gini,
 )
 from models.multicountry_growth_benchmark import multicountry_growth_benchmark
 from models.utilities import (
@@ -489,6 +490,35 @@ def multicountry_growth_nn(
             raise ValueError("sensitivity_times must lie within the training horizon")
         t_sens = jnp.asarray(sensitivity_times, dtype=dtype)
 
+        # The world rate, three cross-sectional world statistics, and every
+        # country's consumption and capital -- the kernel driver's observable
+        # stack, so the two solvers' tables are comparable cell by cell.
+        def sensitivity_observables(values, parameters_p):
+            populations_p = parameters_p.populations
+            weights = populations_p / jnp.sum(populations_p)
+            x = investment_expenditure(values["k"], values["q"], parameters_p)
+            output = production(values["k"], parameters_p.productivities, parameters_p)
+            # World saving is world investment: with no outside world the
+            # aggregate current account is identically zero.
+            saving_rate = jnp.sum(weights * x, axis=-1) / jnp.sum(
+                weights * output, axis=-1
+            )
+            steady_p = steady_state(parameters_p, values["a"].dtype)
+            nfa_dispersion = (
+                jnp.sqrt(jnp.sum(weights * values["a"] ** 2, axis=-1))
+                / steady_p["output_scale"]
+            )
+            return jnp.column_stack(
+                [
+                    values["interest_rate"],
+                    saving_rate,
+                    nfa_dispersion,
+                    weighted_gini(output, populations_p),
+                    values["c"],
+                    values["k"],
+                ]
+            )
+
         # Warm-started at the trained parameters and re-solved to the same
         # residual tolerance, so the stationary point the implicit tangents
         # are taken at moves smoothly with p; the multi-start draw is not
@@ -505,33 +535,40 @@ def multicountry_growth_nn(
                 max_steps_is_success=False,
             )
             values = path_values(nnx.merge(graphdef, solved.x), t_sens, p_value, scales)
-            observables = jnp.column_stack(
-                [values["interest_rate"], values["c"], values["k"]]
-            )
-            return observables, solved.status
+            return sensitivity_observables(values, p_value.model), solved.status
 
+        observable_labels = (
+            ["rate", "saving_rate", "nfa_dispersion", "output_gini"]
+            + [f"c_{country + 1}" for country in range(num_countries)]
+            + [f"k_{country + 1}" for country in range(num_countries)]
+        )
+
+        # The full Jacobian: every observable against every parameter, at one
+        # reverse pass per output scalar.
         jacobian, sensitivity_status = jax.jacrev(
             observables_at_sensitivity_times, has_aux=True
         )(residual_parameters)
         jax.block_until_ready(jacobian)
+        primal_observables = np.asarray(
+            sensitivity_observables(
+                path_values(model, t_sens, residual_parameters, scales),
+                residual_parameters.model,
+            )
+        )
+        gradient_parameters = jacobian.model
+        country_blocks = {
+            "gamma": np.asarray(gradient_parameters.gammas),
+            "productivity": np.asarray(gradient_parameters.productivities),
+            "population": np.asarray(gradient_parameters.populations),
+            "k_0": np.asarray(jacobian.k_0),
+            "a_0": np.asarray(jacobian.a_0),
+        }
+        rate_a_0_gradient = country_blocks["a_0"][:, 0, :]
+
         # A non-converged re-solve would publish exactly zero implicit
         # tangents, indistinguishable from a genuine null effect.
         if int(sensitivity_status) != LMStatus.CONVERGED:
             raise RuntimeError("the sensitivity re-solve did not converge")
-        primal_values = path_values(model, t_sens, residual_parameters, scales)
-        primal_observables = np.column_stack(
-            [
-                np.asarray(primal_values["interest_rate"]),
-                np.asarray(primal_values["c"]),
-                np.asarray(primal_values["k"]),
-            ]
-        )
-        observable_labels = (
-            ["rate"]
-            + [f"c_{country + 1}" for country in range(num_countries)]
-            + [f"k_{country + 1}" for country in range(num_countries)]
-        )
-        gradient_parameters = jacobian.model
         sensitivity_fields, sensitivity_df = sensitivity_fields_frame(
             sensitivity_times,
             observable_labels,
@@ -542,14 +579,22 @@ def multicountry_growth_nn(
                 "r": np.asarray(gradient_parameters.r),
                 "eta": np.asarray(gradient_parameters.eta),
             },
-            {
-                "gamma": np.asarray(gradient_parameters.gammas),
-                "productivity": np.asarray(gradient_parameters.productivities),
-                "population": np.asarray(gradient_parameters.populations),
-                "k_0": np.asarray(jacobian.k_0),
-                "a_0": np.asarray(jacobian.a_0),
-            },
+            country_blocks,
             [float(value) for value in parameters.populations],
+        )
+
+        # Under identical homothetic preferences the world rate is invariant
+        # to every clearing-preserving reallocation of the initial bond
+        # positions, so the rate's bond derivatives are zero to solver
+        # tolerance. Reported as a measured scalar: it is the check on the
+        # implicit tangents themselves, not another comparative static.
+        for index, time_value in enumerate(sensitivity_times):
+            suffix = f"T{time_value:g}".replace(".", "p")
+            sensitivity_fields[f"rate_{suffix}_a_0_neutrality"] = float(
+                np.max(np.abs(rate_a_0_gradient[index]))
+            )
+        sensitivity_fields["rate_a_0_neutrality"] = float(
+            np.max(np.abs(rate_a_0_gradient))
         )
 
     results = {
@@ -742,29 +787,8 @@ def multicountry_growth_nn(
         "initial_conditions": {"k_0": list(k_0), "a_0": list(a_0)},
     }
 
-    # The full parametric solution map for implicit-AD functionals beyond
-    # the built-in sensitivities: warm-starts at the trained parameters,
-    # re-solves at p_value, and evaluates the paths. Callers away from the
-    # gated primal must check the returned solver_status: a non-converged
-    # re-solve yields exactly zero solution tangents, indistinguishable
-    # from a genuine null effect.
-    def parametric_model(points, p_value):
-        solved = solver.solve(
-            result.x,
-            residual_args,
-            p=p_value,
-            max_steps=stop_set.max_steps,
-            atol=atol,
-            max_steps_is_success=False,
-        )
-        values = path_values(nnx.merge(graphdef, solved.x), points, p_value, scales)
-        values["solver_status"] = solved.status
-        return values
-
     return results, {
         "model": model,
-        "parametric_model": parametric_model,
-        "p": residual_parameters,
         "sensitivity_df": sensitivity_df,
         "train_df": train_df,
         "validation_df": validation_df,

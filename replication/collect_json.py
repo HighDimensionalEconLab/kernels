@@ -392,8 +392,19 @@ NEOCLASSICAL_SENSITIVITY_ROWS = (
     ("sigma_crra", r"$\gamma$"),
     ("k_0", r"$x_0$"),
 )
-MULTICOUNTRY_SENSITIVITY_TIMES = (30, 100)
+MULTICOUNTRY_SENSITIVITY_TIMES = (0, 10, 30, 80)
 MULTICOUNTRY_SENSITIVITY_OBSERVABLES = ("rate", "c_1", "c_2", "k_1", "k_2")
+# The ten-country table: no cross-section that wide has a readable
+# per-country column, so its observables are world statistics and the one
+# reported direction is (1, ..., 1) in gamma -- the representative-agent
+# risk-aversion perturbation, which the two-country table reports at the same
+# dates. Agreement between the two is the cross-check the pair exists for.
+MULTICOUNTRY_AGGREGATE_ROWS = (
+    ("rate", r"World interest rate $r^{\star}$"),
+    ("saving_rate", r"World saving rate $X/Y$"),
+    ("nfa_dispersion", r"NFA dispersion"),
+    ("output_gini", r"Output Gini"),
+)
 # Labels in the supplement's multicountry notation (k_{i,0} and b_{i,0}
 # initial conditions, capital share a); a_0_transfer is the
 # clearing-preserving bond transfer tau, and z_i scales country i's
@@ -474,35 +485,66 @@ def neoclassical_sensitivity_payload(value, reference=None):
     return payload
 
 
-def multicountry_sensitivity_payload(value, reference=None):
+def multicountry_sensitivity_payload(value):
     levels = {}
     derivatives = {}
-    cross_solver_gaps = []
     for time in MULTICOUNTRY_SENSITIVITY_TIMES:
         for observable in MULTICOUNTRY_SENSITIVITY_OBSERVABLES:
             levels[f"{observable}_T{time}"] = sig(value(f"{observable}_T{time}"), 6)
-        block = {}
-        for suffix, _ in MULTICOUNTRY_SENSITIVITY_ROWS:
-            block[suffix] = {
+        derivatives[f"T{time}"] = {
+            suffix: {
                 observable: sig(value(f"d_{observable}_T{time}_d_{suffix}"), 6)
                 for observable in MULTICOUNTRY_SENSITIVITY_OBSERVABLES
             }
-            if reference is not None:
-                cross_solver_gaps += [
-                    abs(
-                        value(f"d_{observable}_T{time}_d_{suffix}")
-                        - reference(f"d_{observable}_T{time}_d_{suffix}")
-                    )
-                    for observable in MULTICOUNTRY_SENSITIVITY_OBSERVABLES
-                ]
-        derivatives[f"T{time}"] = block
-    payload = {
+            for suffix, _ in MULTICOUNTRY_SENSITIVITY_ROWS
+        }
+    return {
         "times": list(MULTICOUNTRY_SENSITIVITY_TIMES),
         "levels": levels,
         "derivatives": derivatives,
     }
+
+
+# The ten-country aggregate comparative statics, with the two numbers the
+# table exists to certify: the redistribution-neutrality residual, and the
+# gap against the two-country table on the one perturbation both report.
+# Moving every gamma_i together is the same representative-agent change at
+# any N, so the two must agree despite solving systems of different size.
+def multicountry_aggregate_payload(value, reference=None):
+    def percent_per_gamma(accessor, name, time):
+        return (
+            100.0
+            * accessor(f"d_{name}_T{time}_d_gamma_common")
+            / accessor(f"{name}_T{time}")
+        )
+
+    statistics = {}
+    neutrality = {}
+    rate_gaps = []
+    for time in MULTICOUNTRY_SENSITIVITY_TIMES:
+        statistics[f"T{time}"] = {
+            name: {
+                "level": sig(value(f"{name}_T{time}"), 6),
+                "d_d_gamma_common": sig(value(f"d_{name}_T{time}_d_gamma_common"), 6),
+                "percent_per_gamma": sig(percent_per_gamma(value, name, time), 3),
+            }
+            for name, _ in MULTICOUNTRY_AGGREGATE_ROWS
+        }
+        neutrality[f"T{time}"] = sci(value(f"rate_T{time}_a_0_neutrality"))
+        if reference is not None:
+            rate_gaps.append(
+                abs(
+                    percent_per_gamma(value, "rate", time)
+                    - percent_per_gamma(reference, "rate", time)
+                )
+            )
+    payload = {
+        "times": list(MULTICOUNTRY_SENSITIVITY_TIMES),
+        "statistics": statistics,
+        "rate_redistribution_neutrality": neutrality,
+    }
     if reference is not None:
-        payload["max_abs_gap_vs_kernel"] = sci(max(cross_solver_gaps))
+        payload["max_rate_percent_gap_vs_two_countries"] = sig(max(rate_gaps), 3)
     return payload
 
 
@@ -538,8 +580,8 @@ def write_neoclassical_sensitivity_table(out):
     print(f"wrote {path}")
 
 
-def write_multicountry_sensitivity_table(out):
-    value = json_values(load(out, "multicountry_growth_kernel_baseline"))
+def write_multicountry_sensitivity_table(out, source, name):
+    value = json_values(load(out, source))
 
     def cell(x):
         return f"${sci(x, 3)}$"
@@ -565,7 +607,59 @@ def write_multicountry_sensitivity_table(out):
         if time != MULTICOUNTRY_SENSITIVITY_TIMES[-1]:
             lines.append(r"\midrule")
     lines += [r"\bottomrule", r"\end{tabular}", ""]
-    path = out / "multicountry_growth_sensitivity.tex"
+    path = out / name
+    path.write_text("\n".join(lines))
+    print(f"wrote {path}")
+
+
+def write_multicountry_aggregate_table(out, source, name):
+    value = json_values(load(out, source))
+    times = MULTICOUNTRY_SENSITIVITY_TIMES
+    span = len(times) + 1
+
+    # Percent change per unit of gamma. NFA dispersion and the output Gini
+    # are functions of the predetermined k_0 and b_0 at T = 0, so no
+    # parameter can move them there; the derivative is zero to rounding and
+    # the cell says so rather than reporting a rounded-down small number.
+    def semi_elasticity(name, time):
+        response = (
+            100.0 * value(f"d_{name}_T{time}_d_gamma_common") / value(f"{name}_T{time}")
+        )
+        return "$0$" if abs(response) < 1e-6 else f"${response:.2f}$"
+
+    def block(title, cells_for):
+        rows = [rf"\multicolumn{{{span}}}{{c}}{{{title}}} \\", r"\midrule"]
+        for name, label in MULTICOUNTRY_AGGREGATE_ROWS:
+            rows.append(
+                f"{label} & " + " & ".join(cells_for(name, t) for t in times) + r" \\"
+            )
+        return rows
+
+    lines = [
+        rf"\begin{{tabular}}{{l{'r' * len(times)}}}",
+        r"\toprule",
+        " & " + " & ".join(rf"$T = {time}$" for time in times) + r" \\",
+        r"\midrule",
+        *block("Level", lambda name, t: f"${sci(value(f'{name}_T{t}'), 3)}$"),
+        r"\midrule",
+        *block(
+            r"Common risk aversion: $100\,\partial \ln(\cdot)/\partial\gamma$ "
+            r"(\% per unit $\gamma$)",
+            semi_elasticity,
+        ),
+        r"\midrule",
+        rf"\multicolumn{{{span}}}{{c}}{{Redistribution neutrality}} \\",
+        r"\midrule",
+        r"$\max_i |\partial r^{\star}/\partial b_{i,0}|$ & "
+        + " & ".join(
+            f"${sci(value(f'rate_T{time}_a_0_neutrality'), 2)}$" for time in times
+        )
+        + r" \\",
+        r"\bottomrule",
+        r"\end{tabular}",
+        "",
+    ]
+    path = out / name
     path.write_text("\n".join(lines))
     print(f"wrote {path}")
 
@@ -1291,14 +1385,21 @@ def multicountry_growth_kernel(out):
                 "initial_assets",
                 "three_countries",
                 "heterogeneous_countries",
+                "ten_countries",
             )
         },
     }
-    # The baseline carries the sensitivity fields only in the float64 pass.
+    # The baseline and the ten-country experiment carry the sensitivity
+    # fields only in the float64 pass.
+    first_time = MULTICOUNTRY_SENSITIVITY_TIMES[0]
     baseline_json = load(out, f"{prefix}_baseline")
-    if "d_rate_T30_d_alpha" in baseline_json:
+    if f"d_rate_T{first_time}_d_alpha" in baseline_json:
         payload["sensitivity"] = multicountry_sensitivity_payload(
             json_values(baseline_json)
+        )
+        payload["aggregate_sensitivity"] = multicountry_aggregate_payload(
+            json_values(load(out, f"{prefix}_ten_countries")),
+            reference=json_values(baseline_json),
         )
     return payload
 
@@ -1375,12 +1476,13 @@ def multicountry_growth_nn(out):
         "n_seeds": int(baseline_summary["n_seeds"]),
         "experiments": experiments,
     }
-    # The baseline carries the sensitivity fields only in the float64 pass;
-    # the kernel baseline is the cross-solver reference.
-    if "d_rate_T30_d_alpha" in baseline_summary:
-        payload["sensitivity"] = multicountry_sensitivity_payload(
-            lambda field: float(baseline_accepted[field].median()),
-            reference=json_values(load(out, "multicountry_growth_kernel_baseline")),
+    # The implicit-AD runs are separate single-seed experiments, float64 only.
+    if (out / f"{prefix}_sensitivity.json").exists():
+        two_country = accepted_values(out, f"{prefix}_sensitivity")
+        payload["sensitivity"] = multicountry_sensitivity_payload(two_country)
+        payload["aggregate_sensitivity"] = multicountry_aggregate_payload(
+            accepted_values(out, f"{prefix}_sensitivity_ten_countries"),
+            reference=two_country,
         )
     return payload
 
@@ -1606,7 +1708,28 @@ def collect(output_dir: str = ".results", include_uno: bool = True):
     # The sensitivity experiments run only in the float64 pass.
     if residual_dtype == "float64":
         write_neoclassical_sensitivity_table(out)
-        write_multicountry_sensitivity_table(out)
+        # One table per solver and cross-section width; the kernel and NN
+        # numbers stand on their own rather than being differenced.
+        write_multicountry_sensitivity_table(
+            out,
+            "multicountry_growth_kernel_baseline",
+            "multicountry_growth_sensitivity.tex",
+        )
+        write_multicountry_aggregate_table(
+            out,
+            "multicountry_growth_kernel_ten_countries",
+            "multicountry_growth_aggregate_sensitivity.tex",
+        )
+        write_multicountry_sensitivity_table(
+            out,
+            "multicountry_growth_nn_sensitivity",
+            "multicountry_growth_nn_sensitivity.tex",
+        )
+        write_multicountry_aggregate_table(
+            out,
+            "multicountry_growth_nn_sensitivity_ten_countries",
+            "multicountry_growth_nn_aggregate_sensitivity.tex",
+        )
     payload = clean(
         {
             "_meta": {

@@ -228,28 +228,33 @@ legitimately break it.
 
 `multicountry_growth_kernel.py` threads every structural parameter and
 initial condition through the solver's implicit-AD `p` argument, so
-`--sensitivity_time 10` reports the comparative statics of the global
-interest rate at t=10 with respect to all of them from ONE reverse-mode
-pass (`d_rate_d_*` result keys and `extras["sensitivity_df"]`), on the
-dense and matrix-free paths alike (the `cg` implicit tangent runs the
-block-eigen-preconditioned CG at zero damping). The `a_0` gradient is
-projected onto the feasible clearing set; identical homothetic
-preferences make the rate exactly neutral to such redistributions, and
-the reported gradient confirms it at ~1e-11. The reverse-mode values
-carry the Gauss-Newton implicit-sensitivity bias of a non-interpolating
-collocation solution — verified ~0.7% against central finite differences
-of full re-solves, shrinking proportionally with the collocation
-residual. For observables beyond the built-in rate sensitivity,
-`extras["parametric_model"]` re-solves at any `p` and evaluates the
-paths, so `jax.jvp`/`jax.grad` through it differentiates anything:
-`multicountry_growth_transitions.py` is the worked example — the world
-saving rate, interest rate, output Gini (sigma-convergence), and NFA
-dispersion on a coarse time grid with every `d/d gamma` path from ONE
-forward tangent pass, plus the high-dimensional redistribution Jacobian
-from one `jax.jacrev` — the consumption Gini and terminal NFA dispersion
-respond country-by-country to the initial bond and capital positions
-while the r(t=10) row confirms bond-redistribution neutrality at machine
-zero.
+`--sensitivity_times '[0,10,30,80]'` reports the comparative statics of
+the world interest rate, three world statistics (saving rate, NFA
+dispersion, output Gini), and every country's consumption and capital
+with respect to all of them, as `d_<observable>_T<t>_d_<parameter>`
+result keys and `extras["sensitivity_df"]`. `--sensitivity_mode reverse`
+builds the whole Jacobian, one reverse pass per output scalar;
+`forward` linearizes once and applies the tangent map only along the
+directions published — the `(1, ..., 1)` direction in `gamma` and one
+bond direction per country. Both cost about the same, since the re-solve
+inside the differentiated function dominates either.
+
+Every country block also carries a `_common` entry, the derivative along
+`(1, ..., 1)`: the country count cancels, so it is the one country-block
+statistic comparable across N. The replication runs it at N=2 and N=10
+and the two must agree on `d ln r* / d gamma` despite solving systems of
+1,920 and 9,792 rows — the measured gap is 0.57 percentage points, in
+`aggregate_sensitivity.max_rate_percent_gap_vs_two_countries`.
+
+The `a_0` gradients are projected onto the feasible clearing set;
+identical homothetic preferences make the rate exactly neutral to such
+redistributions, and `max_i |d r*/d b_i0|` confirms it below 5e-10 at
+t = 10, 30, 80, rising to ~2e-6 at t = 0, where the integrated kernel
+vanishes and the rate is carried entirely by its unpenalized offset. The
+reverse-mode values carry the Gauss-Newton implicit-sensitivity bias of a
+non-interpolating collocation solution — verified ~0.7% against central
+finite differences of full re-solves, shrinking proportionally with the
+collocation residual.
 
 The stochastic recursive NN drivers (`stochastic_growth_nn_recursive.py`,
 `stochastic_open_economy_growth_nn_recursive.py`) additionally accept

@@ -474,25 +474,8 @@ def neoclassical_growth_kernel(
         "initial_conditions": {"k_0": k_0},
     }
 
-    # The full parametric solution map for implicit-AD functionals beyond
-    # the built-in sensitivities: re-solves at p_value and evaluates the
-    # paths, so jax.jvp/jax.grad through it differentiates any observable of
-    # the solution with respect to the parameters and initial condition in
-    # p. Callers away from the gated primal must check the returned
-    # solver_status: a non-converged re-solve yields exactly zero solution
-    # tangents, indistinguishable from a genuine null effect.
-    def parametric_model(points, p_value):
-        solved = solver.solve(theta_0, None, p=p_value, **solve_options)
-        K_eval, K_tilde_eval = integrated_kernel_matrices(
-            points, train_data, kernel, sigma, ell
-        )
-        k, c, mu, _, _ = path_values(solved.x, K_eval, K_tilde_eval, p_value)
-        return {"t": points, "k": k, "c": c, "mu": mu, "solver_status": solved.status}
-
     return results, {
         "model": kernel_solution,
-        "parametric_model": parametric_model,
-        "p": p,
         "sensitivity_df": sensitivity_df,
         "train_df": train_df,
         "test_df": test_df,

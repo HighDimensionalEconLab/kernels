@@ -128,7 +128,8 @@ class SolverSettings:
     # paths run whitened). "cg" is matrix-free preconditioned CG on the
     # whitened normal operator with the arrow+Woodbury preconditioner
     # rebuilt every LM step -- the O(N)-per-step path for large country
-    # counts, sensitivities excluded.
+    # counts. The full sensitivity tables (sensitivity_times) stay
+    # dense-only; the gamma-common tangent runs on either path.
     linear_solver: str = "auto"
     # CG inner-solve budget: cg_tol is unreachable in the endgame (the
     # operator condition passes 1e13 at the achieved ridge), so cg_maxiter
@@ -155,6 +156,7 @@ def multicountry_growth_kernel(
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     sensitivity_times: list[float] | None = None,
     sensitivity_mode: str = "reverse",
+    gamma_common_sensitivity_times: list[float] | None = None,
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
@@ -193,6 +195,13 @@ def multicountry_growth_kernel(
         not 0.0 <= float(value) <= float(train_data[-1]) for value in sensitivity_times
     ):
         raise ValueError("sensitivity_times must lie within the training horizon")
+    if gamma_common_sensitivity_times is not None and any(
+        not 0.0 <= float(value) <= float(train_data[-1])
+        for value in gamma_common_sensitivity_times
+    ):
+        raise ValueError(
+            "gamma_common_sensitivity_times must lie within the training horizon"
+        )
     test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     validation_data = jnp.linspace(
         0.0, float(train_data[-1]), data_set.validation_points, dtype=dtype
@@ -749,6 +758,95 @@ def multicountry_growth_kernel(
             np.max(np.abs(rate_a_0_gradient))
         )
 
+    # The one comparative static that survives any cross-section width: the
+    # world rate's response to the representative-agent CRRA direction
+    # (1, ..., 1), as a single forward tangent through the warm re-solve at
+    # the achieved ridge. On the cg path both the damped re-solve and the
+    # undamped implicit-AD system are preconditioned by the arrow-Woodbury
+    # inverse built at the solution (the ad_solver inherits the carried
+    # instance), so no dense factorization enters at any width.
+    gamma_common_fields = {}
+    gamma_common_sensitivity_time = None
+    if gamma_common_sensitivity_times is not None:
+        gamma_common_sensitivity_times = [
+            float(value) for value in gamma_common_sensitivity_times
+        ]
+        K_common, K_tilde_common = integrated_kernel_matrices(
+            jnp.asarray(gamma_common_sensitivity_times, dtype=dtype),
+            train_data,
+            kernel,
+            kernel_set.sigma,
+            kernel_set.ell,
+        )
+        if lm_set.linear_solver == "cg":
+            common_solver_options = {
+                "linear_solver": CG(
+                    build_arrow_woodbury(
+                        theta,
+                        kernel_args,
+                        p,
+                        float(result.lm_state.ridge),
+                        lm_set.cg_damping_floor,
+                        num_countries,
+                    ),
+                    tol=lm_set.cg_tol,
+                    maxiter=lm_set.cg_maxiter,
+                ),
+                # The undamped AD system runs once, so it gets a deeper
+                # budget than the damped inner solves.
+                "ad_solver": CG(None, maxiter=10 * lm_set.cg_maxiter),
+            }
+        else:
+            common_solver_options = {
+                "linear_solver": {
+                    "auto": Cholesky(),
+                    "cholesky": Cholesky(),
+                    "qr": QR(),
+                }[lm_set.linear_solver]
+            }
+        gamma_common_solver = RidgeLevenbergMarquardt(
+            residual_fn,
+            metric=metric,
+            ridge=float(result.lm_state.ridge),
+            init_damping=lm_set.init_damping,
+            damping_decrease=lm_set.damping_decrease,
+            damping_increase=lm_set.damping_increase,
+            **common_solver_options,
+        )
+
+        def rate_at_common_times(p_value):
+            common_result = gamma_common_solver.solve(
+                theta, kernel_args, p=p_value, **solve_options
+            )
+            coordinates = path_coordinates(
+                common_result.x, K_common, K_tilde_common, p_value
+            )
+            return coordinates["interest_rate"], common_result.status
+
+        gamma_common_timer = Stopwatch()
+        primal_rate, tangent_at_p, gamma_common_status = jax.linearize(
+            rate_at_common_times, p, has_aux=True
+        )
+        zero_tangent = jax.tree_util.tree_map(jnp.zeros_like, p)
+        d_rate_common = tangent_at_p(
+            {
+                **zero_tangent,
+                "parameters": replace(
+                    zero_tangent["parameters"],
+                    gammas=jnp.ones_like(p["parameters"].gammas),
+                ),
+            }
+        )
+        gamma_common_sensitivity_time = gamma_common_timer.elapsed(d_rate_common)
+        if int(gamma_common_status) != LMStatus.CONVERGED:
+            raise RuntimeError("the gamma-common sensitivity re-solve did not converge")
+        for index, time_value in enumerate(gamma_common_sensitivity_times):
+            suffix = f"T{time_value:g}".replace(".", "p")
+            gamma_common_fields[f"rate_{suffix}"] = float(primal_rate[index])
+            gamma_common_fields[f"d_rate_{suffix}_d_gamma_common"] = float(
+                d_rate_common[index]
+            )
+
     results = {
         "alpha": parameters.alpha,
         "delta": parameters.delta,
@@ -891,6 +989,12 @@ def multicountry_growth_kernel(
             f"{value:g}" for value in sensitivity_times
         )
         results.update(sensitivity_fields)
+    if gamma_common_sensitivity_times is not None:
+        results["gamma_common_sensitivity_times"] = ",".join(
+            f"{value:g}" for value in gamma_common_sensitivity_times
+        )
+        results["gamma_common_sensitivity_time"] = gamma_common_sensitivity_time
+        results.update(gamma_common_fields)
     if benchmark_available:
         results.update(
             {

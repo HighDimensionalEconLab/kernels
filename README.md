@@ -230,7 +230,13 @@ past N ≈ 10. The cg column stays near-linear in N (~7 s at N = 40 on CPU
 float64) while dense grows as N³ (~34 s at N = 10, ~15x the cg time);
 `multicountry_growth_scaling_figures.py` renders the log-log timing
 figure and `collect_json.py` publishes the per-rung times and the
-dense/cg ratio at the cap into `all_results.json`.
+dense/cg ratio at the cap into `all_results.json`. The widest rung also
+publishes `d_rate_T10_d_gamma_common` — the world rate's response to the
+representative-agent CRRA direction `(1, ..., 1)`, one implicit-AD
+forward tangent through the cg solve (the `ad_solver` inherits the
+arrow-Woodbury inverse built at the solution), comparable against the
+N = 2 and N = 10 sensitivity tables — with the tangent's wall time
+reported next to the primal solve time.
 
 `multicountry_growth_kernel.py` threads every structural parameter and
 initial condition through the solver's implicit-AD `p` argument, so

@@ -67,17 +67,25 @@ def run(
             # while the narrow rungs still stop where their gate already
             # clears -- dense and cg run the same settings at every rung,
             # keeping the timing like-for-like.
+            options = {
+                "parameters": parameters,
+                "lm_set": {
+                    "linear_solver": solver_name,
+                    "residual_atol": 2e-7,
+                    **deep,
+                },
+            }
+            # The widest cg rung also publishes d rate(T10)/d gamma along
+            # (1, ..., 1) -- the representative-agent CRRA comparative
+            # static, whose value is comparable against the N=2/N=10
+            # sensitivity tables -- with the implicit-AD wall time reported
+            # next to the primal solve time.
+            if solver_name == "cg" and num_countries == max(country_counts):
+                options["gamma_common_sensitivity_times"] = [10.0]
             results_df, frames, hyperparameters = ensemble(
                 SOLVER,
                 n_seeds=1,
-                options={
-                    "parameters": parameters,
-                    "lm_set": {
-                        "linear_solver": solver_name,
-                        "residual_atol": 2e-7,
-                        **deep,
-                    },
-                },
+                options=options,
             )
             if not results_df["solution_accepted"].all():
                 raise RuntimeError(

@@ -1417,6 +1417,8 @@ def multicountry_growth_scaling(out):
         solver, count = name.rsplit("_N", 1)
         solve_times[solver][count] = sig(med(experiment["solve_time"]))
     cap = str(MULTICOUNTRY_SCALING_DENSE_MAX)
+    widest_count = max(MULTICOUNTRY_SCALING_COUNTS)
+    widest = load(out, f"multicountry_growth_scaling_cg_N{widest_count}")
     return {
         "country_counts": list(MULTICOUNTRY_SCALING_COUNTS),
         "dense_max_countries": MULTICOUNTRY_SCALING_DENSE_MAX,
@@ -1424,6 +1426,19 @@ def multicountry_growth_scaling(out):
         "dense_to_cg_ratio_at_cap": sig(
             solve_times["dense"][cap] / solve_times["cg"][cap]
         ),
+        # The representative-agent CRRA comparative static from the widest
+        # rung, one implicit-AD forward tangent through the cg solve;
+        # comparable against the N=2/N=10 sensitivity tables' _common
+        # entries, with both runtimes alongside.
+        "gamma_common_sensitivity": {
+            "num_countries": widest_count,
+            "rate_T10": sig(med(widest["rate_T10"]), 4),
+            "d_rate_T10_d_gamma_common": sig(
+                med(widest["d_rate_T10_d_gamma_common"]), 4
+            ),
+            "solve_seconds": sig(med(widest["solve_time"])),
+            "sensitivity_seconds": sig(med(widest["gamma_common_sensitivity_time"])),
+        },
     }
 
 

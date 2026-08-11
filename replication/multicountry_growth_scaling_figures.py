@@ -43,7 +43,7 @@ def run(output_dir: str = ".results"):
             label=label,
         )
     axis.set_xlabel("Countries $N$")
-    axis.set_ylabel("Solve time (seconds)")
+    axis.set_ylabel("Warm solve time (seconds)")
     all_counts = sorted({count for values in series.values() for count in values})
     axis.set_xticks(all_counts)
     axis.get_xaxis().set_major_formatter(plt.ScalarFormatter())

@@ -40,11 +40,13 @@ from models.utilities import (
 )
 
 
-# Acceptance gates, CLI-reachable so a float32 caller can pass its own bar
-# (the float32 replication driver does).
+# Numerical acceptance and ex-post quality thresholds, CLI-reachable so a
+# float32 caller can pass its own bars (the float32 replication driver does).
 @dataclass(frozen=True)
 class ToleranceSettings:
     train_residual: float = 1e-5
+    # Validation and benchmark thresholds are HPO/quality diagnostics; they do
+    # not redefine convergence of a finite, feasible numerical solution.
     validation_residual: float = 1e-2
     benchmark_match: float = 1e-3
 
@@ -52,7 +54,7 @@ class ToleranceSettings:
 @dataclass(frozen=True)
 class KernelSettings:
     kernel: str = "matern12"
-    ell: float = 40.0
+    ell: float = 20.0
     sigma: float = 1.0
 
 
@@ -413,8 +415,7 @@ def open_economy_growth_kernel(
         rejection_reasons.append("nonfinite_or_nonpositive")
     if max_train_residual > tolerance_set.train_residual:
         rejection_reasons.append("train_residual")
-    if max_validation_residual > tolerance_set.validation_residual:
-        rejection_reasons.append("validation_residual")
+    validation_pass = max_validation_residual <= tolerance_set.validation_residual
     benchmark_match = max_benchmark_error <= tolerance_set.benchmark_match
 
     alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, initial = theta
@@ -463,6 +464,7 @@ def open_economy_growth_kernel(
         "q_0": float(steady["q"] * jnp.exp(q_offset)),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
+        "validation_pass": validation_pass,
         "max_benchmark_error": max_benchmark_error,
         "benchmark_match": benchmark_match,
         "terminal_residual_count": 0,

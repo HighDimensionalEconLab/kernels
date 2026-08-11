@@ -393,6 +393,7 @@ NEOCLASSICAL_SENSITIVITY_ROWS = (
     ("k_0", r"$x_0$"),
 )
 MULTICOUNTRY_SENSITIVITY_TIMES = (0, 10, 30, 80)
+MULTICOUNTRY_SENSITIVITY_TABLE_TIMES = (30, 80)
 MULTICOUNTRY_SENSITIVITY_OBSERVABLES = ("rate", "c_1", "c_2", "k_1", "k_2")
 # The ten-country table: no cross-section that wide has a readable
 # per-country column, so its observables are world statistics and the one
@@ -485,24 +486,30 @@ def neoclassical_sensitivity_payload(value, reference=None):
     return payload
 
 
-def multicountry_sensitivity_payload(value):
+def multicountry_sensitivity_payload(value, reference=None):
     levels = {}
     derivatives = {}
+    cross_solver_gaps = []
     for time in MULTICOUNTRY_SENSITIVITY_TIMES:
         for observable in MULTICOUNTRY_SENSITIVITY_OBSERVABLES:
             levels[f"{observable}_T{time}"] = sig(value(f"{observable}_T{time}"), 6)
-        derivatives[f"T{time}"] = {
-            suffix: {
-                observable: sig(value(f"d_{observable}_T{time}_d_{suffix}"), 6)
-                for observable in MULTICOUNTRY_SENSITIVITY_OBSERVABLES
-            }
-            for suffix, _ in MULTICOUNTRY_SENSITIVITY_ROWS
-        }
-    return {
+        derivatives[f"T{time}"] = {}
+        for suffix, _ in MULTICOUNTRY_SENSITIVITY_ROWS:
+            derivatives[f"T{time}"][suffix] = {}
+            for observable in MULTICOUNTRY_SENSITIVITY_OBSERVABLES:
+                field = f"d_{observable}_T{time}_d_{suffix}"
+                derivative = value(field)
+                derivatives[f"T{time}"][suffix][observable] = sig(derivative, 6)
+                if reference is not None:
+                    cross_solver_gaps.append(abs(derivative - reference(field)))
+    payload = {
         "times": list(MULTICOUNTRY_SENSITIVITY_TIMES),
         "levels": levels,
         "derivatives": derivatives,
     }
+    if reference is not None:
+        payload["max_abs_gap_vs_kernel"] = sig(max(cross_solver_gaps), 3)
+    return payload
 
 
 # The ten-country aggregate comparative statics, with the two numbers the
@@ -591,7 +598,7 @@ def write_multicountry_sensitivity_table(out, source, name):
         r"$x_{1,1}(T)$ & $x_{1,2}(T)$ \\"
     )
     lines = [r"\begin{tabular}{lrrrrr}", r"\toprule"]
-    for time in MULTICOUNTRY_SENSITIVITY_TIMES:
+    for time in MULTICOUNTRY_SENSITIVITY_TABLE_TIMES:
         lines += [
             rf"\multicolumn{{6}}{{c}}{{$T = {time}$}} \\",
             r"\midrule",
@@ -604,7 +611,7 @@ def write_multicountry_sensitivity_table(out, source, name):
                 for observable in MULTICOUNTRY_SENSITIVITY_OBSERVABLES
             ]
             lines.append(f"{label} & " + " & ".join(cells) + r" \\")
-        if time != MULTICOUNTRY_SENSITIVITY_TIMES[-1]:
+        if time != MULTICOUNTRY_SENSITIVITY_TABLE_TIMES[-1]:
             lines.append(r"\midrule")
     lines += [r"\bottomrule", r"\end{tabular}", ""]
     path = out / name
@@ -1232,11 +1239,39 @@ def open_economy_growth_kernel(
 ):
     hp = load(out, f"{prefix}_baseline_hyperparameters")
     baseline = load(out, f"{prefix}_baseline")
+    summary = load(out, f"{prefix}_summary")
+    if prefix == "open_economy_growth_kernel" and "comparative_statics" not in summary:
+        raise RuntimeError(
+            f"{prefix} summary lacks comparative_statics; rerun the replication driver"
+        )
+    comparative_statics = summary.get("comparative_statics")
+    if comparative_statics is not None:
+        comparative_statics = {
+            "configurations": comparative_statics["configurations"],
+            "test_T": sig(comparative_statics["test_T"]),
+            **{
+                field: sci(comparative_statics[field])
+                for field in (
+                    "max_k_gap",
+                    "max_q_gap",
+                    "max_investment_gap",
+                    "max_current_account_gap",
+                    "max_consumption_shift_error",
+                    "max_asset_shift_error",
+                )
+            },
+        }
 
     def experiment(name):
         j = load(out, f"{prefix}_{name}")
+        results = pd.read_parquet(out / f"{prefix}_{name}_results.parquet")
         return {
             "solution_accepted": bool(j["frac_accepted"] == 1.0),
+            **(
+                {"validation_pass": bool(results["validation_pass"].all())}
+                if "validation_pass" in results
+                else {}
+            ),
             "r_star": sig(med(j["r_star_resolved"]), 5),
             "k_0": sig(med(j["k_0"]), 5),
             "a_0": sig(med(j["a_0"]), 5),
@@ -1245,6 +1280,13 @@ def open_economy_growth_kernel(
             "max_train_residual": sci(med(j["max_train_residual"])),
             "max_validation_residual": sci(med(j["max_validation_residual"])),
             "max_benchmark_error": sci(med(j["max_benchmark_error"])),
+            "k_relative_error_max": sci(med(j["k_relative_error_max"])),
+            "q_relative_error_max": sci(med(j["q_relative_error_max"])),
+            "c_relative_error_max": sci(med(j["c_relative_error_max"])),
+            "a_scaled_error_max": sci(med(j["a_scaled_error_max"])),
+            "benchmark_a_0_gap": sci(med(j["benchmark_a_0_gap"])),
+            "max_consumption_variation": sci(med(j["max_consumption_variation"])),
+            "rkhs_norm_c": sci(med(j["rkhs_norm_c"])),
             "ex_post_present_value_gap": sci(med(j["ex_post_present_value_gap"])),
             "ex_post_asset_tvc": sci(med(j["ex_post_asset_tvc"])),
             "ex_post_capital_tvc": sci(med(j["ex_post_capital_tvc"])),
@@ -1257,6 +1299,11 @@ def open_economy_growth_kernel(
         "parameters": hp["parameters"],
         "kernel": hp["kernel_set"],
         "selection": selection,
+        **(
+            {"comparative_statics": comparative_statics}
+            if comparative_statics is not None
+            else {}
+        ),
         "training_information": {
             "terminal_residual_count": 0,
             "differential_residual_count": int(
@@ -1343,16 +1390,29 @@ def multicountry_growth_kernel(out):
     def experiment(name):
         j = load(out, f"{prefix}_{name}")
         hp = load(out, f"{prefix}_{name}_hyperparameters")
+        results = pd.read_parquet(out / f"{prefix}_{name}_results.parquet")
         return {
             "num_countries": len(hp["parameters"]["populations"]),
-            "initial_conditions": hp["initial_conditions"],
+            "initial_conditions": {
+                field: [sig(value, 6) for value in values]
+                for field, values in hp["initial_conditions"].items()
+            },
             "solution_accepted": bool(j["frac_accepted"] == 1.0),
+            "validation_pass": bool(results["validation_pass"].all()),
             "num_train_points": int(med(j["num_train_points"])),
             "train_T": sig(med(j["train_T"]), 5),
             "max_train_residual": sci(med(j["max_train_residual"])),
             "max_validation_residual": sci(med(j["max_validation_residual"])),
             "max_resource_gap": sci(med(j["max_resource_gap"])),
+            "max_asset_clearing": sci(med(j["max_asset_clearing"])),
             "max_benchmark_error": sci(med(j["max_benchmark_error"])),
+            "k_relative_error_max": sci(med(j["k_relative_error_max"])),
+            "q_relative_error_max": sci(med(j["q_relative_error_max"])),
+            "c_relative_error_max": sci(med(j["c_relative_error_max"])),
+            "a_scaled_error_max": sci(med(j["a_scaled_error_max"])),
+            "interest_rate_scaled_error_max": sci(
+                med(j["interest_rate_scaled_error_max"])
+            ),
             "ex_post_asset_tvc": sci(med(j["ex_post_asset_tvc"])),
             "ex_post_capital_tvc": sci(med(j["ex_post_capital_tvc"])),
             "wall_time_median": sig(med(j["wall_time"])),
@@ -1368,6 +1428,24 @@ def multicountry_growth_kernel(out):
             "replication.multicountry_growth_kernel driver writes it after "
             "write_summary, so rerun the driver rather than write_summary alone"
         )
+    bond_invariance = summary["bond_invariance"]
+    bond_invariance = {
+        "configurations": bond_invariance["configurations"],
+        "test_T": sig(bond_invariance["test_T"]),
+        **{
+            field: sci(bond_invariance[field])
+            for field in (
+                "max_interest_rate_gap",
+                "max_k_gap",
+                "max_q_gap",
+                "max_gap",
+                "max_interest_rate_gap_train_horizon",
+                "max_k_gap_train_horizon",
+                "max_q_gap_train_horizon",
+                "max_gap_train_horizon",
+            )
+        },
+    }
     payload = {
         "parameters": baseline_hp["parameters"],
         "kernel": baseline_hp["kernel_set"],
@@ -1376,7 +1454,7 @@ def multicountry_growth_kernel(out):
         # Max gap in (r*, k_i, q_i) paths across the three bond
         # configurations: exactly zero in the common-gamma theory, so the
         # measured gap is a solver-accuracy certificate.
-        "bond_invariance": summary["bond_invariance"],
+        "bond_invariance": bond_invariance,
         "experiments": {
             name: experiment(name)
             for name in (
@@ -1414,29 +1492,75 @@ MULTICOUNTRY_SCALING_GAMMA_COMMON = 40
 def multicountry_growth_scaling(out):
     summary = load(out, "multicountry_growth_scaling_summary")
     solve_times = {"dense": {}, "cg": {}}
+    compile_solve_times = {"dense": {}, "cg": {}}
     for name, experiment in summary.items():
         solver, count = name.rsplit("_N", 1)
         solve_times[solver][count] = sig(med(experiment["solve_time"]))
+        compile_solve_times[solver][count] = sig(med(experiment["compile_solve_time"]))
     cap = str(MULTICOUNTRY_SCALING_DENSE_MAX)
-    # Rungs whose acceptance ran under a relaxed max-train-residual bar
-    # (the float64 residual plateau; recorded in the saved hyperparameters).
-    relaxed_gates = {}
+    train_gates = set()
+    validation_diagnostics = set()
+    kernel_settings = set()
+    residual_atols = {}
     for count in MULTICOUNTRY_SCALING_COUNTS:
         hp = load(out, f"multicountry_growth_scaling_cg_N{count}_hyperparameters")
-        gate = hp["tolerance_set"]["train_residual"]
-        if gate != 1e-5:
-            relaxed_gates[str(count)] = gate
+        train_gates.add(hp["tolerance_set"]["train_residual"])
+        validation_diagnostics.add(hp["tolerance_set"]["validation_residual"])
+        kernel_settings.add((hp["kernel_set"]["kernel"], hp["kernel_set"]["ell"]))
+        residual_atols[str(count)] = hp["lm_set"]["residual_atol"]
+        if count <= MULTICOUNTRY_SCALING_DENSE_MAX:
+            dense_hp = load(
+                out, f"multicountry_growth_scaling_dense_N{count}_hyperparameters"
+            )
+            if dense_hp != hp | {
+                "lm_set": {
+                    **hp["lm_set"],
+                    "linear_solver": "cholesky",
+                }
+            }:
+                raise RuntimeError(f"scaling dense and cg settings differ at N={count}")
+    if train_gates != {1e-5}:
+        raise RuntimeError(
+            f"scaling train gates are not uniform: {sorted(train_gates)}"
+        )
+    if len(validation_diagnostics) != 1:
+        raise RuntimeError(
+            "scaling validation diagnostics are not uniform: "
+            f"{sorted(validation_diagnostics)}"
+        )
+    if len(kernel_settings) != 1:
+        raise RuntimeError(f"scaling kernel settings differ: {sorted(kernel_settings)}")
+    kernel, ell = kernel_settings.pop()
     sensitivity_rung = load(
         out, f"multicountry_growth_scaling_cg_N{MULTICOUNTRY_SCALING_GAMMA_COMMON}"
     )
     return {
         "country_counts": list(MULTICOUNTRY_SCALING_COUNTS),
         "dense_max_countries": MULTICOUNTRY_SCALING_DENSE_MAX,
+        "kernel": {"family": kernel, "ell": ell},
         "solve_times": solve_times,
+        "compile_solve_times": compile_solve_times,
+        "warm_timing_repetitions": int(med(sensitivity_rung["timing_repetitions"])),
         "dense_to_cg_ratio_at_cap": sig(
             solve_times["dense"][cap] / solve_times["cg"][cap]
         ),
-        "relaxed_train_residual_gates": relaxed_gates,
+        "compile_to_warm_ratio_at_cap": sig(
+            compile_solve_times["dense"][cap] / solve_times["dense"][cap]
+        ),
+        "train_residual_gate": train_gates.pop(),
+        "max_achieved_train_residual": sci(
+            max(
+                med(experiment["max_train_residual"]) for experiment in summary.values()
+            )
+        ),
+        "validation_residual_diagnostic": validation_diagnostics.pop(),
+        "max_validation_residual": sci(
+            max(
+                med(experiment["max_validation_residual"])
+                for experiment in summary.values()
+            )
+        ),
+        "residual_atol_by_country_count": residual_atols,
         # The representative-agent CRRA comparative static, one implicit-AD
         # forward tangent through the cg solve; comparable against the
         # N=2/N=10 sensitivity tables' _common entries, with both runtimes
@@ -1448,8 +1572,12 @@ def multicountry_growth_scaling(out):
                 med(sensitivity_rung["d_rate_T10_d_gamma_common"]), 4
             ),
             "solve_seconds": sig(med(sensitivity_rung["solve_time"])),
+            "compile_solve_seconds": sig(med(sensitivity_rung["compile_solve_time"])),
             "sensitivity_seconds": sig(
                 med(sensitivity_rung["gamma_common_sensitivity_time"])
+            ),
+            "compile_sensitivity_seconds": sig(
+                med(sensitivity_rung["compile_gamma_common_sensitivity_time"])
             ),
         },
     }
@@ -1530,7 +1658,10 @@ def multicountry_growth_nn(out):
     # The implicit-AD runs are separate single-seed experiments, float64 only.
     if (out / f"{prefix}_sensitivity.json").exists():
         two_country = accepted_values(out, f"{prefix}_sensitivity")
-        payload["sensitivity"] = multicountry_sensitivity_payload(two_country)
+        payload["sensitivity"] = multicountry_sensitivity_payload(
+            two_country,
+            reference=json_values(load(out, "multicountry_growth_kernel_baseline")),
+        )
         payload["aggregate_sensitivity"] = multicountry_aggregate_payload(
             accepted_values(out, f"{prefix}_sensitivity_ten_countries"),
             reference=two_country,
@@ -1814,8 +1945,10 @@ def collect(output_dir: str = ".results", include_uno: bool = True):
                     "recomputed or re-rounded downstream. Cross-seed statistics "
                     "are medians (suffix _median); deterministic wall_time values "
                     f"are medians of {DETERMINISTIC_TIMING_REPETITIONS} cached "
-                    "solve(s); error magnitudes below 0.001 are LaTeX math-mode "
-                    "strings from sci()."
+                    "solve(s), except the multicountry scaling ladder, which "
+                    "reports the median of two warmed solves after one separately "
+                    "retained first solve; error magnitudes below 0.001 are LaTeX "
+                    "math-mode strings from sci()."
                 ),
                 "generated": datetime.datetime.now()
                 .astimezone()

@@ -72,7 +72,9 @@ deterministic kernel
 specification is solved with the persistent JAX cache enabled;
 `DETERMINISTIC_TIMING_REPETITIONS` in `replication/utilities.py` sets the
 repetition count, the timing runs are retained in Parquet, and the JSON reports
-their median.
+their median. The scaling ladder separately retains the first solve and two
+immediately warmed solves at every rung; its figure and headline JSON use the
+median of the warmed pair.
 
 ## Canonical solvers
 
@@ -94,12 +96,14 @@ The main kernel modules are:
   Neither test feeds back into the solve.
 - `optimal_advertising_kernel.py`: optimal advertising.
 - `human_capital_kernel.py`: the two-capital human-capital model.
-- `open_economy_growth_kernel.py`: the one-country open-economy DAE.
+- `open_economy_growth_kernel.py`: the one-country open-economy DAE, using a
+  Matérn-1/2 kernel with lengthscale 20 on its long-horizon grid.
 - `open_economy_growth_kernel_uno.py`: the constrained comparison using the
   same open-economy DAE paths, equations, and collocation grid with the
   function-only RKHS norm as its objective.
 - `multicountry_growth_kernel.py`: the reduced one-good multicountry kernel
-  formulation, with the country consumption and investment FOCs substituted.
+  formulation, with the country consumption and investment FOCs substituted;
+  its long-horizon default is the same Matérn-1/2 kernel and lengthscale 20.
 
 Unqualified kernel filenames refer to the NLLS formulation; `_uno` identifies
 the constrained comparison. Every driver uses
@@ -130,16 +134,16 @@ rank-`n_train` Woodbury term of the whitened clearing columns;
 from per-time Jacobian weights (O(N) build, no materialized Jacobian),
 and a solve callback rebuilds it from the live iterate every LM step, so
 each inner solve is preconditioned by the exact shifted inverse at its
-build point. The cg path lands on the dense solution (identical residuals
-and step counts) at O(N) cost per step, overtaking dense Cholesky by
-N≈3 (2.3s vs 34s at N=10 on CPU float64);
+build point. The cg path lands on the same accepted branch as dense, with
+matching step counts and residuals of the same order, at O(N) cost per step,
+overtaking dense Cholesky by
+N≈5 (2.48 s versus 4.51 s at N=5, and 2.89 s versus 29.4 s at N=10);
 `replication/multicountry_growth_scaling.py` runs the N=2-100 timing
 ladder behind the paper's `multicountry_growth_scaling.pdf`. Stopping is
 the conjunctive `gtol`/`residual_atol` rule; the selection is resolved to
 `gtol / ridge` (the asset driver's free `p_0` needs `gtol ~ 1e-3 * ridge`,
-and the DAE drivers' atol sits above the ridge-floor residual -- the
-multicountry default admits a stop one anneal level above the floor, and
-the achieved level is reported as `ridge`).
+and the DAE drivers' atol sits above the ridge-floor residual). The
+achieved ridge and all stopping settings are recorded with each result.
 
 UNO comparisons are CPU/float64 reference solves. Their native optimization
 state and derivative buffers are host-side float64 arrays; NLLS and NN are the
@@ -223,21 +227,20 @@ productivities per rung (lognormal, sigmas 0.15 and 0.1) under a common
 γ = 2, with drawn initial conditions, at
 N = 2, 3, 5, 10, 15, 25, 40, 80, 100, solved with `linear_solver="cg"`
 and — up to N = 10 — the dense Cholesky reference on identical solver
-settings. The ladder pins `residual_atol = 2e-7` and deepens the ridge
-floor at the wide rungs: the converged residual floors at
-O(ridge ||dual||) and the dual norm grows with the cross-section, so the
-production stopping calibration would breach the fixed train gate past
-N ≈ 10. Rungs through N = 40 hold the production acceptance gates; the
-two widest rungs converge within a factor of two of the float64 residual
-plateau (max pointwise residual ~9e-6 against the 1e-5 production bar),
-where run-to-run reduction ordering moves the max by tens of percent, so
-their acceptance bar sits at 2e-5 — failing on regressions, not noise —
-recorded in the rungs' hyperparameters and published in
-`all_results.json`. The cg column stays near-linear in N (~6 s at
-N = 40 and ~21 s at N = 100 on CPU float64) while dense grows as N³
-(~33 s at N = 10, ~15x the cg time); `multicountry_growth_scaling_figures.py` renders the log-log
-timing figure and `collect_json.py` publishes the per-rung times and the
-dense/cg ratio at the cap into `all_results.json`. The N = 40 rung also
+settings. Every rung uses the Matérn-1/2 kernel with lengthscale 20 and the
+same `train_residual = 1e-5` numerical acceptance gate. The scaled-residual
+stopping tolerance is `2e-7` below N = 25 and `5e-8` from N = 25 onward; the
+wide rungs also use deeper ridge floors because the residual floor grows with
+the cross-section. The `validation_residual = 1e-2` threshold is retained as
+an ex-post generalization diagnostic, not an acceptance condition. Each rung
+records one first solve and two warmed solves, and the timing figure uses the
+median warmed time. On the replication workstation, warmed CG takes about
+6.44 s at N = 40 and 13.1 s at N = 100, while dense takes 29.4 s at N = 10
+against 2.89 s for CG, a factor of 10.2. The first and warmed CG timings are
+close at every rung. `multicountry_growth_scaling_figures.py` renders the
+log-log timing figure and `collect_json.py` publishes both timing phases, all
+per-rung times, the common gates, and the dense/CG ratio into
+`all_results.json`. The N = 40 rung also
 publishes `d_rate_T10_d_gamma_common` — the world rate's response to the
 representative-agent CRRA direction `(1, ..., 1)`, one implicit-AD
 forward tangent through the cg solve (the `ad_solver` inherits the

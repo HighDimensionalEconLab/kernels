@@ -21,7 +21,9 @@ reported solve time is their median. NN ensembles report medians across
 accepted seeds: 11 seeds for the sequence-space baselines, 5 for the recursive
 baselines, and one for the recursive growth driver's variant experiments. The
 two open-economy asset scenarios used only in the transition figure retain one
-displayed seed each.
+displayed seed each. The multicountry scaling ladder uses a phase-tagged timing
+file instead: one first solve followed by two warmed solves, with the warmed
+median used in its figure and both phases retained in `all_results.json`.
 
 ## Generate everything
 

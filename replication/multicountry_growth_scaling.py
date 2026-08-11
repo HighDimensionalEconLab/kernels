@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import gc
+import statistics
+
 import jax
 import jax.numpy as jnp
 import jsonargparse
+import pandas as pd
 
 from models import multicountry_growth_kernel
 from models.multicountry_growth import InitialConditionSettings
@@ -28,6 +32,11 @@ GAMMA_COMMON_COUNT = 40
 # within the calibrated preference class.
 POPULATION_LOG_SIGMA = 0.15
 PRODUCTIVITY_LOG_SIGMA = 0.1
+KERNEL_SET = {"kernel": "matern12", "ell": 20.0}
+NARROW_RESIDUAL_ATOL = 2e-7
+WIDE_RESIDUAL_ATOL = 5e-8
+WIDE_STOPPING_START = 25
+WARM_TIMING_REPETITIONS = 2
 
 
 def run(
@@ -44,7 +53,13 @@ def run(
     configure_process()
     if output_dir is None:
         output_dir = ".results"
-    meta = dict(n_seeds=1, residual_dtype="float64")
+    meta = dict(
+        n_seeds=1,
+        residual_dtype="float64",
+        kernel="matern12",
+        ell=20.0,
+        warm_timing_repetitions=WARM_TIMING_REPETITIONS,
+    )
     experiments = set()
     # Nothing on the ladder is symmetric: populations and productivities are
     # drawn per rung, and the solver draws seeded k_0/a_0 when they are not
@@ -83,33 +98,28 @@ def run(
             deep = dict(ridge=3e-13, cg_damping_floor=1e-11)
         else:
             deep = {}
-        # The two widest rungs converge within a factor of two of the
-        # float64 residual plateau (measured max train residual ~9e-6),
-        # where run-to-run reduction ordering moves the max over ~10^5
-        # residuals by tens of percent; their acceptance bar sits at 2e-5 so
-        # the ladder fails on regressions, not on noise. Rungs through
-        # N = 40 hold the production 1e-5 bar, and every bar is recorded in
-        # the rung's saved hyperparameters.
-        tolerances = {"train_residual": 2e-5} if num_countries >= 80 else {}
+        # Wide systems need the stricter scaled-residual stop to descend from
+        # the 1e-11 continuation level to their configured ridge floor. The
+        # narrow CG systems use the looser reachable stop; 5e-8 would keep the
+        # N=2 solve running after its pointwise residual already clears the
+        # uniform 1e-5 numerical gate.
+        residual_atol = (
+            WIDE_RESIDUAL_ATOL
+            if num_countries >= WIDE_STOPPING_START
+            else NARROW_RESIDUAL_ATOL
+        )
         solvers = ["cholesky", "cg"] if num_countries <= dense_max_countries else ["cg"]
         for solver_name in solvers:
             name = f"{'dense' if solver_name == 'cholesky' else 'cg'}_N{num_countries}"
             print(f"{name} -> {output_dir}/", flush=True)
-            # The production residual_atol (5e-7) lets every rung stop one
-            # continuation level above the ridge floor, where the max train
-            # residual crosses the 1e-5 acceptance gate by N = 15. At 2e-7
-            # the wide rungs are forced down to their (deepened) floors
-            # while the narrow rungs still stop where their gate already
-            # clears -- dense and cg run the same settings at every rung,
-            # keeping the timing like-for-like.
             options = {
                 "parameters": parameters,
+                "kernel_set": KERNEL_SET,
                 "lm_set": {
                     "linear_solver": solver_name,
-                    "residual_atol": 2e-7,
+                    "residual_atol": residual_atol,
                     **deep,
                 },
-                **({"tolerance_set": tolerances} if tolerances else {}),
             }
             # The N=40 cg rung also publishes d rate(T10)/d gamma along
             # (1, ..., 1) -- the representative-agent CRRA comparative
@@ -118,15 +128,65 @@ def run(
             # next to the primal solve time.
             if solver_name == "cg" and num_countries == GAMMA_COMMON_COUNT:
                 options["gamma_common_sensitivity_times"] = [10.0]
-            results_df, frames, hyperparameters = ensemble(
+            compile_results, frames, hyperparameters = ensemble(
                 SOLVER,
                 n_seeds=1,
                 options=options,
             )
-            if not results_df["solution_accepted"].all():
+            if not compile_results["solution_accepted"].all():
                 raise RuntimeError(
-                    f"{name} was rejected: {results_df['rejection_reason'].iloc[0]}"
+                    f"{name} was rejected: {compile_results['rejection_reason'].iloc[0]}"
                 )
+            timing_columns = [
+                column
+                for column in compile_results.select_dtypes("number")
+                if column.endswith(("_time", "_seconds"))
+            ]
+            timing_rows = [
+                {
+                    "timing_phase": "compile",
+                    "timing_run": 0,
+                    **{
+                        column: compile_results[column].iloc[0]
+                        for column in timing_columns
+                    },
+                }
+            ]
+            warm_results = []
+            for timing_run in range(1, WARM_TIMING_REPETITIONS + 1):
+                timed_results, _, timed_hyperparameters = ensemble(
+                    SOLVER,
+                    n_seeds=1,
+                    options=options,
+                )
+                if timed_hyperparameters != hyperparameters:
+                    raise RuntimeError(
+                        f"{name} changed hyperparameters across timing runs"
+                    )
+                if not timed_results["solution_accepted"].all():
+                    raise RuntimeError(
+                        f"{name} timing run {timing_run} was rejected: "
+                        f"{timed_results['rejection_reason'].iloc[0]}"
+                    )
+                warm_results.append(timed_results)
+                timing_rows.append(
+                    {
+                        "timing_phase": "warm",
+                        "timing_run": timing_run,
+                        **{
+                            column: timed_results[column].iloc[0]
+                            for column in timing_columns
+                        },
+                    }
+                )
+            results_df = compile_results.copy()
+            for column in timing_columns:
+                results_df.loc[0, f"compile_{column}"] = compile_results[column].iloc[0]
+                results_df.loc[0, column] = statistics.median(
+                    result[column].iloc[0] for result in warm_results
+                )
+            results_df.loc[0, "timing_repetitions"] = WARM_TIMING_REPETITIONS
+            frames["timing_df"] = pd.DataFrame(timing_rows)
             save_experiment(
                 name,
                 results_df,
@@ -138,10 +198,16 @@ def run(
             )
             experiments.add(name)
             print(
-                f"  solve_time {results_df['solve_time'].iloc[0]:.2f}s "
+                f"  compile {results_df['compile_solve_time'].iloc[0]:.2f}s "
+                f"warm {results_df['solve_time'].iloc[0]:.2f}s "
                 f"steps {int(results_df['steps'].iloc[0])}",
                 flush=True,
             )
+        # Every country count has a distinct compiled shape. Releasing the
+        # completed rung keeps executable storage bounded before the next,
+        # wider system while the persistent cache retains reusable binaries.
+        jax.clear_caches()
+        gc.collect()
     write_summary(output_dir, PREFIX, experiments=experiments)
 
 

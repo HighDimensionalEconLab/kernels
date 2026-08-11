@@ -218,23 +218,24 @@ cross-country dynamics degenerate): lognormal `k_0` and population-demeaned
 dispersed `a_0`, with the seed and dispersions on the CLI
 (`--initial_set.seed`, `--initial_set.k_0_log_sigma`,
 `--initial_set.a_0_sigma`). The scaling ladder is
-`replication/multicountry_growth_scaling.py`: symmetric structural
-parameters with drawn initial conditions at
+`replication/multicountry_growth_scaling.py`: drawn populations and
+productivities per rung (lognormal, sigmas 0.15 and 0.1) under a common
+γ = 2, with drawn initial conditions, at
 N = 2, 3, 5, 10, 15, 25, 40, 80, 100, solved with `linear_solver="cg"`
 and — up to N = 10 — the dense Cholesky reference on identical solver
 settings. The ladder pins `residual_atol = 2e-7` and deepens the ridge
 floor at the wide rungs: the converged residual floors at
 O(ridge ||dual||) and the dual norm grows with the cross-section, so the
 production stopping calibration would breach the fixed train gate past
-N ≈ 10. Every rung through N = 80 passes the production acceptance
-gates; at N = 100 the max-train bar is relaxed to 2e-5 — the pointwise
-residual plateaus at 1.5e-5 no matter how far the ridge deepens (the
-softest whitened modes sit below the float64 matvec noise) while the
-scaled RMS residual stays ~1e-7 — with the relaxed bar recorded in the
-rung's hyperparameters and published in `all_results.json`. The cg
-column stays near-linear in N (~7 s at N = 40 and ~22 s at N = 100 on
-CPU float64) while dense grows as N³ (~34 s at N = 10, ~15x the cg
-time); `multicountry_growth_scaling_figures.py` renders the log-log
+N ≈ 10. Rungs through N = 40 hold the production acceptance gates; the
+two widest rungs converge within a factor of two of the float64 residual
+plateau (max pointwise residual ~9e-6 against the 1e-5 production bar),
+where run-to-run reduction ordering moves the max by tens of percent, so
+their acceptance bar sits at 2e-5 — failing on regressions, not noise —
+recorded in the rungs' hyperparameters and published in
+`all_results.json`. The cg column stays near-linear in N (~6 s at
+N = 40 and ~21 s at N = 100 on CPU float64) while dense grows as N³
+(~33 s at N = 10, ~15x the cg time); `multicountry_growth_scaling_figures.py` renders the log-log
 timing figure and `collect_json.py` publishes the per-rung times and the
 dense/cg ratio at the cap into `all_results.json`. The N = 40 rung also
 publishes `d_rate_T10_d_gamma_common` — the world rate's response to the

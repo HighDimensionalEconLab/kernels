@@ -44,14 +44,15 @@ python -m replication.stochastic_open_economy_growth_kernel_recursive --use_floa
 python -m replication.multicountry_growth_kernel --use_float64 "$use_float64"
 python -m replication.multicountry_growth_nn --use_float64 "$use_float64"
 
-# The uno/IPOPT baselines are float64-only.
+# The uno/IPOPT baselines and the multicountry scaling ladder are float64-only.
 if [[ "$use_float64" == "true" ]]; then
     python -m replication.neoclassical_growth_kernel_uno --output_dir "$output_dir"
     python -m replication.neoclassical_growth_concave_convex_kernel_uno --output_dir "$output_dir"
     python -m replication.asset_pricing_kernel_uno --output_dir "$output_dir"
     python -m replication.open_economy_growth_kernel_uno --output_dir "$output_dir"
+    python -m replication.multicountry_growth_scaling --output_dir "$output_dir"
 else
-    echo "==> skipping uno (float64-only)"
+    echo "==> skipping uno and the scaling ladder (float64-only)"
 fi
 
 echo "==> figures -> $output_dir/"
@@ -68,6 +69,9 @@ python -m replication.open_economy_growth_kernel_figures --output_dir "$output_d
 python -m replication.open_economy_growth_nn_figures --output_dir "$output_dir"
 python -m replication.open_economy_growth_nn_recursive_figures --output_dir "$output_dir"
 python -m replication.multicountry_growth_kernel_figures --output_dir "$output_dir"
+if [[ "$use_float64" == "true" ]]; then
+    python -m replication.multicountry_growth_scaling_figures --output_dir "$output_dir"
+fi
 python -m replication.stochastic_growth_kernel_recursive_figures --output_dir "$output_dir"
 python -m replication.stochastic_open_economy_growth_kernel_recursive_figures --output_dir "$output_dir"
 

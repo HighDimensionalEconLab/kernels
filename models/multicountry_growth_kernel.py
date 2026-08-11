@@ -4,10 +4,12 @@ from dataclasses import asdict, dataclass, replace
 
 import jax
 import jax.numpy as jnp
+import jax.scipy.linalg as jsp_linalg
 import jsonargparse
 import numpy as np
 import pandas as pd
 from nlls_gram import (
+    CG,
     QR,
     AnnealRidge,
     Cholesky,
@@ -40,6 +42,10 @@ from models.multicountry_growth import (
     weighted_gini,
 )
 from models.multicountry_growth_benchmark import multicountry_growth_benchmark
+from models.multicountry_growth_preconditioner import (
+    ArrowWoodburyCallback,
+    build_arrow_woodbury,
+)
 from models.utilities import (
     STATUS_TO_REASON,
     Stopwatch,
@@ -119,8 +125,22 @@ class SolverSettings:
     # level out more completely before descending.
     ridge_grad_rtol: float = 1e-2
     # "auto" (whitened cholesky) is the default; "qr" remains valid (all
-    # paths run whitened). Only the dense factorizations are supported.
+    # paths run whitened). "cg" is matrix-free preconditioned CG on the
+    # whitened normal operator with the arrow+Woodbury preconditioner
+    # rebuilt every LM step -- the O(N)-per-step path for large country
+    # counts, sensitivities excluded.
     linear_solver: str = "auto"
+    # CG inner-solve budget: cg_tol is unreachable in the endgame (the
+    # operator condition passes 1e13 at the achieved ridge), so cg_maxiter
+    # is the effective stopping rule there and the LM accept/reject guards
+    # step quality. cg_damping_floor floors the shift BAKED INTO the
+    # preconditioner build (the batched block Cholesky must stay PD in
+    # float64, and the preconditioned condition number is bounded by
+    # ~ floor / ridge); the live LM damping anneals freely, exactly as on
+    # the dense path, and the preconditioner ignores it.
+    cg_tol: float = 1e-10
+    cg_maxiter: int = 40
+    cg_damping_floor: float = 1e-10
 
 
 def multicountry_growth_kernel(
@@ -150,13 +170,16 @@ def multicountry_growth_kernel(
         if a_0 is None:
             a_0 = drawn_a_0
     validate_initial_conditions(k_0, a_0, parameters)
-    if lm_set.linear_solver == "cg":
-        raise NotImplementedError(
-            "linear_solver='cg' is not supported by this driver; "
-            "use 'auto', 'cholesky', or 'qr'"
+    if lm_set.linear_solver not in ("auto", "cholesky", "qr", "cg"):
+        raise ValueError(
+            "linear_solver must be one of ('auto', 'cholesky', 'qr', 'cg')"
         )
-    if lm_set.linear_solver not in ("auto", "cholesky", "qr"):
-        raise ValueError("linear_solver must be one of ('auto', 'cholesky', 'qr')")
+    if lm_set.linear_solver == "cg" and sensitivity_times is not None:
+        raise NotImplementedError(
+            "sensitivity_times requires a dense linear_solver: the implicit-AD "
+            "system is undamped, sits at the float64 conditioning plateau, and "
+            "a CG solve there would silently degrade the sensitivity tables"
+        )
     if sensitivity_mode not in ("reverse", "forward"):
         raise ValueError("sensitivity_mode must be one of ('reverse', 'forward')")
 
@@ -313,26 +336,61 @@ def multicountry_growth_kernel(
 
     if lm_set.ridge_init is None:
         initial_ridge = lm_set.ridge
-        continuation_options = {}
+        anneal = None
     else:
         initial_ridge = lm_set.ridge_init
-        callback = AnnealRidge(
+        anneal = AnnealRidge(
             ridge_floor=lm_set.ridge,
             decrease=lm_set.ridge_decrease,
             grad_rtol=lm_set.ridge_grad_rtol,
         )
-        continuation_options = {
-            "callback": callback,
-            "user_state": callback.init_state(dtype),
+    if lm_set.linear_solver == "cg":
+        # The kernel matrices ride in the solver's args so the rebuild
+        # callback stays a value-hashable static; the initial preconditioner
+        # only seeds the state, the callback replaces it every step.
+        kernel_args = {
+            "K": K,
+            "K_tilde": K_tilde,
+            "K_check": jsp_linalg.solve_triangular(metric.F.T, K_tilde.T, lower=True).T,
+            "F_t": metric.F.T,
         }
+        init_damping = lm_set.init_damping
+        linear_solver = CG(
+            build_arrow_woodbury(
+                theta_0,
+                kernel_args,
+                p,
+                initial_ridge,
+                max(init_damping, lm_set.cg_damping_floor),
+                num_countries,
+            ),
+            tol=lm_set.cg_tol,
+            maxiter=lm_set.cg_maxiter,
+        )
+        callback = ArrowWoodburyCallback(
+            num_countries=num_countries,
+            damping_floor=lm_set.cg_damping_floor,
+            anneal=anneal,
+        )
+    else:
+        kernel_args = None
+        init_damping = lm_set.init_damping
+        linear_solver = {"auto": Cholesky(), "cholesky": Cholesky(), "qr": QR()}[
+            lm_set.linear_solver
+        ]
+        callback = anneal
+    if callback is None:
+        continuation_options = {}
+    else:
+        continuation_options = {"callback": callback}
+        if anneal is not None:
+            continuation_options["user_state"] = anneal.init_state(dtype)
     solver = RidgeLevenbergMarquardt(
         residual_fn,
         metric=metric,
         ridge=initial_ridge,
-        linear_solver={"auto": Cholesky(), "cholesky": Cholesky(), "qr": QR()}[
-            lm_set.linear_solver
-        ],
-        init_damping=lm_set.init_damping,
+        linear_solver=linear_solver,
+        init_damping=init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
     )
@@ -346,7 +404,7 @@ def multicountry_growth_kernel(
     timer = Stopwatch()
     result = solver.solve(
         theta_0,
-        None,
+        kernel_args,
         p=p,
         **solve_options,
         **continuation_options,
@@ -753,6 +811,10 @@ def multicountry_growth_kernel(
         "wall_time": solve_time,
         "solver": "nlls-gram",
         "linear_solver": lm_set.linear_solver,
+        "preconditioner": "arrow_woodbury" if lm_set.linear_solver == "cg" else "none",
+        "cg_tol": lm_set.cg_tol,
+        "cg_maxiter": lm_set.cg_maxiter,
+        "cg_damping_floor": lm_set.cg_damping_floor,
         "initial_seed": initial_set.seed,
         "k_0_log_sigma": initial_set.k_0_log_sigma,
         "a_0_sigma": initial_set.a_0_sigma,

@@ -24,6 +24,7 @@ MANIFEST = {
     "neoclassical_human_capital.pdf": "human_capital_kernel_figures",
     "optimal_advertising.pdf": "optimal_advertising_kernel_figures",
     "multicountry_growth_transitions.pdf": "multicountry_growth_kernel_figures",
+    "multicountry_growth_scaling.pdf": "multicountry_growth_scaling_figures",
     "sequential_solver_comparison.tex": "collect_json",
     "neoclassical_growth_solver_comparison.tex": "collect_json",
     "neoclassical_growth_sensitivity.tex": "collect_json",

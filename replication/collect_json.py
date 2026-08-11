@@ -1404,6 +1404,29 @@ def multicountry_growth_kernel(out):
     return payload
 
 
+# Mirrors the ladder in replication/multicountry_growth_scaling.py (kept
+# jax-free here, like the sensitivity times above).
+MULTICOUNTRY_SCALING_COUNTS = (2, 3, 5, 10, 15, 25, 40)
+MULTICOUNTRY_SCALING_DENSE_MAX = 15
+
+
+def multicountry_growth_scaling(out):
+    summary = load(out, "multicountry_growth_scaling_summary")
+    solve_times = {"dense": {}, "cg": {}}
+    for name, experiment in summary.items():
+        solver, count = name.rsplit("_N", 1)
+        solve_times[solver][count] = sig(med(experiment["solve_time"]))
+    cap = str(MULTICOUNTRY_SCALING_DENSE_MAX)
+    return {
+        "country_counts": list(MULTICOUNTRY_SCALING_COUNTS),
+        "dense_max_countries": MULTICOUNTRY_SCALING_DENSE_MAX,
+        "solve_times": solve_times,
+        "dense_to_cg_ratio_at_cap": sig(
+            solve_times["dense"][cap] / solve_times["cg"][cap]
+        ),
+    }
+
+
 def multicountry_growth_nn(out):
     prefix = "multicountry_growth_nn"
     experiments = {}
@@ -1694,6 +1717,29 @@ def validate_replication_contract(out, include_uno=True):
                 f"{prefix} must retain {DETERMINISTIC_TIMING_REPETITIONS} timing runs"
             )
 
+    # The scaling ladder runs only in the float64 pass.
+    residual_dtype = load(out, "neoclassical_growth_kernel_baseline").get(
+        "residual_dtype"
+    )
+    if residual_dtype == "float64":
+        summary = load(out, "multicountry_growth_scaling_summary")
+        expected = {f"cg_N{count}" for count in MULTICOUNTRY_SCALING_COUNTS} | {
+            f"dense_N{count}"
+            for count in MULTICOUNTRY_SCALING_COUNTS
+            if count <= MULTICOUNTRY_SCALING_DENSE_MAX
+        }
+        missing = sorted(expected - set(summary))
+        if missing:
+            raise RuntimeError(
+                f"multicountry_growth_scaling summary lacks rungs {missing}; "
+                "rerun replication.multicountry_growth_scaling"
+            )
+        for name in sorted(expected):
+            if summary[name]["frac_accepted"] != 1.0:
+                raise RuntimeError(
+                    f"multicountry_growth_scaling {name} was not accepted"
+                )
+
 
 def collect(output_dir: str = ".results", include_uno: bool = True):
     out = pathlib.Path(output_dir)
@@ -1811,6 +1857,11 @@ def collect(output_dir: str = ".results", include_uno: bool = True):
             ),
             "open_economy_growth_nn_recursive": open_economy_growth_nn_recursive(out),
             "multicountry_growth_kernel": multicountry_growth_kernel(out),
+            **(
+                {"multicountry_growth_scaling": multicountry_growth_scaling(out)}
+                if residual_dtype == "float64"
+                else {}
+            ),
             "multicountry_growth_nn": multicountry_growth_nn(out),
             "performance_comparisons": performance_comparisons(out, include_uno),
         }

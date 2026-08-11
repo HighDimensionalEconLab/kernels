@@ -65,7 +65,10 @@ Every NN driver allows each seed up to five multi-start restarts
 (`stop_set.num_attempts`), so `frac_accepted` measures acceptance within that
 restart budget rather than first-try robustness.
 The two open-economy paths included only
-for the transition figure use one displayed seed each. A deterministic kernel
+for the transition figure use one displayed seed each. The float64 pass also
+runs the multicountry scaling ladder
+(`replication/multicountry_growth_scaling.py`) behind the timing figure. A
+deterministic kernel
 specification is solved with the persistent JAX cache enabled;
 `DETERMINISTIC_TIMING_REPETITIONS` in `replication/utilities.py` sets the
 repetition count, the timing runs are retained in Parquet, and the JSON reports
@@ -119,18 +122,24 @@ fixed small `ridge`, while the harder DAE drivers
 `nlls_gram.ridge_continuation` annealing the ridge to a small floor, with
 `QR()` retained as the extreme-conditioning fallback. `multicountry`'s
 `lm_set.linear_solver="cg"` switches to matrix-free preconditioned CG on
-the whitened normal operator: `nlls_gram.BlockEigenPreconditioner` reads
-analytically assembled per-country/rate/free blocks
-(`multicountry_growth_preconditioner.py`) from the residual `args`,
-rebuilt by the continuation callback at each ridge-level advance; it
-crosses over the dense path around N≈15 countries
-(`multicountry_growth_scaling.py` is the N=2–50 ladder, ~2 minutes at
-N=50 on CPU float64 vs minutes for a single dense Cholesky
-factorization). Stopping is the
-conjunctive `gtol`/`residual_atol` rule; the selection is resolved to
+the whitened normal operator. Away from the asset-clearing rows no
+residual row couples two countries, so the operator is an arrowhead --
+per-country blocks bordered by the shared interest-rate block -- plus a
+rank-`n_train` Woodbury term of the whitened clearing columns;
+`multicountry_growth_preconditioner.py` assembles exactly that structure
+from per-time Jacobian weights (O(N) build, no materialized Jacobian),
+and a solve callback rebuilds it from the live iterate every LM step, so
+each inner solve is preconditioned by the exact shifted inverse at its
+build point. The cg path lands on the dense solution (identical residuals
+and step counts) at O(N) cost per step, overtaking dense Cholesky by
+N≈3 (2.1s vs 27.1s at N=10 on CPU float64);
+`replication/multicountry_growth_scaling.py` runs the N=2-40 timing
+ladder behind the paper's `multicountry_growth_scaling.pdf`. Stopping is
+the conjunctive `gtol`/`residual_atol` rule; the selection is resolved to
 `gtol / ridge` (the asset driver's free `p_0` needs `gtol ~ 1e-3 * ridge`,
-and the DAE drivers' atol is calibrated between the ridge-floor residual and
-the last continuation level's so the solve can only stop at the floor).
+and the DAE drivers' atol sits above the ridge-floor residual -- the
+multicountry default admits a stop one anneal level above the floor, and
+the achieved level is reported as `ridge`).
 
 UNO comparisons are CPU/float64 reference solves. Their native optimization
 state and derivative buffers are host-side float64 arrays; NLLS and NN are the
@@ -208,23 +217,20 @@ The multicountry drivers DRAW heterogeneous initial conditions whenever
 cross-country dynamics degenerate): lognormal `k_0` and population-demeaned
 dispersed `a_0`, with the seed and dispersions on the CLI
 (`--initial_set.seed`, `--initial_set.k_0_log_sigma`,
-`--initial_set.a_0_sigma`). The 50-country stress configuration is
-`multicountry_growth_scaling.py` — the N=2-50 ladder with drawn
-populations, productivities, AND initial conditions (nothing symmetric
-anywhere): every rung passes the deterministic acceptance gates, N=50 in
-~2 minutes on CPU float64 via `linear_solver="cg"` where the dense
-Cholesky factorization alone takes several minutes per solve. On top of
-the residual gates, every rung must pass the long-run economic validity
-bars at t=100: flat consumption, capital, and debt; capital at the theory
-steady state with MPK equalized across countries at `delta + rho/e`;
-`r -> rho`; and the exact one-good sharing invariants — constant
-consumption ratios and consumption levels proportional to initial total
-wealth `a_0 + PV(resources)`. The wealth ordering of long-run consumption
-is gated through the largest wealth separation among misordered pairs
-(exact rank equality is tie-fragile once 50 drawn wealths land within the
-proportionality spread of each other); the a_0-only ranking is reported
-but not gated, since drawn `k_0` and productivity heterogeneity
-legitimately break it.
+`--initial_set.a_0_sigma`). The scaling ladder is
+`replication/multicountry_growth_scaling.py`: symmetric structural
+parameters with drawn initial conditions at N = 2, 3, 5, 10, 15, 25, 40,
+every rung required to pass the standard acceptance gates with
+`linear_solver="cg"` and — up to N = 15 — the dense Cholesky reference on
+identical solver settings. The ladder pins `residual_atol = 2e-7` and
+deepens the ridge floor at the wide rungs: the converged residual floors
+at O(ridge ||dual||) and the dual norm grows with the cross-section, so
+the production stopping calibration would breach the fixed train gate
+past N ≈ 10. The cg column stays near-linear in N (~7 s at N = 40 on CPU
+float64) while dense grows as N³ (~113 s at N = 15, ~29x the cg time);
+`multicountry_growth_scaling_figures.py` renders the log-log timing
+figure and `collect_json.py` publishes the per-rung times and the
+dense/cg ratio at the cap into `all_results.json`.
 
 `multicountry_growth_kernel.py` threads every structural parameter and
 initial condition through the solver's implicit-AD `p` argument, so

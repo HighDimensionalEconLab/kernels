@@ -132,7 +132,7 @@ and a solve callback rebuilds it from the live iterate every LM step, so
 each inner solve is preconditioned by the exact shifted inverse at its
 build point. The cg path lands on the dense solution (identical residuals
 and step counts) at O(N) cost per step, overtaking dense Cholesky by
-N≈3 (2.1s vs 27.1s at N=10 on CPU float64);
+N≈3 (2.3s vs 34s at N=10 on CPU float64);
 `replication/multicountry_growth_scaling.py` runs the N=2-40 timing
 ladder behind the paper's `multicountry_growth_scaling.pdf`. Stopping is
 the conjunctive `gtol`/`residual_atol` rule; the selection is resolved to
@@ -221,13 +221,13 @@ dispersed `a_0`, with the seed and dispersions on the CLI
 `replication/multicountry_growth_scaling.py`: symmetric structural
 parameters with drawn initial conditions at N = 2, 3, 5, 10, 15, 25, 40,
 every rung required to pass the standard acceptance gates with
-`linear_solver="cg"` and — up to N = 15 — the dense Cholesky reference on
+`linear_solver="cg"` and — up to N = 10 — the dense Cholesky reference on
 identical solver settings. The ladder pins `residual_atol = 2e-7` and
 deepens the ridge floor at the wide rungs: the converged residual floors
 at O(ridge ||dual||) and the dual norm grows with the cross-section, so
 the production stopping calibration would breach the fixed train gate
 past N ≈ 10. The cg column stays near-linear in N (~7 s at N = 40 on CPU
-float64) while dense grows as N³ (~113 s at N = 15, ~29x the cg time);
+float64) while dense grows as N³ (~34 s at N = 10, ~15x the cg time);
 `multicountry_growth_scaling_figures.py` renders the log-log timing
 figure and `collect_json.py` publishes the per-rung times and the
 dense/cg ratio at the cap into `all_results.json`.

@@ -15,7 +15,7 @@ SOLVER = multicountry_growth_kernel.multicountry_growth_kernel
 # The dense whitened Cholesky is O(N^3) per step; past the cap it costs
 # minutes per solve and the cg column stands alone.
 COUNTRY_COUNTS = [2, 3, 5, 10, 15, 25, 40]
-DENSE_MAX_COUNTRIES = 15
+DENSE_MAX_COUNTRIES = 10
 
 
 def run(

@@ -1407,7 +1407,7 @@ def multicountry_growth_kernel(out):
 # Mirrors the ladder in replication/multicountry_growth_scaling.py (kept
 # jax-free here, like the sensitivity times above).
 MULTICOUNTRY_SCALING_COUNTS = (2, 3, 5, 10, 15, 25, 40)
-MULTICOUNTRY_SCALING_DENSE_MAX = 15
+MULTICOUNTRY_SCALING_DENSE_MAX = 10
 
 
 def multicountry_growth_scaling(out):

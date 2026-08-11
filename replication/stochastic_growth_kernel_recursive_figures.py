@@ -46,7 +46,10 @@ def run(output_dir: str = ".results", fontsize: int = 14, ticksize: int = 13):
         label="$k$, p90",
     )
     ax_error.plot(
-        quantiles.index, quantiles[("c_err", 0.5)], color="tab:blue", label="$c$, median"
+        quantiles.index,
+        quantiles[("c_err", 0.5)],
+        color="tab:blue",
+        label="$c$, median",
     )
     ax_error.plot(
         quantiles.index,

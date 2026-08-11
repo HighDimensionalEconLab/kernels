@@ -12,9 +12,7 @@ from replication.utilities import (
 
 PREFIX = "stochastic_open_economy_growth_kernel_recursive"
 
-SOLVER = (
-    stochastic_open_economy_growth_kernel_recursive.stochastic_open_economy_growth_kernel_recursive
-)
+SOLVER = stochastic_open_economy_growth_kernel_recursive.stochastic_open_economy_growth_kernel_recursive
 
 DIAGNOSTIC_COLUMNS = [
     "train_euler_mean_abs",

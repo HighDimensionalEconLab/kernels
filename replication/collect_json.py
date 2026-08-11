@@ -1406,8 +1406,9 @@ def multicountry_growth_kernel(out):
 
 # Mirrors the ladder in replication/multicountry_growth_scaling.py (kept
 # jax-free here, like the sensitivity times above).
-MULTICOUNTRY_SCALING_COUNTS = (2, 3, 5, 10, 15, 25, 40)
+MULTICOUNTRY_SCALING_COUNTS = (2, 3, 5, 10, 15, 25, 40, 80, 100)
 MULTICOUNTRY_SCALING_DENSE_MAX = 10
+MULTICOUNTRY_SCALING_GAMMA_COMMON = 40
 
 
 def multicountry_growth_scaling(out):
@@ -1417,8 +1418,17 @@ def multicountry_growth_scaling(out):
         solver, count = name.rsplit("_N", 1)
         solve_times[solver][count] = sig(med(experiment["solve_time"]))
     cap = str(MULTICOUNTRY_SCALING_DENSE_MAX)
-    widest_count = max(MULTICOUNTRY_SCALING_COUNTS)
-    widest = load(out, f"multicountry_growth_scaling_cg_N{widest_count}")
+    # Rungs whose acceptance ran under a relaxed max-train-residual bar
+    # (the float64 residual plateau; recorded in the saved hyperparameters).
+    relaxed_gates = {}
+    for count in MULTICOUNTRY_SCALING_COUNTS:
+        hp = load(out, f"multicountry_growth_scaling_cg_N{count}_hyperparameters")
+        gate = hp["tolerance_set"]["train_residual"]
+        if gate != 1e-5:
+            relaxed_gates[str(count)] = gate
+    sensitivity_rung = load(
+        out, f"multicountry_growth_scaling_cg_N{MULTICOUNTRY_SCALING_GAMMA_COMMON}"
+    )
     return {
         "country_counts": list(MULTICOUNTRY_SCALING_COUNTS),
         "dense_max_countries": MULTICOUNTRY_SCALING_DENSE_MAX,
@@ -1426,18 +1436,21 @@ def multicountry_growth_scaling(out):
         "dense_to_cg_ratio_at_cap": sig(
             solve_times["dense"][cap] / solve_times["cg"][cap]
         ),
-        # The representative-agent CRRA comparative static from the widest
-        # rung, one implicit-AD forward tangent through the cg solve;
-        # comparable against the N=2/N=10 sensitivity tables' _common
-        # entries, with both runtimes alongside.
+        "relaxed_train_residual_gates": relaxed_gates,
+        # The representative-agent CRRA comparative static, one implicit-AD
+        # forward tangent through the cg solve; comparable against the
+        # N=2/N=10 sensitivity tables' _common entries, with both runtimes
+        # alongside.
         "gamma_common_sensitivity": {
-            "num_countries": widest_count,
-            "rate_T10": sig(med(widest["rate_T10"]), 4),
+            "num_countries": MULTICOUNTRY_SCALING_GAMMA_COMMON,
+            "rate_T10": sig(med(sensitivity_rung["rate_T10"]), 4),
             "d_rate_T10_d_gamma_common": sig(
-                med(widest["d_rate_T10_d_gamma_common"]), 4
+                med(sensitivity_rung["d_rate_T10_d_gamma_common"]), 4
             ),
-            "solve_seconds": sig(med(widest["solve_time"])),
-            "sensitivity_seconds": sig(med(widest["gamma_common_sensitivity_time"])),
+            "solve_seconds": sig(med(sensitivity_rung["solve_time"])),
+            "sensitivity_seconds": sig(
+                med(sensitivity_rung["gamma_common_sensitivity_time"])
+            ),
         },
     }
 

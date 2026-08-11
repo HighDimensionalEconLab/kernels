@@ -1061,6 +1061,7 @@ def multicountry_growth_kernel(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
+        "tolerance_set": asdict(tolerance_set),
         "initial_conditions": {"k_0": list(k_0), "a_0": list(a_0)},
     }
 

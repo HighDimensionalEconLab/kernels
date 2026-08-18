@@ -15,7 +15,7 @@ DOMAIN_EPS = 1e-8
 
 
 # Concave-convex (kinked) production calibration shared by the three
-# concave_convex wrappers and the basin-threshold geometry.
+# concave_convex replication sweeps and the basin-threshold geometry.
 @dataclass(frozen=True)
 class KinkedCalibration:
     a: float = 1 / 3

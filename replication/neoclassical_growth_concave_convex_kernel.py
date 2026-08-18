@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+
 import jsonargparse
 import numpy as np
 
-from models import neoclassical_growth_concave_convex_kernel
-from models.neoclassical_growth import kinked_thresholds
+from models import neoclassical_growth_kernel
+from models.neoclassical_growth import KINKED_CALIBRATION, kinked_thresholds
 from replication.utilities import (
     classify_path_basin,
     configure_process,
@@ -52,15 +54,18 @@ def run(output_dir: str | None = None, use_float64: bool = True):
         )
     )
     results_df, frames, hyperparameters = sweep(
-        neoclassical_growth_concave_convex_kernel.neoclassical_growth_concave_convex_kernel,
+        neoclassical_growth_kernel.neoclassical_growth_kernel,
         "k_0",
         [float(k_0) for k_0 in grid],
         options={
+            **asdict(KINKED_CALIBRATION),
             "use_float64": use_float64,
             # The kinked basin experiments keep their own calibrated grid:
             # paths settle by T = 40, and the file defaults carry the smooth
             # model's longer horizon.
-            "data_set": dict(train_T=40.0, train_points=41, test_T=50.0),
+            "data_set": dict(
+                train_T=40.0, train_points=41, test_T=50.0, test_points=41
+            ),
             "lm_set": lm,
             "tolerance_set": tol,
         },

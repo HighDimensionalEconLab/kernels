@@ -12,6 +12,12 @@ import jsonargparse
 import numpy as np
 from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
 
+from models.neoclassical_growth import (
+    InitialConditionSettings,
+    collocation_step_diagnostics,
+    growth_initial_conditions,
+    trajectory_frame,
+)
 from models.neoclassical_growth_kernel_recursive import (
     StateKernelSettings,
     StoppingCriteria,
@@ -20,12 +26,8 @@ from models.neoclassical_growth_kernel_recursive import (
     state_lengthscales,
 )
 from models.neoclassical_growth_nn_recursive import (
-    InitialConditionSettings,
-    collocation_step_diagnostics,
-    draw_initial_conditions,
     load_investment_policy,
     policy_cache_key,
-    trajectory_frame,
 )
 from models.stochastic_growth_nn_recursive import (
     SDE_SOLVERS,
@@ -143,37 +145,11 @@ def stochastic_growth_kernel_recursive(
     train_dt = data_set.train_T / n_train_steps
     test_T = data_set.test_T
 
-    train_ic_key, test_ic_key = jax.random.split(jax.random.key(ic_set.data_seed))
-    train_initial_conditions = draw_initial_conditions(
-        z_0,
-        k_0,
-        ic_set.num_train_trajectories,
-        ic_set.train_log_z_variance,
-        ic_set.train_log_k_variance,
-        train_ic_key,
-        dtype,
-    )
-    test_z_center = z_0 if ic_set.test_z_0 is None else ic_set.test_z_0
-    test_k_center = k_0 if ic_set.test_k_0 is None else ic_set.test_k_0
-    test_log_z_variance = (
-        ic_set.train_log_z_variance
-        if ic_set.test_log_z_variance is None
-        else ic_set.test_log_z_variance
-    )
-    test_log_k_variance = (
-        ic_set.train_log_k_variance
-        if ic_set.test_log_k_variance is None
-        else ic_set.test_log_k_variance
-    )
-    test_initial_conditions = draw_initial_conditions(
-        test_z_center,
-        test_k_center,
-        ic_set.num_test_trajectories,
-        test_log_z_variance,
-        test_log_k_variance,
-        test_ic_key,
-        dtype,
-    )
+    ic_draw = growth_initial_conditions(z_0, k_0, ic_set, dtype)
+    train_ic_key = ic_draw["train_ic_key"]
+    test_ic_key = ic_draw["test_ic_key"]
+    train_initial_conditions = ic_draw["train_initial_conditions"]
+    test_initial_conditions = ic_draw["test_initial_conditions"]
     p = StructuralParameters.create(
         dtype,
         a=a,
@@ -430,8 +406,8 @@ def stochastic_growth_kernel_recursive(
         "z_bar": z_bar,
         "z_0": z_0,
         "k_0": k_0,
-        "test_z_0": test_z_center,
-        "test_k_0": test_k_center,
+        "test_z_0": ic_draw["test_z_center"],
+        "test_k_0": ic_draw["test_k_center"],
         "data_seed": ic_set.data_seed,
         # Measured, not requested: a float64 leak upstream shows up here.
         "residual_dtype": str(train_values["euler_residual"].dtype),

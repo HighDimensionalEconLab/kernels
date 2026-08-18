@@ -16,21 +16,23 @@ from jax.flatten_util import ravel_pytree
 from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
 from tinydiffeq import SRA1, EulerMaruyama, Milstein, SaveAt, solve_sde
 
-from models.neoclassical_growth_nn_recursive import (
-    DrawInvestmentPolicy,
+from models.neoclassical_growth import (
     InitialConditionSettings,
-    InvestmentPolicyNN,
-    InvestmentPolicySettings,
     collocation_step_diagnostics,
     consumption,
-    draw_initial_conditions,
-    load_investment_policy,
+    growth_initial_conditions,
+    hicks_production,
     mpk,
-    policy_cache_key,
-    production,
-    save_investment_policy,
     standardized_initial_states,
     trajectory_frame,
+)
+from models.neoclassical_growth_nn_recursive import (
+    DrawInvestmentPolicy,
+    InvestmentPolicyNN,
+    InvestmentPolicySettings,
+    load_investment_policy,
+    policy_cache_key,
+    save_investment_policy,
 )
 from models.stochastic_growth_benchmark import stochastic_growth_benchmark
 from models.utilities import (
@@ -419,7 +421,7 @@ class FDInterpolatedPolicy:
             mode="nearest",
         )[0]
         z, k = jnp.exp(log_state)
-        return production(z, k, p) - c
+        return hicks_production(z, k, p) - c
 
 
 @lru_cache(maxsize=None)
@@ -577,37 +579,11 @@ def stochastic_growth_nn_recursive(
     train_dt = data_set.train_T / n_train_steps
     test_T = data_set.test_T
 
-    train_ic_key, test_ic_key = jax.random.split(jax.random.key(ic_set.data_seed))
-    train_initial_conditions = draw_initial_conditions(
-        z_0,
-        k_0,
-        ic_set.num_train_trajectories,
-        ic_set.train_log_z_variance,
-        ic_set.train_log_k_variance,
-        train_ic_key,
-        dtype,
-    )
-    test_z_center = z_0 if ic_set.test_z_0 is None else ic_set.test_z_0
-    test_k_center = k_0 if ic_set.test_k_0 is None else ic_set.test_k_0
-    test_log_z_variance = (
-        ic_set.train_log_z_variance
-        if ic_set.test_log_z_variance is None
-        else ic_set.test_log_z_variance
-    )
-    test_log_k_variance = (
-        ic_set.train_log_k_variance
-        if ic_set.test_log_k_variance is None
-        else ic_set.test_log_k_variance
-    )
-    test_initial_conditions = draw_initial_conditions(
-        test_z_center,
-        test_k_center,
-        ic_set.num_test_trajectories,
-        test_log_z_variance,
-        test_log_k_variance,
-        test_ic_key,
-        dtype,
-    )
+    ic_draw = growth_initial_conditions(z_0, k_0, ic_set, dtype)
+    train_ic_key = ic_draw["train_ic_key"]
+    test_ic_key = ic_draw["test_ic_key"]
+    train_initial_conditions = ic_draw["train_initial_conditions"]
+    test_initial_conditions = ic_draw["test_initial_conditions"]
     p = StructuralParameters.create(
         dtype,
         a=a,
@@ -709,7 +685,7 @@ def stochastic_growth_nn_recursive(
         stopping_reason = "cached"
         final_damping = float("nan")
         solver_accepted = bool(cached_meta["solution_accepted"])
-        train_time = 0.0
+        solve_time = 0.0
         total_fit_time = time.perf_counter() - fit_start
         setup_time = total_fit_time
         r = residual_fn(theta_final, solve_args, p)
@@ -775,7 +751,7 @@ def stochastic_growth_nn_recursive(
             **solve_options,
         )
         jax.block_until_ready(result)
-        train_time = time.perf_counter() - start_time
+        solve_time = time.perf_counter() - start_time
         total_fit_time = time.perf_counter() - fit_start
         setup_time = start_time - fit_start
         steps = int(result.steps)
@@ -794,7 +770,7 @@ def stochastic_growth_nn_recursive(
             print(
                 f"attempt {attempt}: {stopping_reason} after {steps} steps "
                 f"(epoch {epochs_run}/{stop_set.num_epochs}), "
-                f"train_loss={train_loss:.3e} ({train_time:.2f}s)"
+                f"train_loss={train_loss:.3e} ({solve_time:.2f}s)"
             )
         policy = nnx.merge(graphdef, theta_final, nondiff)
 
@@ -927,8 +903,8 @@ def stochastic_growth_nn_recursive(
         "z_ergodic_sd": z_ergodic_sd,
         "z_0": z_0,
         "k_0": k_0,
-        "test_z_0": test_z_center,
-        "test_k_0": test_k_center,
+        "test_z_0": ic_draw["test_z_center"],
+        "test_k_0": ic_draw["test_k_center"],
         "seed": seed,
         "data_seed": ic_set.data_seed,
         # Measured, not requested: a float64 leak upstream shows up here.
@@ -969,11 +945,10 @@ def stochastic_growth_nn_recursive(
         "parameter_derivative": "conditional_on_carried_training_batch",
         "attempt": attempt,
         "stopping_reason": stopping_reason,
-        "train_time": train_time,
-        "solve_time": train_time,
+        "solve_time": solve_time,
         "setup_time": setup_time,
         "total_fit_time": total_fit_time,
-        "train_time_success": train_time if solver_accepted else np.nan,
+        "solve_time_success": solve_time if solver_accepted else np.nan,
         "total_params": int(ravel_pytree(nnx.state(policy, nnx.Param))[0].size),
         "solution_accepted": solver_accepted,
         "solver_converged": solver_accepted,
@@ -989,8 +964,8 @@ def stochastic_growth_nn_recursive(
         "observed_log_k_max": float(observed_log_k.max()),
         "train_log_z_variance": ic_set.train_log_z_variance,
         "train_log_k_variance": ic_set.train_log_k_variance,
-        "test_log_z_variance": test_log_z_variance,
-        "test_log_k_variance": test_log_k_variance,
+        "test_log_z_variance": ic_draw["test_log_z_variance"],
+        "test_log_k_variance": ic_draw["test_log_k_variance"],
         "train_points": data_set.train_points,
         "train_steps": n_train_steps,
         "test_points": data_set.test_points,

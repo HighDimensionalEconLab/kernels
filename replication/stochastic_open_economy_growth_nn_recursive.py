@@ -22,7 +22,7 @@ DIAGNOSTIC_COLUMNS = [
     "test_asset_squash_saturation",
     "test_terminal_capital_relative_error",
     "steps",
-    "train_time",
+    "solve_time",
 ]
 
 

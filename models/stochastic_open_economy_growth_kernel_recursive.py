@@ -26,11 +26,8 @@ from models.kernels import (
     ard_matern_state_features,
     ard_rbf_state_features,
 )
-from models.neoclassical_growth_kernel_recursive import StoppingCriteria
-from models.neoclassical_growth_nn_recursive import (
-    policy_cache_key,
-    standardized_initial_states,
-)
+from models.neoclassical_growth import standardized_initial_states
+from models.neoclassical_growth_nn_recursive import policy_cache_key
 from models.open_economy_growth import ModelParameters, production
 from models.stochastic_growth_nn_recursive import sample_trajectory_noise
 from models.stochastic_open_economy_growth_nn_recursive import (
@@ -60,6 +57,26 @@ from models.utilities import (
 )
 
 DOMAIN_EPS = 1e-8
+
+
+@dataclass(frozen=True)
+class StoppingCriteria:
+    max_steps: int = 100
+    residual_atol: float = 1e-5
+    gtol: float = 1e-7
+    ridge: float = 1e-12
+    # ridge_init=None solves at the fixed ridge above; a value enables ridge
+    # continuation annealed from ridge_init down to `ridge` (the floor) by
+    # factors of `ridge_decrease` on inner stationarity. The metric's
+    # factorization never involves the ridge, so the anneal composes
+    # unchanged.
+    ridge_init: float | None = None
+    ridge_decrease: float = 0.1
+    # Relative stationarity threshold that triggers the next ridge level:
+    # looser anneals faster (fewer steps per level), tighter solves each
+    # level out more completely before descending.
+    ridge_grad_rtol: float = 1e-2
+    log_tvc_threshold: float = 0.0
 
 
 # Kernel geometry lives in the NN's normalized coordinates, so one

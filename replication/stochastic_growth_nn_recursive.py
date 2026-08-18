@@ -23,7 +23,7 @@ DIAGNOSTIC_COLUMNS = [
     "test_mean_abs_c_rel_error",
     "policy_mean_abs_c_rel_error",
     "steps",
-    "train_time",
+    "solve_time",
 ]
 
 

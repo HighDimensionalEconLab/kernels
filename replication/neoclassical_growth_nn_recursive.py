@@ -54,7 +54,7 @@ DIAGNOSTIC_COLUMNS = [
     "test_mean_abs_k_rel_error",
     "test_mean_abs_c_rel_error",
     "steps",
-    "train_time",
+    "solve_time",
 ]
 
 

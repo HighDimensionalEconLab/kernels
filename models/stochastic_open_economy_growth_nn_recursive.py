@@ -16,10 +16,8 @@ from jax.flatten_util import ravel_pytree
 from nlls_gram import DrawNNXModule, LevenbergMarquardt, LMAction, LMStatus, MultiStart
 from tinydiffeq import SRA1, EulerMaruyama, Milstein, SaveAt, solve_sde
 
-from models.neoclassical_growth_nn_recursive import (
-    policy_cache_key,
-    standardized_initial_states,
-)
+from models.neoclassical_growth import standardized_initial_states
+from models.neoclassical_growth_nn_recursive import policy_cache_key
 from models.open_economy_growth import ModelParameters, marginal_product, production
 from models.open_economy_growth_benchmark import open_economy_growth_benchmark
 from models.stochastic_growth_nn_recursive import sample_trajectory_noise
@@ -1096,7 +1094,7 @@ def stochastic_open_economy_growth_nn_recursive(
         stopping_reason = "cached"
         final_damping = float("nan")
         solver_accepted = bool(cached_meta["solver_accepted"])
-        train_time = 0.0
+        solve_time = 0.0
         total_fit_time = fit_timer.elapsed()
         setup_time = total_fit_time
         train_residual = residual_fn(theta_final, solve_args, p)
@@ -1126,7 +1124,7 @@ def stochastic_open_economy_growth_nn_recursive(
             if stop_set.num_epochs == 1
             else 0.0
         )
-        train_timer = Stopwatch()
+        solve_timer = Stopwatch()
         result = lm_solver.solve(
             theta_0,
             residual_args,
@@ -1142,9 +1140,9 @@ def stochastic_open_economy_growth_nn_recursive(
             ),
             max_steps_is_success=False,
         )
-        train_time = train_timer.elapsed(result)
+        solve_time = solve_timer.elapsed(result)
         total_fit_time = fit_timer.elapsed()
-        setup_time = total_fit_time - train_time
+        setup_time = total_fit_time - solve_time
         theta_final, solve_args = result.x, result.args
         train_residual = residual_fn(theta_final, solve_args, p)
         train_loss = float(jnp.sum(train_residual * train_residual))
@@ -1159,7 +1157,7 @@ def stochastic_open_economy_growth_nn_recursive(
                 f"attempt {attempt}: {stopping_reason} after {steps} steps "
                 f"(epoch {epochs_run}/{stop_set.num_epochs}, shock scale "
                 f"{float(solve_args.shock_scale):.3f}), "
-                f"train_loss={train_loss:.3e} ({train_time:.2f}s)"
+                f"train_loss={train_loss:.3e} ({solve_time:.2f}s)"
             )
         policy = nnx.merge(graphdef, theta_final, nondiff)
 
@@ -1497,11 +1495,11 @@ def stochastic_open_economy_growth_nn_recursive(
         "final_damping": final_damping,
         "policy_cache_key": cache_key,
         "policy_cache_hit": cache_hit,
-        "train_time": train_time,
+        "solve_time": solve_time,
         "setup_time": setup_time,
         "total_fit_time": total_fit_time,
-        "train_time_success": (
-            train_time if solver_accepted and not cache_hit else np.nan
+        "solve_time_success": (
+            solve_time if solver_accepted and not cache_hit else np.nan
         ),
         "total_params": int(theta_flat.size),
         "residual_count": int(train_residual.size),

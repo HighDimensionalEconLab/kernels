@@ -218,9 +218,7 @@ def asset_pricing_kernel_uno(
     p_benchmark = mu_f_array(test_data, c, g, r, x_0)
     p_rel_error = jnp.abs(p_benchmark - p_test) / p_benchmark
 
-    solve_time = result.cpu_time
-    if solve_time is None:
-        solve_time = elapsed
+    solve_time = elapsed
     solver_status = str(result.optimization_status).split(".")[-1]
     solution_status = str(result.solution_status).split(".")[-1]
     finite = bool(jnp.all(jnp.isfinite(p_test)) and jnp.all(jnp.isfinite(p_benchmark)))
@@ -255,10 +253,7 @@ def asset_pricing_kernel_uno(
         "p_rel_error_mean": float(p_rel_error.mean()),
         "p_rel_error_max": float(p_rel_error[1:].max()),
         "p_rel_error_min": float(p_rel_error[1:].min()),
-        # solve_time is IPOPT's own cpu-time accounting; wall_time is the
-        # measured elapsed span, so both are kept.
         "solve_time": solve_time,
-        "wall_time": elapsed,
         "solver_status": solver_status,
         "solution_status": solution_status,
         "stationarity": result.solution_stationarity,

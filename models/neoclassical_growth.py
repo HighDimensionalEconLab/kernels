@@ -14,8 +14,7 @@ from tinydiffeq import RK4, ConstantStepSize, IController, SaveAt, Tsit5, solve_
 DOMAIN_EPS = 1e-8
 
 
-# Concave-convex (kinked) production calibration shared by the three
-# concave_convex replication sweeps and the basin-threshold geometry.
+# The concave-convex (kinked) production calibration.
 @dataclass(frozen=True)
 class KinkedCalibration:
     a: float = 1 / 3
@@ -110,10 +109,6 @@ def mpk(z, k, p):
     return p.a * z * k ** (p.a - 1.0)
 
 
-def labor_augmenting_scale(z, p):
-    return z ** (1.0 / (1.0 - p.a))
-
-
 def consumption(policy, log_state, p):
     z, k = jnp.exp(log_state)
     return hicks_production(z, k, p) - policy(log_state, p)
@@ -138,7 +133,9 @@ def euler_residuals(policy, log_states, p):
         # The tangent c_dot / c alone is finite for negative consumption, so
         # the zero-scaled primal log c keeps the residual NaN outside the
         # model's domain (c <= 0) instead of quietly extending the Euler
-        # equation there. It contributes exactly zero on the feasible domain.
+        # equation there. It contributes exactly zero on the feasible domain;
+        # the Jacobian stays finite (and meaningless) at infeasible states, so
+        # only residual values signal infeasibility.
         domain_guard = 0.0 * log_c
         return (
             dlog_c_dt
@@ -246,12 +243,13 @@ def draw_initial_conditions(
 
 
 def standardized_initial_states(key, center, scales, num_trajectories):
-    # Trace-safe standardized draws, ADDITIVE in the caller's coordinate:
-    # center + scales * standardized normals, dimension-generic, so a zero
-    # scale pins its axis at the center whatever the center's value. Its
-    # neighbour draw_initial_conditions is the multiplicative (log-scale)
-    # variant -- do not merge them: additive spreads are what keep a level
-    # axis (e.g. net foreign assets) non-degenerate at a zero center.
+    # Trace-safe standardized draws, ADDITIVE in the caller's coordinate
+    # (center + scales * standardized normals), unlike the multiplicative
+    # draw_initial_conditions: additive spreads keep a level axis (e.g. net
+    # foreign assets) non-degenerate at a zero center. A single trajectory
+    # pins the batch at the center whatever the scales; a host-side check on
+    # `scales` cannot live here because lax.cond traces the epoch resampler
+    # even in configurations that never execute it.
     if num_trajectories == 1:
         return center[None, :]
     draws = jax.random.normal(key, (num_trajectories, center.size), dtype=center.dtype)
@@ -260,9 +258,21 @@ def standardized_initial_states(key, center, scales, num_trajectories):
     return center[None, :] + scales[None, :] * standardized
 
 
-# The (z, k) train/test initial-condition design every recursive growth driver
-# shares: independent draws from one data_seed, with the test center and
-# variances defaulting to the training ones.
+# Independent (z, k) train and test draws from one data_seed; the test
+# center and variances default to the training ones, and the resolved values
+# ride along for the results dicts.
+@dataclass(frozen=True)
+class InitialConditionDraw:
+    train_ic_key: jax.Array
+    test_ic_key: jax.Array
+    train_initial_conditions: jax.Array
+    test_initial_conditions: jax.Array
+    test_z_center: float
+    test_k_center: float
+    test_log_z_variance: float
+    test_log_k_variance: float
+
+
 def growth_initial_conditions(z_0, k_0, ic_set, dtype):
     train_ic_key, test_ic_key = jax.random.split(jax.random.key(ic_set.data_seed))
     train_initial_conditions = draw_initial_conditions(
@@ -295,29 +305,22 @@ def growth_initial_conditions(z_0, k_0, ic_set, dtype):
         test_ic_key,
         dtype,
     )
-    return {
-        "train_ic_key": train_ic_key,
-        "test_ic_key": test_ic_key,
-        "train_initial_conditions": train_initial_conditions,
-        "test_initial_conditions": test_initial_conditions,
-        "test_z_center": test_z_center,
-        "test_k_center": test_k_center,
-        "test_log_z_variance": test_log_z_variance,
-        "test_log_k_variance": test_log_k_variance,
-    }
+    return InitialConditionDraw(
+        train_ic_key=train_ic_key,
+        test_ic_key=test_ic_key,
+        train_initial_conditions=train_initial_conditions,
+        test_initial_conditions=test_initial_conditions,
+        test_z_center=test_z_center,
+        test_k_center=test_k_center,
+        test_log_z_variance=test_log_z_variance,
+        test_log_k_variance=test_log_k_variance,
+    )
 
 
 def initial_kappa(initial_conditions, a):
     return np.asarray(
         initial_conditions[:, 1] / initial_conditions[:, 0] ** (1.0 / (1.0 - a))
     )
-
-
-def positive_policy_grid(grid_lo, grid_hi, size):
-    log_lo = math.log(grid_lo)
-    log_hi = math.log(grid_hi)
-    log_margin = 0.05 * (log_hi - log_lo) + 1e-6
-    return np.exp(np.linspace(log_lo - log_margin, log_hi + log_margin, size))
 
 
 def log_state_drift_field(log_state, _, args, p):
@@ -392,7 +395,9 @@ def collocation_residuals(policy, initial_log_states, p, data_set):
     # Mean squared residual, so the loss threshold means the same thing at any
     # number of trajectories or collocation points. An adaptive rollout only
     # fills the accepted prefix of the step buffer, so both the residuals and
-    # the count are restricted to that prefix.
+    # the count are restricted to that prefix -- the accepted-step set moves
+    # with the policy, so the tsit5 objective is only piecewise-continuous in
+    # theta.
     if data_set.ode_solver == "rk4":
         count = jnp.asarray(euler.size, dtype=euler.dtype)
         normalized = euler / jnp.sqrt(count)
@@ -410,6 +415,10 @@ def collocation_residuals(policy, initial_log_states, p, data_set):
 
 
 def log_tvc_residual(policy, initial_log_states, T_start, T_end, p, data_set):
+    # An empty window would make the windowed max an -inf that reads as a
+    # passing certificate.
+    if T_start >= T_end:
+        raise ValueError("the transversality horizon must exceed the start")
     solution = rollout_steps(
         policy,
         initial_log_states,
@@ -477,8 +486,11 @@ def tvc_certificates(
     }
 
 
+# The cache key excludes the evaluation grid: the expensive solve_bvp mesh
+# depends only on the problem, and the returned interpolant is cheap to
+# evaluate on any diagnostic grid.
 @lru_cache(maxsize=None)
-def cached_benchmark_trajectory(
+def cached_benchmark_solution(
     a,
     delta,
     rho_hat,
@@ -486,7 +498,6 @@ def cached_benchmark_trajectory(
     g,
     z_initial,
     k_initial,
-    times,
     benchmark_T,
     benchmark_points,
 ):
@@ -495,7 +506,7 @@ def cached_benchmark_trajectory(
     from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 
     benchmark_grid = np.linspace(0.0, benchmark_T, benchmark_points)
-    benchmark = neoclassical_growth_benchmark(
+    return neoclassical_growth_benchmark(
         a,
         delta,
         rho_hat,
@@ -505,7 +516,6 @@ def cached_benchmark_trajectory(
         z_0=z_initial,
         g=g,
     )
-    return benchmark(np.asarray(times))
 
 
 def benchmark_trajectories(
@@ -514,7 +524,7 @@ def benchmark_trajectories(
     k_paths = []
     c_paths = []
     for z_initial, k_initial in np.asarray(initial_conditions):
-        k_path, c_path = cached_benchmark_trajectory(
+        benchmark = cached_benchmark_solution(
             a,
             delta,
             rho_hat,
@@ -522,10 +532,10 @@ def benchmark_trajectories(
             g,
             float(z_initial),
             float(k_initial),
-            tuple(float(t) for t in np.asarray(times)),
             data_set.benchmark_T,
             data_set.benchmark_points,
         )
+        k_path, c_path = benchmark(np.asarray(times, dtype=float))
         k_paths.append(k_path)
         c_paths.append(c_path)
     times = np.asarray(times)
@@ -626,7 +636,21 @@ def add_benchmark_path_diagnostics(
             "median_c_abs_rel_error": np.median(np.abs(c_error), axis=1),
         }
     )
-    return k_error, c_error, test_summary_df
+    error_fields = {
+        "test_mean_abs_k_rel_error": float(np.mean(np.abs(k_error))),
+        "test_mean_abs_c_rel_error": float(np.mean(np.abs(c_error))),
+        "test_median_abs_k_rel_error": float(np.median(np.abs(k_error))),
+        "test_median_abs_c_rel_error": float(np.median(np.abs(c_error))),
+        "test_median_trajectory_mean_abs_k_rel_error": float(
+            test_summary_df["mean_k_abs_rel_error"].median()
+        ),
+        "test_median_trajectory_mean_abs_c_rel_error": float(
+            test_summary_df["mean_c_abs_rel_error"].median()
+        ),
+        "test_max_abs_k_rel_error": float(np.max(np.abs(k_error))),
+        "test_max_abs_c_rel_error": float(np.max(np.abs(c_error))),
+    }
+    return test_summary_df, error_fields
 
 
 # nnx.jit so one compiled evaluation serves both the nnx policy and the
@@ -641,7 +665,7 @@ def trajectory_values(policy, log_states, p):
     )
     euler = euler_residuals(policy, flat_states, p).reshape(shape)
     z, k = jnp.moveaxis(jnp.exp(log_states), -1, 0)
-    scale = labor_augmenting_scale(z, p)
+    scale = z ** (1.0 / (1.0 - p.a))
     kappa = k / scale
     dk = investment - p.delta * k
     dz = (1.0 - p.a) * p.g * z
@@ -734,10 +758,13 @@ def kappa_diagnostic_grid(
     )
     observed_kappa = observed_kappa[np.isfinite(observed_kappa) & (observed_kappa > 0)]
     if observed_kappa.size == 0:
-        observed_kappa = np.concatenate([train_kappa_0, test_kappa_0])
-    grid_lo = math.exp(math.floor(math.log(observed_kappa.min()) / 0.05) * 0.05)
-    grid_hi = math.exp(math.ceil(math.log(observed_kappa.max()) / 0.05) * 0.05)
-    kappa_grid = positive_policy_grid(grid_lo, grid_hi, policy_grid_size)
+        raise ValueError("no finite positive kappa was observed")
+    log_lo = math.floor(math.log(observed_kappa.min()) / 0.05) * 0.05
+    log_hi = math.ceil(math.log(observed_kappa.max()) / 0.05) * 0.05
+    log_margin = 0.05 * (log_hi - log_lo) + 1e-6
+    kappa_grid = np.exp(
+        np.linspace(log_lo - log_margin, log_hi + log_margin, policy_grid_size)
+    )
     grid_log_states = jnp.stack(
         [
             jnp.zeros(policy_grid_size, dtype=dtype),
@@ -746,3 +773,56 @@ def kappa_diagnostic_grid(
         axis=1,
     )
     return kappa_grid, grid_log_states
+
+
+# The kappa-grid policy comparison the two deterministic recursive drivers
+# publish, with the solver's columns tagged by `suffix` next to the shared
+# benchmark columns.
+def policy_diagnostics_frame(
+    policy,
+    train_kappa,
+    test_kappa,
+    train_kappa_0,
+    test_kappa_0,
+    a,
+    delta,
+    rho_hat,
+    sigma_crra,
+    g,
+    p,
+    data_set,
+    dtype,
+    suffix,
+):
+    kappa_grid, grid_log_states = kappa_diagnostic_grid(
+        train_kappa,
+        test_kappa,
+        train_kappa_0,
+        test_kappa_0,
+        data_set.policy_grid_size,
+        dtype,
+    )
+    grid_values = trajectory_values(policy, grid_log_states[None, :, :], p)
+    output_per_z = np.asarray(jnp.asarray(kappa_grid, dtype=dtype) ** p.a)
+    c_benchmark_grid = benchmark_policy_grid(
+        a, delta, rho_hat, sigma_crra, g, kappa_grid, data_set
+    )
+    return pd.DataFrame(
+        {
+            "kappa": kappa_grid,
+            f"investment_share_{suffix}": np.asarray(grid_values["i"][0])
+            / output_per_z,
+            # The learned map itself: unit_softplus of the raw policy, since
+            # the grid fixes z = 1 so k = kappa.
+            f"i_over_delta_k_{suffix}": np.asarray(grid_values["i"][0])
+            / (delta * np.asarray(kappa_grid)),
+            f"i_per_z_{suffix}": np.asarray(grid_values["i"][0]),
+            f"c_tilde_{suffix}": np.asarray(grid_values["c"][0]),
+            f"dkappa_{suffix}": np.asarray(grid_values["dkappa"][0]),
+            **scale_invariance_columns(policy, kappa_grid, p, dtype, suffix),
+            "c_tilde_benchmark": c_benchmark_grid,
+            "dkappa_benchmark": (
+                kappa_grid**a - c_benchmark_grid - (delta + g) * kappa_grid
+            ),
+        }
+    )

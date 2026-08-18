@@ -134,8 +134,6 @@ class SolverSettings:
 KINKED_SOLVER_SETTINGS = SolverSettings(max_iterations=25, time_limit=0.15)
 
 
-# The shared NEOCLASSICAL_GROWTH_CONSTANTS (utilities.py) maps the Aruoba,
-# Fernandez-Villaverde & Rubio-Ramirez (2006 JEDC) benchmark values.
 def neoclassical_growth_kernel_uno(
     a: float = CONSTANTS.a,
     delta: float = CONSTANTS.delta,
@@ -382,9 +380,7 @@ def neoclassical_growth_kernel_uno(
         )
     )
 
-    solve_time = result.cpu_time
-    if solve_time is None:
-        solve_time = elapsed
+    solve_time = elapsed
     solver_status = str(result.optimization_status).split(".")[-1]
     solution_status = str(result.solution_status).split(".")[-1]
     rejection_reasons = []
@@ -434,10 +430,7 @@ def neoclassical_growth_kernel_uno(
         "p_lower_violation": p_lower_violation,
         "p_upper_violation": p_upper_violation,
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_eval["euler"]))),
-        # solve_time is IPOPT's own cpu-time accounting; wall_time is the
-        # measured elapsed span, so both are kept.
         "solve_time": solve_time,
-        "wall_time": elapsed,
         "solver_status": solver_status,
         "solution_status": solution_status,
         "stationarity": result.solution_stationarity,

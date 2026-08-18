@@ -109,8 +109,6 @@ class SolverSettings:
     gtol: float = 1e-9
 
 
-# The shared NEOCLASSICAL_GROWTH_CONSTANTS (utilities.py) maps the Aruoba,
-# Fernandez-Villaverde & Rubio-Ramirez (2006 JEDC) benchmark values.
 def neoclassical_growth_kernel(
     a: float = CONSTANTS.a,
     delta: float = CONSTANTS.delta,

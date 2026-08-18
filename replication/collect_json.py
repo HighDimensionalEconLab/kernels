@@ -769,7 +769,7 @@ def neoclassical_growth_kernel_uno(out):
             "test_k_rel_error_max": sci(med(j["test_k_rel_error_max"])),
             "test_c_rel_error_max": sci(med(j["test_c_rel_error_max"])),
             "max_train_residual": sci(med(j["max_train_residual"]), 2),
-            "wall_time": sig(med(j["wall_time"]), 2),
+            "solve_time": sig(med(j["solve_time"]), 2),
             "timing_repetitions": int(med(j["timing_repetitions"])),
         }
 
@@ -1689,7 +1689,7 @@ def performance_comparisons(out, include_uno=True):
     asset_nn_error = float(asset_nn["p_rel_error_mean"].median())
     if include_uno:
         asset_uno = load(out, "asset_pricing_kernel_uno_baseline")
-        asset_uno_time = med(asset_uno["wall_time"])
+        asset_uno_time = med(asset_uno["solve_time"])
         asset_uno_error = med(asset_uno["p_rel_error_mean"])
     else:
         asset_uno_time = asset_uno_error = None
@@ -1704,7 +1704,7 @@ def performance_comparisons(out, include_uno=True):
     )
     if include_uno:
         growth_uno = load(out, "neoclassical_growth_kernel_uno_baseline")
-        growth_uno_time = med(growth_uno["wall_time"])
+        growth_uno_time = med(growth_uno["solve_time"])
         growth_uno_error = max(
             med(growth_uno["test_k_rel_error_mean"]),
             med(growth_uno["test_c_rel_error_mean"]),
@@ -1731,7 +1731,7 @@ def performance_comparisons(out, include_uno=True):
     open_kernel_error = med(open_kernel["max_benchmark_error"])
     if include_uno:
         open_uno = load(out, "open_economy_growth_kernel_uno_baseline")
-        open_uno_time = med(open_uno["wall_time"])
+        open_uno_time = med(open_uno["solve_time"])
         open_uno_error = med(open_uno["max_benchmark_error"])
     else:
         open_uno_time = open_uno_error = None

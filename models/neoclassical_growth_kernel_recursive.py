@@ -9,7 +9,6 @@ import jax
 import jax.numpy as jnp
 import jsonargparse
 import numpy as np
-import pandas as pd
 from flax import struct
 from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
 
@@ -27,15 +26,12 @@ from models.neoclassical_growth import (
     InitialConditionSettings,
     RecursiveParameters,
     add_benchmark_path_diagnostics,
-    benchmark_policy_grid,
     benchmark_trajectories,
     euler_residuals,
     growth_initial_conditions,
-    hicks_production,
     initial_kappa,
-    kappa_diagnostic_grid,
+    policy_diagnostics_frame,
     rollout_steps,
-    scale_invariance_columns,
     trajectory_frame,
     trajectory_values,
     tvc_certificates,
@@ -53,7 +49,6 @@ from models.utilities import (
 
 @dataclass(frozen=True)
 class DataSettings:
-    collocation_source: Literal["exact_path"] = "exact_path"
     train_T: float = CONSTANTS.train_T
     # Fixed RKHS centers on the exact path: a representation size, not a
     # rollout grid (nothing is integrated during training).
@@ -145,20 +140,6 @@ def nonhomothetic_state_features(x, centers, kernel_set):
     return additive_matern_state_features(family, x, centers, sigmas, lengthscales)
 
 
-def validate_settings(data_set, kernel_set):
-    if data_set.collocation_source != "exact_path":
-        raise ValueError(f"unknown collocation_source: {data_set.collocation_source!r}")
-    state_kernels = tuple(
-        f"{structure}_{family}"
-        for structure in ("ard", "additive")
-        for family in ("rbf", *MATERN_STATE_FAMILIES)
-    )
-    if kernel_set.state_kernel not in state_kernels:
-        raise ValueError(f"unknown state_kernel: {kernel_set.state_kernel!r}")
-    if kernel_set.linear_mean and kernel_set.homothetic_representation:
-        raise ValueError("linear_mean requires homothetic_representation=False")
-
-
 def fixed_collocation_data(
     a,
     delta,
@@ -170,8 +151,6 @@ def fixed_collocation_data(
     *,
     dtype,
 ):
-    if data_set.collocation_source != "exact_path":
-        raise ValueError(f"unknown collocation_source: {data_set.collocation_source!r}")
     train_times = np.linspace(0.0, data_set.train_T, data_set.train_points)
     z, k, c = benchmark_trajectories(
         a,
@@ -255,30 +234,18 @@ def investment(theta, args, log_state, p, kernel_set):
 class KernelInvestmentPolicy:
     theta: tuple
     args: ResidualArgs
-    p: RecursiveParameters
     kernel_set: StateKernelSettings = struct.field(pytree_node=False)
 
     def __call__(self, log_state, p):
         return investment(self.theta, self.args, log_state, p, self.kernel_set)
 
 
-def make_policy(theta, args, p, kernel_set):
-    return KernelInvestmentPolicy(
-        theta=theta,
-        args=args,
-        p=p,
-        kernel_set=kernel_set,
-    )
-
-
 def residual_fn(theta, args, p, kernel_set):
-    policy = make_policy(theta, args, p, kernel_set)
+    policy = KernelInvestmentPolicy(theta, args, kernel_set)
     residual = euler_residuals(policy, args.train_log_states, p)
     return residual / jnp.sqrt(residual.size)
 
 
-# Calibration shared with neoclassical_growth_nn_recursive via the scoped
-# NEOCLASSICAL_GROWTH_CONSTANTS (utilities.py).
 def neoclassical_growth_kernel_recursive(
     a: float = CONSTANTS.a,
     delta: float = CONSTANTS.delta,
@@ -305,13 +272,21 @@ def neoclassical_growth_kernel_recursive(
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
     validate_balanced_growth(delta, rho_hat, sigma_crra, g)
-    validate_settings(data_set, kernel_set)
+    state_kernels = tuple(
+        f"{structure}_{family}"
+        for structure in ("ard", "additive")
+        for family in ("rbf", *MATERN_STATE_FAMILIES)
+    )
+    if kernel_set.state_kernel not in state_kernels:
+        raise ValueError(f"unknown state_kernel: {kernel_set.state_kernel!r}")
+    if kernel_set.linear_mean and kernel_set.homothetic_representation:
+        raise ValueError("linear_mean requires homothetic_representation=False")
     n_test_steps = data_set.test_points - 1
     test_T = data_set.test_T
 
     ic_draw = growth_initial_conditions(z_0, k_0, ic_set, dtype)
-    train_initial_conditions = ic_draw["train_initial_conditions"]
-    test_initial_conditions = ic_draw["test_initial_conditions"]
+    train_initial_conditions = ic_draw.train_initial_conditions
+    test_initial_conditions = ic_draw.test_initial_conditions
     p = RecursiveParameters.create(
         dtype,
         a=a,
@@ -383,7 +358,7 @@ def neoclassical_growth_kernel_recursive(
     theta = result.x
     alpha = theta[0]
     h_const = float(theta[1]) if kernel_set.free_constant else 0.0
-    policy = make_policy(theta, args, p, kernel_set)
+    policy = KernelInvestmentPolicy(theta, args, kernel_set)
     train_values = trajectory_values(policy, train_log_states, p)
     train_df = trajectory_frame(
         train_values,
@@ -428,7 +403,7 @@ def neoclassical_growth_kernel_recursive(
         np.asarray(test_solution.ts[0]),
         data_set,
     )
-    k_error, c_error, test_summary_df = add_benchmark_path_diagnostics(
+    test_summary_df, error_fields = add_benchmark_path_diagnostics(
         test_df,
         test_values,
         test_initial_conditions,
@@ -452,8 +427,6 @@ def neoclassical_growth_kernel_recursive(
     max_train_euler = float(jnp.max(jnp.abs(train_values["euler_residual"])))
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
     test_trajectory_euler = jnp.mean(jnp.abs(test_values["euler_residual"]), axis=1)
-    mean_k_error = float(np.mean(np.abs(k_error)))
-    mean_c_error = float(np.mean(np.abs(c_error)))
 
     gram_eigenvalues = jnp.linalg.eigvalsh(args.gram)
     train_kappa_0 = initial_kappa(train_initial_conditions, a)
@@ -463,7 +436,6 @@ def neoclassical_growth_kernel_recursive(
     collocation_kappa_spread = float(np.max(train_kappa) / np.min(train_kappa))
     results = {
         "variant": "fixed_recursive_kernel",
-        "collocation_source": data_set.collocation_source,
         "collocation_design": "frozen_exact_benchmark_states",
         "parameter_derivative": "conditional_on_fixed_collocation_design",
         "a": a,
@@ -473,8 +445,8 @@ def neoclassical_growth_kernel_recursive(
         "g": g,
         "z_0": z_0,
         "k_0": k_0,
-        "test_z_0": ic_draw["test_z_center"],
-        "test_k_0": ic_draw["test_k_center"],
+        "test_z_0": ic_draw.test_z_center,
+        "test_k_0": ic_draw.test_k_center,
         "data_seed": ic_set.data_seed,
         # Measured, not requested: a float64 leak upstream shows up here.
         "residual_dtype": str(train_values["euler_residual"].dtype),
@@ -527,18 +499,12 @@ def neoclassical_growth_kernel_recursive(
         **tvc_fields,
         "min_test_c": float(jnp.min(test_values["c"])),
         "test_path_ok": test_path_ok,
-        "test_mean_abs_k_rel_error": mean_k_error,
-        "test_mean_abs_c_rel_error": mean_c_error,
-        "test_median_abs_k_rel_error": float(np.median(np.abs(k_error))),
-        "test_median_abs_c_rel_error": float(np.median(np.abs(c_error))),
-        "test_max_abs_k_rel_error": float(np.max(np.abs(k_error))),
-        "test_max_abs_c_rel_error": float(np.max(np.abs(c_error))),
+        **error_fields,
         "steps": steps,
         "stopping_reason": stopping_reason,
         "solve_time": solve_time,
         "setup_time": setup_time,
         "total_fit_time": total_fit_time,
-        "solver_converged": solver_converged,
         "solution_accepted": solver_converged,
         "num_train_trajectories": ic_set.num_train_trajectories,
         "num_test_trajectories": ic_set.num_test_trajectories,
@@ -554,8 +520,8 @@ def neoclassical_growth_kernel_recursive(
         "test_kappa_0_max": float(test_kappa_0.max()),
         "train_log_z_variance": ic_set.train_log_z_variance,
         "train_log_k_variance": ic_set.train_log_k_variance,
-        "test_log_z_variance": ic_draw["test_log_z_variance"],
-        "test_log_k_variance": ic_draw["test_log_k_variance"],
+        "test_log_z_variance": ic_draw.test_log_z_variance,
+        "test_log_k_variance": ic_draw.test_log_k_variance,
         "train_point_dt": data_set.train_T / (data_set.train_points - 1),
         "test_points": data_set.test_points,
         "train_T": data_set.train_T,
@@ -569,60 +535,22 @@ def neoclassical_growth_kernel_recursive(
             log_z_lengthscale=ell_z,
             log_k_lengthscale=ell_k,
         )
-    results.update(
-        test_pooled_median_abs_k_rel_error=float(np.median(np.abs(k_error))),
-        test_pooled_median_abs_c_rel_error=float(np.median(np.abs(c_error))),
-        test_median_trajectory_mean_abs_k_rel_error=float(
-            test_summary_df["mean_k_abs_rel_error"].median()
-        ),
-        test_median_trajectory_mean_abs_c_rel_error=float(
-            test_summary_df["mean_c_abs_rel_error"].median()
-        ),
-    )
 
-    kappa_grid, grid_log_states = kappa_diagnostic_grid(
+    policy_df = policy_diagnostics_frame(
+        policy,
         train_kappa,
         test_df["kappa"].to_numpy(),
         train_kappa_0,
         test_kappa_0,
-        data_set.policy_grid_size,
-        dtype,
-    )
-    grid_values = trajectory_values(policy, grid_log_states[None, :, :], p)
-    grid_output_per_z = np.asarray(
-        hicks_production(
-            jnp.ones(data_set.policy_grid_size, dtype=dtype),
-            jnp.asarray(kappa_grid, dtype=dtype),
-            p,
-        )
-    )
-    c_benchmark_grid = benchmark_policy_grid(
         a,
         delta,
         rho_hat,
         sigma_crra,
         g,
-        kappa_grid,
+        p,
         data_set,
-    )
-    policy_df = pd.DataFrame(
-        {
-            "kappa": kappa_grid,
-            "investment_share_kernel": np.asarray(grid_values["i"][0])
-            / grid_output_per_z,
-            # The learned object itself: unit_softplus of the raw policy,
-            # since the grid fixes z = 1 so k = kappa.
-            "i_over_delta_k_kernel": np.asarray(grid_values["i"][0])
-            / (delta * np.asarray(kappa_grid)),
-            "i_per_z_kernel": np.asarray(grid_values["i"][0]),
-            "c_tilde_kernel": np.asarray(grid_values["c"][0]),
-            "dkappa_kernel": np.asarray(grid_values["dkappa"][0]),
-            **scale_invariance_columns(policy, kappa_grid, p, dtype, "kernel"),
-            "c_tilde_benchmark": c_benchmark_grid,
-            "dkappa_benchmark": (
-                kappa_grid**a - c_benchmark_grid - (delta + g) * kappa_grid
-            ),
-        }
+        dtype,
+        "kernel",
     )
     hyperparameters = {
         "kernel_set": asdict(kernel_set),

@@ -419,9 +419,7 @@ def open_economy_growth_kernel_uno(
         parameters,
     )
 
-    solve_time = result.cpu_time
-    if solve_time is None:
-        solve_time = elapsed
+    solve_time = elapsed
     solver_status = str(result.optimization_status).split(".")[-1]
     solution_status = str(result.solution_status).split(".")[-1]
     rejection_reasons = []
@@ -526,10 +524,7 @@ def open_economy_growth_kernel_uno(
         "rkhs_norm_q": float(rkhs_norm_q),
         "rkhs_norm_total": float(rkhs_norm_total),
         "objective_value": float(objective_norm_squared),
-        # solve_time is IPOPT's own cpu-time accounting; wall_time is the
-        # measured elapsed span, so both are kept.
         "solve_time": solve_time,
-        "wall_time": elapsed,
         "solver": "uno",
         "solver_status": solver_status,
         "solution_status": solution_status,

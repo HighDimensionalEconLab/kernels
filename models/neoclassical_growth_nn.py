@@ -200,8 +200,6 @@ def snapshot(data, model, p):
     return df
 
 
-# The shared NEOCLASSICAL_GROWTH_CONSTANTS (utilities.py) maps the Aruoba,
-# Fernandez-Villaverde & Rubio-Ramirez (2006 JEDC) benchmark values.
 def neoclassical_growth_nn(
     a: float = CONSTANTS.a,
     delta: float = CONSTANTS.delta,

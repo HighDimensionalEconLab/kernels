@@ -17,6 +17,7 @@ from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
 from tinydiffeq import SRA1, EulerMaruyama, Milstein, SaveAt, solve_sde
 
 from models.neoclassical_growth import (
+    DOMAIN_EPS,
     InitialConditionSettings,
     collocation_step_diagnostics,
     consumption,
@@ -42,8 +43,6 @@ from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
 )
-
-DOMAIN_EPS = 1e-8
 
 SDE_SOLVERS = {
     "sra1": SRA1(),
@@ -369,6 +368,10 @@ def residual_fn(theta, args, p):
 def log_tvc_residual(
     solver, policy, initial_log_states, noise, T_start, T_end, p, data_set
 ):
+    # An empty window would make the windowed max an -inf that reads as a
+    # passing certificate.
+    if T_start >= T_end:
+        raise ValueError("the transversality horizon must exceed the start")
     solution = rollout_steps(
         solver,
         policy,
@@ -580,10 +583,10 @@ def stochastic_growth_nn_recursive(
     test_T = data_set.test_T
 
     ic_draw = growth_initial_conditions(z_0, k_0, ic_set, dtype)
-    train_ic_key = ic_draw["train_ic_key"]
-    test_ic_key = ic_draw["test_ic_key"]
-    train_initial_conditions = ic_draw["train_initial_conditions"]
-    test_initial_conditions = ic_draw["test_initial_conditions"]
+    train_ic_key = ic_draw.train_ic_key
+    test_ic_key = ic_draw.test_ic_key
+    train_initial_conditions = ic_draw.train_initial_conditions
+    test_initial_conditions = ic_draw.test_initial_conditions
     p = StructuralParameters.create(
         dtype,
         a=a,
@@ -903,8 +906,8 @@ def stochastic_growth_nn_recursive(
         "z_ergodic_sd": z_ergodic_sd,
         "z_0": z_0,
         "k_0": k_0,
-        "test_z_0": ic_draw["test_z_center"],
-        "test_k_0": ic_draw["test_k_center"],
+        "test_z_0": ic_draw.test_z_center,
+        "test_k_0": ic_draw.test_k_center,
         "seed": seed,
         "data_seed": ic_set.data_seed,
         # Measured, not requested: a float64 leak upstream shows up here.
@@ -951,7 +954,6 @@ def stochastic_growth_nn_recursive(
         "solve_time_success": solve_time if solver_accepted else np.nan,
         "total_params": int(ravel_pytree(nnx.state(policy, nnx.Param))[0].size),
         "solution_accepted": solver_accepted,
-        "solver_converged": solver_accepted,
         "num_train_trajectories": ic_set.num_train_trajectories,
         "num_test_trajectories": ic_set.num_test_trajectories,
         **collocation_diagnostics,
@@ -964,8 +966,8 @@ def stochastic_growth_nn_recursive(
         "observed_log_k_max": float(observed_log_k.max()),
         "train_log_z_variance": ic_set.train_log_z_variance,
         "train_log_k_variance": ic_set.train_log_k_variance,
-        "test_log_z_variance": ic_draw["test_log_z_variance"],
-        "test_log_k_variance": ic_draw["test_log_k_variance"],
+        "test_log_z_variance": ic_draw.test_log_z_variance,
+        "test_log_k_variance": ic_draw.test_log_k_variance,
         "train_points": data_set.train_points,
         "train_steps": n_train_steps,
         "test_points": data_set.test_points,

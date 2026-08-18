@@ -11,7 +11,6 @@ import jax
 import jax.numpy as jnp
 import jsonargparse
 import numpy as np
-import pandas as pd
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import DrawNNXModule, LevenbergMarquardt, LMAction, LMStatus, MultiStart
@@ -20,17 +19,14 @@ from models.neoclassical_growth import (
     InitialConditionSettings,
     RecursiveParameters,
     add_benchmark_path_diagnostics,
-    benchmark_policy_grid,
     benchmark_trajectories,
     collocation_residuals,
     collocation_rollout,
     collocation_step_diagnostics,
     growth_initial_conditions,
-    hicks_production,
     initial_kappa,
-    kappa_diagnostic_grid,
+    policy_diagnostics_frame,
     rollout_steps,
-    scale_invariance_columns,
     standardized_initial_states,
     trajectory_frame,
     trajectory_values,
@@ -352,9 +348,8 @@ def residual_fn(theta, args, p):
     ).reshape(-1)
 
 
-# The shared NEOCLASSICAL_GROWTH_CONSTANTS (utilities.py) maps the Aruoba,
-# Fernandez-Villaverde & Rubio-Ramirez (2006 JEDC) benchmark values; the
-# stochastic variant solves this same model with stochastic TFP.
+# The stochastic variant (stochastic_growth_nn_recursive) solves this same
+# model with stochastic TFP.
 def neoclassical_growth_nn_recursive(
     a: float = CONSTANTS.a,
     delta: float = CONSTANTS.delta,
@@ -399,9 +394,9 @@ def neoclassical_growth_nn_recursive(
         raise ValueError("epoch resampling requires a positive training log variance")
 
     ic_draw = growth_initial_conditions(z_0, k_0, ic_set, dtype)
-    train_ic_key = ic_draw["train_ic_key"]
-    train_initial_conditions = ic_draw["train_initial_conditions"]
-    test_initial_conditions = ic_draw["test_initial_conditions"]
+    train_ic_key = ic_draw.train_ic_key
+    train_initial_conditions = ic_draw.train_initial_conditions
+    test_initial_conditions = ic_draw.test_initial_conditions
     p = RecursiveParameters.create(
         dtype,
         a=a,
@@ -483,7 +478,8 @@ def neoclassical_growth_nn_recursive(
     cache_hit = cache_path is not None and cache_path.exists()
     if cache_hit:
         policy, cached_meta = load_investment_policy(cache_path)
-        theta_final, solve_args = nnx.split(policy, nnx.Param, ...)[1], residual_args
+        _, theta_final, _ = nnx.split(policy, nnx.Param, ...)
+        solve_args = residual_args
         steps = 0
         epochs_run = 0
         attempt = 0
@@ -659,8 +655,8 @@ def neoclassical_growth_nn_recursive(
         "g": g,
         "z_0": z_0,
         "k_0": k_0,
-        "test_z_0": ic_draw["test_z_center"],
-        "test_k_0": ic_draw["test_k_center"],
+        "test_z_0": ic_draw.test_z_center,
+        "test_k_0": ic_draw.test_k_center,
         "seed": seed,
         "data_seed": ic_set.data_seed,
         "residual_dtype": residual_dtype,
@@ -695,7 +691,6 @@ def neoclassical_growth_nn_recursive(
         "solve_time_success": solve_time if solver_accepted else np.nan,
         "total_params": int(ravel_pytree(nnx.state(policy, nnx.Param))[0].size),
         "solution_accepted": solver_accepted,
-        "solver_converged": solver_accepted,
         "num_train_trajectories": ic_set.num_train_trajectories,
         "num_test_trajectories": ic_set.num_test_trajectories,
         **collocation_diagnostics,
@@ -711,8 +706,8 @@ def neoclassical_growth_nn_recursive(
         "test_kappa_0_max": float(test_kappa_0.max()),
         "train_log_z_variance": ic_set.train_log_z_variance,
         "train_log_k_variance": ic_set.train_log_k_variance,
-        "test_log_z_variance": ic_draw["test_log_z_variance"],
-        "test_log_k_variance": ic_draw["test_log_k_variance"],
+        "test_log_z_variance": ic_draw.test_log_z_variance,
+        "test_log_k_variance": ic_draw.test_log_k_variance,
         "ode_solver": data_set.ode_solver,
         "rtol": data_set.rtol,
         "atol": data_set.atol,
@@ -735,7 +730,7 @@ def neoclassical_growth_nn_recursive(
         np.asarray(test_solution.ts[0]),
         data_set,
     )
-    k_error, c_error, test_summary_df = add_benchmark_path_diagnostics(
+    test_summary_df, error_fields = add_benchmark_path_diagnostics(
         test_df,
         test_values,
         test_initial_conditions,
@@ -746,73 +741,28 @@ def neoclassical_growth_nn_recursive(
         delta=delta,
         g=g,
     )
-    results.update(
-        test_mean_abs_k_rel_error=float(np.mean(np.abs(k_error))),
-        test_mean_abs_c_rel_error=float(np.mean(np.abs(c_error))),
-        test_median_abs_k_rel_error=float(np.median(np.abs(k_error))),
-        test_median_abs_c_rel_error=float(np.median(np.abs(c_error))),
-        test_pooled_median_abs_k_rel_error=float(np.median(np.abs(k_error))),
-        test_pooled_median_abs_c_rel_error=float(np.median(np.abs(c_error))),
-        test_median_trajectory_mean_abs_k_rel_error=float(
-            test_summary_df["mean_k_abs_rel_error"].median()
-        ),
-        test_median_trajectory_mean_abs_c_rel_error=float(
-            test_summary_df["mean_c_abs_rel_error"].median()
-        ),
-        test_max_abs_k_rel_error=float(np.max(np.abs(k_error))),
-        test_max_abs_c_rel_error=float(np.max(np.abs(c_error))),
-    )
+    results.update(error_fields)
 
-    kappa_grid, grid_log_states = kappa_diagnostic_grid(
+    policy_df = policy_diagnostics_frame(
+        policy,
         train_kappa,
         test_df["kappa"].to_numpy(),
         train_kappa_0,
         test_kappa_0,
-        data_set.policy_grid_size,
-        dtype,
-    )
-    grid_values = trajectory_values(policy, grid_log_states[None, :, :], p)
-    grid_output_per_z = np.asarray(
-        hicks_production(
-            jnp.ones(data_set.policy_grid_size, dtype=dtype),
-            jnp.asarray(kappa_grid, dtype=dtype),
-            p,
-        )
-    )
-    policy_df = pd.DataFrame(
-        {
-            "kappa": kappa_grid,
-            "investment_share_nn": np.asarray(grid_values["i"][0]) / grid_output_per_z,
-            # The learned object itself: unit_softplus of the head, since the
-            # grid fixes z = 1 so k = kappa.
-            "i_over_delta_k_nn": np.asarray(grid_values["i"][0])
-            / (delta * np.asarray(kappa_grid)),
-            "i_per_z_nn": np.asarray(grid_values["i"][0]),
-            "c_tilde_nn": np.asarray(grid_values["c"][0]),
-            "dkappa_nn": np.asarray(grid_values["dkappa"][0]),
-            **scale_invariance_columns(policy, kappa_grid, p, dtype, "nn"),
-        }
-    )
-    c_benchmark_grid = benchmark_policy_grid(
         a,
         delta,
         rho_hat,
         sigma_crra,
         g,
-        kappa_grid,
+        p,
         data_set,
-    )
-    policy_df["c_tilde_benchmark"] = c_benchmark_grid
-    policy_df["dkappa_benchmark"] = (
-        np.asarray(kappa_grid) ** a
-        - c_benchmark_grid
-        - (delta + g) * np.asarray(kappa_grid)
+        dtype,
+        "nn",
     )
 
-    data_hyperparameters = asdict(data_set)
     hyperparameters = {
         "hc_set": asdict(hc_set),
-        "data_set": data_hyperparameters,
+        "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
         "opt_set": asdict(opt_set),
         "stop_set": asdict(stop_set),

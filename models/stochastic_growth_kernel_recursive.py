@@ -19,10 +19,10 @@ from models.neoclassical_growth import (
     trajectory_frame,
 )
 from models.neoclassical_growth_kernel_recursive import (
+    KernelInvestmentPolicy,
     StateKernelSettings,
     StoppingCriteria,
     build_residual_args,
-    make_policy,
     state_lengthscales,
 )
 from models.neoclassical_growth_nn_recursive import (
@@ -75,7 +75,7 @@ def load_reference_policy(policy_dir, problem_config):
 
 
 def residual_fn(theta, args, p, kernel_set):
-    policy = make_policy(theta, args, p, kernel_set)
+    policy = KernelInvestmentPolicy(theta, args, kernel_set)
     residual = euler_residuals(policy, args.train_log_states, p)
     return residual / jnp.sqrt(residual.size)
 
@@ -146,10 +146,10 @@ def stochastic_growth_kernel_recursive(
     test_T = data_set.test_T
 
     ic_draw = growth_initial_conditions(z_0, k_0, ic_set, dtype)
-    train_ic_key = ic_draw["train_ic_key"]
-    test_ic_key = ic_draw["test_ic_key"]
-    train_initial_conditions = ic_draw["train_initial_conditions"]
-    test_initial_conditions = ic_draw["test_initial_conditions"]
+    train_ic_key = ic_draw.train_ic_key
+    test_ic_key = ic_draw.test_ic_key
+    train_initial_conditions = ic_draw.train_initial_conditions
+    test_initial_conditions = ic_draw.test_initial_conditions
     p = StructuralParameters.create(
         dtype,
         a=a,
@@ -257,7 +257,7 @@ def stochastic_growth_kernel_recursive(
         )
 
     theta = result.x
-    policy = make_policy(theta, args, p, kernel_set)
+    policy = KernelInvestmentPolicy(theta, args, kernel_set)
     train_values = trajectory_values(policy, train_log_states, p)
     train_df = trajectory_frame(
         train_values,
@@ -406,8 +406,8 @@ def stochastic_growth_kernel_recursive(
         "z_bar": z_bar,
         "z_0": z_0,
         "k_0": k_0,
-        "test_z_0": ic_draw["test_z_center"],
-        "test_k_0": ic_draw["test_k_center"],
+        "test_z_0": ic_draw.test_z_center,
+        "test_k_0": ic_draw.test_k_center,
         "data_seed": ic_set.data_seed,
         # Measured, not requested: a float64 leak upstream shows up here.
         "residual_dtype": str(train_values["euler_residual"].dtype),

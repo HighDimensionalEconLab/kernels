@@ -35,7 +35,7 @@ def apply_common_validation(results):
         if "collocation_path_ok" in results
         else True
     )
-    common_accepted = results["solver_converged"].astype(bool) & collocation_path_ok
+    common_accepted = results["solution_accepted"].astype(bool) & collocation_path_ok
     results["native_solution_accepted"] = results["solution_accepted"]
     results["common_validation_accepted"] = common_accepted
     results["solution_accepted"] = common_accepted
@@ -52,11 +52,11 @@ def method_summary(method, results):
         "frac_accepted": float(results["common_validation_accepted"].mean()),
         "optimizer_solve_time": float(sample["solve_time"].median()),
         "total_fit_time": float(sample["total_fit_time"].median()),
-        "test_pooled_median_abs_k_rel_error": float(
-            sample["test_pooled_median_abs_k_rel_error"].median()
+        "test_median_abs_k_rel_error": float(
+            sample["test_median_abs_k_rel_error"].median()
         ),
-        "test_pooled_median_abs_c_rel_error": float(
-            sample["test_pooled_median_abs_c_rel_error"].median()
+        "test_median_abs_c_rel_error": float(
+            sample["test_median_abs_c_rel_error"].median()
         ),
         "test_median_trajectory_mean_abs_k_rel_error": float(
             sample["test_median_trajectory_mean_abs_k_rel_error"].median()

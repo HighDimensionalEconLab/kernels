@@ -351,7 +351,7 @@ def multicountry_growth_nn(
         multi_start=multi_start,
         **solve_options,
     )
-    train_time = timer.elapsed(result)
+    solve_time = timer.elapsed(result)
     model = nnx.merge(graphdef, result.x, nondiff)
     attempt = int(result.multi_start.attempt) + 1
 
@@ -534,9 +534,8 @@ def multicountry_growth_nn(
         "steps": int(result.steps),
         "attempt": attempt,
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
-        "train_time": train_time,
-        "train_time_success": train_time if solution_accepted else np.nan,
-        "wall_time": train_time,
+        "solve_time": solve_time,
+        "solve_time_success": solve_time if solution_accepted else np.nan,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
         "nn_width": nn_set.width,
         "nn_depth": nn_set.depth,

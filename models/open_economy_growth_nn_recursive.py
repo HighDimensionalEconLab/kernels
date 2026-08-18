@@ -422,7 +422,7 @@ def open_economy_growth_nn_recursive(
         multi_start=multi_start,
         **solve_options,
     )
-    train_time = timer.elapsed(result)
+    solve_time = timer.elapsed(result)
     attempt = int(result.multi_start.attempt) + 1
     policy = nnx.merge(graphdef, result.x, nondiff)
 
@@ -616,8 +616,8 @@ def open_economy_growth_nn_recursive(
         "steps": int(result.steps),
         "attempt": attempt,
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
-        "train_time": train_time,
-        "train_time_success": train_time if solution_accepted else np.nan,
+        "solve_time": solve_time,
+        "solve_time_success": solve_time if solution_accepted else np.nan,
         "total_params": int(theta_final.size),
         "unknown_count": int(theta_final.size),
         "parameter_norm_initial": float(jnp.linalg.norm(theta_initial)),

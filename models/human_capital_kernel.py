@@ -389,7 +389,6 @@ def human_capital_kernel(
             jnp.max(jnp.abs(test_eval["hidden_dae_residual"]))
         ),
         "solve_time": elapsed,
-        "wall_time": elapsed,
         "solver": "nlls-gram",
         "linear_solver": "cholesky",
         "ridge": lm_set.ridge,

@@ -606,7 +606,6 @@ def multicountry_growth_kernel(
         "rkhs_norm_total": float(rkhs_norm_total),
         "rkhs_norm_interest_rate": float(rkhs_norm_rate),
         "solve_time": solve_time,
-        "wall_time": solve_time,
         "solver": "nlls-gram",
         "linear_solver": lm_set.linear_solver,
         "preconditioner": "arrow_woodbury" if lm_set.linear_solver == "cg" else "none",

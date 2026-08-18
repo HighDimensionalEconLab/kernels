@@ -235,7 +235,6 @@ def asset_pricing_kernel(
         "p_rel_error_max": float(p_rel_error[1:].max()),
         "p_rel_error_min": float(p_rel_error[1:].min()),
         "solve_time": elapsed,
-        "wall_time": elapsed,
         "solver": "nlls-gram",
         "linear_solver": "cholesky",
         "ridge": lm_set.ridge,

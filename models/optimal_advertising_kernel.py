@@ -243,7 +243,6 @@ def optimal_advertising_kernel(
         "train_residual_tolerance": train_residual_tolerance,
         "max_validation_residual": max_validation_residual,
         "solve_time": elapsed,
-        "wall_time": elapsed,
         "solver": "nlls-gram",
         "linear_solver": "cholesky",
         "ridge": lm_set.ridge,

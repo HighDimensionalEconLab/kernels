@@ -211,7 +211,7 @@ def asset_pricing_nn(
         multi_start=multi_start,
         **solve_options,
     )
-    train_time = timer.elapsed(result)
+    solve_time = timer.elapsed(result)
     model = nnx.merge(graphdef, result.x, nondiff)
 
     train_df = snapshot(model, train_t, r, c, g, x_0)
@@ -252,8 +252,7 @@ def asset_pricing_nn(
         "steps": int(result.steps),
         "attempt": int(result.multi_start.attempt) + 1,
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
-        "train_time": train_time,
-        "wall_time": train_time,
+        "solve_time": solve_time,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
         "solution_accepted": solution_accepted,
         "rejection_reason": (

@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
-from nlls_gram import LevenbergMarquardt, MultiStart
+from nlls_gram import DrawNNXModule, LevenbergMarquardt, MultiStart
 from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 
 from models.open_economy_growth import (
@@ -28,6 +28,7 @@ from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
     OptimizerSettings,
+    SolveSpec,
     Stopwatch,
     acceptance_fields,
     unit_softplus,
@@ -91,7 +92,7 @@ class SequentialPolicySettings:
 @struct.dataclass
 class ResidualArgs:
     graphdef: nnx.GraphDef
-    fixed_state: nnx.State
+    nondiff: nnx.State
     data_set: DataSettings = struct.field(pytree_node=False)
 
 
@@ -133,7 +134,7 @@ class SequentialPolicyNN(nnx.Module):
         dtype,
         rngs: nnx.Rngs,
     ):
-        self.hidden_activation = ACTIVATIONS[settings.hidden_activation]
+        self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
         self.flow_scale = nnx.Variable(jnp.asarray(settings.flow_scale, dtype=dtype))
         self.investment_anchor = nnx.Variable(
             jnp.asarray(settings.investment_anchor, dtype=dtype)
@@ -171,32 +172,6 @@ class SequentialPolicyNN(nnx.Module):
         )
         current_account = self.flow_scale[...] * raw[1]
         return jnp.stack([investment, current_account])
-
-
-# nlls_gram.DrawNNXModule cannot be used here: it splits on nnx.Param alone,
-# which is a non-exhaustive filter for a policy carrying non-Param scaling
-# Variables. The redrawn fixed_state is deterministic in the settings, so args
-# pass through unchanged. Value-hashable on the spec so equal draws share one
-# jit compilation rather than recompiling per instance.
-class DrawSequentialPolicy:
-    def __init__(self, settings, dtype):
-        self.settings = settings
-        self.dtype = dtype
-
-    def __call__(self, key, x_old, args_old):
-        module = SequentialPolicyNN(self.settings, dtype=self.dtype, rngs=nnx.Rngs(key))
-        _, theta, _ = nnx.split(module, nnx.Param, ...)
-        return theta, args_old
-
-    def __hash__(self):
-        return hash((DrawSequentialPolicy, self.settings, self.dtype))
-
-    def __eq__(self, other):
-        return (
-            isinstance(other, DrawSequentialPolicy)
-            and self.settings == other.settings
-            and self.dtype == other.dtype
-        )
 
 
 def policy_values(policy, k, a, parameters):
@@ -321,7 +296,7 @@ def collocation_states(policy, k_0, a_0, parameters, data_set):
 
 
 def residual_fn(theta, args, p):
-    policy = nnx.merge(args.graphdef, theta, args.fixed_state)
+    policy = nnx.merge(args.graphdef, theta, args.nondiff)
     states, active, solution = collocation_states(
         policy,
         p.k_0,
@@ -422,10 +397,10 @@ def open_economy_growth_nn_recursive(
     )
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     model = SequentialPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(init_key))
-    graphdef, theta_0, fixed_state = nnx.split(model, nnx.Param, ...)
+    graphdef, theta_0, nondiff = nnx.split(model, nnx.Param, ...)
     residual_args = ResidualArgs(
         graphdef=graphdef,
-        fixed_state=fixed_state,
+        nondiff=nondiff,
         data_set=data_set,
     )
     residual_parameters = ResidualParameters(
@@ -443,23 +418,27 @@ def open_economy_growth_nn_recursive(
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
     atol = math.sqrt(stop_set.train_loss_threshold)
+    multi_start = MultiStart(
+        key=multi_start_key,
+        num_starts=stop_set.num_attempts,
+        draw=DrawNNXModule(SequentialPolicyNN, nn_set, dtype=dtype),
+    )
+    solve_options = dict(
+        max_steps=stop_set.max_steps,
+        atol=atol,
+        max_steps_is_success=False,
+    )
     timer = Stopwatch()
     result = solver.solve(
         theta_0,
         residual_args,
         p=residual_parameters,
-        max_steps=stop_set.max_steps,
-        atol=atol,
-        multi_start=MultiStart(
-            key=multi_start_key,
-            num_starts=stop_set.num_attempts,
-            draw=DrawSequentialPolicy(nn_set, dtype),
-        ),
-        max_steps_is_success=False,
+        multi_start=multi_start,
+        **solve_options,
     )
     train_time = timer.elapsed(result)
     attempt = int(result.multi_start.attempt) + 1
-    policy = nnx.merge(graphdef, result.x, fixed_state)
+    policy = nnx.merge(graphdef, result.x, nondiff)
 
     train_eval = evaluate_path(
         policy,
@@ -725,6 +704,15 @@ def open_economy_growth_nn_recursive(
         "diagnostic_df": diagnostic_df,
         "policy_df": policy_df,
         "hyperparameters": hyperparameters,
+        "solve": SolveSpec(
+            solver=solver,
+            theta_0=theta_0,
+            p=residual_parameters,
+            residual_args=residual_args,
+            multi_start=multi_start,
+            options=solve_options,
+        ),
+        "result": result,
     }
 
 

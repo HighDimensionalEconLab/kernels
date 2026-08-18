@@ -13,7 +13,6 @@ from jax.flatten_util import ravel_pytree
 from nlls_gram import (
     DrawNNXModule,
     LevenbergMarquardt,
-    LMStatus,
     MultiStart,
 )
 
@@ -29,18 +28,17 @@ from models.multicountry_growth import (
     production,
     relative_welfare_weights,
     resolved_steady_state,
-    sensitivity_fields_frame,
     steady_state,
     tail_diagnostics,
     tvc_diagnostics,
     validate_initial_conditions,
-    weighted_gini,
 )
 from models.multicountry_growth_benchmark import multicountry_growth_benchmark
 from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
     OptimizerSettings,
+    SolveSpec,
     Stopwatch,
     acceptance_fields,
     make_sampled_train_grid,
@@ -121,6 +119,7 @@ class ResidualParameters:
 @struct.dataclass
 class ResidualArgs:
     graphdef: nnx.GraphDef
+    nondiff: nnx.State
     t: jax.Array
     scales: PathScales = struct.field(pytree_node=False)
 
@@ -134,9 +133,9 @@ class SequencePathNN(nnx.Module):
         dtype,
         rngs: nnx.Rngs,
     ):
-        self.num_countries = num_countries
-        self.hidden_activation = ACTIVATIONS[settings.hidden_activation]
-        self.input_scale = settings.input_scale
+        self.num_countries = nnx.static(num_countries)
+        self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
+        self.input_scale = nnx.static(settings.input_scale)
         self.layers = nnx.List(
             [
                 nnx.Linear(
@@ -235,7 +234,9 @@ def dae_residuals(values, parameters):
 
 
 def residual_fn(theta, args, p):
-    values = path_values(nnx.merge(args.graphdef, theta), args.t, p, args.scales)
+    values = path_values(
+        nnx.merge(args.graphdef, theta, args.nondiff), args.t, p, args.scales
+    )
     residuals = dae_residuals(values, p.model)
     residual = jnp.concatenate(
         [
@@ -267,7 +268,6 @@ def multicountry_growth_nn(
     stop_set: StoppingCriteria = StoppingCriteria(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
-    sensitivity_times: list[float] | None = None,
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
@@ -319,14 +319,12 @@ def multicountry_growth_nn(
         model=multicountry_parameter_values(parameters, dtype),
     )
 
-    graphdef, _ = nnx.split(
-        SequencePathNN(num_countries, nn_set, dtype=dtype, rngs=nnx.Rngs(0)),
-        nnx.Param,
-    )
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     model = SequencePathNN(num_countries, nn_set, dtype=dtype, rngs=nnx.Rngs(init_key))
-    _, theta_0 = nnx.split(model, nnx.Param)
-    residual_args = ResidualArgs(graphdef=graphdef, t=train_t, scales=scales)
+    graphdef, theta_0, nondiff = nnx.split(model, nnx.Param, ...)
+    residual_args = ResidualArgs(
+        graphdef=graphdef, nondiff=nondiff, t=train_t, scales=scales
+    )
 
     solver = LevenbergMarquardt(
         residual_fn,
@@ -339,23 +337,27 @@ def multicountry_growth_nn(
     # solve()'s atol is on the residual norm; the settings threshold is on
     # the sum of squared residuals.
     atol = math.sqrt(stop_set.train_loss_threshold)
+    solve_options = dict(
+        max_steps=stop_set.max_steps,
+        atol=atol,
+        max_steps_is_success=False,
+    )
+    multi_start = MultiStart(
+        key=multi_start_key,
+        num_starts=stop_set.num_attempts,
+        draw=DrawNNXModule(SequencePathNN, num_countries, nn_set, dtype=dtype),
+    )
 
     timer = Stopwatch()
     result = solver.solve(
         theta_0,
         residual_args,
         p=residual_parameters,
-        max_steps=stop_set.max_steps,
-        atol=atol,
-        multi_start=MultiStart(
-            key=multi_start_key,
-            num_starts=stop_set.num_attempts,
-            draw=DrawNNXModule(SequencePathNN, num_countries, nn_set, dtype=dtype),
-        ),
-        max_steps_is_success=False,
+        multi_start=multi_start,
+        **solve_options,
     )
     train_time = timer.elapsed(result)
-    model = nnx.merge(graphdef, result.x)
+    model = nnx.merge(graphdef, result.x, nondiff)
     attempt = int(result.multi_start.attempt) + 1
 
     def evaluate_grid(points):
@@ -482,121 +484,6 @@ def multicountry_growth_nn(
     relative_weights = test_eval["relative_welfare_weights"][0]
     log_relative_weights = jnp.log(relative_weights)
 
-    sensitivity_df = None
-    sensitivity_fields = {}
-    if sensitivity_times is not None:
-        sensitivity_times = [float(value) for value in sensitivity_times]
-        if any(not 0.0 <= value <= float(train_t[-1]) for value in sensitivity_times):
-            raise ValueError("sensitivity_times must lie within the training horizon")
-        t_sens = jnp.asarray(sensitivity_times, dtype=dtype)
-
-        # The world rate, three cross-sectional world statistics, and every
-        # country's consumption and capital -- the kernel driver's observable
-        # stack, so the two solvers' tables are comparable cell by cell.
-        def sensitivity_observables(values, parameters_p):
-            populations_p = parameters_p.populations
-            weights = populations_p / jnp.sum(populations_p)
-            x = investment_expenditure(values["k"], values["q"], parameters_p)
-            output = production(values["k"], parameters_p.productivities, parameters_p)
-            # World saving is world investment: with no outside world the
-            # aggregate current account is identically zero.
-            saving_rate = jnp.sum(weights * x, axis=-1) / jnp.sum(
-                weights * output, axis=-1
-            )
-            steady_p = steady_state(parameters_p, values["a"].dtype)
-            nfa_dispersion = (
-                jnp.sqrt(jnp.sum(weights * values["a"] ** 2, axis=-1))
-                / steady_p["output_scale"]
-            )
-            return jnp.column_stack(
-                [
-                    values["interest_rate"],
-                    saving_rate,
-                    nfa_dispersion,
-                    weighted_gini(output, populations_p),
-                    values["c"],
-                    values["k"],
-                ]
-            )
-
-        # Warm-started at the trained parameters and re-solved to the same
-        # residual tolerance, so the stationary point the implicit tangents
-        # are taken at moves smoothly with p; the multi-start draw is not
-        # re-run. The paths are the unique model solution, so the observable
-        # derivatives do not depend on which network parameterization the
-        # warm start selects.
-        def observables_at_sensitivity_times(p_value):
-            solved = solver.solve(
-                result.x,
-                residual_args,
-                p=p_value,
-                max_steps=stop_set.max_steps,
-                atol=atol,
-                max_steps_is_success=False,
-            )
-            values = path_values(nnx.merge(graphdef, solved.x), t_sens, p_value, scales)
-            return sensitivity_observables(values, p_value.model), solved.status
-
-        observable_labels = (
-            ["rate", "saving_rate", "nfa_dispersion", "output_gini"]
-            + [f"c_{country + 1}" for country in range(num_countries)]
-            + [f"k_{country + 1}" for country in range(num_countries)]
-        )
-
-        # The full Jacobian: every observable against every parameter, at one
-        # reverse pass per output scalar.
-        jacobian, sensitivity_status = jax.jacrev(
-            observables_at_sensitivity_times, has_aux=True
-        )(residual_parameters)
-        jax.block_until_ready(jacobian)
-        primal_observables = np.asarray(
-            sensitivity_observables(
-                path_values(model, t_sens, residual_parameters, scales),
-                residual_parameters.model,
-            )
-        )
-        gradient_parameters = jacobian.model
-        country_blocks = {
-            "gamma": np.asarray(gradient_parameters.gammas),
-            "productivity": np.asarray(gradient_parameters.productivities),
-            "population": np.asarray(gradient_parameters.populations),
-            "k_0": np.asarray(jacobian.k_0),
-            "a_0": np.asarray(jacobian.a_0),
-        }
-        rate_a_0_gradient = country_blocks["a_0"][:, 0, :]
-
-        # A non-converged re-solve would publish exactly zero implicit
-        # tangents, indistinguishable from a genuine null effect.
-        if int(sensitivity_status) != LMStatus.CONVERGED:
-            raise RuntimeError("the sensitivity re-solve did not converge")
-        sensitivity_fields, sensitivity_df = sensitivity_fields_frame(
-            sensitivity_times,
-            observable_labels,
-            primal_observables,
-            {
-                "alpha": np.asarray(gradient_parameters.alpha),
-                "delta": np.asarray(gradient_parameters.delta),
-                "r": np.asarray(gradient_parameters.r),
-                "eta": np.asarray(gradient_parameters.eta),
-            },
-            country_blocks,
-            [float(value) for value in parameters.populations],
-        )
-
-        # Under identical homothetic preferences the world rate is invariant
-        # to every clearing-preserving reallocation of the initial bond
-        # positions, so the rate's bond derivatives are zero to solver
-        # tolerance. Reported as a measured scalar: it is the check on the
-        # implicit tangents themselves, not another comparative static.
-        for index, time_value in enumerate(sensitivity_times):
-            suffix = f"T{time_value:g}".replace(".", "p")
-            sensitivity_fields[f"rate_{suffix}_a_0_neutrality"] = float(
-                np.max(np.abs(rate_a_0_gradient[index]))
-            )
-        sensitivity_fields["rate_a_0_neutrality"] = float(
-            np.max(np.abs(rate_a_0_gradient))
-        )
-
     results = {
         "alpha": parameters.alpha,
         "delta": parameters.delta,
@@ -706,11 +593,6 @@ def multicountry_growth_nn(
             results[f"initial_wealth_{suffix}"] = float(
                 long_run["initial_wealth"][country]
             )
-    if sensitivity_times is not None:
-        results["sensitivity_times"] = ",".join(
-            f"{value:g}" for value in sensitivity_times
-        )
-        results.update(sensitivity_fields)
     if benchmark_available:
         results.update(
             {
@@ -789,11 +671,19 @@ def multicountry_growth_nn(
 
     return results, {
         "model": model,
-        "sensitivity_df": sensitivity_df,
         "train_df": train_df,
         "validation_df": validation_df,
         "test_df": test_df,
         "hyperparameters": hyperparameters,
+        "solve": SolveSpec(
+            solver=solver,
+            theta_0=theta_0,
+            p=residual_parameters,
+            residual_args=residual_args,
+            multi_start=multi_start,
+            options=solve_options,
+        ),
+        "result": result,
     }
 
 

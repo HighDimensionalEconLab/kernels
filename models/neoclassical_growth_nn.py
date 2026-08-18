@@ -13,18 +13,15 @@ from jax.flatten_util import ravel_pytree
 from nlls_gram import (
     DrawNNXModule,
     LevenbergMarquardt,
-    LMStatus,
     MultiStart,
 )
 
-from models.neoclassical_growth_benchmark import (
-    neoclassical_growth_benchmark,
-    neoclassical_steady_state_sensitivities,
-)
+from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
     OptimizerSettings,
+    SolveSpec,
     Stopwatch,
     make_train_t_grid,
     unit_softplus,
@@ -98,6 +95,7 @@ class GrowthPolicySettings:
 @struct.dataclass
 class ResidualArgs:
     graphdef: nnx.GraphDef
+    nondiff: nnx.State
     t: jax.Array
 
 
@@ -111,10 +109,12 @@ class GrowthPolicyNN(nnx.Module):
         dtype,
         rngs: nnx.Rngs,
     ):
-        self.hidden_activation = ACTIVATIONS[settings.hidden_activation]
-        self.input_scale = settings.input_scale
-        self.k_scale = k_scale
-        self.c_scale = c_scale
+        self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
+        self.input_scale = nnx.static(settings.input_scale)
+        # Non-Param Variables: the output scales are data (no recompilation
+        # when they change) but sit outside the differentiated Param state.
+        self.k_scale = nnx.Variable(jnp.asarray(k_scale, dtype=dtype))
+        self.c_scale = nnx.Variable(jnp.asarray(c_scale, dtype=dtype))
         self.layers = nnx.List(
             [
                 nnx.Linear(
@@ -152,9 +152,7 @@ class GrowthPolicyNN(nnx.Module):
         h = jnp.atleast_1d(t / self.input_scale)
         for layer in self.layers:
             h = self.hidden_activation(layer(h))
-        output_scale = jnp.asarray(
-            [self.k_scale, self.c_scale], dtype=self.head.kernel.dtype
-        )
+        output_scale = jnp.stack([self.k_scale[...], self.c_scale[...]])
         return output_scale * unit_softplus(self.head(h))
 
 
@@ -206,7 +204,9 @@ def training_residual(model, data, p):
 
 
 def residual_fn(theta, args, p):
-    return training_residual(nnx.merge(args.graphdef, theta), {"t": args.t}, p)
+    return training_residual(
+        nnx.merge(args.graphdef, theta, args.nondiff), {"t": args.t}, p
+    )
 
 
 def snapshot(data, model, p):
@@ -252,7 +252,6 @@ def neoclassical_growth_nn(
     ),
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
-    sensitivity_times: list[float] | None = None,
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
@@ -306,16 +305,6 @@ def neoclassical_growth_nn(
     policy_settings = replace(nn_set, input_scale=max(float(data_set.train_T), 1.0))
     k_scale = max(float(k_0), DOMAIN_EPS)
     c_scale = c_flow_guess
-    graphdef, _ = nnx.split(
-        GrowthPolicyNN(
-            policy_settings,
-            k_scale=k_scale,
-            c_scale=c_scale,
-            dtype=dtype,
-            rngs=nnx.Rngs(0),
-        ),
-        nnx.Param,
-    )
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     model = GrowthPolicyNN(
         policy_settings,
@@ -324,8 +313,8 @@ def neoclassical_growth_nn(
         dtype=dtype,
         rngs=nnx.Rngs(init_key),
     )
-    _, theta_0 = nnx.split(model, nnx.Param)
-    residual_args = ResidualArgs(graphdef=graphdef, t=t_train)
+    graphdef, theta_0, nondiff = nnx.split(model, nnx.Param, ...)
+    residual_args = ResidualArgs(graphdef=graphdef, nondiff=nondiff, t=t_train)
 
     solver = LevenbergMarquardt(
         residual_fn,
@@ -341,12 +330,21 @@ def neoclassical_growth_nn(
     # convergence, max_steps as the budget (a nonfinite candidate is rejected
     # and damping raised, which recovers more often than aborting).
     atol = math.sqrt(stop_set.train_loss_threshold)
-    draw = DrawNNXModule(
-        GrowthPolicyNN,
-        policy_settings,
-        k_scale=k_scale,
-        c_scale=c_scale,
-        dtype=dtype,
+    solve_options = dict(
+        max_steps=stop_set.max_steps,
+        atol=atol,
+        max_steps_is_success=False,
+    )
+    multi_start = MultiStart(
+        key=multi_start_key,
+        num_starts=stop_set.num_attempts,
+        draw=DrawNNXModule(
+            GrowthPolicyNN,
+            policy_settings,
+            k_scale=k_scale,
+            c_scale=c_scale,
+            dtype=dtype,
+        ),
     )
 
     timer = Stopwatch()
@@ -354,17 +352,11 @@ def neoclassical_growth_nn(
         theta_0,
         residual_args,
         p=p,
-        max_steps=stop_set.max_steps,
-        atol=atol,
-        multi_start=MultiStart(
-            key=multi_start_key,
-            num_starts=stop_set.num_attempts,
-            draw=draw,
-        ),
-        max_steps_is_success=False,
+        multi_start=multi_start,
+        **solve_options,
     )
     train_time = timer.elapsed(result)
-    model = nnx.merge(graphdef, result.x)
+    model = nnx.merge(graphdef, result.x, nondiff)
     steps = int(result.steps)
     attempt = int(result.multi_start.attempt) + 1
     stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
@@ -377,63 +369,6 @@ def neoclassical_growth_nn(
     tvc_values = policy_values(model, jnp.atleast_1d(tvc_t), p)
     log_tvc = float(tvc_values["log_tvc"][0])
     transversality_ok = bool(log_tvc < stop_set.log_tvc_threshold)
-
-    sensitivity_df = None
-    sensitivity_fields = {}
-    if sensitivity_times is not None:
-        if use_kinked_production:
-            raise ValueError("sensitivities require smooth production")
-        sensitivity_times = [float(value) for value in sensitivity_times]
-        if any(not 0.0 <= value <= float(t_train[-1]) for value in sensitivity_times):
-            raise ValueError("sensitivity_times must lie within the training horizon")
-        t_sens = jnp.asarray(sensitivity_times, dtype=dtype)
-
-        # Warm-started at the trained parameters and re-solved to the same
-        # residual tolerance, so the stationary point the implicit tangents
-        # are taken at moves smoothly with p; the multi-start draw is not
-        # re-run. The paths are the unique model solution, so the observable
-        # derivatives do not depend on which network parameterization the
-        # warm start selects.
-        def paths_at_sensitivity_times(p_value):
-            solved = solver.solve(
-                result.x,
-                residual_args,
-                p=p_value,
-                max_steps=stop_set.max_steps,
-                atol=atol,
-                max_steps_is_success=False,
-            )
-            values = policy_values(nnx.merge(graphdef, solved.x), t_sens, p_value)
-            return jnp.column_stack([values["k"], values["c"]]), solved.status
-
-        jacobian, sensitivity_status = jax.jacrev(
-            paths_at_sensitivity_times, has_aux=True
-        )(p)
-        jax.block_until_ready(jacobian)
-        # A non-converged re-solve would publish exactly zero implicit
-        # tangents, indistinguishable from a genuine null effect.
-        if int(sensitivity_status) != LMStatus.CONVERGED:
-            raise RuntimeError("the sensitivity re-solve did not converge")
-        primal_values = policy_values(model, t_sens, p)
-        rows = []
-        for index, time_value in enumerate(sensitivity_times):
-            suffix = f"T{time_value:g}".replace(".", "p")
-            sensitivity_fields[f"k_{suffix}"] = float(primal_values["k"][index])
-            sensitivity_fields[f"c_{suffix}"] = float(primal_values["c"][index])
-            for name in ("a", "delta", "rho_hat", "sigma_crra", "k_0"):
-                d_k = float(getattr(jacobian, name)[index, 0])
-                d_c = float(getattr(jacobian, name)[index, 1])
-                sensitivity_fields[f"d_k_{suffix}_d_{name}"] = d_k
-                sensitivity_fields[f"d_c_{suffix}_d_{name}"] = d_c
-                rows.append(
-                    {"time": time_value, "parameter": name, "d_k": d_k, "d_c": d_c}
-                )
-        sensitivity_df = pd.DataFrame(rows)
-        # The exact steady-state derivatives the large-T columns converge
-        # to; the sigma_crra and k_0 rows converge to zero.
-        sensitivity_fields.update(
-            neoclassical_steady_state_sensitivities(a, delta, rho_hat)
-        )
 
     train_resource_mean_abs = float(train_df["resource"].abs().mean())
     train_euler_mean_abs = float(train_df["euler"].abs().mean())
@@ -484,11 +419,6 @@ def neoclassical_growth_nn(
         "test_T": data_set.test_T,
         "test_tvc_T": data_set.test_tvc_T,
     }
-    if sensitivity_times is not None:
-        results["sensitivity_times"] = ",".join(
-            f"{value:g}" for value in sensitivity_times
-        )
-        results.update(sensitivity_fields)
     if not use_kinked_production:
         results.update(
             test_mean_abs_k_rel_error=float(test_df["k_rel_error"].mean()),
@@ -523,10 +453,18 @@ def neoclassical_growth_nn(
 
     return results, {
         "model": model,
-        "sensitivity_df": sensitivity_df,
         "train_df": train_df,
         "test_df": test_df,
         "hyperparameters": hyperparameters,
+        "solve": SolveSpec(
+            solver=solver,
+            theta_0=theta_0,
+            p=p,
+            residual_args=residual_args,
+            multi_start=multi_start,
+            options=solve_options,
+        ),
+        "result": result,
     }
 
 

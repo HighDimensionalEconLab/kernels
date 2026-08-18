@@ -212,7 +212,6 @@ uv run python -m models.multicountry_growth_kernel \
   --parameters.productivities '[1.0, 1.0, 1.0]' \
   --lm_set.linear_solver cg \
   --initial_set.seed 3
-uv run python -m models.multicountry_growth_kernel --sensitivity_time 10
 uv run python -m models.multicountry_growth_nn --a_0 '[-0.5, 0.5]' --seed 0
 ```
 
@@ -248,18 +247,26 @@ arrow-Woodbury inverse built at the solution), comparable against the
 N = 2 and N = 10 sensitivity tables — with the tangent's wall time
 reported next to the primal solve time.
 
-`multicountry_growth_kernel.py` threads every structural parameter and
-initial condition through the solver's implicit-AD `p` argument, so
-`--sensitivity_times '[0,10,30,80]'` reports the comparative statics of
-the world interest rate, three world statistics (saving rate, NFA
-dispersion, output Gini), and every country's consumption and capital
-with respect to all of them, as `d_<observable>_T<t>_d_<parameter>`
-result keys and `extras["sensitivity_df"]`. `--sensitivity_mode reverse`
-builds the whole Jacobian, one reverse pass per output scalar;
-`forward` linearizes once and applies the tangent map only along the
-directions published — the `(1, ..., 1)` direction in `gamma` and one
-bond direction per country. Both cost about the same, since the re-solve
-inside the differentiated function dominates either.
+Every driver threads its structural parameters and initial conditions
+through the solver's implicit-AD `p` argument and returns
+`extras["solve"]`, a `SolveSpec` (`models/utilities.py`) holding the
+solver, `theta_0`, `p`, `residual_args`, `multi_start`, and the solve
+options, alongside `extras["result"]`, the raw solver result. A caller
+re-runs or warm-starts the solve from the spec and differentiates its own
+re-solve with respect to `spec.p` — the replication drivers do exactly
+this for the sensitivity tables (`replication/neoclassical_growth_kernel.py`,
+`replication/neoclassical_growth_nn.py`,
+`replication/multicountry_growth_kernel.py`,
+`replication/multicountry_growth_nn.py`), publishing
+`d_<observable>_T<t>_d_<parameter>` result fields. The multicountry
+callers report the comparative statics of the world interest rate, three
+world statistics (saving rate, NFA dispersion, output Gini), and every
+country's consumption and capital: reverse mode builds the whole
+Jacobian, one reverse pass per output scalar; forward mode linearizes
+once and applies the tangent map only along the directions published —
+the `(1, ..., 1)` direction in `gamma` and one bond direction per
+country. Both cost about the same, since the re-solve inside the
+differentiated function dominates either.
 
 Every country block also carries a `_common` entry, the derivative along
 `(1, ..., 1)`: the country count cancels, so it is the one country-block

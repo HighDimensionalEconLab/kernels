@@ -31,6 +31,7 @@ from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
     OptimizerSettings,
+    SolveSpec,
     Stopwatch,
     acceptance_fields,
     make_sampled_train_grid,
@@ -130,6 +131,7 @@ class ResidualParameters:
 @struct.dataclass
 class ResidualArgs:
     graphdef: nnx.GraphDef
+    nondiff: nnx.State
     t: jax.Array
     scales: PathScales = struct.field(pytree_node=False)
 
@@ -142,8 +144,8 @@ class SequencePathNN(nnx.Module):
         dtype,
         rngs: nnx.Rngs,
     ):
-        self.hidden_activation = ACTIVATIONS[settings.hidden_activation]
-        self.input_scale = settings.input_scale
+        self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
+        self.input_scale = nnx.static(settings.input_scale)
         self.layers = nnx.List(
             [
                 nnx.Linear(
@@ -228,7 +230,9 @@ def dae_residuals(values, parameters):
 
 
 def residual_fn(theta, args, p):
-    values = path_values(nnx.merge(args.graphdef, theta), args.t, p, args.scales)
+    values = path_values(
+        nnx.merge(args.graphdef, theta, args.nondiff), args.t, p, args.scales
+    )
     residuals = dae_residuals(values, p.model)
     residual = jnp.concatenate([residuals[name] for name in RESIDUAL_NAMES])
     return residual / jnp.sqrt(residual.size)
@@ -283,13 +287,12 @@ def open_economy_growth_nn(
         model=DynamicModelParameters.from_model(parameters, dtype),
     )
 
-    graphdef, _ = nnx.split(
-        SequencePathNN(nn_set, dtype=dtype, rngs=nnx.Rngs(0)), nnx.Param
-    )
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     model = SequencePathNN(nn_set, dtype=dtype, rngs=nnx.Rngs(init_key))
-    _, theta_0 = nnx.split(model, nnx.Param)
-    residual_args = ResidualArgs(graphdef=graphdef, t=train_t, scales=scales)
+    graphdef, theta_0, nondiff = nnx.split(model, nnx.Param, ...)
+    residual_args = ResidualArgs(
+        graphdef=graphdef, nondiff=nondiff, t=train_t, scales=scales
+    )
 
     solver = LevenbergMarquardt(
         residual_fn,
@@ -302,23 +305,27 @@ def open_economy_growth_nn(
     # solve()'s atol is on the residual norm; the settings threshold is on the
     # sum of squared residuals.
     atol = math.sqrt(stop_set.train_loss_threshold)
+    solve_options = dict(
+        max_steps=stop_set.max_steps,
+        atol=atol,
+        max_steps_is_success=False,
+    )
+    multi_start = MultiStart(
+        key=multi_start_key,
+        num_starts=stop_set.num_attempts,
+        draw=DrawNNXModule(SequencePathNN, nn_set, dtype=dtype),
+    )
 
     timer = Stopwatch()
     result = solver.solve(
         theta_0,
         residual_args,
         p=residual_parameters,
-        max_steps=stop_set.max_steps,
-        atol=atol,
-        multi_start=MultiStart(
-            key=multi_start_key,
-            num_starts=stop_set.num_attempts,
-            draw=DrawNNXModule(SequencePathNN, nn_set, dtype=dtype),
-        ),
-        max_steps_is_success=False,
+        multi_start=multi_start,
+        **solve_options,
     )
     train_time = timer.elapsed(result)
-    model = nnx.merge(graphdef, result.x)
+    model = nnx.merge(graphdef, result.x, nondiff)
     attempt = int(result.multi_start.attempt) + 1
 
     def evaluate_grid(points):
@@ -525,6 +532,15 @@ def open_economy_growth_nn(
         "train_df": train_df,
         "test_df": test_df,
         "hyperparameters": hyperparameters,
+        "solve": SolveSpec(
+            solver=solver,
+            theta_0=theta_0,
+            p=residual_parameters,
+            residual_args=residual_args,
+            multi_start=multi_start,
+            options=solve_options,
+        ),
+        "result": result,
     }
 
 

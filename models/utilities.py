@@ -1,6 +1,7 @@
 import math
 import time
 from dataclasses import dataclass
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -12,6 +13,20 @@ STATUS_TO_REASON = {
     LMStatus.NONFINITE: "nonfinite",
     LMStatus.MAX_STEPS: "max_steps",
 }
+
+
+# Everything needed to re-run a driver's solve, returned in extras["solve"]:
+# spec.solver.solve(spec.theta_0, spec.residual_args, p=spec.p,
+# multi_start=spec.multi_start, **spec.options) reproduces the primal solve.
+# Callers differentiate through their own re-solves with respect to spec.p.
+@dataclass(frozen=True)
+class SolveSpec:
+    solver: Any
+    theta_0: Any
+    p: Any
+    residual_args: Any
+    multi_start: Any
+    options: dict
 
 
 # solution_accepted / rejection_reason results-dict fields from the collected

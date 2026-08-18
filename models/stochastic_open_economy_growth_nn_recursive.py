@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
-from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
+from nlls_gram import DrawNNXModule, LevenbergMarquardt, LMAction, LMStatus, MultiStart
 from tinydiffeq import SRA1, EulerMaruyama, Milstein, SaveAt, solve_sde
 
 from models.neoclassical_growth_nn_recursive import (
@@ -166,7 +166,7 @@ class SequentialPolicySettings:
 @struct.dataclass
 class ResidualArgs:
     graphdef: nnx.GraphDef
-    fixed_state: nnx.State
+    nondiff: nnx.State
     initial_states: jax.Array
     initial_center: jax.Array
     initial_scales: jax.Array
@@ -218,7 +218,7 @@ class SequentialPolicyNN(nnx.Module):
         dtype,
         rngs: nnx.Rngs,
     ):
-        self.hidden_activation = ACTIVATIONS[settings.hidden_activation]
+        self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
         self.state_center = nnx.Variable(
             jnp.asarray(
                 [
@@ -304,21 +304,16 @@ class SequentialPolicyNN(nnx.Module):
         )
 
 
-# DrawNNXModule splits on nnx.Param alone -- non-exhaustive here. Restarts
-# re-chain the epoch-key stream from restart_key; multi-start chains each
-# attempt's initial args, so the ladder restarts at epoch 0.
+# DrawNNXModule redraws theta but passes args through unchanged; multi-start
+# chains each attempt's initial args from the previous draw, so re-chaining
+# restart_key/epoch_key here (and resetting epoch to 0) is what keeps each
+# retry's epoch-boundary resampling independent of the others.
 class DrawSequentialPolicy:
     def __init__(self, settings, dtype):
-        self.settings = settings
-        self.dtype = dtype
+        self.draw_theta = DrawNNXModule(SequentialPolicyNN, settings, dtype=dtype)
 
     def __call__(self, key, _, args):
-        module = SequentialPolicyNN(
-            self.settings,
-            dtype=self.dtype,
-            rngs=nnx.Rngs(key),
-        )
-        _, theta, _ = nnx.split(module, nnx.Param, ...)
+        theta, _ = self.draw_theta(key, _, args)
         restart_key, epoch_key = jax.random.split(args.restart_key)
         return theta, args.replace(
             epoch_key=epoch_key,
@@ -327,13 +322,12 @@ class DrawSequentialPolicy:
         )
 
     def __hash__(self):
-        return hash((DrawSequentialPolicy, self.settings, self.dtype))
+        return hash((DrawSequentialPolicy, self.draw_theta))
 
     def __eq__(self, other):
         return (
             isinstance(other, DrawSequentialPolicy)
-            and self.settings == other.settings
-            and self.dtype == other.dtype
+            and self.draw_theta == other.draw_theta
         )
 
 
@@ -630,7 +624,7 @@ def collocation_residuals(solver, policy, initial_states, noise, p, data_set):
 
 
 def residual_fn(theta, args, p):
-    policy = nnx.merge(args.graphdef, theta, args.fixed_state)
+    policy = nnx.merge(args.graphdef, theta, args.nondiff)
     # The ladder scales both sigmas through p (rollout and residual agree);
     # corr_zr is scale-free.
     stage_parameters = p.replace(
@@ -822,7 +816,7 @@ def load_sequential_policy(path):
     settings = SequentialPolicySettings(**meta["settings"])
     dtype = jnp.dtype(meta["dtype"])
     module = SequentialPolicyNN(settings, dtype=dtype, rngs=nnx.Rngs(0))
-    graphdef, theta, fixed_state = nnx.split(module, nnx.Param, ...)
+    graphdef, theta, nondiff = nnx.split(module, nnx.Param, ...)
     nested = {}
     for name in data.files:
         if name == "__meta__":
@@ -835,7 +829,7 @@ def load_sequential_policy(path):
             data[name], dtype=dtype
         )
     theta.replace_by_pure_dict(nested)
-    return nnx.merge(graphdef, theta, fixed_state), meta
+    return nnx.merge(graphdef, theta, nondiff), meta
 
 
 # kappa_z / sigma_z reuse the neoclassical family's calibration, so every
@@ -1067,7 +1061,7 @@ def stochastic_open_economy_growth_nn_recursive(
     fit_timer = Stopwatch()
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     initial_model = SequentialPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(init_key))
-    graphdef, theta_0, fixed_state = nnx.split(initial_model, nnx.Param, ...)
+    graphdef, theta_0, nondiff = nnx.split(initial_model, nnx.Param, ...)
     # fold_in(train_ic_key, 1) is the training noise stream; the kernel
     # consumer regenerates this exact stream to rebuild the frozen design.
     train_noise_key = jax.random.fold_in(train_ic_key, 1)
@@ -1075,7 +1069,7 @@ def stochastic_open_economy_growth_nn_recursive(
     tvc_noise_key = jax.random.fold_in(test_ic_key, 3)
     residual_args = ResidualArgs(
         graphdef=graphdef,
-        fixed_state=fixed_state,
+        nondiff=nondiff,
         initial_states=train_initial_states,
         initial_center=initial_center,
         initial_scales=train_scales,
@@ -1219,7 +1213,7 @@ def stochastic_open_economy_growth_nn_recursive(
                 f"{float(solve_args.shock_scale):.3f}), "
                 f"train_loss={train_loss:.3e} ({train_time:.2f}s)"
             )
-        policy = nnx.merge(graphdef, theta_final, fixed_state)
+        policy = nnx.merge(graphdef, theta_final, nondiff)
 
     # Training diagnostics use the batch the solution was returned on.
     train_stage_parameters = p.replace(

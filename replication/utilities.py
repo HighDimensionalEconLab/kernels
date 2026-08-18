@@ -90,10 +90,17 @@ def with_option(options, key, value):
     return result
 
 
-def ensemble(func, n_seeds, start_seed=0, options=None):
-    options = options or {}
+# One solver call with the CLI's option semantics: nested dicts are
+# instantiated into the driver's settings dataclasses by jsonargparse.
+def run_solver(func, options=None):
     parser = jsonargparse.ArgumentParser(exit_on_error=False)
     parser.add_function_arguments(func)
+    cfg = parser.parse_object(options or {})
+    return func(**parser.instantiate_classes(cfg).as_dict())
+
+
+def ensemble(func, n_seeds, start_seed=0, options=None):
+    options = options or {}
     stochastic = "seed" in inspect.signature(func).parameters
     if stochastic and n_seeds < 1:
         raise ValueError("n_seeds must be positive")
@@ -108,8 +115,7 @@ def ensemble(func, n_seeds, start_seed=0, options=None):
     hyperparameters = None
     for seed in seeds:
         run_options = {**options, "seed": seed} if stochastic else options
-        cfg = parser.parse_object(run_options)
-        results, extra = func(**parser.instantiate_classes(cfg).as_dict())
+        results, extra = run_solver(func, run_options)
         rows.append({**results, "seed": seed} if stochastic else dict(results))
         # Required of every solver (collect_json depends on the saved file); identical
         # across seeds (the runtime-folded settings), so the first suffices.

@@ -20,6 +20,7 @@ from models.kernels import (
 )
 from models.utilities import (
     STATUS_TO_REASON,
+    SolveSpec,
     Stopwatch,
     acceptance_fields,
     make_train_t_grid,
@@ -139,14 +140,15 @@ def asset_pricing_kernel(
         jnp.asarray(lm_set.p0_init, dtype=dtype),
     )
 
-    timer = Stopwatch()
-    result = solver.solve(
-        theta_0,
+    solve_options = dict(
         max_steps=lm_set.max_steps,
         gtol=lm_set.gtol,
         atol=lm_set.residual_atol,
         max_steps_is_success=False,
     )
+
+    timer = Stopwatch()
+    result = solver.solve(theta_0, **solve_options)
     elapsed = timer.elapsed(result)
 
     theta = result.x
@@ -278,6 +280,15 @@ def asset_pricing_kernel(
         "train_df": train_df,
         "test_df": test_df,
         "hyperparameters": hyperparameters,
+        "solve": SolveSpec(
+            solver=solver,
+            theta_0=theta_0,
+            p=None,
+            residual_args=None,
+            multi_start=None,
+            options=solve_options,
+        ),
+        "result": result,
     }
 
 

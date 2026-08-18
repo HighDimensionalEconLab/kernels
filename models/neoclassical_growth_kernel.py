@@ -7,10 +7,7 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from nlls_gram import (
-    LMStatus,
-    RidgeLevenbergMarquardt,
-)
+from nlls_gram import RidgeLevenbergMarquardt
 
 from models.kernels import (
     integrated_kernel_matrices,
@@ -18,21 +15,34 @@ from models.kernels import (
     normalize_kernel,
     rkhs_norm_squared,
 )
-from models.neoclassical_growth_benchmark import (
-    neoclassical_growth_benchmark,
-    neoclassical_steady_state_sensitivities,
-)
+from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
 from models.utilities import (
     STATUS_TO_REASON,
+    SolveSpec,
     Stopwatch,
     acceptance_fields,
     make_train_t_grid,
 )
 
 DOMAIN_EPS = 1e-6
+
+
+# theta is the tuple (alpha_mu, alpha_c, alpha_k, (c_0, mu_0)), which
+# flattens to [alpha_mu (n), alpha_c (n), alpha_k (n), c_0, mu_0] -- the
+# block order of the solver metric. Module-level so callers can evaluate
+# solved paths on their own kernel matrices.
+def path_values(theta, K_eval, K_tilde_eval, p):
+    alpha_mu, alpha_c, alpha_k, initial = theta
+    c_0, mu_0 = initial
+    mu = mu_0 + K_tilde_eval @ alpha_mu
+    c = c_0 + K_tilde_eval @ alpha_c
+    k = p["k_0"] + K_tilde_eval @ alpha_k
+    dmu_dt = K_eval @ alpha_mu
+    dk_dt = K_eval @ alpha_k
+    return k, c, mu, dk_dt, dmu_dt
 
 
 @dataclass(frozen=True)
@@ -111,7 +121,6 @@ def neoclassical_growth_kernel(
     lm_set: SolverSettings = SolverSettings(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     c_0_guess: float | None = None,  # overrides the flat steady-flow warm start
-    sensitivity_times: list[float] | None = None,
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
@@ -162,19 +171,6 @@ def neoclassical_growth_kernel(
         base = k**a_p
         branch = jnp.where(b_1_value * base - b_2_value > base, b_1_value, 1.0)
         return A_value * a_p * branch * k ** (a_p - 1.0)
-
-    # theta is the tuple (alpha_mu, alpha_c, alpha_k, (c_0, mu_0)), which
-    # flattens to [alpha_mu (n), alpha_c (n), alpha_k (n), c_0, mu_0] -- the
-    # block order of the metric below.
-    def path_values(theta, K_eval, K_tilde_eval, p):
-        alpha_mu, alpha_c, alpha_k, initial = theta
-        c_0, mu_0 = initial
-        mu = mu_0 + K_tilde_eval @ alpha_mu
-        c = c_0 + K_tilde_eval @ alpha_c
-        k = p["k_0"] + K_tilde_eval @ alpha_k
-        dmu_dt = K_eval @ alpha_mu
-        dk_dt = K_eval @ alpha_k
-        return k, c, mu, dk_dt, dmu_dt
 
     # 3n nonlinear residuals in 3n + 2 unknowns: ridge LM on
     # ||r||^2 + ridge * (a_mu'K a_mu + a_c'K a_c + a_k'K a_k) selects the
@@ -318,60 +314,6 @@ def neoclassical_growth_kernel(
     ):
         rejection_reasons.append("p_bound")
 
-    sensitivity_df = None
-    sensitivity_fields = {}
-    if sensitivity_times is not None:
-        if use_kinked_production:
-            raise ValueError("sensitivities require smooth production")
-        sensitivity_times = [float(value) for value in sensitivity_times]
-        if any(
-            not 0.0 <= value <= float(train_data[-1]) for value in sensitivity_times
-        ):
-            raise ValueError("sensitivity_times must lie within the training horizon")
-        K_sens, K_tilde_sens = integrated_kernel_matrices(
-            jnp.asarray(sensitivity_times, dtype=dtype), train_data, kernel, sigma, ell
-        )
-
-        # One reverse-mode pass through the solve yields d[k(t), c(t)]/dp at
-        # every sensitivity time together: the implicit dependence of the
-        # solved coefficients on p plus the direct dependence of the path
-        # evaluation.
-        def paths_at_sensitivity_times(p_value):
-            sensitivity_result = solver.solve(theta_0, None, p=p_value, **solve_options)
-            k, c, _, _, _ = path_values(
-                sensitivity_result.x, K_sens, K_tilde_sens, p_value
-            )
-            return jnp.column_stack([k, c]), sensitivity_result.status
-
-        jacobian, sensitivity_status = jax.jacrev(
-            paths_at_sensitivity_times, has_aux=True
-        )(p)
-        jax.block_until_ready(jacobian)
-        # A non-converged re-solve would publish exactly zero implicit
-        # tangents, indistinguishable from a genuine null effect.
-        if int(sensitivity_status) != LMStatus.CONVERGED:
-            raise RuntimeError("the sensitivity re-solve did not converge")
-        k_sens, c_sens, _, _, _ = path_values(theta, K_sens, K_tilde_sens, p)
-        rows = []
-        for index, time_value in enumerate(sensitivity_times):
-            suffix = f"T{time_value:g}".replace(".", "p")
-            sensitivity_fields[f"k_{suffix}"] = float(k_sens[index])
-            sensitivity_fields[f"c_{suffix}"] = float(c_sens[index])
-            for name in ("a", "delta", "rho_hat", "sigma_crra", "k_0"):
-                d_k = float(jacobian[name][index, 0])
-                d_c = float(jacobian[name][index, 1])
-                sensitivity_fields[f"d_k_{suffix}_d_{name}"] = d_k
-                sensitivity_fields[f"d_c_{suffix}_d_{name}"] = d_c
-                rows.append(
-                    {"time": time_value, "parameter": name, "d_k": d_k, "d_c": d_c}
-                )
-        sensitivity_df = pd.DataFrame(rows)
-        # The exact steady-state derivatives the large-T columns converge
-        # to; the sigma_crra and k_0 rows converge to zero.
-        sensitivity_fields.update(
-            neoclassical_steady_state_sensitivities(a, delta, rho_hat)
-        )
-
     results = {
         "a": a,
         "delta": delta,
@@ -414,11 +356,6 @@ def neoclassical_growth_kernel(
         "stopping_reason": STATUS_TO_REASON.get(status, "unknown"),
         **acceptance_fields(rejection_reasons),
     }
-    if sensitivity_times is not None:
-        results["sensitivity_times"] = ",".join(
-            f"{value:g}" for value in sensitivity_times
-        )
-        results.update(sensitivity_fields)
     train_df = pd.DataFrame(
         {
             name: np.asarray(train_eval[name])
@@ -476,10 +413,18 @@ def neoclassical_growth_kernel(
 
     return results, {
         "model": kernel_solution,
-        "sensitivity_df": sensitivity_df,
         "train_df": train_df,
         "test_df": test_df,
         "hyperparameters": hyperparameters,
+        "solve": SolveSpec(
+            solver=solver,
+            theta_0=theta_0,
+            p=p,
+            residual_args=None,
+            multi_start=None,
+            options=solve_options,
+        ),
+        "result": result,
     }
 
 

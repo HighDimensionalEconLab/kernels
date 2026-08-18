@@ -34,6 +34,7 @@ from models.open_economy_growth import (
 from models.open_economy_growth_benchmark import open_economy_growth_benchmark
 from models.utilities import (
     STATUS_TO_REASON,
+    SolveSpec,
     Stopwatch,
     acceptance_fields,
     make_sampled_train_grid,
@@ -268,15 +269,15 @@ def open_economy_growth_kernel(
         damping_increase=lm_set.damping_increase,
     )
 
-    timer = Stopwatch()
-    result = solver.solve(
-        theta_0,
+    solve_options = dict(
         max_steps=lm_set.max_steps,
         gtol=lm_set.gtol,
         atol=lm_set.residual_atol,
         max_steps_is_success=False,
-        **continuation_options,
     )
+
+    timer = Stopwatch()
+    result = solver.solve(theta_0, **solve_options, **continuation_options)
     solve_time = timer.elapsed(result)
     theta = result.x
 
@@ -560,6 +561,15 @@ def open_economy_growth_kernel(
         "train_df": train_df,
         "test_df": test_df,
         "hyperparameters": hyperparameters,
+        "solve": SolveSpec(
+            solver=solver,
+            theta_0=theta_0,
+            p=None,
+            residual_args=None,
+            multi_start=None,
+            options=solve_options,
+        ),
+        "result": result,
     }
 
 

@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
-from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
+from nlls_gram import DrawNNXModule, LevenbergMarquardt, LMAction, LMStatus, MultiStart
 from tinydiffeq import RK4, ConstantStepSize, IController, SaveAt, Tsit5, solve_ode
 
 from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
@@ -23,6 +23,7 @@ from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
     OptimizerSettings,
+    SolveSpec,
     unit_softplus,
 )
 from models.utilities import (
@@ -99,7 +100,7 @@ class InitialConditionSettings:
 @struct.dataclass
 class ResidualArgs:
     graphdef: nnx.GraphDef
-    fixed_state: nnx.State
+    nondiff: nnx.State
     initial_log_states: jax.Array
     epoch_key: jax.Array
     restart_key: jax.Array
@@ -147,11 +148,11 @@ class InvestmentPolicyNN(nnx.Module):
         dtype,
         rngs: nnx.Rngs,
     ):
-        self.homothetic = settings.homothetic_representation
-        self.log_z_scale = math.log(z_scale)
-        self.log_k_scale = math.log(k_scale)
-        self.k_scale = k_scale
-        self.hidden_activation = ACTIVATIONS[settings.hidden_activation]
+        self.homothetic = nnx.static(settings.homothetic_representation)
+        self.log_z_scale = nnx.Variable(jnp.asarray(math.log(z_scale), dtype=dtype))
+        self.log_k_scale = nnx.Variable(jnp.asarray(math.log(k_scale), dtype=dtype))
+        self.k_scale = nnx.Variable(jnp.asarray(k_scale, dtype=dtype))
+        self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
         in_features = 1 if self.homothetic else 2
         self.layers = nnx.List(
             [
@@ -190,8 +191,10 @@ class InvestmentPolicyNN(nnx.Module):
             h = jnp.atleast_1d(log_k - log_z / (1.0 - p.a))
             anchor = p.delta * jnp.exp(log_k)
         else:
-            h = jnp.stack([log_z - self.log_z_scale, log_k - self.log_k_scale])
-            anchor = p.delta * self.k_scale
+            h = jnp.stack(
+                [log_z - self.log_z_scale[...], log_k - self.log_k_scale[...]]
+            )
+            anchor = p.delta * self.k_scale[...]
         for layer in self.layers:
             h = self.hidden_activation(layer(h))
         return anchor * unit_softplus(self.head(h)[0])
@@ -215,9 +218,9 @@ def save_investment_policy(path, policy, settings, *, structural=None, extra=Non
     arrays = flatten((), nnx.state(policy, nnx.Param).to_pure_dict(), {})
     meta = {
         "settings": asdict(settings),
-        "log_z_scale": policy.log_z_scale,
-        "log_k_scale": policy.log_k_scale,
-        "k_scale": policy.k_scale,
+        "log_z_scale": float(policy.log_z_scale[...]),
+        "log_k_scale": float(policy.log_k_scale[...]),
+        "k_scale": float(policy.k_scale[...]),
         "dtype": str(next(iter(arrays.values())).dtype),
     }
     if structural is not None:
@@ -243,7 +246,7 @@ def load_investment_policy(path):
         dtype=dtype,
         rngs=nnx.Rngs(0),
     )
-    graphdef, theta, fixed_state = nnx.split(module, nnx.Param, ...)
+    graphdef, theta, nondiff = nnx.split(module, nnx.Param, ...)
     nested = {}
     for name in data.files:
         if name == "__meta__":
@@ -256,7 +259,7 @@ def load_investment_policy(path):
             data[name], dtype=dtype
         )
     theta.replace_by_pure_dict(nested)
-    return nnx.merge(graphdef, theta, fixed_state), meta
+    return nnx.merge(graphdef, theta, nondiff), meta
 
 
 # Content-addressed policy filenames: the key hashes every input that
@@ -446,29 +449,32 @@ class EpochCallback:
         )
 
 
-# Restart draw: fresh net from the retry key and a fresh epoch-key chain from
-# args.restart_key; the initial training batch is kept.
-@dataclass(frozen=True)
+# DrawNNXModule redraws theta but passes args through unchanged; multi-start
+# chains each attempt's initial args from the previous draw, so re-chaining
+# restart_key/epoch_key here (and resetting epoch to 0) is what keeps each
+# retry's epoch-boundary resampling independent of the others.
 class DrawInvestmentPolicy:
-    settings: InvestmentPolicySettings
-    dtype: object
-    z_scale: float = 1.0
-    k_scale: float = 1.0
+    def __init__(self, settings, *, z_scale, k_scale, dtype):
+        self.draw_theta = DrawNNXModule(
+            InvestmentPolicyNN, settings, z_scale=z_scale, k_scale=k_scale, dtype=dtype
+        )
 
     def __call__(self, key, _, args):
-        module = InvestmentPolicyNN(
-            self.settings,
-            z_scale=self.z_scale,
-            k_scale=self.k_scale,
-            dtype=self.dtype,
-            rngs=nnx.Rngs(key),
-        )
-        _, theta, _ = nnx.split(module, nnx.Param, ...)
+        theta, _ = self.draw_theta(key, _, args)
         restart_key, epoch_key = jax.random.split(args.restart_key)
         return theta, args.replace(
             epoch_key=epoch_key,
             restart_key=restart_key,
             epoch=jnp.asarray(0, dtype=jnp.int32),
+        )
+
+    def __hash__(self):
+        return hash((DrawInvestmentPolicy, self.draw_theta))
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, DrawInvestmentPolicy)
+            and self.draw_theta == other.draw_theta
         )
 
 
@@ -571,7 +577,7 @@ def collocation_residuals(policy, initial_log_states, p, data_set):
 
 
 def residual_fn(theta, args, p):
-    policy = nnx.merge(args.graphdef, theta, args.fixed_state)
+    policy = nnx.merge(args.graphdef, theta, args.nondiff)
     return collocation_residuals(
         policy, args.initial_log_states, p, args.data_set
     ).reshape(-1)
@@ -977,7 +983,7 @@ def neoclassical_growth_nn_recursive(
 
     fit_start = time.perf_counter()
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
-    graphdef, _, fixed_state = nnx.split(
+    graphdef, _, nondiff = nnx.split(
         InvestmentPolicyNN(
             hc_set, z_scale=z_0, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(0)
         ),
@@ -988,7 +994,7 @@ def neoclassical_growth_nn_recursive(
     # restart streams chain from independent fold-ins of the same key.
     residual_args = ResidualArgs(
         graphdef=graphdef,
-        fixed_state=fixed_state,
+        nondiff=nondiff,
         initial_log_states=jnp.log(train_initial_conditions),
         epoch_key=jax.random.fold_in(train_ic_key, 1),
         restart_key=jax.random.fold_in(train_ic_key, 2),
@@ -1085,7 +1091,7 @@ def neoclassical_growth_nn_recursive(
             log_k_scale=math.sqrt(ic_set.train_log_k_variance),
             epoch_early_stopping=stop_set.epoch_early_stopping,
         )
-        draw = DrawInvestmentPolicy(hc_set, dtype, z_0, k_0)
+        draw = DrawInvestmentPolicy(hc_set, z_scale=z_0, k_scale=k_0, dtype=dtype)
         # The per-step tolerance is sound only while the training batch never
         # changes; across epochs, convergence is judged at the boundaries
         # instead.
@@ -1094,21 +1100,25 @@ def neoclassical_growth_nn_recursive(
             if stop_set.num_epochs == 1
             else 0.0
         )
+        multi_start = MultiStart(
+            key=multi_start_key,
+            num_starts=stop_set.num_attempts,
+            draw=draw,
+        )
+        solve_options = dict(
+            max_steps=stop_set.num_epochs * stop_set.max_steps,
+            atol=atol,
+            callback=callback,
+            max_steps_is_success=not stop_set.epoch_early_stopping,
+        )
 
         start_time = time.perf_counter()
         result = solver.solve(
             theta_0,
             residual_args,
             p=p,
-            max_steps=stop_set.num_epochs * stop_set.max_steps,
-            atol=atol,
-            callback=callback,
-            multi_start=MultiStart(
-                key=multi_start_key,
-                num_starts=stop_set.num_attempts,
-                draw=draw,
-            ),
-            max_steps_is_success=not stop_set.epoch_early_stopping,
+            multi_start=multi_start,
+            **solve_options,
         )
         jax.block_until_ready(result)
         train_time = time.perf_counter() - start_time
@@ -1132,7 +1142,7 @@ def neoclassical_growth_nn_recursive(
                 f"(epoch {epochs_run}/{stop_set.num_epochs}), "
                 f"train_loss={train_loss:.3e} ({train_time:.2f}s)"
             )
-        policy = nnx.merge(graphdef, theta_final, fixed_state)
+        policy = nnx.merge(graphdef, theta_final, nondiff)
 
     # Measured, not requested: a float64 leak anywhere upstream shows up here.
     residual_dtype = str(r.dtype)
@@ -1448,6 +1458,18 @@ def neoclassical_growth_nn_recursive(
         "hyperparameters": hyperparameters,
         "test_summary_df": test_summary_df,
     }
+    # A cache hit loads the policy from disk instead of solving, so there is
+    # no primal solve to describe.
+    if not cache_hit:
+        extras["solve"] = SolveSpec(
+            solver=solver,
+            theta_0=theta_0,
+            p=p,
+            residual_args=residual_args,
+            multi_start=multi_start,
+            options=solve_options,
+        )
+        extras["result"] = result
     structural = {
         "a": a,
         "delta": delta,

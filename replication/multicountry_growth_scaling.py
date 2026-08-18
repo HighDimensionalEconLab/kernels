@@ -2,17 +2,23 @@ from __future__ import annotations
 
 import gc
 import statistics
+from dataclasses import replace
 
 import jax
 import jax.numpy as jnp
 import jsonargparse
 import pandas as pd
+from nlls_gram import CG, LMStatus, RidgeLevenbergMarquardt
 
 from models import multicountry_growth_kernel
+from models.kernels import integrated_kernel_matrices
 from models.multicountry_growth import InitialConditionSettings
+from models.multicountry_growth_kernel import path_coordinates
+from models.multicountry_growth_preconditioner import build_arrow_woodbury
+from models.utilities import Stopwatch
 from replication.utilities import (
     configure_process,
-    ensemble,
+    run_solver,
     save_experiment,
     write_summary,
 )
@@ -27,6 +33,7 @@ DENSE_MAX_COUNTRIES = 10
 # one line with the N=2/N=10 sensitivity tables and the production
 # acceptance gates hold with margin.
 GAMMA_COMMON_COUNT = 40
+GAMMA_COMMON_TIMES = [10.0]
 # Per-rung lognormal dispersion of the drawn populations and
 # productivities; curvature stays common at gamma = 2 so the rungs remain
 # within the calibrated preference class.
@@ -121,18 +128,14 @@ def run(
                     **deep,
                 },
             }
-            # The N=40 cg rung also publishes d rate(T10)/d gamma along
-            # (1, ..., 1) -- the representative-agent CRRA comparative
-            # static, whose value is comparable against the N=2/N=10
-            # sensitivity tables -- with the implicit-AD wall time reported
-            # next to the primal solve time.
-            if solver_name == "cg" and num_countries == GAMMA_COMMON_COUNT:
-                options["gamma_common_sensitivity_times"] = [10.0]
-            compile_results, frames, hyperparameters = ensemble(
-                SOLVER,
-                n_seeds=1,
-                options=options,
-            )
+            results, extras = run_solver(SOLVER, options)
+            compile_results = pd.DataFrame([results])
+            frames = {
+                key: value
+                for key, value in extras.items()
+                if isinstance(value, pd.DataFrame)
+            }
+            hyperparameters = extras["hyperparameters"]
             if not compile_results["solution_accepted"].all():
                 raise RuntimeError(
                     f"{name} was rejected: {compile_results['rejection_reason'].iloc[0]}"
@@ -154,11 +157,9 @@ def run(
             ]
             warm_results = []
             for timing_run in range(1, WARM_TIMING_REPETITIONS + 1):
-                timed_results, _, timed_hyperparameters = ensemble(
-                    SOLVER,
-                    n_seeds=1,
-                    options=options,
-                )
+                timed_row, timed_extras = run_solver(SOLVER, options)
+                timed_results = pd.DataFrame([timed_row])
+                timed_hyperparameters = timed_extras["hyperparameters"]
                 if timed_hyperparameters != hyperparameters:
                     raise RuntimeError(
                         f"{name} changed hyperparameters across timing runs"
@@ -187,6 +188,97 @@ def run(
                 )
             results_df.loc[0, "timing_repetitions"] = WARM_TIMING_REPETITIONS
             frames["timing_df"] = pd.DataFrame(timing_rows)
+
+            # The N=40 cg rung also publishes d rate(T10)/d gamma along
+            # (1, ..., 1) -- the representative-agent CRRA comparative
+            # static, whose value is comparable against the N=2/N=10
+            # sensitivity tables -- with the implicit-AD wall time reported
+            # next to the primal solve time, on the same compile-then-warm
+            # schedule. The tangent runs through a re-solve of the returned
+            # SolveSpec, warm-started at the solved coefficients with the
+            # ridge pinned at the level the continuation actually reached;
+            # both the damped re-solve and the undamped implicit-AD system
+            # are preconditioned by the arrow-Woodbury inverse built at the
+            # solution, so no dense factorization enters at any width.
+            if solver_name == "cg" and num_countries == GAMMA_COMMON_COUNT:
+                spec, result = extras["solve"], extras["result"]
+                theta = result.x
+                lm_settings = multicountry_growth_kernel.SolverSettings(
+                    **options["lm_set"]
+                )
+                t_common = jnp.asarray(GAMMA_COMMON_TIMES, dtype=jnp.float64)
+                train_data = jnp.asarray(extras["train_df"]["t"].to_numpy())
+                K_common, K_tilde_common = integrated_kernel_matrices(
+                    t_common,
+                    train_data,
+                    results["kernel"],
+                    results["sigma"],
+                    results["ell"],
+                )
+                gamma_common_solver = RidgeLevenbergMarquardt(
+                    spec.solver.residual_fn,
+                    metric=spec.solver.initial_metric,
+                    ridge=float(result.lm_state.ridge),
+                    linear_solver=CG(
+                        build_arrow_woodbury(
+                            theta,
+                            spec.residual_args,
+                            spec.p,
+                            float(result.lm_state.ridge),
+                            lm_settings.cg_damping_floor,
+                            num_countries,
+                        ),
+                        tol=lm_settings.cg_tol,
+                        maxiter=lm_settings.cg_maxiter,
+                    ),
+                    # The undamped AD system runs once, so it gets a deeper
+                    # budget than the damped inner solves.
+                    ad_solver=CG(None, maxiter=10 * lm_settings.cg_maxiter),
+                    init_damping=spec.solver.init_damping,
+                    damping_decrease=spec.solver.damping_decrease,
+                    damping_increase=spec.solver.damping_increase,
+                )
+
+                def rate_at_common_times(p_value):
+                    common_result = gamma_common_solver.solve(
+                        theta, spec.residual_args, p=p_value, **spec.options
+                    )
+                    coordinates = path_coordinates(
+                        common_result.x, K_common, K_tilde_common, p_value
+                    )
+                    return coordinates["interest_rate"], common_result.status
+
+                gamma_direction = {
+                    **jax.tree_util.tree_map(jnp.zeros_like, spec.p),
+                    "parameters": replace(
+                        jax.tree_util.tree_map(jnp.zeros_like, spec.p)["parameters"],
+                        gammas=jnp.ones_like(spec.p["parameters"].gammas),
+                    ),
+                }
+                tangent_times = []
+                for _ in range(WARM_TIMING_REPETITIONS + 1):
+                    tangent_timer = Stopwatch()
+                    primal_rate, tangent_at_p, status = jax.linearize(
+                        rate_at_common_times, spec.p, has_aux=True
+                    )
+                    d_rate_common = tangent_at_p(gamma_direction)
+                    tangent_times.append(tangent_timer.elapsed(d_rate_common))
+                    if int(status) != LMStatus.CONVERGED:
+                        raise RuntimeError(
+                            "the gamma-common sensitivity re-solve did not converge"
+                        )
+                for index, time_value in enumerate(GAMMA_COMMON_TIMES):
+                    suffix = f"T{time_value:g}".replace(".", "p")
+                    results_df.loc[0, f"rate_{suffix}"] = float(primal_rate[index])
+                    results_df.loc[0, f"d_rate_{suffix}_d_gamma_common"] = float(
+                        d_rate_common[index]
+                    )
+                results_df.loc[0, "compile_gamma_common_sensitivity_time"] = (
+                    tangent_times[0]
+                )
+                results_df.loc[0, "gamma_common_sensitivity_time"] = statistics.median(
+                    tangent_times[1:]
+                )
             save_experiment(
                 name,
                 results_df,

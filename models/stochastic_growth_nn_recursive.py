@@ -39,6 +39,7 @@ from models.utilities import (
 from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
+    SolveSpec,
 )
 
 DOMAIN_EPS = 1e-8
@@ -106,7 +107,7 @@ class StoppingCriteria:
 @struct.dataclass
 class ResidualArgs:
     graphdef: nnx.GraphDef
-    fixed_state: nnx.State
+    nondiff: nnx.State
     initial_log_states: jax.Array
     noise: object
     epoch_key: jax.Array
@@ -358,7 +359,7 @@ def collocation_residuals(solver, policy, initial_log_states, noise, p, data_set
 
 
 def residual_fn(theta, args, p):
-    policy = nnx.merge(args.graphdef, theta, args.fixed_state)
+    policy = nnx.merge(args.graphdef, theta, args.nondiff)
     return collocation_residuals(
         args.solver, policy, args.initial_log_states, args.noise, p, args.data_set
     ).reshape(-1)
@@ -652,7 +653,7 @@ def stochastic_growth_nn_recursive(
 
     fit_start = time.perf_counter()
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
-    graphdef, _, fixed_state = nnx.split(
+    graphdef, _, nondiff = nnx.split(
         InvestmentPolicyNN(
             hc_set, z_scale=z_bar, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(0)
         ),
@@ -668,7 +669,7 @@ def stochastic_growth_nn_recursive(
     test_tvc_noise_key = jax.random.fold_in(test_ic_key, 2)
     residual_args = ResidualArgs(
         graphdef=graphdef,
-        fixed_state=fixed_state,
+        nondiff=nondiff,
         initial_log_states=jnp.log(train_initial_conditions),
         noise=sample_trajectory_noise(
             solver,
@@ -774,7 +775,7 @@ def stochastic_growth_nn_recursive(
             n_steps=n_train_steps,
             dt=train_dt,
         )
-        draw = DrawInvestmentPolicy(hc_set, dtype, z_bar, k_0)
+        draw = DrawInvestmentPolicy(hc_set, z_scale=z_bar, k_scale=k_0, dtype=dtype)
         # The per-step tolerance is sound only while the training batch never
         # changes; across epochs, convergence is judged at the boundaries
         # instead.
@@ -783,21 +784,25 @@ def stochastic_growth_nn_recursive(
             if stop_set.num_epochs == 1
             else 0.0
         )
+        multi_start = MultiStart(
+            key=multi_start_key,
+            num_starts=stop_set.num_attempts,
+            draw=draw,
+        )
+        solve_options = dict(
+            max_steps=stop_set.num_epochs * stop_set.max_steps,
+            atol=atol,
+            callback=callback,
+            max_steps_is_success=not stop_set.epoch_early_stopping,
+        )
 
         start_time = time.perf_counter()
         result = lm_solver.solve(
             theta_0,
             residual_args,
             p=p,
-            max_steps=stop_set.num_epochs * stop_set.max_steps,
-            atol=atol,
-            callback=callback,
-            multi_start=MultiStart(
-                key=multi_start_key,
-                num_starts=stop_set.num_attempts,
-                draw=draw,
-            ),
-            max_steps_is_success=not stop_set.epoch_early_stopping,
+            multi_start=multi_start,
+            **solve_options,
         )
         jax.block_until_ready(result)
         train_time = time.perf_counter() - start_time
@@ -821,7 +826,7 @@ def stochastic_growth_nn_recursive(
                 f"(epoch {epochs_run}/{stop_set.num_epochs}), "
                 f"train_loss={train_loss:.3e} ({train_time:.2f}s)"
             )
-        policy = nnx.merge(graphdef, theta_final, fixed_state)
+        policy = nnx.merge(graphdef, theta_final, nondiff)
 
     # Training diagnostics use the batch (ICs and noise) the solution was
     # returned on.
@@ -1164,6 +1169,18 @@ def stochastic_growth_nn_recursive(
         "hyperparameters": hyperparameters,
         "test_summary_df": test_summary_df,
     }
+    # A cache hit loads the policy from disk instead of solving, so there is
+    # no primal solve to describe.
+    if not cache_hit:
+        extras["solve"] = SolveSpec(
+            solver=lm_solver,
+            theta_0=theta_0,
+            p=p,
+            residual_args=residual_args,
+            multi_start=multi_start,
+            options=solve_options,
+        )
+        extras["result"] = result
     structural = {
         "a": a,
         "delta": delta,

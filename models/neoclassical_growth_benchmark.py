@@ -1,6 +1,8 @@
 import numpy as np
 from scipy.integrate import solve_bvp
 
+from models.neoclassical_growth import validate_balanced_growth
+
 
 # Neoclassical Growth Benchmark solution
 def neoclassical_growth_benchmark(
@@ -29,10 +31,6 @@ def neoclassical_growth_benchmark(
     #   calibration dependent through the stable and unstable eigenvalues.
     # tol/max_nodes: solve_bvp accuracy -- scipy's default tol=1e-3 leaves ~1e-4
     # errors in the "benchmark" itself, polluting every reported solver error
-
-    # Deferred import: models.neoclassical_growth imports this module for its
-    # benchmark-trajectory diagnostics.
-    from models.neoclassical_growth import validate_balanced_growth
 
     validate_balanced_growth(delta, rho_hat, sigma_crra, g)
     marginal_product_ss = delta + rho_hat + sigma_crra * g

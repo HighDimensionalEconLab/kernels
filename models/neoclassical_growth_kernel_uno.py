@@ -58,6 +58,40 @@ def path_values(x, K_eval, K_tilde_eval, k_0):
     return k, c, mu, dk_dt, dmu_dt
 
 
+@jax.jit
+def objective(x, K):
+    alpha_mu, alpha_c, alpha_k, _, _ = unpack(x)
+    return alpha_mu @ K @ alpha_mu + alpha_c @ K @ alpha_c + alpha_k @ K @ alpha_k
+
+
+# CRRA first-order condition u'(c) = mu, i.e. mu c^sigma_crra = 1; the
+# costate and resource residuals are utility-free.
+@jax.jit
+def constraints(x, K, K_tilde, p):
+    k, c, mu, dk_dt, dmu_dt = path_values(x, K, K_tilde, p.k_0)
+    k_positive = jnp.maximum(k, DOMAIN_EPS)
+    output = production(k_positive, p)
+    mpk = marginal_product(k_positive, p)
+    resource = dk_dt - (output - p.delta * k - c)
+    euler = dmu_dt + mu * (mpk - p.delta - p.rho_hat)
+    shadow_price = mu * c**p.sigma_crra - 1.0
+    return jnp.concatenate([resource, euler, shadow_price, k, c, mu])
+
+
+def lagrangian(x, objective_multiplier, multipliers, K, K_tilde, p):
+    return objective_multiplier * objective(x, K) + jnp.dot(
+        multipliers, constraints(x, K, K_tilde, p)
+    )
+
+
+# Stable module-level derivative wrappers: IPOPT calls back every iteration
+# and across driver invocations, so a per-call jax.grad/jacfwd/hessian
+# closure would retrace and recompile on every solve.
+objective_gradient = jax.jit(jax.grad(objective))
+constraint_jacobian = jax.jit(jax.jacfwd(constraints))
+lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
+
+
 @dataclass(frozen=True)
 class KernelSettings:
     kernel: str = "matern12"  # matern12 | matern32 | matern52 | rbf
@@ -165,40 +199,6 @@ def neoclassical_growth_kernel_uno(
     x_initial[3 * n_train] = c_flow_guess
     x_initial[3 * n_train + 1] = c_flow_guess**-sigma_crra
 
-    @jax.jit
-    def objective(x):
-        alpha_mu, alpha_c, alpha_k, _, _ = unpack(x)
-        return (
-            alpha_mu @ K_jax @ alpha_mu
-            + alpha_c @ K_jax @ alpha_c
-            + alpha_k @ K_jax @ alpha_k
-        )
-
-    # CRRA first-order condition u'(c) = mu, i.e. mu c^sigma_crra = 1; the
-    # costate and resource residuals are utility-free.
-    @jax.jit
-    def constraints(x):
-        k, c, mu, dk_dt, dmu_dt = path_values(x, K_jax, K_tilde_jax, k_0)
-        k_positive = jnp.maximum(k, DOMAIN_EPS)
-        output = production(k_positive, p)
-        mpk = marginal_product(k_positive, p)
-        resource = dk_dt - (output - delta * k - c)
-        euler = dmu_dt + mu * (mpk - delta - rho_hat)
-        shadow_price = mu * c**sigma_crra - 1.0
-        return jnp.concatenate([resource, euler, shadow_price, k, c, mu])
-
-    def lagrangian(x, objective_multiplier, multipliers):
-        return objective_multiplier * objective(x) + jnp.dot(
-            multipliers, constraints(x)
-        )
-
-    # Built once at setup scope: IPOPT invokes these from C on every
-    # iteration, and a jax.grad/jacfwd wrapper created inside a callback
-    # would retrace per call.
-    objective_gradient = jax.jit(jax.grad(objective))
-    constraint_jacobian = jax.jit(jax.jacfwd(constraints))
-    lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
-
     variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
     variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
     variable_lower_bounds[3 * n_train :] = DOMAIN_EPS
@@ -224,10 +224,10 @@ def neoclassical_growth_kernel_uno(
     )
 
     def objective_callback(x):
-        return float(objective(jnp.asarray(x)))
+        return float(objective(jnp.asarray(x), K_jax))
 
     def objective_gradient_callback(x, gradient):
-        gradient[:] = np.asarray(objective_gradient(jnp.asarray(x)))
+        gradient[:] = np.asarray(objective_gradient(jnp.asarray(x), K_jax))
 
     model.set_objective(unopy.MINIMIZE, objective_callback, objective_gradient_callback)
 
@@ -235,10 +235,14 @@ def neoclassical_growth_kernel_uno(
     jacobian_columns = np.tile(np.arange(n_variables, dtype=np.int32), n_constraints)
 
     def constraints_callback(x, constraint_output):
-        constraint_output[:] = np.asarray(constraints(jnp.asarray(x)))
+        constraint_output[:] = np.asarray(
+            constraints(jnp.asarray(x), K_jax, K_tilde_jax, p)
+        )
 
     def jacobian_callback(x, jacobian_output):
-        jacobian_output[:] = np.asarray(constraint_jacobian(jnp.asarray(x))).reshape(-1)
+        jacobian_output[:] = np.asarray(
+            constraint_jacobian(jnp.asarray(x), K_jax, K_tilde_jax, p)
+        ).reshape(-1)
 
     model.set_constraints(
         n_constraints,
@@ -261,6 +265,9 @@ def neoclassical_growth_kernel_uno(
                 jnp.asarray(x),
                 float(objective_multiplier),
                 jnp.asarray(multipliers),
+                K_jax,
+                K_tilde_jax,
+                p,
             )
         )
         hessian_output[:] = hessian[hessian_rows, hessian_columns]
@@ -427,6 +434,8 @@ def neoclassical_growth_kernel_uno(
         "p_lower_violation": p_lower_violation,
         "p_upper_violation": p_upper_violation,
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_eval["euler"]))),
+        # solve_time is IPOPT's own cpu-time accounting; wall_time is the
+        # measured elapsed span, so both are kept.
         "solve_time": solve_time,
         "wall_time": elapsed,
         "solver_status": solver_status,

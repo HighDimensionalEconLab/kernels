@@ -526,6 +526,8 @@ def open_economy_growth_kernel_uno(
         "rkhs_norm_q": float(rkhs_norm_q),
         "rkhs_norm_total": float(rkhs_norm_total),
         "objective_value": float(objective_norm_squared),
+        # solve_time is IPOPT's own cpu-time accounting; wall_time is the
+        # measured elapsed span, so both are kept.
         "solve_time": solve_time,
         "wall_time": elapsed,
         "solver": "uno",

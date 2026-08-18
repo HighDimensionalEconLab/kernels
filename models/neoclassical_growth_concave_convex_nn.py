@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import jsonargparse
 
+from models.neoclassical_growth import KINKED_CALIBRATION as KINKED
 from models.neoclassical_growth_nn import (
     DataSettings,
     GrowthPolicySettings,
@@ -12,14 +13,14 @@ from models.utilities import OptimizerSettings
 
 
 def neoclassical_growth_concave_convex_nn(
-    a: float = 1 / 3,
-    delta: float = 0.1,
-    rho_hat: float = 0.11,
-    A: float = 0.5,
-    b_1: float = 3.0,
-    b_2: float = 2.5,
+    a: float = KINKED.a,
+    delta: float = KINKED.delta,
+    rho_hat: float = KINKED.rho_hat,
+    A: float = KINKED.A,
+    b_1: float = KINKED.b_1,
+    b_2: float = KINKED.b_2,
     k_0: float = 1.0,
-    sigma_crra: float = 1.0,
+    sigma_crra: float = KINKED.sigma_crra,
     seed: int = 0,
     use_float64: bool = True,
     data_set: DataSettings = DataSettings(test_points=41),

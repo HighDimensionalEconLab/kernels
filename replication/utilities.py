@@ -267,15 +267,6 @@ def write_summary(output_dir, prefix, experiments=None):
 # --- kinked (concave-convex) production geometry ------------------------------
 
 
-def kinked_thresholds(a=1 / 3, delta=0.1, rho_hat=0.11, A=0.5, b_1=3.0, b_2=2.5):
-    # Branch switch k_thr where k^a = b_1 k^a - b_2, and the per-branch steady
-    # states from f'(k_ss) = delta + rho_hat (ex-post classification only).
-    k_thr = (b_2 / (b_1 - 1.0)) ** (1.0 / a)
-    k_ss_low = ((delta + rho_hat) / (A * a)) ** (1.0 / (a - 1.0))
-    k_ss_high = ((delta + rho_hat) / (A * a * b_1)) ** (1.0 / (a - 1.0))
-    return k_thr, k_ss_low, k_ss_high
-
-
 def classify_path_basin(k_path, k_0, k_thr, k_ss_low, k_ss_high, tol_frac=0.05):
     # Finite-horizon solutions (kernel and sequential-NN paths to test_T) may
     # end mid-transition near the threshold, so a settle-ball test alone cannot

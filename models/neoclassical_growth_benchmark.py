@@ -1,5 +1,3 @@
-import math
-
 import numpy as np
 from scipy.integrate import solve_bvp
 
@@ -8,7 +6,7 @@ from scipy.integrate import solve_bvp
 def neoclassical_growth_benchmark(
     a,
     delta,
-    r,
+    rho_hat,
     sigma_crra,
     k_0,
     t_grid,
@@ -20,7 +18,7 @@ def neoclassical_growth_benchmark(
 ):
     # a: capital share
     # delta: depreciation
-    # r: discount rate
+    # rho_hat: discount rate
     # sigma_crra: the constant relative risk aversion coefficient
     # k_0, z_0: initial conditions for capital and Hicks-neutral TFP (Y = z k^a)
     # g: per-capita balanced growth rate; TFP grows at (1-a) g so the
@@ -32,15 +30,12 @@ def neoclassical_growth_benchmark(
     # tol/max_nodes: solve_bvp accuracy -- scipy's default tol=1e-3 leaves ~1e-4
     # errors in the "benchmark" itself, polluting every reported solver error
 
-    if g >= r:
-        raise ValueError("g must be less than r")
-    if r + (sigma_crra - 1.0) * g <= 0.0:
-        raise ValueError("r + (sigma_crra - 1) * g must be positive")
-    if delta + g <= 0.0:
-        raise ValueError("delta + g must be positive")
-    marginal_product_ss = delta + r + sigma_crra * g
-    if marginal_product_ss <= 0.0:
-        raise ValueError("delta + r + sigma_crra * g must be positive")
+    # Deferred import: models.neoclassical_growth imports this module for its
+    # benchmark-trajectory diagnostics.
+    from models.neoclassical_growth import validate_balanced_growth
+
+    validate_balanced_growth(delta, rho_hat, sigma_crra, g)
+    marginal_product_ss = delta + rho_hat + sigma_crra * g
 
     # Production is Y = z k^a with the labor-augmenting scale s = z^{1/(1-a)},
     # so Y = s (k/s)^a. In detrended coordinates kappa=k/s and c_tilde=c/s, the
@@ -59,7 +54,7 @@ def neoclassical_growth_benchmark(
             (
                 kappa**a - c_tilde - (delta + g) * kappa,
                 (c_tilde / sigma_crra)
-                * (a * kappa ** (a - 1) - r - delta - sigma_crra * g),
+                * (a * kappa ** (a - 1) - rho_hat - delta - sigma_crra * g),
             )
         )
 
@@ -76,7 +71,7 @@ def neoclassical_growth_benchmark(
     c_tilde_ss = kappa_ss**a - (delta + g) * kappa_ss
     if c_tilde_ss <= 0.0:
         raise ValueError("balanced-growth consumption per unit of z must be positive")
-    trace = r + (sigma_crra - 1.0) * g
+    trace = rho_hat + (sigma_crra - 1.0) * g
     discriminant = trace**2 - 4 * c_tilde_ss * f_pp / sigma_crra
     if discriminant <= 0.0:
         raise ValueError("balanced-growth saddle discriminant must be positive")
@@ -100,31 +95,3 @@ def neoclassical_growth_benchmark(
         return scale * val[0], scale * val[1]
 
     return interpolate_solution
-
-
-# Closed-form steady state of the static model (z = 1, g = 0) and its exact
-# derivatives, the AD-free target the solver sensitivities are checked
-# against: f'(k_ss) = delta + rho_hat with f(k) = k^a gives
-# k_ss = (a / (delta + rho_hat))^(1/(1 - a)) and c_ss = k_ss^a - delta k_ss.
-# sigma_crra and k_0 do not enter, so those derivatives are exactly zero.
-def neoclassical_steady_state_sensitivities(a, delta, rho_hat):
-    mpk_ss = delta + rho_hat
-    k_ss = (a / mpk_ss) ** (1.0 / (1.0 - a))
-    c_ss = k_ss**a - delta * k_ss
-    d_k_ss_d_a = k_ss * (1.0 / (a * (1.0 - a)) + math.log(a / mpk_ss) / (1.0 - a) ** 2)
-    d_k_ss_d_delta = -k_ss / ((1.0 - a) * mpk_ss)
-    # a k_ss^(a-1) - delta = rho_hat collapses the chain rule for c_ss.
-    return {
-        "k_ss": k_ss,
-        "c_ss": c_ss,
-        "d_k_ss_d_a": d_k_ss_d_a,
-        "d_k_ss_d_delta": d_k_ss_d_delta,
-        "d_k_ss_d_rho_hat": d_k_ss_d_delta,
-        "d_k_ss_d_sigma_crra": 0.0,
-        "d_k_ss_d_k_0": 0.0,
-        "d_c_ss_d_a": k_ss**a * math.log(k_ss) + rho_hat * d_k_ss_d_a,
-        "d_c_ss_d_delta": rho_hat * d_k_ss_d_delta - k_ss,
-        "d_c_ss_d_rho_hat": rho_hat * d_k_ss_d_delta,
-        "d_c_ss_d_sigma_crra": 0.0,
-        "d_c_ss_d_k_0": 0.0,
-    }

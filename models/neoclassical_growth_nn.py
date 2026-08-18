@@ -16,6 +16,14 @@ from nlls_gram import (
     MultiStart,
 )
 
+from models.neoclassical_growth import (
+    DOMAIN_EPS,
+    StructuralParameters,
+    marginal_product,
+    production,
+    resolve_kink_family,
+    steady_flow_consumption_guess,
+)
 from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from models.utilities import (
     ACTIVATIONS,
@@ -28,26 +36,6 @@ from models.utilities import (
 from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
-
-DOMAIN_EPS = 1e-8
-
-
-@struct.dataclass
-class StructuralParameters:
-    a: jax.Array
-    delta: jax.Array
-    rho_hat: jax.Array
-    sigma_crra: jax.Array
-    k_0: jax.Array
-    A: jax.Array
-    b_1: jax.Array
-    b_2: jax.Array
-
-    @classmethod
-    def create(cls, dtype, **kwargs):
-        return cls(
-            **{key: jnp.asarray(value, dtype=dtype) for key, value in kwargs.items()}
-        )
 
 
 @dataclass
@@ -155,15 +143,6 @@ class GrowthPolicyNN(nnx.Module):
         return output_scale * unit_softplus(self.head(h))
 
 
-def production(k, p):
-    base = k**p.a
-    return p.A * jnp.maximum(base, p.b_1 * base - p.b_2)
-
-
-def marginal_product(k, p):
-    return jax.vmap(jax.grad(lambda x: production(x, p)))(k)
-
-
 def policy_values(model, t, p):
     values, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
         t
@@ -174,38 +153,33 @@ def policy_values(model, t, p):
     dc_dt = derivatives[:, 1]
     output = production(k, p)
     mpk = marginal_product(k, p)
-    resource = dk_dt - (output - p.delta * k - c)
-    euler = dc_dt - c * (mpk - p.delta - p.rho_hat) / p.sigma_crra
-    log_tvc = -p.rho_hat * t - p.sigma_crra * jnp.log(c) + jnp.log(k)
     return {
         "t": t,
         "k": k,
         "c": c,
+        "dk_dt": dk_dt,
+        "dc_dt": dc_dt,
         "Y": output,
         "mpk": mpk,
-        "resource": resource,
-        "euler": euler,
-        "log_tvc": log_tvc,
+        "resource": dk_dt - (output - p.delta * k - c),
+        "euler": dc_dt - c * (mpk - p.delta - p.rho_hat) / p.sigma_crra,
     }
 
 
-def training_residual(model, data, p):
-    values = policy_values(model, data["t"], p)
-    ic = model(jnp.asarray(0.0, dtype=data["t"].dtype))[0] - p.k_0
-    residual = jnp.concatenate(
-        [
-            values["resource"],
-            values["euler"],
-            jnp.atleast_1d(ic),
-        ]
-    )
-    return residual / jnp.sqrt(residual.size)
-
-
 def residual_fn(theta, args, p):
-    return training_residual(
-        nnx.merge(args.graphdef, theta, args.nondiff), {"t": args.t}, p
+    model = nnx.merge(args.graphdef, theta, args.nondiff)
+    values, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
+        args.t
     )
+    k = values[:, 0]
+    c = values[:, 1]
+    dk_dt = derivatives[:, 0]
+    dc_dt = derivatives[:, 1]
+    resource = dk_dt - (production(k, p) - p.delta * k - c)
+    euler = dc_dt - c * (marginal_product(k, p) - p.delta - p.rho_hat) / p.sigma_crra
+    ic = model(jnp.asarray(0.0, dtype=args.t.dtype))[0] - p.k_0
+    residual = jnp.concatenate([resource, euler, jnp.atleast_1d(ic)])
+    return residual / jnp.sqrt(residual.size)
 
 
 def snapshot(data, model, p):
@@ -254,13 +228,9 @@ def neoclassical_growth_nn(
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
-    kinked_parameter_count = sum(parameter is not None for parameter in (A, b_1, b_2))
-    if kinked_parameter_count not in {0, 3}:
-        raise ValueError("Set all of A, b_1, and b_2, or set none of them.")
-    use_kinked_production = kinked_parameter_count == 3
-    A_value = 1.0 if A is None else float(A)
-    b_1_value = 1.0 if b_1 is None else float(b_1)
-    b_2_value = 0.0 if b_2 is None else float(b_2)
+    use_kinked_production, A_value, b_1_value, b_2_value = resolve_kink_family(
+        A, b_1, b_2
+    )
 
     dtype = jnp.float64 if use_float64 else jnp.float32
     p = StructuralParameters.create(
@@ -276,31 +246,9 @@ def neoclassical_growth_nn(
     )
 
     t_train = make_train_t_grid(data_set, dtype)
-    train_data = {"t": t_train}
-    test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
-    test_data = {"t": test_t}
-    if not use_kinked_production:
-        benchmark_grid = jnp.linspace(
-            0.0, data_set.benchmark_T, data_set.benchmark_points, dtype=dtype
-        )
-        benchmark_solution = neoclassical_growth_benchmark(
-            a, delta, rho_hat, sigma_crra, k_0, benchmark_grid
-        )
-        k_train_bar, c_train_bar = benchmark_solution(t_train)
-        k_test_bar, c_test_bar = benchmark_solution(test_t)
-        train_data = {
-            **train_data,
-            "k_benchmark": k_train_bar,
-            "c_benchmark": c_train_bar,
-        }
-        test_data = {
-            **test_data,
-            "k_benchmark": k_test_bar,
-            "c_benchmark": c_test_bar,
-        }
-
-    initial_output = float(A_value * max(k_0**a, b_1_value * k_0**a - b_2_value))
-    c_flow_guess = max(initial_output - delta * k_0, DOMAIN_EPS)
+    c_flow_guess = steady_flow_consumption_guess(
+        k_0, a, delta, A_value, b_1_value, b_2_value
+    )
     policy_settings = replace(nn_set, input_scale=max(float(data_set.train_T), 1.0))
     k_scale = max(float(k_0), DOMAIN_EPS)
     c_scale = c_flow_guess
@@ -354,7 +302,7 @@ def neoclassical_growth_nn(
         multi_start=multi_start,
         **solve_options,
     )
-    train_time = timer.elapsed(result)
+    solve_time = timer.elapsed(result)
     model = nnx.merge(graphdef, result.x, nondiff)
     steps = int(result.steps)
     attempt = int(result.multi_start.attempt) + 1
@@ -362,11 +310,38 @@ def neoclassical_growth_nn(
     train_loss = float(result.info.loss)
     accepted = bool(result.multi_start.accepted)
 
+    train_data = {"t": t_train}
+    test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
+    test_data = {"t": test_t}
+    if not use_kinked_production:
+        benchmark_grid = jnp.linspace(
+            0.0, data_set.benchmark_T, data_set.benchmark_points, dtype=dtype
+        )
+        benchmark_solution = neoclassical_growth_benchmark(
+            a, delta, rho_hat, sigma_crra, k_0, benchmark_grid
+        )
+        k_train_bar, c_train_bar = benchmark_solution(t_train)
+        k_test_bar, c_test_bar = benchmark_solution(test_t)
+        train_data = {
+            **train_data,
+            "k_benchmark": k_train_bar,
+            "c_benchmark": c_train_bar,
+        }
+        test_data = {
+            **test_data,
+            "k_benchmark": k_test_bar,
+            "c_benchmark": c_test_bar,
+        }
+
     train_df = snapshot(train_data, model, p)
     test_df = snapshot(test_data, model, p)
     tvc_t = jnp.asarray(data_set.test_tvc_T, dtype=dtype)
     tvc_values = policy_values(model, jnp.atleast_1d(tvc_t), p)
-    log_tvc = float(tvc_values["log_tvc"][0])
+    log_tvc = float(
+        -p.rho_hat * tvc_t
+        - p.sigma_crra * jnp.log(tvc_values["c"][0])
+        + jnp.log(tvc_values["k"][0])
+    )
     transversality_ok = bool(log_tvc < stop_set.log_tvc_threshold)
 
     train_resource_mean_abs = float(train_df["resource"].abs().mean())
@@ -392,7 +367,7 @@ def neoclassical_growth_nn(
         "use_kinked_production": use_kinked_production,
         "seed": seed,
         # Measured, not requested: a float64 leak upstream shows up here.
-        "residual_dtype": str(tvc_values["log_tvc"].dtype),
+        "residual_dtype": str(tvc_values["euler"].dtype),
         "solver": "nlls-gram",
         "train_loss": train_loss,
         "final_damping": float(result.lm_state.damping),
@@ -407,8 +382,8 @@ def neoclassical_growth_nn(
         "steps": steps,
         "attempt": attempt,
         "stopping_reason": stopping_reason,
-        "train_time": train_time,
-        "train_time_success": train_time if accepted else np.nan,
+        "solve_time": solve_time,
+        "solve_time_success": solve_time if accepted else np.nan,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
         "nn_width": policy_settings.width,
         "nn_depth": policy_settings.depth,
@@ -420,12 +395,12 @@ def neoclassical_growth_nn(
     }
     if not use_kinked_production:
         results.update(
-            test_mean_abs_k_rel_error=float(test_df["k_rel_error"].mean()),
-            test_mean_abs_c_rel_error=float(test_df["c_rel_error"].mean()),
-            test_max_abs_k_rel_error=float(test_df["k_rel_error"].abs().max()),
-            test_max_abs_c_rel_error=float(test_df["c_rel_error"].abs().max()),
-            train_mean_abs_k_rel_error=float(train_df["k_rel_error"].mean()),
-            train_mean_abs_c_rel_error=float(train_df["c_rel_error"].mean()),
+            test_k_rel_error_mean=float(test_df["k_rel_error"].mean()),
+            test_c_rel_error_mean=float(test_df["c_rel_error"].mean()),
+            test_k_rel_error_max=float(test_df["k_rel_error"].abs().max()),
+            test_c_rel_error_max=float(test_df["c_rel_error"].abs().max()),
+            train_k_rel_error_mean=float(train_df["k_rel_error"].mean()),
+            train_c_rel_error_mean=float(train_df["c_rel_error"].mean()),
         )
 
     if verbose:

@@ -4,10 +4,10 @@ import jsonargparse
 import numpy as np
 
 from models import neoclassical_growth_concave_convex_kernel_uno
+from models.neoclassical_growth import kinked_thresholds
 from replication.utilities import (
     classify_path_basin,
     configure_process,
-    kinked_thresholds,
     save_experiment,
     sweep,
     write_summary,

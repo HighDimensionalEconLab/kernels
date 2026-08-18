@@ -7,7 +7,7 @@ import pandas as pd
 from nlls_gram import LMStatus
 
 from models.kernels import integrated_kernel_matrices
-from models.neoclassical_growth_benchmark import neoclassical_steady_state_sensitivities
+from models.neoclassical_growth import neoclassical_steady_state_sensitivities
 from models.neoclassical_growth_kernel import path_values
 from replication.neoclassical_growth_kernel import PREFIX, SOLVER
 from replication.utilities import (
@@ -75,8 +75,8 @@ def run(
         fields[f"k_{suffix}"] = float(k_sens[index])
         fields[f"c_{suffix}"] = float(c_sens[index])
         for name in ("a", "delta", "rho_hat", "sigma_crra", "k_0"):
-            fields[f"d_k_{suffix}_d_{name}"] = float(jacobian[name][index, 0])
-            fields[f"d_c_{suffix}_d_{name}"] = float(jacobian[name][index, 1])
+            fields[f"d_k_{suffix}_d_{name}"] = float(getattr(jacobian, name)[index, 0])
+            fields[f"d_c_{suffix}_d_{name}"] = float(getattr(jacobian, name)[index, 1])
     # The exact steady-state derivatives the large-T columns converge
     # to; the sigma_crra and k_0 rows converge to zero.
     fields.update(

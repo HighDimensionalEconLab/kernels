@@ -38,7 +38,6 @@ from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
     OptimizerSettings,
-    SolveSpec,
     Stopwatch,
     acceptance_fields,
     make_sampled_train_grid,
@@ -285,10 +284,6 @@ def multicountry_growth_nn(
     validate_initial_conditions(k_0, a_0, parameters)
 
     train_t = make_sampled_train_grid(data_set, dtype)
-    if data_set.test_T > float(train_t[-1]):
-        raise ValueError("test_T must not exceed the training horizon")
-    if data_set.benchmark_T < max(data_set.test_T, float(train_t[-1])):
-        raise ValueError("benchmark_T must cover the train and test horizons")
 
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     validation_t = jnp.linspace(
@@ -675,14 +670,15 @@ def multicountry_growth_nn(
         "validation_df": validation_df,
         "test_df": test_df,
         "hyperparameters": hyperparameters,
-        "solve": SolveSpec(
-            solver=solver,
-            theta_0=theta_0,
-            p=residual_parameters,
-            residual_args=residual_args,
-            multi_start=multi_start,
-            options=solve_options,
-        ),
+        "solve": {
+            "solver": solver,
+            "residual_fn": residual_fn,
+            "theta_0": theta_0,
+            "p": residual_parameters,
+            "residual_args": residual_args,
+            "multi_start": multi_start,
+            "options": solve_options,
+        },
         "result": result,
     }
 

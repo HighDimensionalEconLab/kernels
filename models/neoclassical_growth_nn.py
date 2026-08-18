@@ -21,7 +21,6 @@ from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
     OptimizerSettings,
-    SolveSpec,
     Stopwatch,
     make_train_t_grid,
     unit_softplus,
@@ -456,14 +455,15 @@ def neoclassical_growth_nn(
         "train_df": train_df,
         "test_df": test_df,
         "hyperparameters": hyperparameters,
-        "solve": SolveSpec(
-            solver=solver,
-            theta_0=theta_0,
-            p=p,
-            residual_args=residual_args,
-            multi_start=multi_start,
-            options=solve_options,
-        ),
+        "solve": {
+            "solver": solver,
+            "residual_fn": residual_fn,
+            "theta_0": theta_0,
+            "p": p,
+            "residual_args": residual_args,
+            "multi_start": multi_start,
+            "options": solve_options,
+        },
         "result": result,
     }
 

@@ -21,7 +21,6 @@ from models.utilities import (
 )
 from models.utilities import (
     STATUS_TO_REASON,
-    SolveSpec,
     Stopwatch,
     acceptance_fields,
     make_train_t_grid,
@@ -124,8 +123,6 @@ def neoclassical_growth_kernel(
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
-    if sigma_crra <= 0.0:
-        raise ValueError("sigma_crra must be positive")
     dtype = jnp.float64 if use_float64 else jnp.float32
     train_residual_tolerance = tolerance_set.train_residual
     validation_residual_tolerance = tolerance_set.validation_residual
@@ -416,14 +413,15 @@ def neoclassical_growth_kernel(
         "train_df": train_df,
         "test_df": test_df,
         "hyperparameters": hyperparameters,
-        "solve": SolveSpec(
-            solver=solver,
-            theta_0=theta_0,
-            p=p,
-            residual_args=None,
-            multi_start=None,
-            options=solve_options,
-        ),
+        "solve": {
+            "solver": solver,
+            "residual_fn": residual_fn,
+            "theta_0": theta_0,
+            "p": p,
+            "residual_args": None,
+            "multi_start": None,
+            "options": solve_options,
+        },
         "result": result,
     }
 

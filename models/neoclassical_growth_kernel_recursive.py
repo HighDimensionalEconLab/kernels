@@ -158,22 +158,6 @@ def nonhomothetic_state_features(x, centers, kernel_set):
 def validate_settings(data_set, kernel_set, stop_set):
     if data_set.collocation_source != "exact_path":
         raise ValueError(f"unknown collocation_source: {data_set.collocation_source!r}")
-    if data_set.train_points < 2:
-        raise ValueError("train_points must be at least two")
-    if data_set.train_T <= 0.0 or data_set.test_T <= 0.0:
-        raise ValueError("train_T and test_T must be positive")
-    if data_set.test_points < 2 or data_set.tvc_steps < 1:
-        raise ValueError("test_points must be at least two and tvc_steps positive")
-    if data_set.train_tvc_T <= data_set.train_T:
-        raise ValueError("train_tvc_T must exceed train_T")
-    if data_set.benchmark_T < max(data_set.train_T, data_set.test_T):
-        raise ValueError("benchmark_T must cover both train and test horizons")
-    if data_set.benchmark_points < data_set.train_points:
-        raise ValueError("benchmark_points must be at least train_points")
-    if kernel_set.amplitude <= 0.0 or kernel_set.lengthscale <= 0.0:
-        raise ValueError("kernel amplitude and lengthscale must be positive")
-    if kernel_set.metric_epsilon <= 0.0:
-        raise ValueError("metric_epsilon must be positive")
     state_kernels = tuple(
         f"{structure}_{family}"
         for structure in ("ard", "additive")
@@ -181,14 +165,8 @@ def validate_settings(data_set, kernel_set, stop_set):
     )
     if kernel_set.state_kernel not in state_kernels:
         raise ValueError(f"unknown state_kernel: {kernel_set.state_kernel!r}")
-    if not all(ell > 0.0 for ell in state_lengthscales(kernel_set)):
-        raise ValueError("per-dimension lengthscales must be positive when set")
     if kernel_set.linear_mean and kernel_set.homothetic_representation:
         raise ValueError("linear_mean requires homothetic_representation=False")
-    if stop_set.residual_atol <= 0.0 or stop_set.gtol <= 0.0:
-        raise ValueError("residual_atol and gtol must be positive")
-    if stop_set.ridge <= 0.0:
-        raise ValueError("ridge must be positive")
 
 
 def fixed_collocation_data(
@@ -336,10 +314,6 @@ def neoclassical_growth_kernel_recursive(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    if not 0.0 < a < 1.0:
-        raise ValueError("a must lie strictly between zero and one")
-    if sigma_crra <= 0.0:
-        raise ValueError("sigma_crra must be positive")
     # Well-posedness of the planner objective, not steady-state structure:
     # finiteness of discounted utility needs rho_hat + (sigma - 1) g > 0, the
     # discounted-capital certificate needs g < rho_hat, and detrended capital

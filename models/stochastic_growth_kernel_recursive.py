@@ -130,30 +130,12 @@ def stochastic_growth_kernel_recursive(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    if not 0.0 < a < 1.0:
-        raise ValueError("a must lie strictly between zero and one")
-    if sigma_crra <= 0.0:
-        raise ValueError("sigma_crra must be positive")
-    if rho_hat <= 0.0:
-        raise ValueError("rho_hat must be positive")
-    if eta <= 0.0:
-        raise ValueError("eta must be positive")
-    if sigma_z < 0.0:
-        raise ValueError("sigma_z must be nonnegative")
-    if sde_solver not in SDE_SOLVERS:
-        raise ValueError(f"sde_solver must be one of {sorted(SDE_SOLVERS)}")
     # Mean reversion in z fixes a scale, so the homothetic representation is
     # misspecified by construction for this model.
     if kernel_set.homothetic_representation:
         raise ValueError(
             "the stochastic model requires homothetic_representation=False"
         )
-    if stop_set.residual_atol <= 0.0 or stop_set.gtol <= 0.0:
-        raise ValueError("residual_atol and gtol must be positive")
-    if stop_set.ridge <= 0.0:
-        raise ValueError("ridge must be positive")
-    if not all(ell > 0.0 for ell in state_lengthscales(kernel_set)):
-        raise ValueError("kernel lengthscales must be positive")
 
     solver = SDE_SOLVERS[sde_solver]
     n_train_steps = data_set.train_points - 1

@@ -262,28 +262,6 @@ def stochastic_open_economy_growth_kernel_recursive(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    if k_0 <= 0.0:
-        raise ValueError("k_0 must be positive")
-    if z_0 <= 0.0 or z_bar <= 0.0:
-        raise ValueError("z_0 and z_bar must be positive")
-    if kappa_z <= 0.0 or kappa_r <= 0.0:
-        raise ValueError("shock mean-reversion rates must be positive")
-    if sigma_z < 0.0 or sigma_r < 0.0:
-        raise ValueError("shock diffusion scales must be nonnegative")
-    if not -1.0 < corr_zr < 1.0:
-        raise ValueError("corr_zr must lie strictly between -1 and one")
-    if sde_solver not in SDE_SOLVERS:
-        raise ValueError(f"sde_solver must be one of {sorted(SDE_SOLVERS)}")
-    if data_set.train_T <= 0.0 or data_set.test_T <= 0.0:
-        raise ValueError("train_T and test_T must be positive")
-    if data_set.train_points < 2 or data_set.test_points < 2:
-        raise ValueError("train_points and test_points must be at least two")
-    if ic_set.num_train_trajectories < 1 or ic_set.num_test_trajectories < 1:
-        raise ValueError("training and test trajectory counts must be positive")
-    if kernel_set.amplitude <= 0.0 or kernel_set.lengthscale <= 0.0:
-        raise ValueError("kernel amplitude and lengthscale must be positive")
-    if kernel_set.metric_epsilon <= 0.0:
-        raise ValueError("metric_epsilon must be positive")
     state_kernels = tuple(
         f"{structure}_{family}"
         for structure in ("ard", "additive")
@@ -291,26 +269,6 @@ def stochastic_open_economy_growth_kernel_recursive(
     )
     if kernel_set.state_kernel not in state_kernels:
         raise ValueError(f"unknown state_kernel: {kernel_set.state_kernel!r}")
-    if not all(ell > 0.0 for ell in state_lengthscales(kernel_set)):
-        raise ValueError("per-axis lengthscales must be positive when set")
-    if stop_set.residual_atol <= 0.0 or stop_set.gtol <= 0.0:
-        raise ValueError("residual_atol and gtol must be positive")
-    if stop_set.ridge <= 0.0:
-        raise ValueError("ridge must be positive")
-    if stop_set.ridge_init is not None:
-        if stop_set.ridge_init <= stop_set.ridge:
-            raise ValueError("ridge_init must exceed the ridge floor")
-        if not 0.0 < stop_set.ridge_decrease < 1.0:
-            raise ValueError("ridge_decrease must lie strictly between 0 and 1")
-        if stop_set.ridge_grad_rtol <= 0.0:
-            raise ValueError("ridge_grad_rtol must be positive")
-    tolerances = (
-        tolerance_set.test_euler_mean_abs,
-        tolerance_set.test_euler_max,
-        tolerance_set.test_diffusion_max_abs,
-    )
-    if any(not math.isfinite(value) or value <= 0.0 for value in tolerances):
-        raise ValueError("acceptance tolerances must be positive")
 
     train_variances = (
         ic_set.train_log_z_variance,
@@ -331,11 +289,6 @@ def stochastic_open_economy_growth_kernel_recursive(
             strict=True,
         )
     )
-    if any(not math.isfinite(value) or value < 0.0 for value in train_variances):
-        raise ValueError("training initial-condition variances must be nonnegative")
-    if any(not math.isfinite(value) or value < 0.0 for value in test_variances):
-        raise ValueError("test initial-condition variances must be nonnegative")
-
     output_scale = float(production(k_0, z_0, parameters))
     initial_center = jnp.asarray(
         [math.log(z_0), math.log(k_0), a_0 / output_scale, rate_gap_0],

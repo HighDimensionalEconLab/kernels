@@ -23,7 +23,6 @@ from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
     OptimizerSettings,
-    SolveSpec,
     unit_softplus,
 )
 from models.utilities import (
@@ -349,12 +348,6 @@ def euler_residuals(policy, log_states, p):
 def draw_initial_conditions(
     z_0, k_0, num_trajectories, log_z_variance, log_k_variance, key, dtype
 ):
-    if z_0 <= 0.0 or k_0 <= 0.0:
-        raise ValueError("z_0 and k_0 must be positive")
-    if num_trajectories < 1:
-        raise ValueError("trajectory counts must be positive")
-    if log_z_variance < 0.0 or log_k_variance < 0.0:
-        raise ValueError("initial-condition log variances must be nonnegative")
     base = jnp.asarray([z_0, k_0], dtype=dtype)
     if log_z_variance == 0.0 and log_k_variance == 0.0:
         return jnp.tile(base, (num_trajectories, 1))
@@ -479,8 +472,6 @@ class DrawInvestmentPolicy:
 
 
 def positive_policy_grid(grid_lo, grid_hi, size):
-    if grid_lo <= 0.0 or grid_hi < grid_lo:
-        raise ValueError("policy-grid bounds must satisfy 0 < grid_lo <= grid_hi")
     log_lo = math.log(grid_lo)
     log_hi = math.log(grid_hi)
     log_margin = 0.05 * (log_hi - log_lo) + 1e-6
@@ -890,10 +881,6 @@ def neoclassical_growth_nn_recursive(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    if not 0.0 < a < 1.0:
-        raise ValueError("a must lie strictly between zero and one")
-    if sigma_crra <= 0.0:
-        raise ValueError("sigma_crra must be positive")
     # Well-posedness of the planner objective, not steady-state structure:
     # finiteness of discounted utility needs rho_hat + (sigma - 1) g > 0, the
     # discounted-capital certificate needs g < rho_hat, and detrended capital
@@ -904,35 +891,10 @@ def neoclassical_growth_nn_recursive(
         raise ValueError("rho_hat + (sigma_crra - 1) * g must be positive")
     if delta + g <= 0.0:
         raise ValueError("delta + g must be positive")
-    if data_set.train_T <= 0.0:
-        raise ValueError("train_T must be positive")
-    if data_set.train_points < 2:
-        raise ValueError("train_points must be at least two")
     if data_set.ode_solver not in {"rk4", "tsit5"}:
         raise ValueError("ode_solver must be 'rk4' or 'tsit5'")
-    if not (math.isfinite(data_set.rtol) and data_set.rtol > 0.0):
-        raise ValueError("rtol must be positive")
-    if not (math.isfinite(data_set.atol) and data_set.atol > 0.0):
-        raise ValueError("atol must be positive")
-    if data_set.initial_dt is not None and not (
-        math.isfinite(data_set.initial_dt) and data_set.initial_dt > 0.0
-    ):
-        raise ValueError("initial_dt must be positive when set")
-    if not (
-        math.isfinite(stop_set.train_loss_threshold)
-        and stop_set.train_loss_threshold > 0.0
-    ):
-        raise ValueError("train_loss_threshold must be positive")
-    if data_set.tvc_steps < 1:
-        raise ValueError("tvc_steps must be positive")
-    if data_set.test_points < 2:
-        raise ValueError("test_points must be at least two")
-    if data_set.train_tvc_T <= data_set.train_T:
-        raise ValueError("train_tvc_T must exceed train_T")
     n_test_steps = data_set.test_points - 1
     test_T = data_set.test_T
-    if data_set.benchmark_T < max(data_set.train_T, test_T):
-        raise ValueError("benchmark_T must cover both train_T and test_T")
     # Without a positive variance every epoch redraw returns the same batch.
     if stop_set.num_epochs > 1 and (
         ic_set.train_log_z_variance <= 0.0 and ic_set.train_log_k_variance <= 0.0
@@ -1461,14 +1423,15 @@ def neoclassical_growth_nn_recursive(
     # A cache hit loads the policy from disk instead of solving, so there is
     # no primal solve to describe.
     if not cache_hit:
-        extras["solve"] = SolveSpec(
-            solver=solver,
-            theta_0=theta_0,
-            p=p,
-            residual_args=residual_args,
-            multi_start=multi_start,
-            options=solve_options,
-        )
+        extras["solve"] = {
+            "solver": solver,
+            "residual_fn": residual_fn,
+            "theta_0": theta_0,
+            "p": p,
+            "residual_args": residual_args,
+            "multi_start": multi_start,
+            "options": solve_options,
+        }
         extras["result"] = result
     structural = {
         "a": a,

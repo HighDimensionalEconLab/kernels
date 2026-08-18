@@ -20,14 +20,8 @@ def open_economy_growth_benchmark(
     max_nodes=100000,
 ):
     t_grid = np.asarray(t_grid, dtype=float)
-    if t_grid.ndim != 1 or len(t_grid) < 2:
-        raise ValueError(
-            "t_grid must be a one-dimensional array with at least 2 points"
-        )
     if t_grid[0] != 0.0 or np.any(np.diff(t_grid) <= 0.0):
         raise ValueError("t_grid must start at zero and be strictly increasing")
-    if k_0 <= 0.0:
-        raise ValueError("k_0 must be positive")
 
     productivity = (
         (lambda t: np.ones_like(t, dtype=float))

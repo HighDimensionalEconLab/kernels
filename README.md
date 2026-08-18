@@ -239,25 +239,27 @@ against 2.89 s for CG, a factor of 10.2. The first and warmed CG timings are
 close at every rung. `multicountry_growth_scaling_figures.py` renders the
 log-log timing figure and `collect_json.py` publishes both timing phases, all
 per-rung times, the common gates, and the dense/CG ratio into
-`all_results.json`. The N = 40 rung also
-publishes `d_rate_T10_d_gamma_common` — the world rate's response to the
+`all_results.json`. `replication/multicountry_growth_gamma_common.py`
+re-solves the N = 40 CG rung and publishes
+`d_rate_T10_d_gamma_common` — the world rate's response to the
 representative-agent CRRA direction `(1, ..., 1)`, one implicit-AD
 forward tangent through the cg solve (the `ad_solver` inherits the
 arrow-Woodbury inverse built at the solution), comparable against the
 N = 2 and N = 10 sensitivity tables — with the tangent's wall time
-reported next to the primal solve time.
+reported next to the rung's primal solve time.
 
 Every driver threads its structural parameters and initial conditions
 through the solver's implicit-AD `p` argument and returns
-`extras["solve"]`, a `SolveSpec` (`models/utilities.py`) holding the
-solver, `theta_0`, `p`, `residual_args`, `multi_start`, and the solve
-options, alongside `extras["result"]`, the raw solver result. A caller
-re-runs or warm-starts the solve from the spec and differentiates its own
-re-solve with respect to `spec.p` — the replication drivers do exactly
-this for the sensitivity tables (`replication/neoclassical_growth_kernel.py`,
-`replication/neoclassical_growth_nn.py`,
-`replication/multicountry_growth_kernel.py`,
-`replication/multicountry_growth_nn.py`), publishing
+`extras["solve"]`, a dict holding the solver, `residual_fn`, `theta_0`,
+`p`, `residual_args`, `multi_start`, and the solve options, alongside
+`extras["result"]`, the raw solver result. A caller re-runs or
+warm-starts the solve from that handle and differentiates its own
+re-solve with respect to `spec["p"]` — the dedicated sensitivity drivers
+do exactly this for the sensitivity tables
+(`replication/neoclassical_growth_kernel_sensitivity.py`,
+`replication/neoclassical_growth_nn_sensitivity.py`,
+`replication/multicountry_growth_kernel_sensitivity.py`,
+`replication/multicountry_growth_nn_sensitivity.py`), publishing
 `d_<observable>_T<t>_d_<parameter>` result fields. The multicountry
 callers report the comparative statics of the world interest rate, three
 world statistics (saving rate, NFA dispersion, output Gini), and every

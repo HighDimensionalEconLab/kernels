@@ -17,7 +17,6 @@ from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
     OptimizerSettings,
-    SolveSpec,
     Stopwatch,
     make_train_t_grid,
 )
@@ -280,14 +279,15 @@ def asset_pricing_nn(
             "parameters": {"r": r, "c": c, "g": g},
             "initial_conditions": {"x_0": x_0},
         },
-        "solve": SolveSpec(
-            solver=solver,
-            theta_0=theta_0,
-            p=p,
-            residual_args=residual_args,
-            multi_start=multi_start,
-            options=solve_options,
-        ),
+        "solve": {
+            "solver": solver,
+            "residual_fn": residual_fn,
+            "theta_0": theta_0,
+            "p": p,
+            "residual_args": residual_args,
+            "multi_start": multi_start,
+            "options": solve_options,
+        },
         "result": result,
     }
 

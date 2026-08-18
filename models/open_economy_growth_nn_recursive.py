@@ -28,7 +28,6 @@ from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
     OptimizerSettings,
-    SolveSpec,
     Stopwatch,
     acceptance_fields,
     unit_softplus,
@@ -371,19 +370,6 @@ def open_economy_growth_nn_recursive(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    if k_0 <= 0.0:
-        raise ValueError("k_0 must be positive")
-    if data_set.train_points < 2:
-        raise ValueError("train_points must be at least two")
-    if data_set.diagnostic_T < max(data_set.train_T, data_set.test_T):
-        raise ValueError("diagnostic_T must cover the train and test horizons")
-    if data_set.benchmark_T < data_set.test_T:
-        raise ValueError("benchmark_T must cover the test horizon")
-    if not (
-        math.isfinite(stop_set.train_loss_threshold)
-        and stop_set.train_loss_threshold > 0.0
-    ):
-        raise ValueError("train_loss_threshold must be positive")
     k_0_jax = jnp.asarray(k_0, dtype=dtype)
     a_0_jax = jnp.asarray(a_0, dtype=dtype)
     dynamic_parameters = DynamicModelParameters.from_model(parameters, dtype)
@@ -704,14 +690,15 @@ def open_economy_growth_nn_recursive(
         "diagnostic_df": diagnostic_df,
         "policy_df": policy_df,
         "hyperparameters": hyperparameters,
-        "solve": SolveSpec(
-            solver=solver,
-            theta_0=theta_0,
-            p=residual_parameters,
-            residual_args=residual_args,
-            multi_start=multi_start,
-            options=solve_options,
-        ),
+        "solve": {
+            "solver": solver,
+            "residual_fn": residual_fn,
+            "theta_0": theta_0,
+            "p": residual_parameters,
+            "residual_args": residual_args,
+            "multi_start": multi_start,
+            "options": solve_options,
+        },
         "result": result,
     }
 

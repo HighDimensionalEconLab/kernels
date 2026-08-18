@@ -873,58 +873,10 @@ def stochastic_open_economy_growth_nn_recursive(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    if k_0 <= 0.0:
-        raise ValueError("k_0 must be positive")
-    if z_0 <= 0.0 or z_bar <= 0.0:
-        raise ValueError("z_0 and z_bar must be positive")
-    if kappa_z <= 0.0 or kappa_r <= 0.0:
-        raise ValueError("shock mean-reversion rates must be positive")
-    if sigma_z < 0.0 or sigma_r < 0.0:
-        raise ValueError("shock diffusion scales must be nonnegative")
-    if not -1.0 < corr_zr < 1.0:
-        raise ValueError("corr_zr must lie strictly between -1 and one")
-    if sde_solver not in SDE_SOLVERS:
-        raise ValueError(f"sde_solver must be one of {sorted(SDE_SOLVERS)}")
-    if data_set.train_T <= 0.0 or data_set.test_T <= 0.0 or data_set.tvc_T <= 0.0:
-        raise ValueError("train_T, test_T, and tvc_T must be positive")
-    if data_set.train_points < 2 or data_set.test_points < 2 or data_set.tvc_points < 2:
-        raise ValueError(
-            "train_points, test_points, and tvc_points must be at least two"
-        )
-    if ic_set.num_train_trajectories < 1 or ic_set.num_test_trajectories < 1:
-        raise ValueError("training and test trajectory counts must be positive")
-    if ic_set.num_tvc_trajectories < 2:
-        raise ValueError("num_tvc_trajectories must be at least two")
-    if stop_set.max_steps < 1 or stop_set.num_epochs < 1:
-        raise ValueError("max_steps and num_epochs must be positive")
-    if stop_set.num_attempts < 1:
-        raise ValueError("num_attempts must be positive")
-    if not 1 <= stop_set.continuation_epochs <= stop_set.num_epochs:
-        raise ValueError("continuation_epochs must lie in [1, num_epochs]")
-    if not 0.0 < stop_set.initial_shock_scale <= 1.0:
-        raise ValueError("initial_shock_scale must lie in (0, 1]")
-    if not (
-        math.isfinite(stop_set.train_loss_threshold)
-        and stop_set.train_loss_threshold > 0.0
-    ):
-        raise ValueError("train_loss_threshold must be positive")
-    if nn_set.width < 1 or nn_set.depth < 1:
-        raise ValueError("network width and depth must be positive")
     if nn_set.hidden_activation not in SMOOTH_ACTIVATIONS:
         raise ValueError(
             f"hidden_activation must be one of {sorted(SMOOTH_ACTIVATIONS)}"
         )
-    if nn_set.investment_head_init_scale < 0.0:
-        raise ValueError("investment_head_init_scale must be nonnegative")
-    if asset_shift_scale <= 0.0:
-        raise ValueError("asset_shift_scale must be positive")
-    tolerances = (
-        tolerance_set.test_euler_mean_abs,
-        tolerance_set.test_euler_max,
-        tolerance_set.test_diffusion_max_abs,
-    )
-    if any(not math.isfinite(value) or value <= 0.0 for value in tolerances):
-        raise ValueError("acceptance tolerances must be positive")
 
     train_variances = (
         ic_set.train_log_z_variance,
@@ -945,10 +897,6 @@ def stochastic_open_economy_growth_nn_recursive(
             strict=True,
         )
     )
-    if any(not math.isfinite(value) or value < 0.0 for value in train_variances):
-        raise ValueError("training initial-condition variances must be nonnegative")
-    if any(not math.isfinite(value) or value < 0.0 for value in test_variances):
-        raise ValueError("test initial-condition variances must be nonnegative")
     if ic_set.num_train_trajectories == 1 and any(
         value > 0.0 for value in train_variances
     ):

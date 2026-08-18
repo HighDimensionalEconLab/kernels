@@ -27,26 +27,6 @@ class MulticountryParameters:
     populations: tuple[float, ...] = (1.0, 1.0)
     productivities: tuple[float, ...] = (1.0, 1.0)
 
-    def __post_init__(self):
-        if not 0.0 < self.alpha < 1.0:
-            raise ValueError("alpha must lie in (0, 1)")
-        if self.delta <= 0.0 or self.r <= 0.0:
-            raise ValueError("delta and r must be positive")
-        if not 0.0 < self.eta < 1.0:
-            raise ValueError("eta must lie in (0, 1)")
-        if len(self.populations) < 2:
-            raise ValueError("at least two countries are required")
-        if not (len(self.gammas) == len(self.populations) == len(self.productivities)):
-            raise ValueError(
-                "gammas, populations, and productivities must have equal lengths"
-            )
-        if any(value <= 0.0 for value in self.gammas):
-            raise ValueError("gammas must be positive")
-        if any(value <= 0.0 for value in self.populations):
-            raise ValueError("populations must be positive")
-        if any(value <= 0.0 for value in self.productivities):
-            raise ValueError("productivities must be positive")
-
     @property
     def num_countries(self):
         return len(self.populations)
@@ -128,11 +108,6 @@ def draw_initial_conditions(initial_set, parameters, dtype=jnp.float64):
 
 
 def validate_initial_conditions(k_0, a_0, parameters):
-    num_countries = parameters.num_countries
-    if len(k_0) != num_countries or any(value <= 0.0 for value in k_0):
-        raise ValueError("k_0 must contain one positive capital stock per country")
-    if len(a_0) != num_countries:
-        raise ValueError("a_0 must contain one NFA position per country")
     populations = np.asarray(parameters.populations, dtype=np.float64)
     a_0_np = np.asarray(a_0, dtype=np.float64)
     scale = float(steady_state(parameters, jnp.float64)["output_scale"])
@@ -257,8 +232,6 @@ def resolved_steady_state(mu, parameters):
     # marginal-wealth levels: consumption from the FOC, assets from the
     # stationary budgets.
     mu = jnp.atleast_1d(mu)
-    if mu.shape[-1] != parameters.num_countries:
-        raise ValueError("mu must contain one value per country")
     dtype = mu.dtype
     populations = jnp.asarray(parameters.populations, dtype=dtype)
     steady = steady_state(parameters, dtype)
@@ -473,8 +446,6 @@ def long_run_diagnostics(
     # ratios, consumption proportional to initial wealth a_0_i +
     # PV(resources_i), and wealth-rank preservation -- are exact only under
     # a common gamma, so they are computed only when every gamma_i is equal.
-    if check_T > float(t[-1]) or check_T - window < float(t[0]):
-        raise ValueError("the long-run check window must lie inside the grid")
     a_0 = jnp.asarray(a_0, dtype=values["k"].dtype)
     i_check = int(jnp.argmin(jnp.abs(t - check_T)))
     i_before = int(jnp.argmin(jnp.abs(t - (check_T - window))))

@@ -31,7 +31,6 @@ from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
     OptimizerSettings,
-    SolveSpec,
     Stopwatch,
     acceptance_fields,
     make_sampled_train_grid,
@@ -257,15 +256,9 @@ def open_economy_growth_nn(
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
-    if k_0 <= 0.0:
-        raise ValueError("k_0 must be positive")
     dtype = jnp.float64 if use_float64 else jnp.float32
 
     train_t = make_sampled_train_grid(data_set, dtype)
-    if data_set.test_T > float(train_t[-1]):
-        raise ValueError("test_T must not exceed the training horizon")
-    if data_set.benchmark_T < max(data_set.test_T, float(train_t[-1])):
-        raise ValueError("benchmark_T must cover the train and test horizons")
 
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     validation_t = jnp.linspace(
@@ -532,14 +525,15 @@ def open_economy_growth_nn(
         "train_df": train_df,
         "test_df": test_df,
         "hyperparameters": hyperparameters,
-        "solve": SolveSpec(
-            solver=solver,
-            theta_0=theta_0,
-            p=residual_parameters,
-            residual_args=residual_args,
-            multi_start=multi_start,
-            options=solve_options,
-        ),
+        "solve": {
+            "solver": solver,
+            "residual_fn": residual_fn,
+            "theta_0": theta_0,
+            "p": residual_parameters,
+            "residual_args": residual_args,
+            "multi_start": multi_start,
+            "options": solve_options,
+        },
         "result": result,
     }
 

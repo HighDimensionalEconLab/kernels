@@ -76,8 +76,6 @@ def neoclassical_growth_kernel_uno(
     # IPOPT works in float64 C arrays, so this solver is float64-only.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
-    if sigma_crra <= 0.0:
-        raise ValueError("sigma_crra must be positive")
     kinked_parameter_count = sum(parameter is not None for parameter in (A, b_1, b_2))
     if kinked_parameter_count not in {0, 3}:
         raise ValueError("Set all of A, b_1, and b_2, or set none of them.")

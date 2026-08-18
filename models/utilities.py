@@ -1,11 +1,11 @@
 import math
 import time
 from dataclasses import dataclass
-from typing import Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from flax import nnx
 from nlls_gram import LMStatus
 
 STATUS_TO_REASON = {
@@ -13,20 +13,6 @@ STATUS_TO_REASON = {
     LMStatus.NONFINITE: "nonfinite",
     LMStatus.MAX_STEPS: "max_steps",
 }
-
-
-# Everything needed to re-run a driver's solve, returned in extras["solve"]:
-# spec.solver.solve(spec.theta_0, spec.residual_args, p=spec.p,
-# multi_start=spec.multi_start, **spec.options) reproduces the primal solve.
-# Callers differentiate through their own re-solves with respect to spec.p.
-@dataclass(frozen=True)
-class SolveSpec:
-    solver: Any
-    theta_0: Any
-    p: Any
-    residual_args: Any
-    multi_start: Any
-    options: dict
 
 
 # solution_accepted / rejection_reason results-dict fields from the collected
@@ -50,8 +36,6 @@ def acceptance_fields(rejection_reasons):
 # exceeds one. Steps are taken along the unit direction, so h is the actual
 # perturbation size in x space. Returns (derivative, h).
 def finite_difference_directional(f, x, v, eps_f, order=4):
-    if eps_f <= 0.0:
-        raise ValueError("eps_f must be positive")
     x_leaves = jax.tree_util.tree_leaves(x)
     v_leaves = jax.tree_util.tree_leaves(v)
     v_norm = math.sqrt(sum(float(jnp.sum(jnp.square(leaf))) for leaf in v_leaves))
@@ -211,15 +195,6 @@ def make_sampled_train_grid(data_set, dtype):
         )
     elif data_set.sampling == "front_loaded":
         dense_points = data_set.train_points - data_set.tail_points
-        if (
-            dense_points < 2
-            or data_set.tail_points < 1
-            or not 0.0 < data_set.dense_T < data_set.train_T
-        ):
-            raise ValueError(
-                "front_loaded sampling requires at least 2 dense points, "
-                "1 tail point, and 0 < dense_T < train_T"
-            )
         dense_data = jnp.linspace(0.0, data_set.dense_T, dense_points, dtype=dtype)
         tail_data = jnp.linspace(
             data_set.dense_T, data_set.train_T, data_set.tail_points + 1, dtype=dtype
@@ -248,5 +223,5 @@ ACTIVATIONS = {
     "relu": jax.nn.relu,
     "softplus": jax.nn.softplus,
     "unit_softplus": unit_softplus,
-    "identity": lambda x: x,
+    "identity": nnx.identity,
 }

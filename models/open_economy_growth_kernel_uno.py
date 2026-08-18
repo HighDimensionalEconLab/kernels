@@ -51,8 +51,6 @@ def open_economy_growth_kernel_uno(
     # IPOPT works in float64 C arrays, so this solver is float64-only.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
-    if k_0 <= 0.0:
-        raise ValueError("k_0 must be positive")
 
     kernel = normalize_kernel(kernel_set.kernel)
     if data_set.train_points_list is None:
@@ -62,15 +60,6 @@ def open_economy_growth_kernel_uno(
             )
         elif data_set.sampling == "front_loaded":
             dense_points = data_set.train_points - data_set.tail_points
-            if (
-                dense_points < 2
-                or data_set.tail_points < 1
-                or not 0.0 < data_set.dense_T < data_set.train_T
-            ):
-                raise ValueError(
-                    "front_loaded sampling requires at least 2 dense points, "
-                    "1 tail point, and 0 < dense_T < train_T"
-                )
             dense_data = jnp.linspace(
                 0.0, data_set.dense_T, dense_points, dtype=jnp.float64
             )
@@ -91,10 +80,6 @@ def open_economy_growth_kernel_uno(
         raise ValueError("training points must be strictly increasing")
     if float(train_data[0]) != 0.0:
         raise ValueError("training points must start at zero")
-    if data_set.test_T > float(train_data[-1]):
-        raise ValueError("test_T must not exceed the training horizon")
-    if data_set.benchmark_T < max(data_set.test_T, float(train_data[-1])):
-        raise ValueError("benchmark_T must cover the train and test horizons")
 
     test_data = jnp.linspace(
         0.0, data_set.test_T, data_set.test_points, dtype=jnp.float64

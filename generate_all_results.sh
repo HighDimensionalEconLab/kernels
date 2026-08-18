@@ -25,6 +25,8 @@ echo "==> start: $(date)"
 
 echo "==> data -> $output_dir/ (use_float64=$use_float64)"
 python -m replication.neoclassical_growth_kernel --use_float64 "$use_float64"
+python -m replication.neoclassical_growth_kernel_robustness --use_float64 "$use_float64"
+python -m replication.neoclassical_growth_kernel_sensitivity --use_float64 "$use_float64"
 python -m replication.neoclassical_growth_concave_convex_kernel --use_float64 "$use_float64"
 python -m replication.neoclassical_growth_concave_convex_nn --use_float64 "$use_float64"
 python -m replication.asset_pricing_kernel --use_float64 "$use_float64"
@@ -32,6 +34,7 @@ python -m replication.asset_pricing_nn --use_float64 "$use_float64"
 python -m replication.optimal_advertising_kernel --use_float64 "$use_float64"
 python -m replication.human_capital_kernel --use_float64 "$use_float64"
 python -m replication.neoclassical_growth_nn --use_float64 "$use_float64"
+python -m replication.neoclassical_growth_nn_sensitivity --use_float64 "$use_float64"
 python -m replication.neoclassical_growth_nn_recursive --use_float64 "$use_float64"
 python -m replication.neoclassical_growth_kernel_recursive --use_float64 "$use_float64"
 python -m replication.stochastic_growth_nn_recursive --use_float64 "$use_float64"
@@ -42,7 +45,9 @@ python -m replication.open_economy_growth_nn_recursive --use_float64 "$use_float
 python -m replication.stochastic_open_economy_growth_nn_recursive --use_float64 "$use_float64"
 python -m replication.stochastic_open_economy_growth_kernel_recursive --use_float64 "$use_float64"
 python -m replication.multicountry_growth_kernel --use_float64 "$use_float64"
+python -m replication.multicountry_growth_kernel_sensitivity --use_float64 "$use_float64"
 python -m replication.multicountry_growth_nn --use_float64 "$use_float64"
+python -m replication.multicountry_growth_nn_sensitivity --use_float64 "$use_float64"
 
 # The uno/IPOPT baselines and the multicountry scaling ladder are float64-only.
 if [[ "$use_float64" == "true" ]]; then
@@ -51,6 +56,7 @@ if [[ "$use_float64" == "true" ]]; then
     python -m replication.asset_pricing_kernel_uno --output_dir "$output_dir"
     python -m replication.open_economy_growth_kernel_uno --output_dir "$output_dir"
     python -m replication.multicountry_growth_scaling --output_dir "$output_dir"
+    python -m replication.multicountry_growth_gamma_common --output_dir "$output_dir"
 else
     echo "==> skipping uno and the scaling ladder (float64-only)"
 fi

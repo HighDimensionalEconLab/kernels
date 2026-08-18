@@ -19,7 +19,6 @@ from models.kernels import (
 )
 from models.utilities import (
     STATUS_TO_REASON,
-    SolveSpec,
     Stopwatch,
     acceptance_fields,
     make_train_t_grid,
@@ -283,14 +282,15 @@ def optimal_advertising_kernel(
         "train_df": train_df,
         "test_df": test_df,
         "hyperparameters": hyperparameters,
-        "solve": SolveSpec(
-            solver=solver,
-            theta_0=theta_0,
-            p=None,
-            residual_args=None,
-            multi_start=None,
-            options=solve_options,
-        ),
+        "solve": {
+            "solver": solver,
+            "residual_fn": residual_fn,
+            "theta_0": theta_0,
+            "p": None,
+            "residual_args": None,
+            "multi_start": None,
+            "options": solve_options,
+        },
         "result": result,
     }
 

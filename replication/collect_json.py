@@ -1467,17 +1467,16 @@ def multicountry_growth_kernel(out):
             )
         },
     }
-    # The baseline and the ten-country experiment carry the sensitivity
-    # fields only in the float64 pass.
-    first_time = MULTICOUNTRY_SENSITIVITY_TIMES[0]
-    baseline_json = load(out, f"{prefix}_baseline")
-    if f"d_rate_T{first_time}_d_alpha" in baseline_json:
+    # The implicit-AD runs are separate single-solve experiments
+    # (multicountry_growth_kernel_sensitivity.py), float64 only.
+    if (out / f"{prefix}_sensitivity.json").exists():
+        sensitivity_json = load(out, f"{prefix}_sensitivity")
         payload["sensitivity"] = multicountry_sensitivity_payload(
-            json_values(baseline_json)
+            json_values(sensitivity_json)
         )
         payload["aggregate_sensitivity"] = multicountry_aggregate_payload(
-            json_values(load(out, f"{prefix}_ten_countries")),
-            reference=json_values(baseline_json),
+            json_values(load(out, f"{prefix}_sensitivity_ten_countries")),
+            reference=json_values(sensitivity_json),
         )
     return payload
 
@@ -1534,6 +1533,9 @@ def multicountry_growth_scaling(out):
     sensitivity_rung = load(
         out, f"multicountry_growth_scaling_cg_N{MULTICOUNTRY_SCALING_GAMMA_COMMON}"
     )
+    # The tangent itself comes from the gamma-common driver's own stem; the
+    # rung's primal solve times stay with the ladder rung it extends.
+    gamma_common = load(out, "multicountry_growth_scaling_gamma_common")
     return {
         "country_counts": list(MULTICOUNTRY_SCALING_COUNTS),
         "dense_max_countries": MULTICOUNTRY_SCALING_DENSE_MAX,
@@ -1567,17 +1569,17 @@ def multicountry_growth_scaling(out):
         # alongside.
         "gamma_common_sensitivity": {
             "num_countries": MULTICOUNTRY_SCALING_GAMMA_COMMON,
-            "rate_T10": sig(med(sensitivity_rung["rate_T10"]), 4),
+            "rate_T10": sig(med(gamma_common["rate_T10"]), 4),
             "d_rate_T10_d_gamma_common": sig(
-                med(sensitivity_rung["d_rate_T10_d_gamma_common"]), 4
+                med(gamma_common["d_rate_T10_d_gamma_common"]), 4
             ),
             "solve_seconds": sig(med(sensitivity_rung["solve_time"])),
             "compile_solve_seconds": sig(med(sensitivity_rung["compile_solve_time"])),
             "sensitivity_seconds": sig(
-                med(sensitivity_rung["gamma_common_sensitivity_time"])
+                med(gamma_common["gamma_common_sensitivity_time"])
             ),
             "compile_sensitivity_seconds": sig(
-                med(sensitivity_rung["compile_gamma_common_sensitivity_time"])
+                med(gamma_common["compile_gamma_common_sensitivity_time"])
             ),
         },
     }
@@ -1660,7 +1662,7 @@ def multicountry_growth_nn(out):
         two_country = accepted_values(out, f"{prefix}_sensitivity")
         payload["sensitivity"] = multicountry_sensitivity_payload(
             two_country,
-            reference=json_values(load(out, "multicountry_growth_kernel_baseline")),
+            reference=json_values(load(out, "multicountry_growth_kernel_sensitivity")),
         )
         payload["aggregate_sensitivity"] = multicountry_aggregate_payload(
             accepted_values(out, f"{prefix}_sensitivity_ten_countries"),
@@ -1917,12 +1919,12 @@ def collect(output_dir: str = ".results", include_uno: bool = True):
         # numbers stand on their own rather than being differenced.
         write_multicountry_sensitivity_table(
             out,
-            "multicountry_growth_kernel_baseline",
+            "multicountry_growth_kernel_sensitivity",
             "multicountry_growth_sensitivity.tex",
         )
         write_multicountry_aggregate_table(
             out,
-            "multicountry_growth_kernel_ten_countries",
+            "multicountry_growth_kernel_sensitivity_ten_countries",
             "multicountry_growth_aggregate_sensitivity.tex",
         )
         write_multicountry_sensitivity_table(

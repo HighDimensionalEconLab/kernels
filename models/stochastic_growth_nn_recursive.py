@@ -39,7 +39,6 @@ from models.utilities import (
 from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
-    SolveSpec,
 )
 
 DOMAIN_EPS = 1e-8
@@ -565,41 +564,12 @@ def stochastic_growth_nn_recursive(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    if not 0.0 < a < 1.0:
-        raise ValueError("a must lie strictly between zero and one")
-    if sigma_crra <= 0.0:
-        raise ValueError("sigma_crra must be positive")
-    if rho_hat <= 0.0:
-        raise ValueError("rho_hat must be positive")
-    if eta <= 0.0:
-        raise ValueError("eta must be positive")
-    if sigma_z < 0.0:
-        raise ValueError("sigma_z must be nonnegative")
-    if z_bar <= 0.0:
-        raise ValueError("z_bar must be positive")
-    if sde_solver not in SDE_SOLVERS:
-        raise ValueError(f"sde_solver must be one of {sorted(SDE_SOLVERS)}")
     # Mean reversion in z fixes a scale, so the homothetic representation is
     # misspecified by construction for this model.
     if hc_set.homothetic_representation:
         raise ValueError(
             "the stochastic model requires homothetic_representation=False"
         )
-    if data_set.train_T <= 0.0:
-        raise ValueError("train_T must be positive")
-    if data_set.train_points < 2:
-        raise ValueError("train_points must be at least two")
-    if not (
-        math.isfinite(stop_set.train_loss_threshold)
-        and stop_set.train_loss_threshold > 0.0
-    ):
-        raise ValueError("train_loss_threshold must be positive")
-    if data_set.tvc_steps < 1:
-        raise ValueError("tvc_steps must be positive")
-    if data_set.test_points < 2:
-        raise ValueError("test_points must be at least two")
-    if data_set.train_tvc_T <= data_set.train_T:
-        raise ValueError("train_tvc_T must exceed train_T")
 
     solver = SDE_SOLVERS[sde_solver]
     n_train_steps = data_set.train_points - 1
@@ -1172,14 +1142,15 @@ def stochastic_growth_nn_recursive(
     # A cache hit loads the policy from disk instead of solving, so there is
     # no primal solve to describe.
     if not cache_hit:
-        extras["solve"] = SolveSpec(
-            solver=lm_solver,
-            theta_0=theta_0,
-            p=p,
-            residual_args=residual_args,
-            multi_start=multi_start,
-            options=solve_options,
-        )
+        extras["solve"] = {
+            "solver": lm_solver,
+            "residual_fn": residual_fn,
+            "theta_0": theta_0,
+            "p": p,
+            "residual_args": residual_args,
+            "multi_start": multi_start,
+            "options": solve_options,
+        }
         extras["result"] = result
     structural = {
         "a": a,

@@ -32,12 +32,6 @@ def neoclassical_growth_benchmark(
     # tol/max_nodes: solve_bvp accuracy -- scipy's default tol=1e-3 leaves ~1e-4
     # errors in the "benchmark" itself, polluting every reported solver error
 
-    if not 0.0 < a < 1.0:
-        raise ValueError("a must lie strictly between zero and one")
-    if k_0 <= 0.0 or z_0 <= 0.0:
-        raise ValueError("k_0 and z_0 must be positive")
-    if sigma_crra <= 0.0:
-        raise ValueError("sigma_crra must be positive")
     if g >= r:
         raise ValueError("g must be less than r")
     if r + (sigma_crra - 1.0) * g <= 0.0:

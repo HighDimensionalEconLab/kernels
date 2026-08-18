@@ -36,21 +36,6 @@ def stochastic_growth_benchmark(
     #   the scheme is unconditionally stable)
     # Pure numpy/scipy: independent of the caller's jax x64 flag, like the
     # deterministic solve_bvp benchmark.
-    if not 0.0 < a < 1.0:
-        raise ValueError("a must lie strictly between zero and one")
-    if sigma_crra <= 0.0:
-        raise ValueError("sigma_crra must be positive")
-    if rho_hat <= 0.0:
-        raise ValueError("rho_hat must be positive")
-    if eta <= 0.0:
-        raise ValueError("eta must be positive")
-    if sigma_z < 0.0:
-        raise ValueError("sigma_z must be nonnegative")
-    if k_lo <= 0.0:
-        raise ValueError("k_lo must be positive")
-    if num_z_points < 3 or num_k_points < 3:
-        raise ValueError("grids need at least three points per dimension")
-
     z_bar = np.exp(log_z_bar)
     kappa_ss = ((delta + rho_hat) / a) ** (1.0 / (a - 1.0))
     k_ss = z_bar ** (1.0 / (1.0 - a)) * kappa_ss

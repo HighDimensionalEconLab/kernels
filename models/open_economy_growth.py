@@ -15,20 +15,6 @@ class ModelParameters:
     eta: float = 0.76
     r_star: float | None = None
 
-    def __post_init__(self):
-        if not 0.0 < self.alpha < 1.0:
-            raise ValueError("alpha must lie in (0, 1)")
-        if self.gamma <= 0.0:
-            raise ValueError("gamma must be positive")
-        if self.delta <= 0.0:
-            raise ValueError("delta must be positive")
-        if self.r <= 0.0:
-            raise ValueError("r must be positive")
-        if not 0.0 < self.eta < 1.0:
-            raise ValueError("eta must lie in (0, 1)")
-        if self.interest_rate <= 0.0:
-            raise ValueError("r_star must be positive")
-
     @property
     def interest_rate(self):
         if self.r_star is None:

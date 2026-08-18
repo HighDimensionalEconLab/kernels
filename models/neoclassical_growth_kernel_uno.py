@@ -32,9 +32,9 @@ from models.utilities import (
 )
 
 ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
-# IPOPT's interior point evaluates infeasible trial iterates, so the model
-# functions clamp k away from zero and the primal bounds keep (c, mu, k)
-# strictly positive at this scale.
+# IPOPT's interior point evaluates infeasible trial iterates: the model
+# functions clamp k at this floor and the primal bounds keep (c, mu, k) above
+# it.
 DOMAIN_EPS = 1e-6
 
 
@@ -84,9 +84,8 @@ def lagrangian(x, objective_multiplier, multipliers, K, K_tilde, p):
     )
 
 
-# Stable module-level derivative wrappers: IPOPT calls back every iteration
-# and across driver invocations, so a per-call jax.grad/jacfwd/hessian
-# closure would retrace and recompile on every solve.
+# Module level: per-call grad/jacfwd/hessian closures would retrace on
+# every solve.
 objective_gradient = jax.jit(jax.grad(objective))
 constraint_jacobian = jax.jit(jax.jacfwd(constraints))
 lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
@@ -126,11 +125,9 @@ class SolverSettings:
     time_limit: float | None = None
 
 
-# Kinked production needs the fail-fast budget: near the basin threshold the
-# NLP can wander, and the sweep classifies a slow solve as rejected. Both
-# limits are calibrated to the kinked experiments' 41-point training design
-# (the replication drivers pass it; the smooth-model default is 101 points,
-# where 25 iterations alone cost ~1 s and the wall fires spuriously).
+# Fail-fast budget for kinked production: near the basin threshold the NLP
+# can wander, and the sweep classifies a slow solve as rejected. Calibrated
+# to the 41-point kinked training design the replication drivers pass.
 KINKED_SOLVER_SETTINGS = SolverSettings(max_iterations=25, time_limit=0.15)
 
 
@@ -174,8 +171,8 @@ def neoclassical_growth_kernel_uno(
     n_variables = 3 * n_train + 2
     n_constraints = 6 * n_train
 
-    # Value container only: IPOPT owns the unknowns and their derivatives, so
-    # no `p` rides through the solve for implicit differentiation.
+    # Value container only: no p rides through IPOPT for implicit
+    # differentiation.
     p = StructuralParameters.create(
         jnp.float64,
         a=a,
@@ -294,8 +291,8 @@ def neoclassical_growth_kernel_uno(
     result = solver.optimize(model)
     elapsed = timer.elapsed()
 
-    # primal_solution appends solver-internal auxiliaries past the declared
-    # variables; only the leading 3n + 2 block is ours.
+    # primal_solution appends solver-internal auxiliaries; only the leading
+    # 3n + 2 block is ours.
     x = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))[:n_variables]
     alpha_mu, alpha_c, alpha_k, c_0, mu_0 = unpack(x)
 

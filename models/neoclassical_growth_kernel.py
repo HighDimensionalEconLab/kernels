@@ -57,8 +57,6 @@ class KernelSettings:
     sigma: float = 1.0
 
 
-# Accuracy is truncation- then density-limited: halving dt below 1.0 keeps
-# improving errors at unchanged LM cost but slows the uno variant.
 @dataclass(frozen=True)
 class DataSettings:
     train_T: float = CONSTANTS.train_T
@@ -80,10 +78,6 @@ class ToleranceSettings:
     mpk_bound: float = 1e-3
 
 
-# The residual is nonlinear (production, mu*c products) but mildly so: with
-# near-Gauss-Newton damping (tiny init, fast decrease) and geodesic
-# acceleration (library default) the solve lands in 4-25 steps, where a
-# cautious damping schedule needed 100+.
 @dataclass(frozen=True)
 class SolverSettings:
     init_damping: float = 1e-8
@@ -91,19 +85,10 @@ class SolverSettings:
     damping_increase: float = 4.0
     max_steps: int = 50
     residual_atol: float = 2e-8  # on the 1/sqrt(3n)-scaled residual norm
-    # The fixed ridge weight of the objective ||r||^2 + ridge * q(theta) with
-    # q = sum_j alpha_j' K alpha_j and the free (c_0, mu_0) unpenalized (no
-    # epsilon shift anywhere): the minimizer is O(ridge) from the pure
-    # RKHS-seminorm interpolant. The converged residual norm is
-    # O(ridge * ||dual||) (~25x ridge measured here), so ridge must sit low
-    # enough that residual_atol is reachable; 1e-10 leaves the selection
-    # unchanged (the null space is 2-dimensional and steeply penalized) while
-    # meeting the same atol as the metric formulation in 5 steps. gtol bounds
-    # the ridge stationarity ||J'r + ridge K alpha||; convergence requires
-    # gtol AND residual_atol (conjunctive). Calibration (the
-    # ~1e-3 * ridge * info.penalty_grad_norm recipe): ridge*||L'L theta|| is
-    # ~4.6e-11 at convergence, so 1e-9 resolves the selection well below the
-    # quality gates while sitting far above the ~1e-14 gradient floor.
+    # Ridge weight of ||r||^2 + ridge * sum_j alpha_j' K alpha_j with the free
+    # (c_0, mu_0) unpenalized; the converged residual norm is
+    # O(ridge * ||dual||), so ridge must sit low enough that residual_atol
+    # stays reachable. Convergence requires gtol AND residual_atol.
     # Tuning: https://highdimensionaleconlab.github.io/nlls_gram/ridge_lm/
     ridge: float = 1e-10
     gtol: float = 1e-9
@@ -137,10 +122,9 @@ def neoclassical_growth_kernel(
     train_data = make_train_t_grid(data_set, dtype)
     n_train = len(train_data)
 
-    # The structural parameters -- the kink family included -- and the
-    # initial condition all ride in the solver's `p` argument so the solved
-    # paths are implicitly differentiable with respect to every one of them
-    # (nlls-gram's implicit JVP/VJP at the ridge stationary point).
+    # Everything in p, the kink family included, is implicitly
+    # differentiable through the solve (nlls-gram's implicit JVP/VJP at the
+    # ridge stationary point).
     p = StructuralParameters.create(
         dtype,
         a=a,

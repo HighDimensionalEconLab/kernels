@@ -49,9 +49,6 @@ class ToleranceSettings:
     train_residual: float = 1e-8
 
 
-# The affine residual rewards near-Gauss-Newton steps, so a tiny init_damping
-# converges in 2 LM steps (a factor ~10 faster than the IPOPT baseline); the
-# damping decrease/increase factors never bind and stay at library defaults.
 @dataclass(frozen=True)
 class SolverSettings:
     init_damping: float = 1e-8
@@ -60,20 +57,11 @@ class SolverSettings:
     max_steps: int = 100
     residual_atol: float = 1e-9  # unscaled residual norm; bounds max|residual|
     p0_init: float = 0.0
-    # The fixed ridge weight of the objective ||r||^2 + ridge * a'Ka with the
-    # free p_0 unpenalized (no epsilon shift anywhere): the minimizer is
-    # O(ridge) from the pure RKHS-seminorm interpolant with p_0 free. The
-    # converged residual norm is O(ridge * ||dual||), so residual_atol must
-    # sit above that floor -- the ridge objective deliberately backs off
-    # exact interpolation, unlike the metric formulation whose affine solve
-    # reached float64 roundoff. gtol bounds the ridge stationarity
-    # ||J'r + ridge K a||; convergence requires gtol AND residual_atol
-    # (conjunctive). The one-dimensional null space runs along the weakly
-    # penalized p_0 mixture, and gtol follows the
-    # ~1e-3 * ridge * info.penalty_grad_norm calibration recipe exactly:
-    # ridge*||K a|| is ~1e-10 at convergence, so 1e-13 resolves p_0 to ~0.1%
-    # (measured: gtol = 1e-9 leaves p_0 off by O(1); 1e-13 matches the
-    # metric selection). Tuning:
+    # Ridge weight of ||r||^2 + ridge * a'Ka with the free p_0 unpenalized;
+    # the converged residual norm is O(ridge * ||dual||), so residual_atol
+    # must sit above that floor. Convergence requires gtol AND residual_atol,
+    # and gtol must be tight enough to resolve the weakly penalized p_0
+    # direction. Tuning:
     # https://highdimensionaleconlab.github.io/nlls_gram/ridge_lm/
     ridge: float = 1e-10
     gtol: float = 1e-13

@@ -87,10 +87,8 @@ class StructuralParameters:
 
 @dataclass(frozen=True)
 class DataSettings:
-    # Fixed-step SDE rollout on the integrator's own states; train_T = 60
-    # covers ~8 half-lives of the capital transition (stable root ~ -0.089)
-    # and, at train dt 0.625, is an order of magnitude more accurate on
-    # held-out paths than 40 at ~2.7x the solve cost. Test/tvc dt is 1.0.
+    # Fixed-step SDE rollout on the integrator's own states; train_T covers
+    # ~8 half-lives of the capital transition. Test/tvc dt is 1.0.
     train_points: int = 97
     test_points: int = 71
     tvc_points: int = 161

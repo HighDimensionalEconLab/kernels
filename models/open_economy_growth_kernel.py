@@ -109,12 +109,10 @@ class SolverSettings:
     # looser anneals faster (fewer steps per level), tighter solves each
     # level out more completely before descending.
     ridge_grad_rtol: float = 1e-2
-    # "auto" (whitened cholesky) is the default: the whitened normal matrix
-    # J~'J~ + ridge*I_head has its spectral floor at the ridge, so the DAE
-    # Jacobian's scale spread no longer pushes the cholesky path past
-    # float64 at this ridge -- measured 1.8-3x faster wall-clock than the
-    # previously required "qr" at identical solution quality. "qr" and
-    # "cholesky" remain valid (all paths run whitened).
+    # "auto" (whitened cholesky): the whitened normal matrix has its
+    # spectral floor at the ridge, so the DAE Jacobian's scale spread stays
+    # within float64. "qr" and "cholesky" remain valid (all paths run
+    # whitened).
     linear_solver: str = "auto"
 
 

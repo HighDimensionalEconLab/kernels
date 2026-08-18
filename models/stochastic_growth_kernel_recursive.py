@@ -98,9 +98,7 @@ def stochastic_growth_kernel_recursive(
     use_float64: bool = True,
     sde_solver: str = "sra1",
     policy_dir: str = ".results",
-    # Half the NN's collocation density: the frozen design needs coverage,
-    # not integration accuracy, and 16 x 33 states solve ~3x faster at
-    # near-identical held-out quality.
+    # The frozen design needs coverage, not integration accuracy.
     data_set: DataSettings = DataSettings(train_points=33),
     ic_set: InitialConditionSettings = InitialConditionSettings(
         num_train_trajectories=16,
@@ -124,8 +122,8 @@ def stochastic_growth_kernel_recursive(
         geodesic_acceleration=True,
         geodesic_acceptance_ratio=0.75,
     ),
-    # The float64 ridge-LM residual floor of this representation on the 2-D
-    # stochastic state box sits at ~6e-5 RMS; the atol sits just above it.
+    # residual_atol sits just above this representation's float64 residual
+    # floor.
     stop_set: StoppingCriteria = StoppingCriteria(max_steps=150, residual_atol=7e-5),
     verbose: bool = True,
 ):

@@ -29,8 +29,8 @@ class KinkedCalibration:
 KINKED_CALIBRATION = KinkedCalibration()
 
 
-# Sequence-space structural parameters: smooth Cobb-Douglas production is
-# (A, b_1, b_2) = (1, 1, 0); all three set selects the kinked family.
+# (A, b_1, b_2) = (1, 1, 0) is smooth Cobb-Douglas; the kinked family sets
+# all three.
 @struct.dataclass
 class StructuralParameters:
     a: jax.Array
@@ -49,8 +49,7 @@ class StructuralParameters:
         )
 
 
-# Recursive structural parameters: smooth production with balanced growth at
-# per-capita rate g; the initial conditions ride in the solver args instead.
+# The initial conditions ride in the solver args, not here.
 @struct.dataclass
 class RecursiveParameters:
     a: jax.Array
@@ -66,8 +65,6 @@ class RecursiveParameters:
         )
 
 
-# All three kink parameters set selects the concave-convex family; none
-# selects smooth Cobb-Douglas. A partial specification is an error.
 def resolve_kink_family(A, b_1, b_2):
     kinked_parameter_count = sum(parameter is not None for parameter in (A, b_1, b_2))
     if kinked_parameter_count not in {0, 3}:
@@ -91,8 +88,8 @@ def marginal_product(k, p):
     return p.A * branch * (p.a * k ** (p.a - 1.0))
 
 
-# Flat steady-flow consumption warm start c(0) = f(k_0) - delta k_0, floored
-# away from zero; pure host arithmetic on the caller's floats.
+# Flat steady-flow warm start c(0) = f(k_0) - delta k_0, floored away from
+# zero.
 def steady_flow_consumption_guess(k_0, a, delta, A, b_1, b_2):
     base = k_0**a
     return max(A * max(base, b_1 * base - b_2) - delta * k_0, DOMAIN_EPS)
@@ -130,12 +127,8 @@ def euler_residuals(policy, log_states, p):
             (state_drift,),
         )
         z, k = jnp.exp(log_state)
-        # The tangent c_dot / c alone is finite for negative consumption, so
-        # the zero-scaled primal log c keeps the residual NaN outside the
-        # model's domain (c <= 0) instead of quietly extending the Euler
-        # equation there. It contributes exactly zero on the feasible domain;
-        # the Jacobian stays finite (and meaningless) at infeasible states, so
-        # only residual values signal infeasibility.
+        # Zero on the feasible domain; keeps the residual NaN when c <= 0,
+        # where the tangent alone would stay finite.
         domain_guard = 0.0 * log_c
         return (
             dlog_c_dt
@@ -154,9 +147,8 @@ def steady_state(a, delta, rho_hat):
     return k_ss, k_ss**a - delta * k_ss
 
 
-# Exact steady-state derivatives, the AD-free target the solver sensitivities
-# are checked against. sigma_crra and k_0 do not enter, so those derivatives
-# are exactly zero.
+# The AD-free target the solver sensitivities are checked against;
+# sigma_crra and k_0 do not enter, so those derivatives are exactly zero.
 def neoclassical_steady_state_sensitivities(a, delta, rho_hat):
     mpk_ss = delta + rho_hat
     k_ss, c_ss = steady_state(a, delta, rho_hat)
@@ -243,13 +235,10 @@ def draw_initial_conditions(
 
 
 def standardized_initial_states(key, center, scales, num_trajectories):
-    # Trace-safe standardized draws, ADDITIVE in the caller's coordinate
-    # (center + scales * standardized normals), unlike the multiplicative
-    # draw_initial_conditions: additive spreads keep a level axis (e.g. net
-    # foreign assets) non-degenerate at a zero center. A single trajectory
-    # pins the batch at the center whatever the scales; a host-side check on
-    # `scales` cannot live here because lax.cond traces the epoch resampler
-    # even in configurations that never execute it.
+    # Additive in the caller's coordinate, unlike the multiplicative
+    # draw_initial_conditions: additive spreads keep a level axis
+    # non-degenerate at a zero center. One trajectory pins the batch at the
+    # center.
     if num_trajectories == 1:
         return center[None, :]
     draws = jax.random.normal(key, (num_trajectories, center.size), dtype=center.dtype)
@@ -258,9 +247,8 @@ def standardized_initial_states(key, center, scales, num_trajectories):
     return center[None, :] + scales[None, :] * standardized
 
 
-# Independent (z, k) train and test draws from one data_seed; the test
-# center and variances default to the training ones, and the resolved values
-# ride along for the results dicts.
+# Train and test draws from one data_seed; the resolved test design rides
+# along for the results dicts.
 @dataclass(frozen=True)
 class InitialConditionDraw:
     train_ic_key: jax.Array
@@ -395,9 +383,7 @@ def collocation_residuals(policy, initial_log_states, p, data_set):
     # Mean squared residual, so the loss threshold means the same thing at any
     # number of trajectories or collocation points. An adaptive rollout only
     # fills the accepted prefix of the step buffer, so both the residuals and
-    # the count are restricted to that prefix -- the accepted-step set moves
-    # with the policy, so the tsit5 objective is only piecewise-continuous in
-    # theta.
+    # the count are restricted to that prefix.
     if data_set.ode_solver == "rk4":
         count = jnp.asarray(euler.size, dtype=euler.dtype)
         normalized = euler / jnp.sqrt(count)
@@ -415,8 +401,7 @@ def collocation_residuals(policy, initial_log_states, p, data_set):
 
 
 def log_tvc_residual(policy, initial_log_states, T_start, T_end, p, data_set):
-    # An empty window would make the windowed max an -inf that reads as a
-    # passing certificate.
+    # An empty window would certify on -inf evidence.
     if T_start >= T_end:
         raise ValueError("the transversality horizon must exceed the start")
     solution = rollout_steps(
@@ -448,8 +433,6 @@ def log_tvc_residual(policy, initial_log_states, T_start, T_end, p, data_set):
     )
 
 
-# Windowed and terminal transversality certificates on the training and
-# held-out initial conditions, as published results fields.
 def tvc_certificates(
     policy, train_log_states, test_log_states, p, data_set, log_tvc_threshold
 ):
@@ -486,9 +469,8 @@ def tvc_certificates(
     }
 
 
-# The cache key excludes the evaluation grid: the expensive solve_bvp mesh
-# depends only on the problem, and the returned interpolant is cheap to
-# evaluate on any diagnostic grid.
+# Keyed on the problem alone; the returned interpolant is cheap to evaluate
+# on any diagnostic grid.
 @lru_cache(maxsize=None)
 def cached_benchmark_solution(
     a,
@@ -501,8 +483,7 @@ def cached_benchmark_solution(
     benchmark_T,
     benchmark_points,
 ):
-    # Deferred import: neoclassical_growth_benchmark imports this module's
-    # validate_balanced_growth.
+    # Deferred: neoclassical_growth_benchmark imports this module's validator.
     from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 
     benchmark_grid = np.linspace(0.0, benchmark_T, benchmark_points)
@@ -775,9 +756,8 @@ def kappa_diagnostic_grid(
     return kappa_grid, grid_log_states
 
 
-# The kappa-grid policy comparison the two deterministic recursive drivers
-# publish, with the solver's columns tagged by `suffix` next to the shared
-# benchmark columns.
+# The published kappa-grid policy comparison; `suffix` tags the solver's
+# columns next to the shared benchmark ones.
 def policy_diagnostics_frame(
     policy,
     train_kappa,

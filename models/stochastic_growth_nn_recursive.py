@@ -368,8 +368,7 @@ def residual_fn(theta, args, p):
 def log_tvc_residual(
     solver, policy, initial_log_states, noise, T_start, T_end, p, data_set
 ):
-    # An empty window would make the windowed max an -inf that reads as a
-    # passing certificate.
+    # An empty window would certify on -inf evidence.
     if T_start >= T_end:
         raise ValueError("the transversality horizon must exceed the start")
     solution = rollout_steps(
@@ -522,11 +521,9 @@ def trajectory_values(policy, log_states, p):
     }
 
 
-# The deterministic model of the shared NEOCLASSICAL_GROWTH_CONSTANTS
-# (utilities.py) plus its OU log-TFP. The default innovation scale is the
-# high-variance sensitivity column sigma = 0.035 of Aruoba et al. (ergodic
-# sd ~ 0.112); their benchmark sigma = 0.007 (sigma_z_benchmark) is nearly
-# certainty equivalent.
+# The deterministic model plus its OU log-TFP; the default innovation scale
+# is the high-variance sensitivity column of Aruoba et al., since their
+# benchmark sigma is nearly certainty equivalent.
 def stochastic_growth_nn_recursive(
     a: float = CONSTANTS.a,
     delta: float = CONSTANTS.delta,

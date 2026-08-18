@@ -47,16 +47,11 @@ from models.utilities import (
 @dataclass(frozen=True)
 class DataSettings:
     # Training collocation on the integrator's own states: n points from
-    # n - 1 steps including the initial condition, so nothing is
-    # interpolated. ode_solver "rk4" spends the budget on a fixed grid;
-    # "tsit5" spends the same budget adaptively and enforces residuals on
-    # the accepted steps only, concentrating points where the transition is
-    # fast. rtol/atol are the adaptive error thresholds and initial_dt the
-    # adaptive starting step (None: the fixed grid's train_T / (n - 1));
-    # all three are ignored under rk4. Test/tvc rollouts stay fixed-step.
-    # Thresholds much below 1e-6 demand more steps than a ~32-step budget
-    # allows while the interim policy is still wrong, so training dies on
-    # inf residuals instead of adapting.
+    # n - 1 steps including the initial condition, nothing interpolated.
+    # "rk4" spends the budget on a fixed grid; "tsit5" spends it adaptively
+    # and enforces residuals on the accepted steps only. rtol/atol/initial_dt
+    # configure the adaptive controller and are ignored under rk4; test/tvc
+    # rollouts stay fixed-step.
     train_points: int = 65
     test_points: int = 41
     tvc_steps: int = 256
@@ -94,8 +89,6 @@ class StoppingCriteria:
     # each interior epoch boundary, so num_epochs = 1 never resamples.
     max_steps: int = 250
     train_loss_threshold: float = 1e-14
-    # Multi-start restarts with fresh parameter draws; later attempts run only
-    # when an earlier one fails, so converging solves pay nothing.
     num_attempts: int = 5
     log_tvc_threshold: float = 0.0
     num_epochs: int = 1

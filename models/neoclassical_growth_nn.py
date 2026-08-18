@@ -52,20 +52,11 @@ class DataSettings:
 
 @dataclass(frozen=True)
 class StoppingCriteria:
-    # Three-seed calibration converges in 141-181 steps at the default
-    # tolerance, leaving a useful margin without a 1,000-step runaway budget.
     max_steps: int = 250
-    # 1e-15 is reachable in <1 s at the default architecture and buys ~11x
-    # accuracy over 1e-12 (k rel error ~1.3e-6 vs ~1.5e-5 against the tight
-    # solve_bvp benchmark). w32 d3 tanh is right-sized: smaller/shallower
-    # nets and gelu all measure worse here.
     train_loss_threshold: float = 1e-15
-    # Bar on the post-hoc log-TVC check at test_tvc_T: 0.0 demands the
-    # discounted value of capital in marginal-utility units is below its O(1)
-    # scale (saddle: -rho_hat t + O(1) << 0; a bubble is far positive).
+    # Post-hoc log-TVC bar at test_tvc_T: the saddle path sits far negative,
+    # a bubble far positive.
     log_tvc_threshold: float = 0.0
-    # frac_accepted measures acceptance within the restart budget, not first-try
-    # robustness: a seed that stalls short of the loss threshold is redrawn.
     num_attempts: int = 5
 
 
@@ -213,9 +204,8 @@ def neoclassical_growth_nn(
     use_float64: bool = True,
     data_set: DataSettings = DataSettings(),
     nn_set: GrowthPolicySettings = GrowthPolicySettings(),
-    # Local 8-seed grid: dec 0.5 / inc 2.0 is ~25% faster than 0.35/8.0 at
-    # the same 8/8 acceptance; geodesic acceleration is required (off fails
-    # to reach the loss threshold at any swept damping).
+    # Geodesic acceleration is required: without it the solve stalls short of
+    # the loss threshold.
     lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=1e-5,
         damping_decrease=0.5,
@@ -271,9 +261,7 @@ def neoclassical_growth_nn(
     )
 
     # solve()'s atol is on the residual norm; the settings threshold is on
-    # the sum of squared residuals. Stopping is entirely solve()'s: atol for
-    # convergence, max_steps as the budget (a nonfinite candidate is rejected
-    # and damping raised, which recovers more often than aborting).
+    # the sum of squared residuals.
     atol = math.sqrt(stop_set.train_loss_threshold)
     solve_options = dict(
         max_steps=stop_set.max_steps,

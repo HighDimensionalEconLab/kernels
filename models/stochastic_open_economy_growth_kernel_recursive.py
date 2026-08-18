@@ -86,10 +86,8 @@ class StoppingCriteria:
 @jax.tree_util.register_static
 @dataclass(frozen=True)
 class StateKernelSettings:
-    # Joint optimum from the T = 60 W&B sweep, chosen for cross-seed rollout
-    # margin and speed over raw objective. At this lengthscale the kernel
-    # carries levels and tilts, so the affine mean defaults off; retune the
-    # geometry jointly, not per field.
+    # At this lengthscale the kernel carries levels and tilts, so the affine
+    # mean defaults off; retune the geometry jointly, not per field.
     amplitude: float = 1.86
     lengthscale: float = 1.69
     metric_epsilon: float = 7.7e-5
@@ -249,12 +247,9 @@ def stochastic_open_economy_growth_kernel_recursive(
     # two solvers' held-out euler errors comparable.
     data_set: DataSettings = DataSettings(train_points=49),
     # Matches the NN driver's default problem, so a module-default NN run
-    # with --policy_cache feeds a module-default kernel run; 8 trajectories
-    # roughly halve the held-out euler at ~2x the centers.
+    # with --policy_cache feeds a module-default kernel run.
     ic_set: InitialConditionSettings = InitialConditionSettings(),
     kernel_set: StateKernelSettings = StateKernelSettings(),
-    # Damping schedule from the W&B sweep winner alongside the kernel
-    # geometry and stopping defaults below.
     opt_set: OptimizerSettings = OptimizerSettings(
         init_damping=4.9e-4,
         damping_decrease=0.16,

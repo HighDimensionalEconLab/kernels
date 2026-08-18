@@ -67,9 +67,6 @@ class DataSettings:
 @dataclass(frozen=True)
 class StateKernelSettings:
     amplitude: float = 1.0
-    # Sweep-validated at the calibrated state geometry (k_ss ~ 3.6): much
-    # shorter values under-cover the capital span and stall the ridge-LM
-    # solve, while ~0.9 converges too slowly for the replication step budget.
     lengthscale: float = 0.6
     metric_epsilon: float = 3e-5
     # With the free constant, theta is (alpha, h_const) and only alpha is
@@ -96,9 +93,7 @@ class StateKernelSettings:
 @dataclass(frozen=True)
 class StoppingCriteria:
     max_steps: int = 100
-    # RMS Euler at 1e-5 is far below economic significance. The thresholds
-    # are float64-tuned; float32 callers pass looser values explicitly (the
-    # float32 replication driver carries them).
+    # float64-tuned; float32 callers pass looser values explicitly.
     residual_atol: float = 1e-5
     gtol: float = 1e-7
     ridge: float = 1e-12

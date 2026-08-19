@@ -169,6 +169,7 @@ cython_debug/
 # Replication outputs and JAX compilation cache
 .results/
 .results_*/
+.results-*/
 .jax_cache/
 
 # wandb sweeps (runtime artifacts)

@@ -21,12 +21,12 @@ from models.neoclassical_growth import (
     mpk,
     production,
 )
-from models.neoclassical_growth_nn_recursive import (
+from models.policies import (
     DrawInvestmentPolicy,
     InvestmentPolicyNN,
     InvestmentPolicySettings,
-    load_investment_policy,
-    save_investment_policy,
+    load_growth_policy,
+    save_growth_policy,
 )
 from models.stochastic_growth_benchmark import stochastic_growth_benchmark
 from models.utilities import (
@@ -625,7 +625,7 @@ def stochastic_growth_nn_recursive(
     )
     cache_hit = cache_path is not None and cache_path.exists()
     if cache_hit:
-        policy, cached_meta = load_investment_policy(cache_path)
+        policy, cached_meta = load_growth_policy(cache_path)
         theta_final, solve_args = nnx.split(policy, nnx.Param, ...)[1], residual_args
         steps = 0
         epochs_run = 0
@@ -1058,11 +1058,11 @@ def stochastic_growth_nn_recursive(
         "test_euler_mean_abs": results["test_euler_mean_abs"],
     }
     if cache_path is not None and not cache_hit:
-        save_investment_policy(
+        save_growth_policy(
             cache_path, policy, hc_set, structural=structural, extra=policy_extra
         )
     if save_policy is not None:
-        save_investment_policy(
+        save_growth_policy(
             save_policy, policy, hc_set, structural=structural, extra=policy_extra
         )
     return results, extras

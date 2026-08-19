@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import pathlib
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from functools import partial
 
 import jax
@@ -12,14 +12,13 @@ import jsonargparse
 import numpy as np
 from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
 
-from models.neoclassical_growth_kernel_recursive import (
+from models.policies import (
     KernelInvestmentPolicy,
     StateKernelSettings,
-    StoppingCriteria,
     build_residual_args,
+    load_growth_policy,
     state_lengthscales,
 )
-from models.neoclassical_growth_nn_recursive import load_investment_policy
 from models.stochastic_growth_nn_recursive import (
     DataSettings,
     StructuralParameters,
@@ -46,6 +45,16 @@ from models.utilities import (
 )
 
 
+@dataclass(frozen=True)
+class StoppingCriteria:
+    max_steps: int = 100
+    # float64-tuned; float32 callers pass looser values explicitly.
+    residual_atol: float = 1e-5
+    gtol: float = 1e-7
+    ridge: float = 1e-12
+    log_tvc_threshold: float = 0.0
+
+
 # Locate the reference NN policy for this exact problem (structural
 # parameters, dtype, and training initial-condition design) by its problem
 # hash; among matching runs, take the accepted artifact with the smallest
@@ -65,7 +74,7 @@ def load_reference_policy(policy_dir, problem_config):
             "run stochastic_growth_nn_recursive with --policy_cache first"
         )
     _, best = min(candidates, key=lambda pair: pair[0])
-    policy, meta = load_investment_policy(best)
+    policy, meta = load_growth_policy(best)
     return policy, meta, best
 
 

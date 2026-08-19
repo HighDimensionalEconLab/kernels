@@ -3,21 +3,16 @@ from __future__ import annotations
 import time
 from dataclasses import asdict, dataclass
 from functools import partial
-from typing import Literal
 
 import jax
 import jax.numpy as jnp
 import jsonargparse
 import numpy as np
-from flax import struct
 from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
 
 from models.kernels import (
     STATE_KERNEL_NAMES,
-    rbf_state_features,
-    rbf_state_gram,
     rkhs_norm_squared,
-    state_features,
 )
 from models.neoclassical_growth import (
     RecursiveParameters,
@@ -27,6 +22,12 @@ from models.neoclassical_growth import (
     trajectory_values,
 )
 from models.neoclassical_growth_benchmark import benchmark_df
+from models.policies import (
+    KernelInvestmentPolicy,
+    StateKernelSettings,
+    build_residual_args,
+    state_lengthscales,
+)
 from models.utilities import (
     DOMAIN_EPS,
     STATUS_TO_REASON,
@@ -34,7 +35,6 @@ from models.utilities import (
     OptimizerSettings,
     growth_initial_conditions,
     long_df,
-    unit_softplus,
 )
 from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
@@ -54,33 +54,6 @@ class DataSettings:
     test_T: float = CONSTANTS.test_T
 
 
-@jax.tree_util.register_static
-@dataclass(frozen=True)
-class StateKernelSettings:
-    amplitude: float = 1.0
-    lengthscale: float = 0.6
-    metric_epsilon: float = 3e-5
-    # With the free constant, theta is (alpha, h_const) and only alpha is
-    # penalized; without it the policy is the pure RKHS expansion.
-    free_constant: bool = True
-    # Homothetic: 1-D RBF on log(k/z). Non-homothetic: a 2-D expansion on the
-    # centered (log z, log k) with product (ard) or sum (additive) composition
-    # of RBF or Matern 1-D kernels; lengthscales default per axis to
-    # `lengthscale`, and linear_mean appends two unpenalized coefficients.
-    homothetic_representation: bool = True
-    state_kernel: Literal[
-        "ard_rbf",
-        "additive_rbf",
-        "ard_matern32",
-        "ard_matern52",
-        "additive_matern32",
-        "additive_matern52",
-    ] = "ard_rbf"
-    log_z_lengthscale: float | None = None
-    log_k_lengthscale: float | None = None
-    linear_mean: bool = False
-
-
 @dataclass(frozen=True)
 class StoppingCriteria:
     max_steps: int = 100
@@ -89,26 +62,6 @@ class StoppingCriteria:
     gtol: float = 1e-7
     ridge: float = 1e-12
     log_tvc_threshold: float = 0.0
-
-
-@struct.dataclass
-class ResidualArgs:
-    centers: jax.Array
-    train_log_states: jax.Array
-    gram: jax.Array
-    state_offset: jax.Array
-    k_scale: jax.Array
-    # 1/(1-a): log kappa = log k - z_detrend * log z for Hicks-neutral z.
-    z_detrend: jax.Array
-
-
-def state_lengthscales(kernel_set):
-    ell_z = kernel_set.log_z_lengthscale
-    ell_k = kernel_set.log_k_lengthscale
-    return (
-        kernel_set.lengthscale if ell_z is None else ell_z,
-        kernel_set.lengthscale if ell_k is None else ell_k,
-    )
 
 
 # Frozen collocation design: the exact benchmark paths of the training
@@ -129,88 +82,6 @@ def fixed_collocation_data(
         jnp.asarray(np.broadcast_to(train_times, k.shape), dtype=dtype),
         jnp.asarray(log_states, dtype=dtype),
     )
-
-
-def build_residual_args(train_log_states, kernel_set, a, z_0=1.0, k_0=1.0):
-    flat_states = train_log_states.reshape(-1, 2)
-    dtype = flat_states.dtype
-    state_offset = jnp.log(jnp.asarray([z_0, k_0], dtype))
-    z_detrend = jnp.asarray(1.0 / (1.0 - a), dtype)
-    if kernel_set.homothetic_representation:
-        centers = flat_states[:, 1] - z_detrend * flat_states[:, 0]
-        gram = rbf_state_gram(
-            centers,
-            jnp.asarray(kernel_set.amplitude, dtype),
-            jnp.asarray(kernel_set.lengthscale, dtype),
-        )
-    else:
-        centers = flat_states - state_offset
-        gram = state_features(
-            kernel_set.state_kernel,
-            centers,
-            centers,
-            kernel_set.amplitude,
-            state_lengthscales(kernel_set),
-        )
-    gram = (gram + gram.T) / 2.0
-    return ResidualArgs(
-        centers=centers,
-        train_log_states=flat_states,
-        gram=gram,
-        state_offset=state_offset,
-        k_scale=jnp.asarray(k_0, dtype),
-        z_detrend=z_detrend,
-    )
-
-
-def raw_policy(theta, args, log_state, kernel_set):
-    alpha = theta[0]
-    if kernel_set.homothetic_representation:
-        q = log_state[1] - args.z_detrend * log_state[0]
-        features = rbf_state_features(
-            q,
-            args.centers,
-            jnp.asarray(kernel_set.amplitude, q.dtype),
-            jnp.asarray(kernel_set.lengthscale, q.dtype),
-        )
-        h = features @ alpha
-    else:
-        x = log_state - args.state_offset
-        features = state_features(
-            kernel_set.state_kernel,
-            x,
-            args.centers,
-            kernel_set.amplitude,
-            state_lengthscales(kernel_set),
-        )
-        h = features @ alpha
-        # The linear-mean coefficients are the last theta leaf, after the free
-        # constant when both are present; like h_const they are unpenalized.
-        if kernel_set.linear_mean:
-            h = h + x @ theta[-1]
-    if kernel_set.free_constant and len(theta) > 1:
-        h = h + theta[1]
-    return h
-
-
-# Same output maps as the recursive NN: unit softplus of the raw policy
-# anchored at delta * k (homothetic) or the constant delta * k_0.
-def investment(theta, args, log_state, p, kernel_set):
-    raw = raw_policy(theta, args, log_state, kernel_set)
-    if kernel_set.homothetic_representation:
-        k = jnp.exp(log_state[1])
-        return p.delta * k * unit_softplus(raw)
-    return p.delta * args.k_scale * unit_softplus(raw)
-
-
-@struct.dataclass
-class KernelInvestmentPolicy:
-    theta: tuple
-    args: ResidualArgs
-    kernel_set: StateKernelSettings = struct.field(pytree_node=False)
-
-    def __call__(self, log_state, p):
-        return investment(self.theta, self.args, log_state, p, self.kernel_set)
 
 
 def residual_fn(theta, args, p, kernel_set):

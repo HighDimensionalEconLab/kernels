@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 
 import jax
 import jax.numpy as jnp
@@ -34,12 +34,10 @@ from models.multicountry_growth import (
     production,
     relative_welfare_weights,
     resolved_steady_state,
-    sensitivity_fields_frame,
     steady_state,
     tail_diagnostics,
     tvc_diagnostics,
     validate_initial_conditions,
-    weighted_gini,
 )
 from models.multicountry_growth_benchmark import multicountry_growth_benchmark
 from models.multicountry_growth_preconditioner import (
@@ -130,8 +128,11 @@ class SolverSettings:
     # paths run whitened). "cg" is matrix-free preconditioned CG on the
     # whitened normal operator with the arrow+Woodbury preconditioner
     # rebuilt every LM step -- the O(N)-per-step path for large country
-    # counts. The full sensitivity tables (sensitivity_times) stay
-    # dense-only; the gamma-common tangent runs on either path.
+    # counts. Implicit-AD re-solves through the returned solve handle (the
+    # replication sensitivity tables) stay dense-only: the undamped
+    # implicit-AD system sits at the float64 conditioning plateau, where a
+    # CG solve would silently degrade the tangents; the gamma-common
+    # tangent runs on either path.
     linear_solver: str = "auto"
     # CG inner-solve budget: cg_tol is unreachable in the endgame (the
     # operator condition passes 1e13 at the achieved ridge), so cg_maxiter
@@ -146,6 +147,57 @@ class SolverSettings:
     cg_damping_floor: float = 1e-10
 
 
+# theta = (alpha_k, alpha_a, alpha_q, alpha_c, alpha_mu, alpha_rate,
+#          (q_offsets, c_offsets, mu_offsets, rate_offset)), matching the
+# solver metric blocks. Module-level so callers can evaluate solved paths on
+# their own kernel matrices.
+def path_coordinates(theta, K_eval, K_tilde_eval, p):
+    parameters_p = p["parameters"]
+    populations_p = parameters_p.populations
+    k_0_p = p["k_0"]
+    num_countries = k_0_p.shape[0]
+    # Population demeaning is a no-op at the primal point (the inputs
+    # already clear) and projects AD perturbations of a_0 onto the
+    # feasible clearing set, so every direction is meaningful.
+    a_0_p = p["a_0"] - jnp.sum(populations_p * p["a_0"]) / jnp.sum(populations_p)
+    steady_p = steady_state(parameters_p, k_0_p.dtype)
+    # The asset block is the one path with no unpenalized offset, so its
+    # coefficient scale enters the minimum-norm selection metric; the
+    # scale must be differentiation-inert or every parameter sensitivity
+    # picks up a selection-drift term from the metric moving with p.
+    # The other normalizations are absorbed by their free offsets and
+    # need no such guard.
+    output_scale_p = jax.lax.stop_gradient(steady_p["output_scale"])
+    log_consumption_scale_p = jnp.log(steady_p["consumption_scale"])
+    alpha_k, alpha_a, alpha_q, alpha_c, alpha_mu, alpha_rate, initial = theta
+    q_offsets = initial[:num_countries]
+    c_offsets = initial[num_countries : 2 * num_countries]
+    mu_offsets = initial[2 * num_countries : 3 * num_countries]
+    rate_offset = initial[-1]
+    log_k = jnp.log(k_0_p) + K_tilde_eval @ alpha_k.T
+    a = a_0_p + output_scale_p * (K_tilde_eval @ alpha_a.T)
+    log_q = -jnp.log(parameters_p.eta) + q_offsets + K_tilde_eval @ alpha_q.T
+    log_c = log_consumption_scale_p + c_offsets + K_tilde_eval @ alpha_c.T
+    log_mu = (
+        -parameters_p.gammas * log_consumption_scale_p
+        + mu_offsets
+        + K_tilde_eval @ alpha_mu.T
+    )
+    log_rate = jnp.log(parameters_p.r) + rate_offset + K_tilde_eval @ alpha_rate
+    return {
+        "k": jnp.exp(log_k),
+        "a": a,
+        "q": jnp.exp(log_q),
+        "c": jnp.exp(log_c),
+        "mu": jnp.exp(log_mu),
+        "interest_rate": jnp.exp(log_rate),
+        "dlog_k_dt": K_eval @ alpha_k.T,
+        "da_dt": output_scale_p * (K_eval @ alpha_a.T),
+        "dlog_q_dt": K_eval @ alpha_q.T,
+        "dlog_mu_dt": K_eval @ alpha_mu.T,
+    }
+
+
 def multicountry_growth_kernel(
     k_0: tuple[float, ...] | None = None,
     a_0: tuple[float, ...] | None = None,
@@ -156,9 +208,6 @@ def multicountry_growth_kernel(
     data_set: DataSettings = DataSettings(),
     lm_set: SolverSettings = SolverSettings(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
-    sensitivity_times: list[float] | None = None,
-    sensitivity_mode: str = "reverse",
-    gamma_common_sensitivity_times: list[float] | None = None,
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
@@ -174,36 +223,9 @@ def multicountry_growth_kernel(
         if a_0 is None:
             a_0 = drawn_a_0
     validate_initial_conditions(k_0, a_0, parameters)
-    if lm_set.linear_solver not in ("auto", "cholesky", "qr", "cg"):
-        raise ValueError(
-            "linear_solver must be one of ('auto', 'cholesky', 'qr', 'cg')"
-        )
-    if lm_set.linear_solver == "cg" and sensitivity_times is not None:
-        raise NotImplementedError(
-            "sensitivity_times requires a dense linear_solver: the implicit-AD "
-            "system is undamped, sits at the float64 conditioning plateau, and "
-            "a CG solve there would silently degrade the sensitivity tables"
-        )
-    if sensitivity_mode not in ("reverse", "forward"):
-        raise ValueError("sensitivity_mode must be one of ('reverse', 'forward')")
 
     kernel = normalize_kernel(kernel_set.kernel)
     train_data = make_sampled_train_grid(data_set, dtype)
-    if data_set.test_T > float(train_data[-1]):
-        raise ValueError("test_T must not exceed the training horizon")
-    if data_set.benchmark_T < max(data_set.test_T, float(train_data[-1])):
-        raise ValueError("benchmark_T must cover the train and test horizons")
-    if sensitivity_times is not None and any(
-        not 0.0 <= float(value) <= float(train_data[-1]) for value in sensitivity_times
-    ):
-        raise ValueError("sensitivity_times must lie within the training horizon")
-    if gamma_common_sensitivity_times is not None and any(
-        not 0.0 <= float(value) <= float(train_data[-1])
-        for value in gamma_common_sensitivity_times
-    ):
-        raise ValueError(
-            "gamma_common_sensitivity_times must lie within the training horizon"
-        )
     test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     validation_data = jnp.linspace(
         0.0, float(train_data[-1]), data_set.validation_points, dtype=dtype
@@ -243,54 +265,6 @@ def multicountry_growth_kernel(
         "k_0": jnp.asarray(k_0, dtype=dtype),
         "a_0": a_0_array,
     }
-
-    # theta = (alpha_k, alpha_a, alpha_q, alpha_c, alpha_mu, alpha_rate,
-    #          (q_offsets, c_offsets, mu_offsets, rate_offset)), matching the
-    # metric blocks.
-    def path_coordinates(theta, K_eval, K_tilde_eval, p):
-        parameters_p = p["parameters"]
-        populations_p = parameters_p.populations
-        k_0_p = p["k_0"]
-        # Population demeaning is a no-op at the primal point (the inputs
-        # already clear) and projects AD perturbations of a_0 onto the
-        # feasible clearing set, so every direction is meaningful.
-        a_0_p = p["a_0"] - jnp.sum(populations_p * p["a_0"]) / jnp.sum(populations_p)
-        steady_p = steady_state(parameters_p, k_0_p.dtype)
-        # The asset block is the one path with no unpenalized offset, so its
-        # coefficient scale enters the minimum-norm selection metric; the
-        # scale must be differentiation-inert or every parameter sensitivity
-        # picks up a selection-drift term from the metric moving with p.
-        # The other normalizations are absorbed by their free offsets and
-        # need no such guard.
-        output_scale_p = jax.lax.stop_gradient(steady_p["output_scale"])
-        log_consumption_scale_p = jnp.log(steady_p["consumption_scale"])
-        alpha_k, alpha_a, alpha_q, alpha_c, alpha_mu, alpha_rate, initial = theta
-        q_offsets = initial[:num_countries]
-        c_offsets = initial[num_countries : 2 * num_countries]
-        mu_offsets = initial[2 * num_countries : 3 * num_countries]
-        rate_offset = initial[-1]
-        log_k = jnp.log(k_0_p) + K_tilde_eval @ alpha_k.T
-        a = a_0_p + output_scale_p * (K_tilde_eval @ alpha_a.T)
-        log_q = -jnp.log(parameters_p.eta) + q_offsets + K_tilde_eval @ alpha_q.T
-        log_c = log_consumption_scale_p + c_offsets + K_tilde_eval @ alpha_c.T
-        log_mu = (
-            -parameters_p.gammas * log_consumption_scale_p
-            + mu_offsets
-            + K_tilde_eval @ alpha_mu.T
-        )
-        log_rate = jnp.log(parameters_p.r) + rate_offset + K_tilde_eval @ alpha_rate
-        return {
-            "k": jnp.exp(log_k),
-            "a": a,
-            "q": jnp.exp(log_q),
-            "c": jnp.exp(log_c),
-            "mu": jnp.exp(log_mu),
-            "interest_rate": jnp.exp(log_rate),
-            "dlog_k_dt": K_eval @ alpha_k.T,
-            "da_dt": output_scale_p * (K_eval @ alpha_a.T),
-            "dlog_q_dt": K_eval @ alpha_q.T,
-            "dlog_mu_dt": K_eval @ alpha_mu.T,
-        }
 
     def coordinate_residuals(coordinates, parameters_p):
         return path_residuals(
@@ -571,284 +545,6 @@ def multicountry_growth_kernel(
     rkhs_norm_rate = rkhs_norm_squared(theta[5], K)
     rkhs_norm_total = sum(rkhs_norms.values()) + rkhs_norm_rate
 
-    sensitivity_df = None
-    sensitivity_fields = {}
-    if sensitivity_times is not None:
-        sensitivity_times = [float(value) for value in sensitivity_times]
-        K_sens, K_tilde_sens = integrated_kernel_matrices(
-            jnp.asarray(sensitivity_times, dtype=dtype),
-            train_data,
-            kernel,
-            kernel_set.sigma,
-            kernel_set.ell,
-        )
-
-        # The world rate, three cross-sectional world statistics, and every
-        # country's consumption and capital. The per-country levels are the
-        # readable observables at N = 2; the aggregates are what survives a
-        # cross-section too wide to tabulate country by country.
-        def sensitivity_observables(coordinates, parameters_p):
-            populations_p = parameters_p.populations
-            weights = populations_p / jnp.sum(populations_p)
-            x = investment_expenditure(coordinates["k"], coordinates["q"], parameters_p)
-            output = production(
-                coordinates["k"], parameters_p.productivities, parameters_p
-            )
-            # World saving is world investment: with no outside world the
-            # aggregate current account is identically zero.
-            saving_rate = jnp.sum(weights * x, axis=-1) / jnp.sum(
-                weights * output, axis=-1
-            )
-            steady_p = steady_state(parameters_p, coordinates["a"].dtype)
-            nfa_dispersion = (
-                jnp.sqrt(jnp.sum(weights * coordinates["a"] ** 2, axis=-1))
-                / steady_p["output_scale"]
-            )
-            return jnp.column_stack(
-                [
-                    coordinates["interest_rate"],
-                    saving_rate,
-                    nfa_dispersion,
-                    weighted_gini(output, populations_p),
-                    coordinates["c"],
-                    coordinates["k"],
-                ]
-            )
-
-        # Differentiating this maps p to every observable at every
-        # sensitivity time through the solve: the implicit dependence of the
-        # solved coefficients on p plus the direct dependence of the path
-        # evaluation. The a_0 derivatives are the projected ones (demeaning
-        # inside path_coordinates), so they measure feasible redistributions.
-        # Warm-started at the solved coefficients with the ridge pinned at the
-        # level the continuation actually reached, so the re-solve lands on
-        # the primal's own stationary point in a step or two. Re-annealing
-        # from ridge_init would be free to settle at a different achieved
-        # ridge, and the implicit tangents are the tangents of whatever
-        # stationary point the solve returns.
-        sensitivity_solver = RidgeLevenbergMarquardt(
-            residual_fn,
-            metric=metric,
-            ridge=float(result.lm_state.ridge),
-            linear_solver={"auto": Cholesky(), "cholesky": Cholesky(), "qr": QR()}[
-                lm_set.linear_solver
-            ],
-            init_damping=lm_set.init_damping,
-            damping_decrease=lm_set.damping_decrease,
-            damping_increase=lm_set.damping_increase,
-        )
-
-        def observables_at_sensitivity_times(p_value):
-            sensitivity_result = sensitivity_solver.solve(
-                theta,
-                None,
-                p=p_value,
-                **solve_options,
-            )
-            coordinates = path_coordinates(
-                sensitivity_result.x, K_sens, K_tilde_sens, p_value
-            )
-            return (
-                sensitivity_observables(coordinates, p_value["parameters"]),
-                sensitivity_result.status,
-            )
-
-        observable_labels = (
-            ["rate", "saving_rate", "nfa_dispersion", "output_gini"]
-            + [f"c_{country + 1}" for country in range(num_countries)]
-            + [f"k_{country + 1}" for country in range(num_countries)]
-        )
-        populations_list = [float(value) for value in parameters.populations]
-
-        if sensitivity_mode == "reverse":
-            # The full Jacobian: every observable against every parameter, at
-            # one reverse pass per output scalar. Any question about the
-            # solution can be read off it afterwards.
-            jacobian, sensitivity_status = jax.jacrev(
-                observables_at_sensitivity_times, has_aux=True
-            )(p)
-            jax.block_until_ready(jacobian)
-            primal_observables = np.asarray(
-                sensitivity_observables(
-                    path_coordinates(theta, K_sens, K_tilde_sens, p), p["parameters"]
-                )
-            )
-            gradient_parameters = jacobian["parameters"]
-            scalar_blocks = {
-                "alpha": np.asarray(gradient_parameters.alpha),
-                "delta": np.asarray(gradient_parameters.delta),
-                "r": np.asarray(gradient_parameters.r),
-                "eta": np.asarray(gradient_parameters.eta),
-            }
-            country_blocks = {
-                "gamma": np.asarray(gradient_parameters.gammas),
-                "productivity": np.asarray(gradient_parameters.productivities),
-                "population": np.asarray(gradient_parameters.populations),
-                "k_0": np.asarray(jacobian["k_0"]),
-                "a_0": np.asarray(jacobian["a_0"]),
-            }
-            rate_a_0_gradient = country_blocks["a_0"][:, 0, :]
-        else:
-            # One linearization at the solved point, then a tangent map
-            # applied to each reported direction: (1, ..., 1) in gamma and one
-            # bond direction per country. The number of applications follows
-            # the directions published rather than the 2N + 4 observables, and
-            # only those directions exist afterwards -- there is no Jacobian
-            # left over to answer a different question from. Wall time tracks
-            # reverse mode either way: the re-solve inside the differentiated
-            # function dominates both, so switching modes buys accuracy of
-            # intent, not speed.
-            primal, tangent_at_p, sensitivity_status = jax.linearize(
-                observables_at_sensitivity_times, p, has_aux=True
-            )
-            jax.block_until_ready(primal)
-            primal_observables = np.asarray(primal)
-            zero_tangent = jax.tree_util.tree_map(jnp.zeros_like, p)
-            # (1, ..., 1) in gamma: the country count cancels, so this is the
-            # representative-agent risk-aversion change at any N.
-            gamma_common = np.asarray(
-                tangent_at_p(
-                    {
-                        **zero_tangent,
-                        "parameters": replace(
-                            zero_tangent["parameters"],
-                            gammas=jnp.ones_like(p["parameters"].gammas),
-                        ),
-                    }
-                )
-            )
-            rate_a_0_gradient = np.column_stack(
-                [
-                    np.asarray(
-                        tangent_at_p(
-                            {
-                                **zero_tangent,
-                                "a_0": zero_tangent["a_0"].at[country].set(1.0),
-                            }
-                        )
-                    )[:, 0]
-                    for country in range(num_countries)
-                ]
-            )
-            scalar_blocks = {"gamma_common": gamma_common}
-            country_blocks = {}
-
-        # A non-converged re-solve would publish exactly zero implicit
-        # tangents, indistinguishable from a genuine null effect.
-        if int(sensitivity_status) != LMStatus.CONVERGED:
-            raise RuntimeError("the sensitivity re-solve did not converge")
-        sensitivity_fields, sensitivity_df = sensitivity_fields_frame(
-            sensitivity_times,
-            observable_labels,
-            primal_observables,
-            scalar_blocks,
-            country_blocks,
-            populations_list,
-        )
-
-        # Under identical homothetic preferences the world rate is invariant
-        # to every clearing-preserving reallocation of the initial bond
-        # positions, so the rate's bond derivatives are zero to solver
-        # tolerance. Reported as a measured scalar: it is the check on the
-        # implicit tangents themselves, not another comparative static.
-        for index, time_value in enumerate(sensitivity_times):
-            suffix = f"T{time_value:g}".replace(".", "p")
-            sensitivity_fields[f"rate_{suffix}_a_0_neutrality"] = float(
-                np.max(np.abs(rate_a_0_gradient[index]))
-            )
-        sensitivity_fields["rate_a_0_neutrality"] = float(
-            np.max(np.abs(rate_a_0_gradient))
-        )
-
-    # The one comparative static that survives any cross-section width: the
-    # world rate's response to the representative-agent CRRA direction
-    # (1, ..., 1), as a single forward tangent through the warm re-solve at
-    # the achieved ridge. On the cg path both the damped re-solve and the
-    # undamped implicit-AD system are preconditioned by the arrow-Woodbury
-    # inverse built at the solution (the ad_solver inherits the carried
-    # instance), so no dense factorization enters at any width.
-    gamma_common_fields = {}
-    gamma_common_sensitivity_time = None
-    if gamma_common_sensitivity_times is not None:
-        gamma_common_sensitivity_times = [
-            float(value) for value in gamma_common_sensitivity_times
-        ]
-        K_common, K_tilde_common = integrated_kernel_matrices(
-            jnp.asarray(gamma_common_sensitivity_times, dtype=dtype),
-            train_data,
-            kernel,
-            kernel_set.sigma,
-            kernel_set.ell,
-        )
-        if lm_set.linear_solver == "cg":
-            common_solver_options = {
-                "linear_solver": CG(
-                    build_arrow_woodbury(
-                        theta,
-                        kernel_args,
-                        p,
-                        float(result.lm_state.ridge),
-                        lm_set.cg_damping_floor,
-                        num_countries,
-                    ),
-                    tol=lm_set.cg_tol,
-                    maxiter=lm_set.cg_maxiter,
-                ),
-                # The undamped AD system runs once, so it gets a deeper
-                # budget than the damped inner solves.
-                "ad_solver": CG(None, maxiter=10 * lm_set.cg_maxiter),
-            }
-        else:
-            common_solver_options = {
-                "linear_solver": {
-                    "auto": Cholesky(),
-                    "cholesky": Cholesky(),
-                    "qr": QR(),
-                }[lm_set.linear_solver]
-            }
-        gamma_common_solver = RidgeLevenbergMarquardt(
-            residual_fn,
-            metric=metric,
-            ridge=float(result.lm_state.ridge),
-            init_damping=lm_set.init_damping,
-            damping_decrease=lm_set.damping_decrease,
-            damping_increase=lm_set.damping_increase,
-            **common_solver_options,
-        )
-
-        def rate_at_common_times(p_value):
-            common_result = gamma_common_solver.solve(
-                theta, kernel_args, p=p_value, **solve_options
-            )
-            coordinates = path_coordinates(
-                common_result.x, K_common, K_tilde_common, p_value
-            )
-            return coordinates["interest_rate"], common_result.status
-
-        gamma_common_timer = Stopwatch()
-        primal_rate, tangent_at_p, gamma_common_status = jax.linearize(
-            rate_at_common_times, p, has_aux=True
-        )
-        zero_tangent = jax.tree_util.tree_map(jnp.zeros_like, p)
-        d_rate_common = tangent_at_p(
-            {
-                **zero_tangent,
-                "parameters": replace(
-                    zero_tangent["parameters"],
-                    gammas=jnp.ones_like(p["parameters"].gammas),
-                ),
-            }
-        )
-        gamma_common_sensitivity_time = gamma_common_timer.elapsed(d_rate_common)
-        if int(gamma_common_status) != LMStatus.CONVERGED:
-            raise RuntimeError("the gamma-common sensitivity re-solve did not converge")
-        for index, time_value in enumerate(gamma_common_sensitivity_times):
-            suffix = f"T{time_value:g}".replace(".", "p")
-            gamma_common_fields[f"rate_{suffix}"] = float(primal_rate[index])
-            gamma_common_fields[f"d_rate_{suffix}_d_gamma_common"] = float(
-                d_rate_common[index]
-            )
-
     results = {
         "alpha": parameters.alpha,
         "delta": parameters.delta,
@@ -910,7 +606,6 @@ def multicountry_growth_kernel(
         "rkhs_norm_total": float(rkhs_norm_total),
         "rkhs_norm_interest_rate": float(rkhs_norm_rate),
         "solve_time": solve_time,
-        "wall_time": solve_time,
         "solver": "nlls-gram",
         "linear_solver": lm_set.linear_solver,
         "preconditioner": "arrow_woodbury" if lm_set.linear_solver == "cg" else "none",
@@ -988,17 +683,6 @@ def multicountry_growth_kernel(
                 long_run["initial_wealth"][country]
             )
     results["rate_offset"] = float(theta_offsets[-1])
-    if sensitivity_times is not None:
-        results["sensitivity_times"] = ",".join(
-            f"{value:g}" for value in sensitivity_times
-        )
-        results.update(sensitivity_fields)
-    if gamma_common_sensitivity_times is not None:
-        results["gamma_common_sensitivity_times"] = ",".join(
-            f"{value:g}" for value in gamma_common_sensitivity_times
-        )
-        results["gamma_common_sensitivity_time"] = gamma_common_sensitivity_time
-        results.update(gamma_common_fields)
     if benchmark_available:
         results.update(
             {
@@ -1087,8 +771,17 @@ def multicountry_growth_kernel(
         "train_df": train_df,
         "validation_df": validation_df,
         "test_df": test_df,
-        "sensitivity_df": sensitivity_df,
         "hyperparameters": hyperparameters,
+        "solve": {
+            "solver": solver,
+            "residual_fn": residual_fn,
+            "theta_0": theta_0,
+            "p": p,
+            "residual_args": kernel_args,
+            "multi_start": None,
+            "options": solve_options,
+        },
+        "result": result,
     }
 
 

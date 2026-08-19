@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import time
 from dataclasses import asdict, dataclass
 from functools import partial
@@ -10,7 +9,6 @@ import jax
 import jax.numpy as jnp
 import jsonargparse
 import numpy as np
-import pandas as pd
 from flax import struct
 from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
 
@@ -24,35 +22,30 @@ from models.kernels import (
     rbf_state_gram,
     rkhs_norm_squared,
 )
-from models.neoclassical_growth_nn_recursive import (
+from models.neoclassical_growth import (
+    DOMAIN_EPS,
     InitialConditionSettings,
-    StructuralParameters,
-    add_benchmark_path_diagnostics,
-    benchmark_policy_grid,
-    benchmark_trajectories,
-    draw_initial_conditions,
+    RecursiveParameters,
     euler_residuals,
+    growth_initial_conditions,
     log_tvc_residual,
-    positive_policy_grid,
-    production,
-    rollout_steps,
-    scale_invariance_columns,
-    trajectory_frame,
+    simulate,
     trajectory_values,
 )
+from models.neoclassical_growth_benchmark import benchmark_df
 from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
 from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
+    long_df,
     unit_softplus,
 )
 
 
 @dataclass(frozen=True)
 class DataSettings:
-    collocation_source: Literal["exact_path"] = "exact_path"
     train_T: float = CONSTANTS.train_T
     # Fixed RKHS centers on the exact path: a representation size, not a
     # rollout grid (nothing is integrated during training).
@@ -62,18 +55,12 @@ class DataSettings:
     tvc_steps: int = 256
     train_tvc_T: float = CONSTANTS.transversality_T
     test_T: float = CONSTANTS.test_T
-    policy_grid_size: int = 100
-    benchmark_T: float = CONSTANTS.benchmark_T
-    benchmark_points: int = CONSTANTS.benchmark_points
 
 
 @jax.tree_util.register_static
 @dataclass(frozen=True)
 class StateKernelSettings:
     amplitude: float = 1.0
-    # Sweep-validated at the calibrated state geometry (k_ss ~ 3.6): much
-    # shorter values under-cover the capital span and stall the ridge-LM
-    # solve, while ~0.9 converges too slowly for the replication step budget.
     lengthscale: float = 0.6
     metric_epsilon: float = 3e-5
     # With the free constant, theta is (alpha, h_const) and only alpha is
@@ -100,23 +87,10 @@ class StateKernelSettings:
 @dataclass(frozen=True)
 class StoppingCriteria:
     max_steps: int = 100
-    # RMS Euler at 1e-5 is far below economic significance. The thresholds
-    # are float64-tuned; float32 callers pass looser values explicitly (the
-    # float32 replication driver carries them).
+    # float64-tuned; float32 callers pass looser values explicitly.
     residual_atol: float = 1e-5
     gtol: float = 1e-7
     ridge: float = 1e-12
-    # ridge_init=None solves at the fixed ridge above; a value enables ridge
-    # continuation annealed from ridge_init down to `ridge` (the floor) by
-    # factors of `ridge_decrease` on inner stationarity. The metric's
-    # factorization never involves the ridge, so the anneal composes
-    # unchanged.
-    ridge_init: float | None = None
-    ridge_decrease: float = 0.1
-    # Relative stationarity threshold that triggers the next ridge level:
-    # looser anneals faster (fewer steps per level), tighter solves each
-    # level out more completely before descending.
-    ridge_grad_rtol: float = 1e-2
     log_tvc_threshold: float = 0.0
 
 
@@ -155,71 +129,23 @@ def nonhomothetic_state_features(x, centers, kernel_set):
     return additive_matern_state_features(family, x, centers, sigmas, lengthscales)
 
 
-def validate_settings(data_set, kernel_set, stop_set):
-    if data_set.collocation_source != "exact_path":
-        raise ValueError(f"unknown collocation_source: {data_set.collocation_source!r}")
-    if data_set.train_points < 2:
-        raise ValueError("train_points must be at least two")
-    if data_set.train_T <= 0.0 or data_set.test_T <= 0.0:
-        raise ValueError("train_T and test_T must be positive")
-    if data_set.test_points < 2 or data_set.tvc_steps < 1:
-        raise ValueError("test_points must be at least two and tvc_steps positive")
-    if data_set.train_tvc_T <= data_set.train_T:
-        raise ValueError("train_tvc_T must exceed train_T")
-    if data_set.benchmark_T < max(data_set.train_T, data_set.test_T):
-        raise ValueError("benchmark_T must cover both train and test horizons")
-    if data_set.benchmark_points < data_set.train_points:
-        raise ValueError("benchmark_points must be at least train_points")
-    if kernel_set.amplitude <= 0.0 or kernel_set.lengthscale <= 0.0:
-        raise ValueError("kernel amplitude and lengthscale must be positive")
-    if kernel_set.metric_epsilon <= 0.0:
-        raise ValueError("metric_epsilon must be positive")
-    state_kernels = tuple(
-        f"{structure}_{family}"
-        for structure in ("ard", "additive")
-        for family in ("rbf", *MATERN_STATE_FAMILIES)
-    )
-    if kernel_set.state_kernel not in state_kernels:
-        raise ValueError(f"unknown state_kernel: {kernel_set.state_kernel!r}")
-    if not all(ell > 0.0 for ell in state_lengthscales(kernel_set)):
-        raise ValueError("per-dimension lengthscales must be positive when set")
-    if kernel_set.linear_mean and kernel_set.homothetic_representation:
-        raise ValueError("linear_mean requires homothetic_representation=False")
-    if stop_set.residual_atol <= 0.0 or stop_set.gtol <= 0.0:
-        raise ValueError("residual_atol and gtol must be positive")
-    if stop_set.ridge <= 0.0:
-        raise ValueError("ridge must be positive")
-
-
+# Frozen collocation design: the exact benchmark paths of the training
+# initial conditions on the training date grid.
 def fixed_collocation_data(
-    a,
-    delta,
-    rho_hat,
-    sigma_crra,
-    g,
-    initial_conditions,
-    data_set,
-    *,
-    dtype,
+    a, delta, rho_hat, sigma_crra, g, initial_conditions, data_set, *, dtype
 ):
-    if data_set.collocation_source != "exact_path":
-        raise ValueError(f"unknown collocation_source: {data_set.collocation_source!r}")
     train_times = np.linspace(0.0, data_set.train_T, data_set.train_points)
-    z, k, c = benchmark_trajectories(
-        a,
-        delta,
-        rho_hat,
-        sigma_crra,
-        g,
-        initial_conditions,
-        train_times,
-        data_set,
+    benchmark = benchmark_df(
+        initial_conditions, train_times, a, delta, rho_hat, sigma_crra, g
+    )
+    k = benchmark["k"].to_numpy().reshape(len(initial_conditions), -1)
+    z = np.asarray(initial_conditions)[:, :1] * np.exp(
+        (1.0 - a) * g * train_times[None, :]
     )
     log_states = np.stack([np.log(z), np.log(k)], axis=-1)
     return (
         jnp.asarray(np.broadcast_to(train_times, k.shape), dtype=dtype),
         jnp.asarray(log_states, dtype=dtype),
-        jnp.asarray(c, dtype=dtype),
     )
 
 
@@ -287,30 +213,18 @@ def investment(theta, args, log_state, p, kernel_set):
 class KernelInvestmentPolicy:
     theta: tuple
     args: ResidualArgs
-    p: StructuralParameters
     kernel_set: StateKernelSettings = struct.field(pytree_node=False)
 
     def __call__(self, log_state, p):
         return investment(self.theta, self.args, log_state, p, self.kernel_set)
 
 
-def make_policy(theta, args, p, kernel_set):
-    return KernelInvestmentPolicy(
-        theta=theta,
-        args=args,
-        p=p,
-        kernel_set=kernel_set,
-    )
-
-
 def residual_fn(theta, args, p, kernel_set):
-    policy = make_policy(theta, args, p, kernel_set)
+    policy = KernelInvestmentPolicy(theta, args, kernel_set)
     residual = euler_residuals(policy, args.train_log_states, p)
     return residual / jnp.sqrt(residual.size)
 
 
-# Calibration shared with neoclassical_growth_nn_recursive via the scoped
-# NEOCLASSICAL_GROWTH_CONSTANTS (utilities.py).
 def neoclassical_growth_kernel_recursive(
     a: float = CONSTANTS.a,
     delta: float = CONSTANTS.delta,
@@ -333,71 +247,40 @@ def neoclassical_growth_kernel_recursive(
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
 ):
+    # Model and collocation design setup.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    if not 0.0 < a < 1.0:
-        raise ValueError("a must lie strictly between zero and one")
-    if sigma_crra <= 0.0:
-        raise ValueError("sigma_crra must be positive")
-    # Well-posedness of the planner objective, not steady-state structure:
-    # finiteness of discounted utility needs rho_hat + (sigma - 1) g > 0, the
-    # discounted-capital certificate needs g < rho_hat, and detrended capital
-    # needs positive effective depreciation.
-    if g >= rho_hat:
-        raise ValueError("g must be less than rho_hat")
-    if rho_hat + (sigma_crra - 1.0) * g <= 0.0:
-        raise ValueError("rho_hat + (sigma_crra - 1) * g must be positive")
-    if delta + g <= 0.0:
-        raise ValueError("delta + g must be positive")
-    validate_settings(data_set, kernel_set, stop_set)
+    state_kernels = tuple(
+        f"{structure}_{family}"
+        for structure in ("ard", "additive")
+        for family in ("rbf", *MATERN_STATE_FAMILIES)
+    )
+    if kernel_set.state_kernel not in state_kernels:
+        raise ValueError(f"unknown state_kernel: {kernel_set.state_kernel!r}")
+    if kernel_set.linear_mean and kernel_set.homothetic_representation:
+        raise ValueError("linear_mean requires homothetic_representation=False")
     n_test_steps = data_set.test_points - 1
     test_T = data_set.test_T
 
-    train_ic_key, test_ic_key = jax.random.split(jax.random.key(ic_set.data_seed))
-    train_initial_conditions = draw_initial_conditions(
-        z_0,
-        k_0,
-        ic_set.num_train_trajectories,
-        ic_set.train_log_z_variance,
-        ic_set.train_log_k_variance,
-        train_ic_key,
-        dtype,
-    )
-    test_z_center = z_0 if ic_set.test_z_0 is None else ic_set.test_z_0
-    test_k_center = k_0 if ic_set.test_k_0 is None else ic_set.test_k_0
-    test_log_z_variance = (
-        ic_set.train_log_z_variance
-        if ic_set.test_log_z_variance is None
-        else ic_set.test_log_z_variance
-    )
-    test_log_k_variance = (
-        ic_set.train_log_k_variance
-        if ic_set.test_log_k_variance is None
-        else ic_set.test_log_k_variance
-    )
-    test_initial_conditions = draw_initial_conditions(
-        test_z_center,
-        test_k_center,
-        ic_set.num_test_trajectories,
-        test_log_z_variance,
-        test_log_k_variance,
-        test_ic_key,
-        dtype,
-    )
-    p = StructuralParameters.create(
+    ic_draw = growth_initial_conditions(z_0, k_0, ic_set, dtype)
+    train_initial_conditions = ic_draw.train_initial_conditions
+    test_initial_conditions = ic_draw.test_initial_conditions
+    p = RecursiveParameters.create(
         dtype,
         a=a,
         delta=delta,
         rho_hat=rho_hat,
         sigma_crra=sigma_crra,
         g=g,
-        z_0=train_initial_conditions[:, 0],
-        k_0=train_initial_conditions[:, 1],
+        A=1.0,
+        b_1=1.0,
+        b_2=0.0,
+        k_thr=float("inf"),
     )
 
     fit_start = time.perf_counter()
-    train_times, train_log_states, train_c_benchmark = fixed_collocation_data(
+    train_times, train_log_states = fixed_collocation_data(
         a,
         delta,
         rho_hat,
@@ -408,17 +291,21 @@ def neoclassical_growth_kernel_recursive(
         dtype=dtype,
     )
     args = build_residual_args(train_log_states, kernel_set, a, z_0, k_0)
-    n_train = args.centers.shape[0]
-    shifted_gram = args.gram + kernel_set.metric_epsilon * jnp.eye(n_train, dtype=dtype)
+    n_centers = args.centers.shape[0]
+    shifted_gram = args.gram + kernel_set.metric_epsilon * jnp.eye(
+        n_centers, dtype=dtype
+    )
     metric = RepeatedFactorMetric(
         jnp.linalg.cholesky(shifted_gram, upper=True),
         repeats=1,
     )
-    theta_0 = (jnp.zeros(n_train, dtype=dtype),)
+    theta_0 = (jnp.zeros(n_centers, dtype=dtype),)
     if kernel_set.free_constant:
         theta_0 = theta_0 + (jnp.zeros((), dtype=dtype),)
     if kernel_set.linear_mean:
         theta_0 = theta_0 + (jnp.zeros(2, dtype=dtype),)
+
+    # Ridge Levenberg-Marquardt solve.
     solver = RidgeLevenbergMarquardt(
         partial(residual_fn, kernel_set=kernel_set),
         metric=metric,
@@ -458,27 +345,19 @@ def neoclassical_growth_kernel_recursive(
     theta = result.x
     alpha = theta[0]
     h_const = float(theta[1]) if kernel_set.free_constant else 0.0
-    policy = make_policy(theta, args, p, kernel_set)
-    train_values = trajectory_values(policy, train_log_states, p)
-    train_df = trajectory_frame(
-        train_values,
-        train_times,
-        train_initial_conditions,
-    )
-    train_c_benchmark_np = np.asarray(train_c_benchmark).reshape(-1)
-    train_df["c_benchmark"] = train_c_benchmark_np
-    train_df["i_benchmark"] = (
-        np.asarray(train_df["z"] * train_df["k"] ** a) - train_c_benchmark_np
-    )
-    train_df["fixed_exact_center"] = True
+    policy = KernelInvestmentPolicy(theta, args, kernel_set)
 
-    test_solution = rollout_steps(
-        policy,
-        jnp.log(test_initial_conditions),
-        test_T,
-        n_test_steps,
-        test_T / n_test_steps,
-        p,
+    # Diagnostics on the frozen centers and held-out rollouts.
+    train_values = trajectory_values(policy, train_log_states, p)
+    train_initial = np.asarray(train_initial_conditions)
+    train_df = long_df(
+        {"t": train_times, **train_values},
+        ("trajectory", "step"),
+        scalars={"z_0": train_initial[:, 0], "k_0": train_initial[:, 1]},
+    )
+
+    test_solution = simulate(
+        policy, jnp.log(test_initial_conditions), test_T, n_test_steps, p
     )
     jax.block_until_ready(test_solution)
     test_log_states = jnp.where(
@@ -491,76 +370,65 @@ def neoclassical_growth_kernel_recursive(
         and jnp.all(jnp.isfinite(test_values["c"]))
         and jnp.min(test_values["c"]) > 0.0
     )
-    test_df = trajectory_frame(test_values, test_solution.ts, test_initial_conditions)
-
-    z_benchmark, k_benchmark, c_benchmark = benchmark_trajectories(
+    test_initial = np.asarray(test_initial_conditions)
+    test_df = long_df(
+        {"t": test_solution.ts, **test_values},
+        ("trajectory", "step"),
+        scalars={"z_0": test_initial[:, 0], "k_0": test_initial[:, 1]},
+    )
+    benchmark = benchmark_df(
+        test_initial,
+        np.asarray(test_solution.ts[0]),
         a,
         delta,
         rho_hat,
         sigma_crra,
         g,
-        test_initial_conditions,
-        np.asarray(test_solution.ts[0]),
-        data_set,
     )
-    k_error, c_error, test_summary_df = add_benchmark_path_diagnostics(
-        test_df,
-        test_values,
-        test_initial_conditions,
-        z_benchmark,
-        k_benchmark,
-        c_benchmark,
-        a=a,
-        delta=delta,
-        g=g,
+    test_df = test_df.merge(
+        benchmark[["trajectory", "t", "k", "c"]],
+        on=["trajectory", "t"],
+        suffixes=("", "_benchmark"),
     )
+    test_df["k_rel_error"] = (test_df["k"] - test_df["k_benchmark"]) / test_df[
+        "k_benchmark"
+    ].abs().clip(lower=DOMAIN_EPS)
+    test_df["c_rel_error"] = (test_df["c"] - test_df["c_benchmark"]) / test_df[
+        "c_benchmark"
+    ].abs().clip(lower=DOMAIN_EPS)
+    abs_errors = test_df[["k_rel_error", "c_rel_error"]].abs()
+    trajectory_mean = abs_errors.groupby(test_df["trajectory"]).mean()
+    error_fields = {
+        "test_mean_abs_k_rel_error": float(abs_errors["k_rel_error"].mean()),
+        "test_mean_abs_c_rel_error": float(abs_errors["c_rel_error"].mean()),
+        "test_max_abs_k_rel_error": float(abs_errors["k_rel_error"].max()),
+        "test_median_trajectory_mean_abs_k_rel_error": float(
+            trajectory_mean["k_rel_error"].median()
+        ),
+        "test_median_trajectory_mean_abs_c_rel_error": float(
+            trajectory_mean["c_rel_error"].median()
+        ),
+    }
 
-    max_log_tvc, train_terminal_log_tvc, tvc_ok = log_tvc_residual(
+    # Terminal transversality certificate on the training initial conditions.
+    train_tvc = log_tvc_residual(
         policy,
         jnp.log(train_initial_conditions),
-        data_set.train_T,
         data_set.train_tvc_T,
+        data_set.tvc_steps,
         p,
-        data_set,
     )
-    max_log_tvc = float(max_log_tvc)
-    transversality_ok = bool(
-        jnp.all(tvc_ok) and max_log_tvc < stop_set.log_tvc_threshold
-    )
-    _, test_terminal_log_tvc, test_tvc_ok = log_tvc_residual(
-        policy,
-        jnp.log(test_initial_conditions),
-        data_set.train_T,
-        data_set.train_tvc_T,
-        p,
-        data_set,
-    )
-    test_max_log_tvc = float(jnp.max(test_terminal_log_tvc))
-    test_transversality_ok = bool(
-        jnp.all(test_tvc_ok) and test_max_log_tvc < stop_set.log_tvc_threshold
-    )
+    max_log_tvc_residual = float(jnp.max(train_tvc))
+    transversality_ok = bool(max_log_tvc_residual < stop_set.log_tvc_threshold)
 
     max_train_euler = float(jnp.max(jnp.abs(train_values["euler_residual"])))
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
     test_trajectory_euler = jnp.mean(jnp.abs(test_values["euler_residual"]), axis=1)
-    mean_k_error = float(np.mean(np.abs(k_error)))
-    mean_c_error = float(np.mean(np.abs(c_error)))
-
     gram_eigenvalues = jnp.linalg.eigvalsh(args.gram)
-    train_kappa_0 = np.asarray(
-        train_initial_conditions[:, 1]
-        / train_initial_conditions[:, 0] ** (1.0 / (1.0 - a))
-    )
-    test_kappa_0 = np.asarray(
-        test_initial_conditions[:, 1]
-        / test_initial_conditions[:, 0] ** (1.0 / (1.0 - a))
-    )
-    train_kappa = train_df["kappa"].to_numpy()
-    test_kappa = test_df["kappa"].to_numpy()
-    collocation_kappa_spread = float(np.max(train_kappa) / np.min(train_kappa))
+
+    # Published results.
     results = {
         "variant": "fixed_recursive_kernel",
-        "collocation_source": data_set.collocation_source,
         "collocation_design": "frozen_exact_benchmark_states",
         "parameter_derivative": "conditional_on_fixed_collocation_design",
         "a": a,
@@ -570,8 +438,8 @@ def neoclassical_growth_kernel_recursive(
         "g": g,
         "z_0": z_0,
         "k_0": k_0,
-        "test_z_0": test_z_center,
-        "test_k_0": test_k_center,
+        "test_z_0": ic_draw.test_z_center,
+        "test_k_0": ic_draw.test_k_center,
         "data_seed": ic_set.data_seed,
         # Measured, not requested: a float64 leak upstream shows up here.
         "residual_dtype": str(train_values["euler_residual"].dtype),
@@ -604,7 +472,7 @@ def neoclassical_growth_kernel_recursive(
         "h_const": h_const,
         "rkhs_norm": float(rkhs_norm_squared(alpha, args.gram)),
         "shifted_metric_norm": float(rkhs_norm_squared(alpha, shifted_gram)),
-        "penalized_parameter_count": n_train,
+        "penalized_parameter_count": n_centers,
         "unpenalized_parameter_count": (1 if kernel_set.free_constant else 0)
         + (2 if kernel_set.linear_mean else 0),
         "gram_min_eigenvalue": float(gram_eigenvalues[0]),
@@ -621,44 +489,24 @@ def neoclassical_growth_kernel_recursive(
             jnp.quantile(test_trajectory_euler, 0.9)
         ),
         "test_trajectory_euler_mean_abs_max": float(jnp.max(test_trajectory_euler)),
-        "max_log_tvc_residual": max_log_tvc,
-        "mean_log_tvc_residual": float(jnp.mean(train_terminal_log_tvc)),
-        "test_mean_log_tvc_residual": float(jnp.mean(test_terminal_log_tvc)),
-        "test_max_log_tvc_residual": test_max_log_tvc,
-        "test_transversality_ok": test_transversality_ok,
-        "tvc_normalization": "relative_to_initial_log_certificate",
+        "max_log_tvc_residual": max_log_tvc_residual,
         "transversality_ok": transversality_ok,
         "min_test_c": float(jnp.min(test_values["c"])),
         "test_path_ok": test_path_ok,
-        "test_mean_abs_k_rel_error": mean_k_error,
-        "test_mean_abs_c_rel_error": mean_c_error,
-        "test_median_abs_k_rel_error": float(np.median(np.abs(k_error))),
-        "test_median_abs_c_rel_error": float(np.median(np.abs(c_error))),
-        "test_max_abs_k_rel_error": float(np.max(np.abs(k_error))),
-        "test_max_abs_c_rel_error": float(np.max(np.abs(c_error))),
+        **error_fields,
         "steps": steps,
         "stopping_reason": stopping_reason,
         "solve_time": solve_time,
         "setup_time": setup_time,
         "total_fit_time": total_fit_time,
-        "solver_converged": solver_converged,
         "solution_accepted": solver_converged,
         "num_train_trajectories": ic_set.num_train_trajectories,
         "num_test_trajectories": ic_set.num_test_trajectories,
-        "num_collocation_states": n_train,
-        "collocation_kappa_spread": collocation_kappa_spread,
-        "collocation_log_kappa_min": float(np.log(np.min(train_kappa))),
-        "collocation_log_kappa_max": float(np.log(np.max(train_kappa))),
-        "test_log_kappa_min": float(np.log(np.nanmin(test_kappa))),
-        "test_log_kappa_max": float(np.log(np.nanmax(test_kappa))),
-        "train_kappa_0_min": float(train_kappa_0.min()),
-        "train_kappa_0_max": float(train_kappa_0.max()),
-        "test_kappa_0_min": float(test_kappa_0.min()),
-        "test_kappa_0_max": float(test_kappa_0.max()),
+        "num_centers": n_centers,
         "train_log_z_variance": ic_set.train_log_z_variance,
         "train_log_k_variance": ic_set.train_log_k_variance,
-        "test_log_z_variance": test_log_z_variance,
-        "test_log_k_variance": test_log_k_variance,
+        "test_log_z_variance": ic_draw.test_log_z_variance,
+        "test_log_k_variance": ic_draw.test_log_k_variance,
         "train_point_dt": data_set.train_T / (data_set.train_points - 1),
         "test_points": data_set.test_points,
         "train_T": data_set.train_T,
@@ -672,77 +520,7 @@ def neoclassical_growth_kernel_recursive(
             log_z_lengthscale=ell_z,
             log_k_lengthscale=ell_k,
         )
-    results.update(
-        test_pooled_median_abs_k_rel_error=float(np.median(np.abs(k_error))),
-        test_pooled_median_abs_c_rel_error=float(np.median(np.abs(c_error))),
-        test_median_trajectory_mean_abs_k_rel_error=float(
-            test_summary_df["mean_k_abs_rel_error"].median()
-        ),
-        test_median_trajectory_mean_abs_c_rel_error=float(
-            test_summary_df["mean_c_abs_rel_error"].median()
-        ),
-    )
 
-    # Diagnostic grid bounds come from the realized states, never a steady
-    # state. Snapping to a coarse log lattice keeps the cached benchmark
-    # starts shared across seeds and data draws.
-    observed_kappa = np.concatenate(
-        [
-            train_kappa,
-            test_df["kappa"].to_numpy(),
-            train_kappa_0,
-            test_kappa_0,
-        ]
-    )
-    observed_kappa = observed_kappa[np.isfinite(observed_kappa) & (observed_kappa > 0)]
-    if observed_kappa.size == 0:
-        observed_kappa = np.concatenate([train_kappa_0, test_kappa_0])
-    grid_lo = math.exp(math.floor(math.log(observed_kappa.min()) / 0.05) * 0.05)
-    grid_hi = math.exp(math.ceil(math.log(observed_kappa.max()) / 0.05) * 0.05)
-    kappa_grid = positive_policy_grid(grid_lo, grid_hi, data_set.policy_grid_size)
-    grid_log_states = jnp.stack(
-        [
-            jnp.zeros(data_set.policy_grid_size, dtype=dtype),
-            jnp.log(jnp.asarray(kappa_grid, dtype=dtype)),
-        ],
-        axis=1,
-    )
-    grid_values = trajectory_values(policy, grid_log_states[None, :, :], p)
-    grid_output_per_z = np.asarray(
-        production(
-            jnp.ones(data_set.policy_grid_size, dtype=dtype),
-            jnp.asarray(kappa_grid, dtype=dtype),
-            p,
-        )
-    )
-    c_benchmark_grid = benchmark_policy_grid(
-        a,
-        delta,
-        rho_hat,
-        sigma_crra,
-        g,
-        kappa_grid,
-        data_set,
-    )
-    policy_df = pd.DataFrame(
-        {
-            "kappa": kappa_grid,
-            "investment_share_kernel": np.asarray(grid_values["i"][0])
-            / grid_output_per_z,
-            # The learned object itself: unit_softplus of the raw policy,
-            # since the grid fixes z = 1 so k = kappa.
-            "i_over_delta_k_kernel": np.asarray(grid_values["i"][0])
-            / (delta * np.asarray(kappa_grid)),
-            "i_per_z_kernel": np.asarray(grid_values["i"][0]),
-            "c_tilde_kernel": np.asarray(grid_values["c"][0]),
-            "dkappa_kernel": np.asarray(grid_values["dkappa"][0]),
-            **scale_invariance_columns(policy, kappa_grid, p, dtype, "kernel"),
-            "c_tilde_benchmark": c_benchmark_grid,
-            "dkappa_benchmark": (
-                kappa_grid**a - c_benchmark_grid - (delta + g) * kappa_grid
-            ),
-        }
-    )
     hyperparameters = {
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
@@ -774,8 +552,6 @@ def neoclassical_growth_kernel_recursive(
         "test_initial_conditions": test_initial_conditions,
         "train_df": train_df,
         "test_df": test_df,
-        "test_summary_df": test_summary_df,
-        "policy_df": policy_df,
         "hyperparameters": hyperparameters,
     }
 

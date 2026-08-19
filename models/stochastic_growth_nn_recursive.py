@@ -16,21 +16,22 @@ from jax.flatten_util import ravel_pytree
 from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
 from tinydiffeq import SRA1, EulerMaruyama, Milstein, SaveAt, solve_sde
 
+from models.neoclassical_growth import (
+    DOMAIN_EPS,
+    InitialConditionSettings,
+    consumption,
+    growth_initial_conditions,
+    mpk,
+    production,
+    standardized_initial_states,
+)
 from models.neoclassical_growth_nn_recursive import (
     DrawInvestmentPolicy,
-    InitialConditionSettings,
     InvestmentPolicyNN,
     InvestmentPolicySettings,
-    collocation_step_diagnostics,
-    consumption,
-    draw_initial_conditions,
     load_investment_policy,
-    mpk,
     policy_cache_key,
-    production,
     save_investment_policy,
-    standardized_initial_states,
-    trajectory_frame,
 )
 from models.stochastic_growth_benchmark import stochastic_growth_benchmark
 from models.utilities import (
@@ -39,9 +40,8 @@ from models.utilities import (
 from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
+    long_df,
 )
-
-DOMAIN_EPS = 1e-8
 
 SDE_SOLVERS = {
     "sra1": SRA1(),
@@ -61,6 +61,10 @@ class StructuralParameters:
     log_z_bar: jax.Array
     z_0: jax.Array
     k_0: jax.Array
+    A: jax.Array
+    b_1: jax.Array
+    b_2: jax.Array
+    k_thr: jax.Array
 
     @classmethod
     def create(cls, dtype, **kwargs):
@@ -106,7 +110,7 @@ class StoppingCriteria:
 @struct.dataclass
 class ResidualArgs:
     graphdef: nnx.GraphDef
-    fixed_state: nnx.State
+    nondiff: nnx.State
     initial_log_states: jax.Array
     noise: object
     epoch_key: jax.Array
@@ -320,7 +324,7 @@ def batched_sde_rollout(solver, policy, initial_log_states, noise, T, n_steps, p
 
 
 @partial(jax.jit, static_argnames=("data_set",))
-def collocation_rollout(solver, policy, initial_log_states, noise, p, data_set):
+def simulate_train(solver, policy, initial_log_states, noise, p, data_set):
     return batched_sde_rollout(
         solver,
         policy,
@@ -333,20 +337,21 @@ def collocation_rollout(solver, policy, initial_log_states, noise, p, data_set):
 
 
 @partial(jax.jit, static_argnames=("T", "n_steps"))
-def rollout_steps(solver, policy, initial_log_states, noise, T, n_steps, p):
+def simulate(solver, policy, initial_log_states, noise, T, n_steps, p):
     return batched_sde_rollout(solver, policy, initial_log_states, noise, T, n_steps, p)
 
 
-def collocation_residuals(solver, policy, initial_log_states, noise, p, data_set):
-    solution = collocation_rollout(
-        solver, policy, initial_log_states, noise, p, data_set
+def residual_fn(theta, args, p):
+    policy = nnx.merge(args.graphdef, theta, args.nondiff)
+    solution = simulate_train(
+        args.solver, policy, args.initial_log_states, args.noise, p, args.data_set
     )
     log_states = solution.xs
     euler = euler_residuals(policy, log_states.reshape(-1, 2), p).reshape(
         log_states.shape[:2]
     )
     # Mean squared residual, so the loss threshold means the same thing at any
-    # number of trajectories or collocation points.
+    # number of trajectories or steps.
     count = jnp.asarray(euler.size, dtype=euler.dtype)
     # A nonfinite trajectory did not cover the requested economic horizon. Make
     # that a loud optimizer failure instead of fitting a prefix.
@@ -354,47 +359,23 @@ def collocation_residuals(solver, policy, initial_log_states, noise, p, data_set
         solution.ok[:, None],
         euler / jnp.sqrt(count),
         jnp.full_like(euler, jnp.inf),
-    )
-
-
-def residual_fn(theta, args, p):
-    policy = nnx.merge(args.graphdef, theta, args.fixed_state)
-    return collocation_residuals(
-        args.solver, policy, args.initial_log_states, args.noise, p, args.data_set
     ).reshape(-1)
 
 
-def log_tvc_residual(
-    solver, policy, initial_log_states, noise, T_start, T_end, p, data_set
-):
-    solution = rollout_steps(
-        solver,
-        policy,
-        initial_log_states,
-        noise,
-        T_end,
-        data_set.tvc_steps,
-        p,
-    )
-    valid = (solution.ts >= T_start) & solution.ok[:, None]
-    flat_states = solution.xs.reshape(-1, 2)
-    c = jax.vmap(lambda state: consumption(policy, state, p))(flat_states).reshape(
-        solution.ts.shape
-    )
-    _, k = jnp.moveaxis(jnp.exp(solution.xs), -1, 0)
-    log_tvc = -p.rho_hat * solution.ts - p.sigma_crra * jnp.log(c) + jnp.log(k)
+# Natural-log transversality certificate at the terminal date T, normalized
+# by the initial-date certificate, per initial state: the saddle path sits
+# far negative, a capital bubble drives it positive. A failed rollout is a
+# loud +inf.
+def log_tvc_residual(solver, policy, initial_log_states, noise, T, n_steps, p):
+    solution = simulate(solver, policy, initial_log_states, noise, T, n_steps, p)
+    terminal_log_states = solution.xs[:, -1, :]
+    c_T = jax.vmap(lambda state: consumption(policy, state, p))(terminal_log_states)
+    k_T = jnp.exp(terminal_log_states[:, 1])
     c_0 = jax.vmap(lambda state: consumption(policy, state, p))(initial_log_states)
     k_0 = jnp.exp(initial_log_states[:, 1])
+    log_tvc = -p.rho_hat * T - p.sigma_crra * jnp.log(c_T) + jnp.log(k_T)
     initial_log_tvc = -p.sigma_crra * jnp.log(c_0) + jnp.log(k_0)
-    normalized_log_tvc = log_tvc - initial_log_tvc[:, None]
-    # Alongside the windowed max, the per-trajectory certificate at the single
-    # terminal date T_end; a failed rollout is a loud +inf.
-    terminal_log_tvc = jnp.where(solution.ok, normalized_log_tvc[:, -1], jnp.inf)
-    return (
-        jnp.max(jnp.where(valid, normalized_log_tvc, -jnp.inf)),
-        terminal_log_tvc,
-        solution.ok,
-    )
+    return jnp.where(solution.ok, log_tvc - initial_log_tvc, jnp.inf)
 
 
 # The FD consumption policy as a rollout-compatible callable: bilinear
@@ -456,7 +437,7 @@ def cached_stochastic_benchmark(
 # Common-noise pathwise errors against the FD policy: the exogenous z path is
 # identical under both policies, so the comparison isolates the capital and
 # consumption responses.
-def add_fd_path_diagnostics(test_df, test_values, fd_values, test_initial_conditions):
+def add_fd_path_diagnostics(test_df, test_values, fd_values):
     k_benchmark = np.asarray(fd_values["k"])
     c_benchmark = np.asarray(fd_values["c"])
     k_error = (np.asarray(test_values["k"]) - k_benchmark) / np.abs(k_benchmark).clip(
@@ -468,28 +449,12 @@ def add_fd_path_diagnostics(test_df, test_values, fd_values, test_initial_condit
     columns = {
         "k_benchmark": k_benchmark,
         "c_benchmark": c_benchmark,
-        "i_benchmark": np.asarray(fd_values["i"]),
         "k_rel_error": k_error,
         "c_rel_error": c_error,
-        "k_abs_rel_error": np.abs(k_error),
-        "c_abs_rel_error": np.abs(c_error),
     }
     for name, value in columns.items():
         test_df[name] = np.asarray(value).reshape(-1)
-
-    initial = np.asarray(test_initial_conditions)
-    test_summary_df = pd.DataFrame(
-        {
-            "trajectory": np.arange(initial.shape[0]),
-            "z_0": initial[:, 0],
-            "k_0": initial[:, 1],
-            "mean_k_abs_rel_error": np.mean(np.abs(k_error), axis=1),
-            "median_k_abs_rel_error": np.median(np.abs(k_error), axis=1),
-            "mean_c_abs_rel_error": np.mean(np.abs(c_error), axis=1),
-            "median_c_abs_rel_error": np.median(np.abs(c_error), axis=1),
-        }
-    )
-    return k_error, c_error, test_summary_df
+    return k_error, c_error
 
 
 # nnx.jit so one compiled evaluation serves both the nnx policy and the FD
@@ -517,11 +482,9 @@ def trajectory_values(policy, log_states, p):
     }
 
 
-# The deterministic model of the shared NEOCLASSICAL_GROWTH_CONSTANTS
-# (utilities.py) plus its OU log-TFP. The default innovation scale is the
-# high-variance sensitivity column sigma = 0.035 of Aruoba et al. (ergodic
-# sd ~ 0.112); their benchmark sigma = 0.007 (sigma_z_benchmark) is nearly
-# certainty equivalent.
+# The deterministic model plus its OU log-TFP; the default innovation scale
+# is the high-variance sensitivity column of Aruoba et al., since their
+# benchmark sigma is nearly certainty equivalent.
 def stochastic_growth_nn_recursive(
     a: float = CONSTANTS.a,
     delta: float = CONSTANTS.delta,
@@ -564,41 +527,12 @@ def stochastic_growth_nn_recursive(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    if not 0.0 < a < 1.0:
-        raise ValueError("a must lie strictly between zero and one")
-    if sigma_crra <= 0.0:
-        raise ValueError("sigma_crra must be positive")
-    if rho_hat <= 0.0:
-        raise ValueError("rho_hat must be positive")
-    if eta <= 0.0:
-        raise ValueError("eta must be positive")
-    if sigma_z < 0.0:
-        raise ValueError("sigma_z must be nonnegative")
-    if z_bar <= 0.0:
-        raise ValueError("z_bar must be positive")
-    if sde_solver not in SDE_SOLVERS:
-        raise ValueError(f"sde_solver must be one of {sorted(SDE_SOLVERS)}")
     # Mean reversion in z fixes a scale, so the homothetic representation is
     # misspecified by construction for this model.
     if hc_set.homothetic_representation:
         raise ValueError(
             "the stochastic model requires homothetic_representation=False"
         )
-    if data_set.train_T <= 0.0:
-        raise ValueError("train_T must be positive")
-    if data_set.train_points < 2:
-        raise ValueError("train_points must be at least two")
-    if not (
-        math.isfinite(stop_set.train_loss_threshold)
-        and stop_set.train_loss_threshold > 0.0
-    ):
-        raise ValueError("train_loss_threshold must be positive")
-    if data_set.tvc_steps < 1:
-        raise ValueError("tvc_steps must be positive")
-    if data_set.test_points < 2:
-        raise ValueError("test_points must be at least two")
-    if data_set.train_tvc_T <= data_set.train_T:
-        raise ValueError("train_tvc_T must exceed train_T")
 
     solver = SDE_SOLVERS[sde_solver]
     n_train_steps = data_set.train_points - 1
@@ -606,37 +540,11 @@ def stochastic_growth_nn_recursive(
     train_dt = data_set.train_T / n_train_steps
     test_T = data_set.test_T
 
-    train_ic_key, test_ic_key = jax.random.split(jax.random.key(ic_set.data_seed))
-    train_initial_conditions = draw_initial_conditions(
-        z_0,
-        k_0,
-        ic_set.num_train_trajectories,
-        ic_set.train_log_z_variance,
-        ic_set.train_log_k_variance,
-        train_ic_key,
-        dtype,
-    )
-    test_z_center = z_0 if ic_set.test_z_0 is None else ic_set.test_z_0
-    test_k_center = k_0 if ic_set.test_k_0 is None else ic_set.test_k_0
-    test_log_z_variance = (
-        ic_set.train_log_z_variance
-        if ic_set.test_log_z_variance is None
-        else ic_set.test_log_z_variance
-    )
-    test_log_k_variance = (
-        ic_set.train_log_k_variance
-        if ic_set.test_log_k_variance is None
-        else ic_set.test_log_k_variance
-    )
-    test_initial_conditions = draw_initial_conditions(
-        test_z_center,
-        test_k_center,
-        ic_set.num_test_trajectories,
-        test_log_z_variance,
-        test_log_k_variance,
-        test_ic_key,
-        dtype,
-    )
+    ic_draw = growth_initial_conditions(z_0, k_0, ic_set, dtype)
+    train_ic_key = ic_draw.train_ic_key
+    test_ic_key = ic_draw.test_ic_key
+    train_initial_conditions = ic_draw.train_initial_conditions
+    test_initial_conditions = ic_draw.test_initial_conditions
     p = StructuralParameters.create(
         dtype,
         a=a,
@@ -648,11 +556,15 @@ def stochastic_growth_nn_recursive(
         log_z_bar=math.log(z_bar),
         z_0=train_initial_conditions[:, 0],
         k_0=train_initial_conditions[:, 1],
+        A=1.0,
+        b_1=1.0,
+        b_2=0.0,
+        k_thr=float("inf"),
     )
 
     fit_start = time.perf_counter()
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
-    graphdef, _, fixed_state = nnx.split(
+    graphdef, _, nondiff = nnx.split(
         InvestmentPolicyNN(
             hc_set, z_scale=z_bar, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(0)
         ),
@@ -661,14 +573,13 @@ def stochastic_growth_nn_recursive(
     )
     # The initial training draws consume train_ic_key itself; the epoch,
     # restart, and noise streams chain from independent fold-ins of the same
-    # key, and the test noise streams chain from test_ic_key.
+    # key, and the test noise stream chains from test_ic_key.
     train_noise_key = jax.random.fold_in(train_ic_key, 3)
     tvc_noise_key = jax.random.fold_in(train_ic_key, 4)
     test_noise_key = jax.random.fold_in(test_ic_key, 1)
-    test_tvc_noise_key = jax.random.fold_in(test_ic_key, 2)
     residual_args = ResidualArgs(
         graphdef=graphdef,
-        fixed_state=fixed_state,
+        nondiff=nondiff,
         initial_log_states=jnp.log(train_initial_conditions),
         noise=sample_trajectory_noise(
             solver,
@@ -738,7 +649,7 @@ def stochastic_growth_nn_recursive(
         stopping_reason = "cached"
         final_damping = float("nan")
         solver_accepted = bool(cached_meta["solution_accepted"])
-        train_time = 0.0
+        solve_time = 0.0
         total_fit_time = time.perf_counter() - fit_start
         setup_time = total_fit_time
         r = residual_fn(theta_final, solve_args, p)
@@ -774,7 +685,7 @@ def stochastic_growth_nn_recursive(
             n_steps=n_train_steps,
             dt=train_dt,
         )
-        draw = DrawInvestmentPolicy(hc_set, dtype, z_bar, k_0)
+        draw = DrawInvestmentPolicy(hc_set, z_scale=z_bar, k_scale=k_0, dtype=dtype)
         # The per-step tolerance is sound only while the training batch never
         # changes; across epochs, convergence is judged at the boundaries
         # instead.
@@ -783,24 +694,28 @@ def stochastic_growth_nn_recursive(
             if stop_set.num_epochs == 1
             else 0.0
         )
+        multi_start = MultiStart(
+            key=multi_start_key,
+            num_starts=stop_set.num_attempts,
+            draw=draw,
+        )
+        solve_options = dict(
+            max_steps=stop_set.num_epochs * stop_set.max_steps,
+            atol=atol,
+            callback=callback,
+            max_steps_is_success=not stop_set.epoch_early_stopping,
+        )
 
         start_time = time.perf_counter()
         result = lm_solver.solve(
             theta_0,
             residual_args,
             p=p,
-            max_steps=stop_set.num_epochs * stop_set.max_steps,
-            atol=atol,
-            callback=callback,
-            multi_start=MultiStart(
-                key=multi_start_key,
-                num_starts=stop_set.num_attempts,
-                draw=draw,
-            ),
-            max_steps_is_success=not stop_set.epoch_early_stopping,
+            multi_start=multi_start,
+            **solve_options,
         )
         jax.block_until_ready(result)
-        train_time = time.perf_counter() - start_time
+        solve_time = time.perf_counter() - start_time
         total_fit_time = time.perf_counter() - fit_start
         setup_time = start_time - fit_start
         steps = int(result.steps)
@@ -819,26 +734,26 @@ def stochastic_growth_nn_recursive(
             print(
                 f"attempt {attempt}: {stopping_reason} after {steps} steps "
                 f"(epoch {epochs_run}/{stop_set.num_epochs}), "
-                f"train_loss={train_loss:.3e} ({train_time:.2f}s)"
+                f"train_loss={train_loss:.3e} ({solve_time:.2f}s)"
             )
-        policy = nnx.merge(graphdef, theta_final, fixed_state)
+        policy = nnx.merge(graphdef, theta_final, nondiff)
 
     # Training diagnostics use the batch (ICs and noise) the solution was
     # returned on.
     train_batch_log_states = solve_args.initial_log_states
     train_batch_initial_conditions = jnp.exp(train_batch_log_states)
-    train_solution = collocation_rollout(
+    train_solution = simulate_train(
         solver, policy, train_batch_log_states, solve_args.noise, p, data_set
     )
     train_log_states = train_solution.xs
     train_values = trajectory_values(policy, train_log_states, p)
-    train_df = trajectory_frame(
-        train_values,
-        train_solution.ts,
-        train_batch_initial_conditions,
+    train_initial = np.asarray(train_batch_initial_conditions)
+    train_df = long_df(
+        {"t": train_solution.ts, **train_values},
+        ("trajectory", "step"),
+        scalars={"z_0": train_initial[:, 0], "k_0": train_initial[:, 1]},
     )
-    train_df["collocation_step_index"] = train_df.groupby("trajectory").cumcount()
-    collocation_diagnostics = collocation_step_diagnostics(train_solution.ts)
+    num_simulation_states = int(train_solution.ts.size)
 
     test_initial_log_states = jnp.log(test_initial_conditions)
     test_noise = sample_trajectory_noise(
@@ -850,7 +765,7 @@ def stochastic_growth_nn_recursive(
         dtype,
         2,
     )
-    test_solution = rollout_steps(
+    test_solution = simulate(
         solver,
         policy,
         test_initial_log_states,
@@ -870,8 +785,14 @@ def stochastic_growth_nn_recursive(
         and jnp.all(jnp.isfinite(test_values["c"]))
         and jnp.min(test_values["c"]) > 0.0
     )
-    test_df = trajectory_frame(test_values, test_solution.ts, test_initial_conditions)
+    test_initial = np.asarray(test_initial_conditions)
+    test_df = long_df(
+        {"t": test_solution.ts, **test_values},
+        ("trajectory", "step"),
+        scalars={"z_0": test_initial[:, 0], "k_0": test_initial[:, 1]},
+    )
 
+    # Terminal transversality certificate on the training batch.
     train_tvc_noise = sample_trajectory_noise(
         solver,
         tvc_noise_key,
@@ -881,43 +802,17 @@ def stochastic_growth_nn_recursive(
         dtype,
         2,
     )
-    max_log_tvc, train_terminal_log_tvc, tvc_ok = log_tvc_residual(
+    train_tvc = log_tvc_residual(
         solver,
         policy,
         train_batch_log_states,
         train_tvc_noise,
-        data_set.train_T,
         data_set.train_tvc_T,
-        p,
-        data_set,
-    )
-    max_log_tvc = float(max_log_tvc)
-    transversality_ok = bool(
-        jnp.all(tvc_ok) and max_log_tvc < stop_set.log_tvc_threshold
-    )
-    test_tvc_noise = sample_trajectory_noise(
-        solver,
-        test_tvc_noise_key,
-        ic_set.num_test_trajectories,
         data_set.tvc_steps,
-        data_set.train_tvc_T / data_set.tvc_steps,
-        dtype,
-        2,
-    )
-    _, test_terminal_log_tvc, test_tvc_ok = log_tvc_residual(
-        solver,
-        policy,
-        test_initial_log_states,
-        test_tvc_noise,
-        data_set.train_T,
-        data_set.train_tvc_T,
         p,
-        data_set,
     )
-    test_max_log_tvc = float(jnp.max(test_terminal_log_tvc))
-    test_transversality_ok = bool(
-        jnp.all(test_tvc_ok) and test_max_log_tvc < stop_set.log_tvc_threshold
-    )
+    max_log_tvc = float(jnp.max(train_tvc))
+    transversality_ok = bool(max_log_tvc < stop_set.log_tvc_threshold)
     max_train_euler = float(train_df["euler_residual"].abs().max())
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
     test_trajectory_euler = jnp.mean(jnp.abs(test_values["euler_residual"]), axis=1)
@@ -952,8 +847,8 @@ def stochastic_growth_nn_recursive(
         "z_ergodic_sd": z_ergodic_sd,
         "z_0": z_0,
         "k_0": k_0,
-        "test_z_0": test_z_center,
-        "test_k_0": test_k_center,
+        "test_z_0": ic_draw.test_z_center,
+        "test_k_0": ic_draw.test_k_center,
         "seed": seed,
         "data_seed": ic_set.data_seed,
         # Measured, not requested: a float64 leak upstream shows up here.
@@ -980,11 +875,6 @@ def stochastic_growth_nn_recursive(
             jnp.mean(jnp.abs(test_values["diffusion_term"]))
         ),
         "max_log_tvc_residual": max_log_tvc,
-        "mean_log_tvc_residual": float(jnp.mean(train_terminal_log_tvc)),
-        "test_mean_log_tvc_residual": float(jnp.mean(test_terminal_log_tvc)),
-        "test_max_log_tvc_residual": test_max_log_tvc,
-        "test_transversality_ok": test_transversality_ok,
-        "tvc_normalization": "relative_to_initial_log_certificate",
         "transversality_ok": transversality_ok,
         "min_test_c": float(jnp.min(test_values["c"])),
         "test_path_ok": test_path_ok,
@@ -994,18 +884,16 @@ def stochastic_growth_nn_recursive(
         "parameter_derivative": "conditional_on_carried_training_batch",
         "attempt": attempt,
         "stopping_reason": stopping_reason,
-        "train_time": train_time,
-        "solve_time": train_time,
+        "solve_time": solve_time,
         "setup_time": setup_time,
         "total_fit_time": total_fit_time,
-        "train_time_success": train_time if solver_accepted else np.nan,
+        "solve_time_success": solve_time if solver_accepted else np.nan,
         "total_params": int(ravel_pytree(nnx.state(policy, nnx.Param))[0].size),
         "solution_accepted": solver_accepted,
-        "solver_converged": solver_accepted,
         "num_train_trajectories": ic_set.num_train_trajectories,
         "num_test_trajectories": ic_set.num_test_trajectories,
-        **collocation_diagnostics,
-        "collocation_path_ok": bool(jnp.all(train_solution.ok)),
+        "num_simulation_states": num_simulation_states,
+        "train_path_ok": bool(jnp.all(train_solution.ok)),
         "observed_log_z_min": float(observed_log_z.min()),
         "observed_log_z_max": float(observed_log_z.max()),
         "observed_log_z_p025": float(np.quantile(observed_log_z, 0.025)),
@@ -1014,8 +902,8 @@ def stochastic_growth_nn_recursive(
         "observed_log_k_max": float(observed_log_k.max()),
         "train_log_z_variance": ic_set.train_log_z_variance,
         "train_log_k_variance": ic_set.train_log_k_variance,
-        "test_log_z_variance": test_log_z_variance,
-        "test_log_k_variance": test_log_k_variance,
+        "test_log_z_variance": ic_draw.test_log_z_variance,
+        "test_log_k_variance": ic_draw.test_log_k_variance,
         "train_points": data_set.train_points,
         "train_steps": n_train_steps,
         "test_points": data_set.test_points,
@@ -1045,7 +933,7 @@ def stochastic_growth_nn_recursive(
         log_k_grid=jnp.asarray(fd["log_k_grid"], dtype=dtype),
         consumption_grid=jnp.asarray(fd["c"], dtype=dtype),
     )
-    fd_solution = rollout_steps(
+    fd_solution = simulate(
         solver,
         fd_policy,
         test_initial_log_states,
@@ -1055,9 +943,7 @@ def stochastic_growth_nn_recursive(
         p,
     )
     fd_values = trajectory_values(fd_policy, fd_solution.xs, p)
-    k_error, c_error, test_summary_df = add_fd_path_diagnostics(
-        test_df, test_values, fd_values, test_initial_conditions
-    )
+    k_error, c_error = add_fd_path_diagnostics(test_df, test_values, fd_values)
     results.update(
         fd_benchmark_iterations=int(fd["iterations"]),
         # The FD reference's own residual level in the same metric: NN-vs-FD
@@ -1068,14 +954,6 @@ def stochastic_growth_nn_recursive(
         fd_test_euler_max=float(jnp.max(jnp.abs(fd_values["euler_residual"]))),
         test_mean_abs_k_rel_error=float(np.mean(np.abs(k_error))),
         test_mean_abs_c_rel_error=float(np.mean(np.abs(c_error))),
-        test_median_abs_k_rel_error=float(np.median(np.abs(k_error))),
-        test_median_abs_c_rel_error=float(np.median(np.abs(c_error))),
-        test_median_trajectory_mean_abs_k_rel_error=float(
-            test_summary_df["mean_k_abs_rel_error"].median()
-        ),
-        test_median_trajectory_mean_abs_c_rel_error=float(
-            test_summary_df["mean_c_abs_rel_error"].median()
-        ),
         test_max_abs_k_rel_error=float(np.max(np.abs(k_error))),
         test_max_abs_c_rel_error=float(np.max(np.abs(c_error))),
     )
@@ -1162,8 +1040,20 @@ def stochastic_growth_nn_recursive(
         "test_df": test_df,
         "policy_df": policy_df,
         "hyperparameters": hyperparameters,
-        "test_summary_df": test_summary_df,
     }
+    # A cache hit loads the policy from disk instead of solving, so there is
+    # no primal solve to describe.
+    if not cache_hit:
+        extras["solve"] = {
+            "solver": lm_solver,
+            "residual_fn": residual_fn,
+            "theta_0": theta_0,
+            "p": p,
+            "residual_args": residual_args,
+            "multi_start": multi_start,
+            "options": solve_options,
+        }
+        extras["result"] = result
     structural = {
         "a": a,
         "delta": delta,

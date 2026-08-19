@@ -27,26 +27,6 @@ class MulticountryParameters:
     populations: tuple[float, ...] = (1.0, 1.0)
     productivities: tuple[float, ...] = (1.0, 1.0)
 
-    def __post_init__(self):
-        if not 0.0 < self.alpha < 1.0:
-            raise ValueError("alpha must lie in (0, 1)")
-        if self.delta <= 0.0 or self.r <= 0.0:
-            raise ValueError("delta and r must be positive")
-        if not 0.0 < self.eta < 1.0:
-            raise ValueError("eta must lie in (0, 1)")
-        if len(self.populations) < 2:
-            raise ValueError("at least two countries are required")
-        if not (len(self.gammas) == len(self.populations) == len(self.productivities)):
-            raise ValueError(
-                "gammas, populations, and productivities must have equal lengths"
-            )
-        if any(value <= 0.0 for value in self.gammas):
-            raise ValueError("gammas must be positive")
-        if any(value <= 0.0 for value in self.populations):
-            raise ValueError("populations must be positive")
-        if any(value <= 0.0 for value in self.productivities):
-            raise ValueError("productivities must be positive")
-
     @property
     def num_countries(self):
         return len(self.populations)
@@ -128,11 +108,6 @@ def draw_initial_conditions(initial_set, parameters, dtype=jnp.float64):
 
 
 def validate_initial_conditions(k_0, a_0, parameters):
-    num_countries = parameters.num_countries
-    if len(k_0) != num_countries or any(value <= 0.0 for value in k_0):
-        raise ValueError("k_0 must contain one positive capital stock per country")
-    if len(a_0) != num_countries:
-        raise ValueError("a_0 must contain one NFA position per country")
     populations = np.asarray(parameters.populations, dtype=np.float64)
     a_0_np = np.asarray(a_0, dtype=np.float64)
     scale = float(steady_state(parameters, jnp.float64)["output_scale"])
@@ -257,8 +232,6 @@ def resolved_steady_state(mu, parameters):
     # marginal-wealth levels: consumption from the FOC, assets from the
     # stationary budgets.
     mu = jnp.atleast_1d(mu)
-    if mu.shape[-1] != parameters.num_countries:
-        raise ValueError("mu must contain one value per country")
     dtype = mu.dtype
     populations = jnp.asarray(parameters.populations, dtype=dtype)
     steady = steady_state(parameters, dtype)
@@ -309,10 +282,47 @@ def path_residuals(
     }
 
 
+# The world rate, three cross-sectional world statistics, and every country's
+# consumption and capital -- the observable stack both solvers' sensitivity
+# callers differentiate, so the two tables are comparable cell by cell. The
+# input dict needs the path_values/path_coordinates keys (interest_rate, a, k,
+# q, c); column order matches sensitivity_observable_labels.
+def sensitivity_observables(values, parameters):
+    populations = parameters.populations
+    weights = populations / jnp.sum(populations)
+    x = investment_expenditure(values["k"], values["q"], parameters)
+    output = production(values["k"], parameters.productivities, parameters)
+    # World saving is world investment: with no outside world the aggregate
+    # current account is identically zero.
+    saving_rate = jnp.sum(weights * x, axis=-1) / jnp.sum(weights * output, axis=-1)
+    steady = steady_state(parameters, values["a"].dtype)
+    nfa_dispersion = (
+        jnp.sqrt(jnp.sum(weights * values["a"] ** 2, axis=-1)) / steady["output_scale"]
+    )
+    return jnp.column_stack(
+        [
+            values["interest_rate"],
+            saving_rate,
+            nfa_dispersion,
+            weighted_gini(output, populations),
+            values["c"],
+            values["k"],
+        ]
+    )
+
+
+def sensitivity_observable_labels(num_countries):
+    return (
+        ["rate", "saving_rate", "nfa_dispersion", "output_gini"]
+        + [f"c_{country + 1}" for country in range(num_countries)]
+        + [f"k_{country + 1}" for country in range(num_countries)]
+    )
+
+
 # Flat results fields d_<observable>_T<t>_d_<parameter>[_<country>] plus the
 # observable levels <observable>_T<t>, and a long-form frame with one row per
-# derivative entry, shared by the kernel and NN sensitivity blocks so both
-# drivers publish identical names. Every country block also carries a
+# derivative entry, shared by the kernel and NN sensitivity callers so both
+# publish identical names. Every country block also carries a
 # _common entry, the derivative along (1, ..., 1): the country count drops
 # out, so it is the one country-block statistic comparable across N. For a_0
 # that direction is infeasible and the demeaning projects it away, leaving a
@@ -436,8 +446,6 @@ def long_run_diagnostics(
     # ratios, consumption proportional to initial wealth a_0_i +
     # PV(resources_i), and wealth-rank preservation -- are exact only under
     # a common gamma, so they are computed only when every gamma_i is equal.
-    if check_T > float(t[-1]) or check_T - window < float(t[0]):
-        raise ValueError("the long-run check window must lie inside the grid")
     a_0 = jnp.asarray(a_0, dtype=values["k"].dtype)
     i_check = int(jnp.argmin(jnp.abs(t - check_T)))
     i_before = int(jnp.argmin(jnp.abs(t - (check_T - window))))

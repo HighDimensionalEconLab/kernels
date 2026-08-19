@@ -109,12 +109,10 @@ class SolverSettings:
     # looser anneals faster (fewer steps per level), tighter solves each
     # level out more completely before descending.
     ridge_grad_rtol: float = 1e-2
-    # "auto" (whitened cholesky) is the default: the whitened normal matrix
-    # J~'J~ + ridge*I_head has its spectral floor at the ridge, so the DAE
-    # Jacobian's scale spread no longer pushes the cholesky path past
-    # float64 at this ridge -- measured 1.8-3x faster wall-clock than the
-    # previously required "qr" at identical solution quality. "qr" and
-    # "cholesky" remain valid (all paths run whitened).
+    # "auto" (whitened cholesky): the whitened normal matrix has its
+    # spectral floor at the ridge, so the DAE Jacobian's scale spread stays
+    # within float64. "qr" and "cholesky" remain valid (all paths run
+    # whitened).
     linear_solver: str = "auto"
 
 
@@ -131,14 +129,8 @@ def open_economy_growth_kernel(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    if k_0 <= 0.0:
-        raise ValueError("k_0 must be positive")
     kernel = normalize_kernel(kernel_set.kernel)
     train_data = make_sampled_train_grid(data_set, dtype)
-    if data_set.test_T > float(train_data[-1]):
-        raise ValueError("test_T must not exceed the training horizon")
-    if data_set.benchmark_T < max(data_set.test_T, float(train_data[-1])):
-        raise ValueError("benchmark_T must cover the train and test horizons")
 
     test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     validation_data = jnp.linspace(
@@ -268,15 +260,15 @@ def open_economy_growth_kernel(
         damping_increase=lm_set.damping_increase,
     )
 
-    timer = Stopwatch()
-    result = solver.solve(
-        theta_0,
+    solve_options = dict(
         max_steps=lm_set.max_steps,
         gtol=lm_set.gtol,
         atol=lm_set.residual_atol,
         max_steps_is_success=False,
-        **continuation_options,
     )
+
+    timer = Stopwatch()
+    result = solver.solve(theta_0, **solve_options, **continuation_options)
     solve_time = timer.elapsed(result)
     theta = result.x
 
@@ -506,7 +498,6 @@ def open_economy_growth_kernel(
         "rkhs_norm_q": float(rkhs_norm_q),
         "rkhs_norm_total": float(rkhs_norm_total),
         "solve_time": solve_time,
-        "wall_time": solve_time,
         "solver": "nlls-gram",
         "linear_solver": lm_set.linear_solver,
         "ridge": lm_set.ridge,
@@ -560,6 +551,16 @@ def open_economy_growth_kernel(
         "train_df": train_df,
         "test_df": test_df,
         "hyperparameters": hyperparameters,
+        "solve": {
+            "solver": solver,
+            "residual_fn": residual_fn,
+            "theta_0": theta_0,
+            "p": None,
+            "residual_args": None,
+            "multi_start": None,
+            "options": solve_options,
+        },
+        "result": result,
     }
 
 

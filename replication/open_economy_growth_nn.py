@@ -16,24 +16,13 @@ SOLVER = open_economy_growth_nn.open_economy_growth_nn
 
 
 def run(
-    output_dir: str | None = None,
+    output_dir: str = ".results",
     n_seeds: int = 7,
-    use_float64: bool = True,
     verbose: bool = False,
 ):
     configure_process()
-    if output_dir is None:
-        output_dir = ".results" if use_float64 else ".results_float32"
     parameters = ModelParameters()
     output_ss = float(steady_state(parameters)["output"])
-    # Float32 runs pass looser solver thresholds and acceptance gates; the
-    # float64 run uses the solver defaults.
-    stop = {} if use_float64 else dict(train_loss_threshold=1e-8)
-    tol = (
-        {}
-        if use_float64
-        else dict(train_residual=5e-3, validation_residual=2e-2, benchmark_match=1e-2)
-    )
 
     def go(name, experiment_n_seeds, **experiment):
         print(f"{name}: {experiment_n_seeds} seeds -> {output_dir}/")
@@ -41,10 +30,7 @@ def run(
             SOLVER,
             n_seeds=experiment_n_seeds,
             options={
-                "use_float64": use_float64,
                 "verbose": verbose,
-                "stop_set": stop,
-                "tolerance_set": tol,
                 **experiment,
             },
         )
@@ -55,7 +41,7 @@ def run(
             output_dir,
             {
                 "n_seeds": experiment_n_seeds,
-                "residual_dtype": "float64" if use_float64 else "float32",
+                "residual_dtype": "float64",
             },
             prefix=PREFIX,
             hyperparameters=hyperparameters,

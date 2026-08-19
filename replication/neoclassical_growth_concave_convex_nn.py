@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+
 import jsonargparse
 import numpy as np
 
-from models import neoclassical_growth_concave_convex_nn
+from models import neoclassical_growth_nn
+from models.neoclassical_growth import KINKED_CALIBRATION, kinked_thresholds
 from replication.utilities import (
     classify_path_basin,
     configure_process,
-    kinked_thresholds,
     save_experiment,
     sweep,
     write_summary,
@@ -17,31 +19,26 @@ PREFIX = "neoclassical_growth_concave_convex_nn"
 
 
 def run(
-    output_dir: str | None = None,
-    use_float64: bool = True,
+    output_dir: str = ".results",
     verbose: bool = False,
 ):
     configure_process()
-    if output_dir is None:
-        output_dir = ".results" if use_float64 else ".results_float32"
-    # Float32 runs pass looser solver thresholds and acceptance gates; the
-    # float64 run uses the solver defaults.
-    stop = {} if use_float64 else dict(train_loss_threshold=1e-9)
     n_points = 70
     grid = np.linspace(0.5, 4.0, n_points)
     print(f"threshold sweep: {n_points} initial conditions -> {output_dir}/")
     results_df, frames, hyperparameters = sweep(
-        neoclassical_growth_concave_convex_nn.neoclassical_growth_concave_convex_nn,
+        neoclassical_growth_nn.neoclassical_growth_nn,
         "k_0",
         [float(k_0) for k_0 in grid],
         options={
-            "use_float64": use_float64,
+            **asdict(KINKED_CALIBRATION),
             "verbose": verbose,
             # The kinked basin experiments keep their own calibrated grid:
             # paths settle by T = 40, and the file defaults carry the smooth
             # model's longer horizon.
-            "data_set": dict(train_T=40.0, train_points=41, test_T=50.0),
-            "stop_set": stop,
+            "data_set": dict(
+                train_T=40.0, train_points=41, test_T=50.0, test_points=41
+            ),
         },
     )
 
@@ -89,7 +86,7 @@ def run(
         dict(
             n_seeds=1,
             n_points=n_points,
-            residual_dtype="float64" if use_float64 else "float32",
+            residual_dtype="float64",
         ),
         prefix=PREFIX,
         hyperparameters=hyperparameters,

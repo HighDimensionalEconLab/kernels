@@ -28,12 +28,18 @@ SOLVER = multicountry_growth_kernel.multicountry_growth_kernel
 # across configurations is the N-country analogue of the small open
 # economy's comparative-statics check.
 BOND_CONFIGURATIONS = ("initial_debt", "baseline", "initial_assets")
-# Sensitivity dates shared by the two-country and ten-country experiments.
+# Sensitivity dates shared by the two-country and ten-country experiments
+# (multicountry_growth_kernel_sensitivity.py and the NN sensitivity driver).
 # The cross-check on d r*/d gamma_bar -- the same representative-agent
 # perturbation solved through a 1,920-row and a 9,792-row system -- only
 # compares at dates both tables report, so the two lists must stay equal.
 SENSITIVITY_TIMES = [0.0, 10.0, 30.0, 80.0]
 LARGE_COUNTRY_COUNT = 10
+LARGE_COUNTRY_PARAMETERS = dict(
+    gammas=(2.0,) * LARGE_COUNTRY_COUNT,
+    populations=(1.0,) * LARGE_COUNTRY_COUNT,
+    productivities=(1.0,) * LARGE_COUNTRY_COUNT,
+)
 
 
 def bond_invariance(validation_frames, num_countries, test_T):
@@ -80,26 +86,12 @@ def bond_invariance(validation_frames, num_countries, test_T):
     }
 
 
-def run(output_dir: str | None = None, use_float64: bool = True):
+def run(output_dir: str = ".results"):
     configure_process()
-    if output_dir is None:
-        output_dir = ".results" if use_float64 else ".results_float32"
     parameters = MulticountryParameters()
     drawn_k_0, _ = draw_initial_conditions(InitialConditionSettings(), parameters)
     output_scale = float(steady_state(parameters)["output_scale"])
-    # Float32 runs pass looser solver thresholds and acceptance gates; the
-    # float64 run uses the solver defaults.
-    lm = {} if use_float64 else dict(ridge=1e-7, ridge_init=1e-5, gtol=1e-6)
-    tol = (
-        {}
-        if use_float64
-        else dict(
-            train_residual=1e-3,
-            validation_residual=1e-2,
-            benchmark_match=1e-2,
-        )
-    )
-    meta = dict(n_seeds=1, residual_dtype="float64" if use_float64 else "float32")
+    meta = dict(n_seeds=1, residual_dtype="float64")
     validation_frames = {}
 
     def go(name, **experiment):
@@ -107,12 +99,7 @@ def run(output_dir: str | None = None, use_float64: bool = True):
         results_df, frames, hyperparameters = ensemble(
             SOLVER,
             n_seeds=1,
-            options={
-                "use_float64": use_float64,
-                "lm_set": lm,
-                "tolerance_set": tol,
-                **experiment,
-            },
+            options=experiment,
         )
         save_experiment(
             name,
@@ -125,14 +112,7 @@ def run(output_dir: str | None = None, use_float64: bool = True):
         )
         validation_frames[name] = frames["validation_df"]
 
-    # The baseline and the ten-country experiment publish the implicit-AD
-    # sensitivity tables for the supplement's sensitivity appendix (float64
-    # only): every observable at every date in SENSITIVITY_TIMES against
-    # every structural parameter and initial condition. Two countries carry
-    # the per-country levels; ten carry the world aggregates, which is all a
-    # cross-section that wide can say.
-    sensitivity = dict(sensitivity_times=SENSITIVITY_TIMES) if use_float64 else {}
-    go("baseline", **sensitivity)
+    go("baseline")
     go(
         "initial_debt",
         k_0=drawn_k_0,
@@ -162,18 +142,7 @@ def run(output_dir: str | None = None, use_float64: bool = True):
     # is the drawn capital and the drawn bond positions, so the aggregate
     # comparative statics isolate what a wide cross-section adds over two
     # countries rather than what asymmetric calibration adds.
-    # Forward mode here: this table reports one direction in gamma plus the
-    # per-country bond directions the neutrality check reads, so the tangent
-    # map is applied to exactly what gets published and nothing else.
-    go(
-        "ten_countries",
-        parameters=dict(
-            gammas=(2.0,) * LARGE_COUNTRY_COUNT,
-            populations=(1.0,) * LARGE_COUNTRY_COUNT,
-            productivities=(1.0,) * LARGE_COUNTRY_COUNT,
-        ),
-        **(dict(sensitivity_mode="forward", **sensitivity) if sensitivity else {}),
-    )
+    go("ten_countries", parameters=LARGE_COUNTRY_PARAMETERS)
     write_summary(
         output_dir,
         PREFIX,

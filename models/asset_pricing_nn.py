@@ -51,6 +51,7 @@ class StoppingCriteria:
 @struct.dataclass
 class ResidualArgs:
     graphdef: nnx.GraphDef
+    nondiff: nnx.State
     train_t: jax.Array
 
 
@@ -62,8 +63,8 @@ class PricePolicyNN(nnx.Module):
         dtype,
         rngs: nnx.Rngs,
     ):
-        self.hidden_activation = ACTIVATIONS[settings.hidden_activation]
-        self.input_scale = settings.input_scale
+        self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
+        self.input_scale = nnx.static(settings.input_scale)
         self.layers = nnx.List(
             [
                 nnx.Linear(
@@ -120,7 +121,7 @@ def policy_values(model, t, r, c, g, x_0):
 
 
 def residual_fn(theta, args, p):
-    candidate = nnx.merge(args.graphdef, theta)
+    candidate = nnx.merge(args.graphdef, theta, args.nondiff)
     residual = policy_values(
         candidate,
         args.train_t,
@@ -169,17 +170,14 @@ def asset_pricing_nn(
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     nn_set = replace(nn_set, input_scale=max(float(data_set.train_T), 1.0))
 
-    graphdef, _ = nnx.split(
-        PricePolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(0)), nnx.Param
-    )
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     model = PricePolicyNN(
         nn_set,
         dtype=dtype,
         rngs=nnx.Rngs(init_key),
     )
-    _, theta_0 = nnx.split(model, nnx.Param)
-    residual_args = ResidualArgs(graphdef=graphdef, train_t=train_t)
+    graphdef, theta_0, nondiff = nnx.split(model, nnx.Param, ...)
+    residual_args = ResidualArgs(graphdef=graphdef, nondiff=nondiff, train_t=train_t)
     p = {
         name: jnp.asarray(value, dtype=dtype)
         for name, value in {"r": r, "c": c, "g": g, "x_0": x_0}.items()
@@ -194,24 +192,27 @@ def asset_pricing_nn(
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
     atol = math.sqrt(stop_set.train_loss_threshold)
-    draw = DrawNNXModule(PricePolicyNN, nn_set, dtype=dtype)
+    solve_options = dict(
+        max_steps=stop_set.max_steps,
+        atol=atol,
+        max_steps_is_success=False,
+    )
+    multi_start = MultiStart(
+        key=multi_start_key,
+        num_starts=stop_set.num_attempts,
+        draw=DrawNNXModule(PricePolicyNN, nn_set, dtype=dtype),
+    )
 
     timer = Stopwatch()
     result = solver.solve(
         theta_0,
         residual_args,
         p=p,
-        max_steps=stop_set.max_steps,
-        atol=atol,
-        multi_start=MultiStart(
-            key=multi_start_key,
-            num_starts=stop_set.num_attempts,
-            draw=draw,
-        ),
-        max_steps_is_success=False,
+        multi_start=multi_start,
+        **solve_options,
     )
-    train_time = timer.elapsed(result)
-    model = nnx.merge(graphdef, result.x)
+    solve_time = timer.elapsed(result)
+    model = nnx.merge(graphdef, result.x, nondiff)
 
     train_df = snapshot(model, train_t, r, c, g, x_0)
     test_df = snapshot(model, test_t, r, c, g, x_0)
@@ -251,8 +252,7 @@ def asset_pricing_nn(
         "steps": int(result.steps),
         "attempt": int(result.multi_start.attempt) + 1,
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
-        "train_time": train_time,
-        "wall_time": train_time,
+        "solve_time": solve_time,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
         "solution_accepted": solution_accepted,
         "rejection_reason": (
@@ -278,6 +278,16 @@ def asset_pricing_nn(
             "parameters": {"r": r, "c": c, "g": g},
             "initial_conditions": {"x_0": x_0},
         },
+        "solve": {
+            "solver": solver,
+            "residual_fn": residual_fn,
+            "theta_0": theta_0,
+            "p": p,
+            "residual_args": residual_args,
+            "multi_start": multi_start,
+            "options": solve_options,
+        },
+        "result": result,
     }
 
 

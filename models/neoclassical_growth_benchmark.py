@@ -1,63 +1,40 @@
-import math
+from __future__ import annotations
+
+from functools import lru_cache
 
 import numpy as np
+import pandas as pd
 from scipy.integrate import solve_bvp
 
+# Reference saddle path of the smooth model. The interface is the tidy-frame
+# benchmark_df below; the engine behind solve_kappa_path is scipy's
+# solve_bvp (bvp4c-style residual-controlled collocation) and is the single
+# swap point for a different algorithm. Solved in the detrended coordinates
+# kappa = k / z^{1/(1-a)}, c_tilde = c / z^{1/(1-a)}: TFP grows at (1 - a) g
+# so the labor-augmenting scale z^{1/(1-a)} grows at g, and the
+# balanced-growth boundary is stationary. Pure numpy: a jax ODE here would
+# inherit the caller's x64 flag, and under float32 solve_bvp can never
+# verify BENCHMARK_TOL and exhausts max_nodes.
 
-# Neoclassical Growth Benchmark solution
-def neoclassical_growth_benchmark(
-    a,
-    delta,
-    r,
-    sigma_crra,
-    k_0,
-    t_grid,
-    tol=1e-10,
-    max_nodes=100000,
-    *,
-    z_0=1.0,
-    g=0.0,
-):
-    # a: capital share
-    # delta: depreciation
-    # r: discount rate
-    # sigma_crra: the constant relative risk aversion coefficient
-    # k_0, z_0: initial conditions for capital and Hicks-neutral TFP (Y = z k^a)
-    # g: per-capita balanced growth rate; TFP grows at (1-a) g so the
-    #   labor-augmenting scale z^{1/(1-a)} grows at g. The static model is
-    #   z_0=1, g=0.
-    # t_grid: The grid for the normalized boundary-value solve. Truncation pins
-    #   kappa(T) = kappa_ss; the necessary buffer past a diagnostic window is
-    #   calibration dependent through the stable and unstable eigenvalues.
-    # tol/max_nodes: solve_bvp accuracy -- scipy's default tol=1e-3 leaves ~1e-4
-    # errors in the "benchmark" itself, polluting every reported solver error
+# Truncation horizon (~20 e-foldings of the calibrated saddle path) with the
+# terminal pin kappa(T) = kappa_ss; requested dates beyond it would
+# extrapolate. scipy's default tol=1e-3 leaves ~1e-4 errors in the
+# "benchmark" itself, polluting every reported solver error.
+BENCHMARK_T = 200.0
+BENCHMARK_TOL = 1e-10
+INITIAL_MESH_POINTS = 801
+MAX_MESH_NODES = 100000
 
-    if not 0.0 < a < 1.0:
-        raise ValueError("a must lie strictly between zero and one")
-    if k_0 <= 0.0 or z_0 <= 0.0:
-        raise ValueError("k_0 and z_0 must be positive")
-    if sigma_crra <= 0.0:
-        raise ValueError("sigma_crra must be positive")
-    if g >= r:
-        raise ValueError("g must be less than r")
-    if r + (sigma_crra - 1.0) * g <= 0.0:
-        raise ValueError("r + (sigma_crra - 1) * g must be positive")
-    if delta + g <= 0.0:
-        raise ValueError("delta + g must be positive")
-    marginal_product_ss = delta + r + sigma_crra * g
-    if marginal_product_ss <= 0.0:
-        raise ValueError("delta + r + sigma_crra * g must be positive")
 
-    # Production is Y = z k^a with the labor-augmenting scale s = z^{1/(1-a)},
-    # so Y = s (k/s)^a. In detrended coordinates kappa=k/s and c_tilde=c/s, the
-    # balanced-growth boundary is stationary.
-    scale_0 = z_0 ** (1.0 / (1.0 - a))
-    kappa_0 = k_0 / scale_0
-    kappa_ss = (marginal_product_ss / a) ** (1 / (a - 1))
-    kappa_T = kappa_ss
+@lru_cache(maxsize=None)
+def solve_kappa_path(a, delta, rho_hat, sigma_crra, g, kappa_0, times):
+    times_array = np.asarray(times, dtype=float)
+    if times_array.max() > BENCHMARK_T:
+        raise ValueError("extrapolation past the benchmark horizon is not supported")
+    mesh = np.linspace(0.0, BENCHMARK_T, INITIAL_MESH_POINTS)
+    marginal_product_ss = delta + rho_hat + sigma_crra * g
+    kappa_ss = (marginal_product_ss / a) ** (1.0 / (a - 1.0))
 
-    # Pure numpy: a jax ODE here would inherit the caller's x64 flag, and under
-    # float32 solve_bvp can never verify tol=1e-10 and exhausts max_nodes.
     def ODE(t, y):
         kappa = y[0]
         c_tilde = y[1]
@@ -65,14 +42,12 @@ def neoclassical_growth_benchmark(
             (
                 kappa**a - c_tilde - (delta + g) * kappa,
                 (c_tilde / sigma_crra)
-                * (a * kappa ** (a - 1) - r - delta - sigma_crra * g),
+                * (a * kappa ** (a - 1) - rho_hat - delta - sigma_crra * g),
             )
         )
 
     def bc(ya, yb):
-        return np.array(
-            [ya[0] - kappa_0, yb[0] - kappa_T]
-        )  # boundary condition, kappa(0) = kappa_0, kappa(T) = kappa_ss
+        return np.array([ya[0] - kappa_0, yb[0] - kappa_ss])
 
     # Saddle-shaped initial guess: exponential approach to the steady state at
     # the linearized stable eigenvalue, with steady-flow consumption. A naive
@@ -80,57 +55,57 @@ def neoclassical_growth_benchmark(
     # horizons.
     f_pp = a * (a - 1) * kappa_ss ** (a - 2)
     c_tilde_ss = kappa_ss**a - (delta + g) * kappa_ss
-    if c_tilde_ss <= 0.0:
-        raise ValueError("balanced-growth consumption per unit of z must be positive")
-    trace = r + (sigma_crra - 1.0) * g
+    trace = rho_hat + (sigma_crra - 1.0) * g
     discriminant = trace**2 - 4 * c_tilde_ss * f_pp / sigma_crra
-    if discriminant <= 0.0:
-        raise ValueError("balanced-growth saddle discriminant must be positive")
     lambda_stable = 0.5 * (trace - np.sqrt(discriminant))
-    t_np = np.asarray(t_grid, dtype=float)
-    kappa_guess = kappa_ss + (kappa_0 - kappa_ss) * np.exp(lambda_stable * t_np)
+    kappa_guess = kappa_ss + (kappa_0 - kappa_ss) * np.exp(lambda_stable * mesh)
     c_tilde_guess = kappa_guess**a - (delta + g) * kappa_guess
-    iv = np.vstack((kappa_guess, c_tilde_guess))
-    solution = solve_bvp(ODE, bc, t_np, iv, tol=tol, max_nodes=max_nodes)
+    solution = solve_bvp(
+        ODE,
+        bc,
+        mesh,
+        np.vstack((kappa_guess, c_tilde_guess)),
+        tol=BENCHMARK_TOL,
+        max_nodes=MAX_MESH_NODES,
+    )
     if solution.status != 0:
         raise RuntimeError(f"solve_bvp failed: {solution.message}")
-
-    # the "solution" is an interpolator already, can just unpack
-    T_max = t_grid[-1]
-
-    def interpolate_solution(t_grid):
-        if t_grid[-1] > T_max:
-            raise ValueError("Extrapolation not supported")
-        val = solution.sol(t_grid)
-        scale = scale_0 * np.exp(g * np.asarray(t_grid))
-        return scale * val[0], scale * val[1]
-
-    return interpolate_solution
+    # solution.sol is the solver's own C1 collocation spline, accurate to
+    # BENCHMARK_TOL everywhere, so requested dates need not be mesh nodes.
+    kappa, c_tilde = solution.sol(times_array)
+    return kappa, c_tilde
 
 
-# Closed-form steady state of the static model (z = 1, g = 0) and its exact
-# derivatives, the AD-free target the solver sensitivities are checked
-# against: f'(k_ss) = delta + rho_hat with f(k) = k^a gives
-# k_ss = (a / (delta + rho_hat))^(1/(1 - a)) and c_ss = k_ss^a - delta k_ss.
-# sigma_crra and k_0 do not enter, so those derivatives are exactly zero.
-def neoclassical_steady_state_sensitivities(a, delta, rho_hat):
-    mpk_ss = delta + rho_hat
-    k_ss = (a / mpk_ss) ** (1.0 / (1.0 - a))
-    c_ss = k_ss**a - delta * k_ss
-    d_k_ss_d_a = k_ss * (1.0 / (a * (1.0 - a)) + math.log(a / mpk_ss) / (1.0 - a) ** 2)
-    d_k_ss_d_delta = -k_ss / ((1.0 - a) * mpk_ss)
-    # a k_ss^(a-1) - delta = rho_hat collapses the chain rule for c_ss.
-    return {
-        "k_ss": k_ss,
-        "c_ss": c_ss,
-        "d_k_ss_d_a": d_k_ss_d_a,
-        "d_k_ss_d_delta": d_k_ss_d_delta,
-        "d_k_ss_d_rho_hat": d_k_ss_d_delta,
-        "d_k_ss_d_sigma_crra": 0.0,
-        "d_k_ss_d_k_0": 0.0,
-        "d_c_ss_d_a": k_ss**a * math.log(k_ss) + rho_hat * d_k_ss_d_a,
-        "d_c_ss_d_delta": rho_hat * d_k_ss_d_delta - k_ss,
-        "d_c_ss_d_rho_hat": rho_hat * d_k_ss_d_delta,
-        "d_c_ss_d_sigma_crra": 0.0,
-        "d_c_ss_d_k_0": 0.0,
-    }
+# Re-trended benchmark paths over (z_0, k_0) initial conditions as a tidy
+# (trajectory, t) DataFrame with detrended (kappa, c_tilde) and level (k, c)
+# columns.
+def benchmark_df(initial_conditions, times, a, delta, rho_hat, sigma_crra, g=0.0):
+    times = np.asarray(times, dtype=float)
+    pieces = []
+    for trajectory, (z_0, k_0) in enumerate(
+        np.asarray(initial_conditions, dtype=float)
+    ):
+        scale_0 = z_0 ** (1.0 / (1.0 - a))
+        kappa, c_tilde = solve_kappa_path(
+            float(a),
+            float(delta),
+            float(rho_hat),
+            float(sigma_crra),
+            float(g),
+            float(k_0 / scale_0),
+            tuple(times.tolist()),
+        )
+        scale = scale_0 * np.exp(g * times)
+        pieces.append(
+            pd.DataFrame(
+                {
+                    "trajectory": trajectory,
+                    "t": times,
+                    "kappa": kappa,
+                    "c_tilde": c_tilde,
+                    "k": scale * kappa,
+                    "c": scale * c_tilde,
+                }
+            )
+        )
+    return pd.concat(pieces, ignore_index=True)

@@ -22,24 +22,17 @@ DIAGNOSTIC_COLUMNS = [
     "test_asset_squash_saturation",
     "test_terminal_capital_relative_error",
     "steps",
-    "train_time",
+    "solve_time",
 ]
 
 
 def run(
-    output_dir: str | None = None,
+    output_dir: str = ".results",
     n_seeds: int = 5,
-    use_float64: bool = True,
     data_seed: int = 0,
     verbose: bool = False,
 ):
     configure_process()
-    if output_dir is None:
-        output_dir = ".results" if use_float64 else ".results_float32"
-    # Float32 runs pass a looser solver threshold and acceptance gates; the
-    # float64 run uses the solver defaults.
-    stop = {} if use_float64 else dict(train_loss_threshold=1e-6)
-    tol = {} if use_float64 else dict(test_euler_mean_abs=2e-3, test_euler_max=5e-2)
 
     def go(name, experiment_n_seeds, **experiment):
         print(f"{name}: {experiment_n_seeds} seeds -> {output_dir}/")
@@ -47,11 +40,8 @@ def run(
             SOLVER,
             n_seeds=experiment_n_seeds,
             options={
-                "use_float64": use_float64,
                 "verbose": verbose,
                 "ic_set": {"data_seed": data_seed, **experiment.pop("ic_set", {})},
-                "stop_set": stop,
-                "tolerance_set": tol,
                 # Cache accepted policies so the kernel distillation driver can
                 # load the best baseline one as its frozen reference.
                 "policy_cache": output_dir,
@@ -65,7 +55,7 @@ def run(
             output_dir,
             {
                 "n_seeds": experiment_n_seeds,
-                "residual_dtype": "float64" if use_float64 else "float32",
+                "residual_dtype": "float64",
             },
             prefix=PREFIX,
             hyperparameters=hyperparameters,

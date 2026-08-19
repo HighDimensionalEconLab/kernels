@@ -26,12 +26,6 @@ def multicountry_growth_benchmark(
     k_0 = np.asarray(k_0, dtype=float)
     a_0 = np.atleast_1d(np.asarray(a_0, dtype=float))
     t_grid = np.asarray(t_grid, dtype=float)
-    if k_0.shape != (2,) or np.any(k_0 <= 0.0):
-        raise ValueError("k_0 must contain two positive capital stocks")
-    if a_0.shape != (1,):
-        raise ValueError("a_0 must contain the first country's NFA position")
-    if t_grid.ndim != 1 or t_grid.size < 2:
-        raise ValueError("t_grid must be one-dimensional with at least two points")
     if t_grid[0] != 0.0 or np.any(np.diff(t_grid) <= 0.0):
         raise ValueError("t_grid must start at zero and be strictly increasing")
 

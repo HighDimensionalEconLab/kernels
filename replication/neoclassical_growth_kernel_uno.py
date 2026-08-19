@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-
 import jsonargparse
 
 from models import neoclassical_growth_kernel_uno
@@ -69,15 +67,15 @@ def run(
 
     # nu / ell robustness table rows. The (nu=1/2, ell=10) row aliases the
     # baseline experiment in collect_json, so it is not re-run here.
-    go("nu15_ell10", kernel_set=dict(nu=1.5, ell=10.0))
-    go("nu25_ell10", kernel_set=dict(nu=2.5, ell=10.0))
-    go("nu05_ell2", kernel_set=dict(nu=0.5, ell=2.0))
-    go("nu05_ell20", kernel_set=dict(nu=0.5, ell=20.0))
+    go("nu15_ell10", kernel_set=dict(kernel="matern32", ell=10.0))
+    go("nu25_ell10", kernel_set=dict(kernel="matern52", ell=10.0))
+    go("nu05_ell2", kernel_set=dict(kernel="matern12", ell=2.0))
+    go("nu05_ell20", kernel_set=dict(kernel="matern12", ell=20.0))
     # Gaussian/RBF (nu -> inf) referee rows: ill-conditioned Gram matrices at
     # large ell may reject -- a first-class outcome rendered as "--" in the table.
-    go("rbf_ell10", kernel_set=dict(nu=math.inf, ell=10.0))
-    go("rbf_ell2", kernel_set=dict(nu=math.inf, ell=2.0))
-    go("rbf_ell20", kernel_set=dict(nu=math.inf, ell=20.0))
+    go("rbf_ell10", kernel_set=dict(kernel="rbf", ell=10.0))
+    go("rbf_ell2", kernel_set=dict(kernel="rbf", ell=2.0))
+    go("rbf_ell20", kernel_set=dict(kernel="rbf", ell=20.0))
 
     write_summary(output_dir, PREFIX)
 

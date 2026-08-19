@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from dataclasses import asdict, dataclass
 
 import jax
@@ -10,22 +9,87 @@ import numpy as np
 import pandas as pd
 import unopy
 
-from models.kernels import integrated_kernel_matrices, rkhs_norm_squared
-from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
+from models.kernels import (
+    integrated_kernel_matrices,
+    normalize_kernel,
+)
+from models.neoclassical_growth import (
+    StructuralParameters,
+    mpk,
+    production,
+    steady_flow_consumption_guess,
+)
+from models.neoclassical_growth_benchmark import benchmark_df
 from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
+from models.utilities import (
+    Stopwatch,
+    acceptance_fields,
+    make_train_t_grid,
+)
 
 ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
-TRAIN_RESIDUAL_TOL = 1e-5
-VALIDATION_RESIDUAL_TOL = 5e-3
-MPK_BOUND_TOL = 1e-3
+# IPOPT's interior point evaluates infeasible trial iterates: the model
+# functions clamp k at this floor and the primal bounds keep (c, mu, k) above
+# it.
 DOMAIN_EPS = 1e-6
+
+
+def unpack(x):
+    n_train = (x.shape[0] - 2) // 3
+    alpha_mu = x[:n_train]
+    alpha_c = x[n_train : 2 * n_train]
+    alpha_k = x[2 * n_train : 3 * n_train]
+    c_0 = x[3 * n_train]
+    mu_0 = x[3 * n_train + 1]
+    return alpha_mu, alpha_c, alpha_k, c_0, mu_0
+
+
+def path_values(x, K_eval, K_tilde_eval, k_0):
+    alpha_mu, alpha_c, alpha_k, c_0, mu_0 = unpack(x)
+    mu = mu_0 + K_tilde_eval @ alpha_mu
+    c = c_0 + K_tilde_eval @ alpha_c
+    k = k_0 + K_tilde_eval @ alpha_k
+    dmu_dt = K_eval @ alpha_mu
+    dk_dt = K_eval @ alpha_k
+    return k, c, mu, dk_dt, dmu_dt
+
+
+@jax.jit
+def objective(x, K):
+    alpha_mu, alpha_c, alpha_k, _, _ = unpack(x)
+    return alpha_mu @ K @ alpha_mu + alpha_c @ K @ alpha_c + alpha_k @ K @ alpha_k
+
+
+# CRRA first-order condition u'(c) = mu, i.e. mu c^sigma_crra = 1; the
+# costate and resource residuals are utility-free.
+@jax.jit
+def constraints(x, K, K_tilde, p):
+    k, c, mu, dk_dt, dmu_dt = path_values(x, K, K_tilde, p.k_0)
+    k_positive = jnp.maximum(k, DOMAIN_EPS)
+    resource = dk_dt - (production(1.0, k_positive, p) - p.delta * k - c)
+    euler = dmu_dt + mu * (mpk(1.0, k_positive, p) - p.delta - p.rho_hat)
+    shadow_price = mu * c**p.sigma_crra - 1.0
+    return jnp.concatenate([resource, euler, shadow_price, k, c, mu])
+
+
+def lagrangian(x, objective_multiplier, multipliers, K, K_tilde, p):
+    return objective_multiplier * objective(x, K) + jnp.dot(
+        multipliers, constraints(x, K, K_tilde, p)
+    )
+
+
+# Module level: per-call grad/jacfwd/hessian closures would retrace on
+# every solve.
+objective_gradient = jax.jit(jax.grad(objective))
+constraint_jacobian = jax.jit(jax.jacfwd(constraints))
+lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
 
 
 @dataclass(frozen=True)
 class KernelSettings:
-    nu: float = 0.5  # math.inf selects the Gaussian/RBF kernel
+    kernel: str = "matern12"  # matern12 | matern32 | matern52 | rbf
     ell: float = 10.0
     sigma: float = 1.0
 
@@ -37,8 +101,15 @@ class DataSettings:
     train_points_list: list[float] | None = None
     test_T: float = CONSTANTS.sequence_test_T
     test_points: int = 100
-    benchmark_T: float = CONSTANTS.benchmark_T
-    benchmark_points: int = CONSTANTS.benchmark_points
+
+
+# Acceptance gates, CLI-reachable; the mpk bound applies only under kinked
+# production.
+@dataclass(frozen=True)
+class ToleranceSettings:
+    train_residual: float = 1e-5
+    validation_residual: float = 5e-3
+    mpk_bound: float = 1e-3
 
 
 @dataclass(frozen=True)
@@ -48,16 +119,12 @@ class SolverSettings:
     time_limit: float | None = None
 
 
-# Kinked production needs the fail-fast budget: near the basin threshold the
-# NLP can wander, and the sweep classifies a slow solve as rejected. Both
-# limits are calibrated to the kinked experiments' 41-point training design
-# (the replication drivers pass it; the smooth-model default is 101 points,
-# where 25 iterations alone cost ~1 s and the wall fires spuriously).
+# Fail-fast budget for kinked production: near the basin threshold the NLP
+# can wander, and the sweep classifies a slow solve as rejected. Calibrated
+# to the 41-point kinked training design the replication drivers pass.
 KINKED_SOLVER_SETTINGS = SolverSettings(max_iterations=25, time_limit=0.15)
 
 
-# The shared NEOCLASSICAL_GROWTH_CONSTANTS (utilities.py) maps the Aruoba,
-# Fernandez-Villaverde & Rubio-Ramirez (2006 JEDC) benchmark values.
 def neoclassical_growth_kernel_uno(
     a: float = CONSTANTS.a,
     delta: float = CONSTANTS.delta,
@@ -70,46 +137,31 @@ def neoclassical_growth_kernel_uno(
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
     solver_set: SolverSettings | None = None,
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
     c_0_guess: float | None = None,  # overrides the flat steady-flow warm start
     verbose: bool = False,
 ):
-    # IPOPT works in float64 C arrays, so this solver is float64-only.
+    # Model setup. IPOPT works in float64 C arrays, so this solver is
+    # float64-only.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
-    if sigma_crra <= 0.0:
-        raise ValueError("sigma_crra must be positive")
-    kinked_parameter_count = sum(parameter is not None for parameter in (A, b_1, b_2))
-    if kinked_parameter_count not in {0, 3}:
-        raise ValueError("Set all of A, b_1, and b_2, or set none of them.")
-    use_kinked_production = kinked_parameter_count == 3
-    A_value = 1.0 if A is None else float(A)
-    b_1_value = 1.0 if b_1 is None else float(b_1)
-    b_2_value = 0.0 if b_2 is None else float(b_2)
+    # Kinked production is enabled exactly when all of A, b_1, b_2 are given.
+    use_kinked_production = not (A is None or b_1 is None or b_2 is None)
+    if use_kinked_production:
+        A, b_1, b_2 = float(A), float(b_1), float(b_2)
+        k_thr = (b_2 / (b_1 - 1.0)) ** (1.0 / a)
+    else:
+        A, b_1, b_2, k_thr = 1.0, 1.0, 0.0, float("inf")
     if solver_set is None:
         solver_set = (
             KINKED_SOLVER_SETTINGS if use_kinked_production else SolverSettings()
         )
 
-    nu, ell, sigma = kernel_set.nu, kernel_set.ell, kernel_set.sigma
-    if data_set.train_points_list is None:
-        train_data = jnp.linspace(
-            0, data_set.train_T, data_set.train_points, dtype=jnp.float64
-        )
-    else:
-        train_data = jnp.array(data_set.train_points_list, dtype=jnp.float64)
-    test_data = jnp.linspace(
-        0, data_set.test_T, data_set.test_points, dtype=jnp.float64
-    )
-    validation_points = max(data_set.test_points, data_set.benchmark_points)
-    validation_data = jnp.linspace(
-        0, data_set.train_T, validation_points, dtype=jnp.float64
-    )
-    benchmark_grid = jnp.linspace(
-        0, data_set.benchmark_T, data_set.benchmark_points, dtype=jnp.float64
-    )
-
+    kernel = normalize_kernel(kernel_set.kernel)
+    ell, sigma = kernel_set.ell, kernel_set.sigma
+    train_data = make_train_t_grid(data_set, jnp.float64)
     n_train = len(train_data)
-    K, K_tilde = integrated_kernel_matrices(train_data, train_data, nu, sigma, ell)
+    K, K_tilde = integrated_kernel_matrices(train_data, train_data, kernel, sigma, ell)
     K = np.asarray((K + K.T) / 2)
     K_tilde = np.asarray(K_tilde)
     K_jax = jnp.asarray(K)
@@ -118,82 +170,27 @@ def neoclassical_growth_kernel_uno(
     n_variables = 3 * n_train + 2
     n_constraints = 6 * n_train
 
-    def initial_production(k_value):
-        if use_kinked_production:
-            return A_value * max(k_value**a, b_1_value * k_value**a - b_2_value)
-        return k_value**a
+    # Value container only: no p rides through IPOPT for implicit
+    # differentiation.
+    p = StructuralParameters.create(
+        jnp.float64,
+        a=a,
+        delta=delta,
+        rho_hat=rho_hat,
+        sigma_crra=sigma_crra,
+        k_0=k_0,
+        A=A,
+        b_1=b_1,
+        b_2=b_2,
+        k_thr=k_thr,
+    )
 
-    c_flow_guess = max(initial_production(k_0) - delta * k_0, DOMAIN_EPS)
+    c_flow_guess = steady_flow_consumption_guess(k_0, a, delta, A, b_1, b_2)
     if c_0_guess is not None:
         c_flow_guess = max(float(c_0_guess), DOMAIN_EPS)
     x_initial = np.zeros(n_variables, dtype=np.float64)
     x_initial[3 * n_train] = c_flow_guess
     x_initial[3 * n_train + 1] = c_flow_guess**-sigma_crra
-
-    def unpack(x):
-        alpha_mu = x[:n_train]
-        alpha_c = x[n_train : 2 * n_train]
-        alpha_k = x[2 * n_train : 3 * n_train]
-        c_0 = x[3 * n_train]
-        mu_0 = x[3 * n_train + 1]
-        return alpha_mu, alpha_c, alpha_k, c_0, mu_0
-
-    def path_values(x, K_eval, K_tilde_eval):
-        alpha_mu, alpha_c, alpha_k, c_0, mu_0 = unpack(x)
-        mu = mu_0 + K_tilde_eval @ alpha_mu
-        c = c_0 + K_tilde_eval @ alpha_c
-        k = k_0 + K_tilde_eval @ alpha_k
-        dmu_dt = K_eval @ alpha_mu
-        dk_dt = K_eval @ alpha_k
-        return k, c, mu, dk_dt, dmu_dt
-
-    def production_scalar(k_scalar):
-        k_positive = jnp.maximum(k_scalar, DOMAIN_EPS)
-        z = k_positive**a
-        if use_kinked_production:
-            return A_value * jnp.maximum(z, b_1_value * z - b_2_value)
-        return z
-
-    production = jax.vmap(production_scalar)
-    marginal_product = jax.vmap(jax.grad(production_scalar))
-
-    def objective(x):
-        alpha_mu, alpha_c, alpha_k, _, _ = unpack(x)
-        return (
-            alpha_mu @ K_jax @ alpha_mu
-            + alpha_c @ K_jax @ alpha_c
-            + alpha_k @ K_jax @ alpha_k
-        )
-
-    # CRRA first-order condition u'(c) = mu, i.e. mu c^sigma_crra = 1; the
-    # costate and resource residuals are utility-free.
-    def constraints(x):
-        k, c, mu, dk_dt, dmu_dt = path_values(x, K_jax, K_tilde_jax)
-        output = production(k)
-        mpk = marginal_product(k)
-        resource = dk_dt - (output - delta * k - c)
-        euler = dmu_dt + mu * (mpk - delta - rho_hat)
-        shadow_price = mu * c**sigma_crra - 1.0
-        return jnp.concatenate([resource, euler, shadow_price, k, c, mu])
-
-    def lagrangian(x, objective_multiplier, multipliers):
-        return objective_multiplier * objective(x) + jnp.dot(
-            multipliers, constraints(x)
-        )
-
-    objective_value = jax.jit(objective)
-    objective_gradient = jax.jit(jax.grad(objective))
-    constraint_values = jax.jit(constraints)
-    constraint_jacobian = jax.jit(jax.jacfwd(constraints))
-    lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
-
-    x_initial_jax = jnp.asarray(x_initial)
-    zero_multipliers = jnp.zeros(n_constraints, dtype=jnp.float64)
-    jax.block_until_ready(objective_value(x_initial_jax))
-    jax.block_until_ready(objective_gradient(x_initial_jax))
-    jax.block_until_ready(constraint_values(x_initial_jax))
-    jax.block_until_ready(constraint_jacobian(x_initial_jax))
-    jax.block_until_ready(lagrangian_hessian(x_initial_jax, 1.0, zero_multipliers))
 
     variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
     variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
@@ -211,6 +208,7 @@ def neoclassical_growth_kernel_uno(
         ]
     )
 
+    # IPOPT model wiring.
     model = unopy.Model(
         unopy.PROBLEM_NONLINEAR,
         n_variables,
@@ -220,10 +218,10 @@ def neoclassical_growth_kernel_uno(
     )
 
     def objective_callback(x):
-        return float(objective_value(jnp.asarray(x)))
+        return float(objective(jnp.asarray(x), K_jax))
 
     def objective_gradient_callback(x, gradient):
-        gradient[:] = np.asarray(objective_gradient(jnp.asarray(x)))
+        gradient[:] = np.asarray(objective_gradient(jnp.asarray(x), K_jax))
 
     model.set_objective(unopy.MINIMIZE, objective_callback, objective_gradient_callback)
 
@@ -231,10 +229,14 @@ def neoclassical_growth_kernel_uno(
     jacobian_columns = np.tile(np.arange(n_variables, dtype=np.int32), n_constraints)
 
     def constraints_callback(x, constraint_output):
-        constraint_output[:] = np.asarray(constraint_values(jnp.asarray(x)))
+        constraint_output[:] = np.asarray(
+            constraints(jnp.asarray(x), K_jax, K_tilde_jax, p)
+        )
 
     def jacobian_callback(x, jacobian_output):
-        jacobian_output[:] = np.asarray(constraint_jacobian(jnp.asarray(x))).reshape(-1)
+        jacobian_output[:] = np.asarray(
+            constraint_jacobian(jnp.asarray(x), K_jax, K_tilde_jax, p)
+        ).reshape(-1)
 
     model.set_constraints(
         n_constraints,
@@ -257,6 +259,9 @@ def neoclassical_growth_kernel_uno(
                 jnp.asarray(x),
                 float(objective_multiplier),
                 jnp.asarray(multipliers),
+                K_jax,
+                K_tilde_jax,
+                p,
             )
         )
         hessian_output[:] = hessian[hessian_rows, hessian_columns]
@@ -281,94 +286,96 @@ def neoclassical_growth_kernel_uno(
     if solver_set.time_limit is not None:
         solver.set_option("time_limit", solver_set.time_limit)
 
-    start = time.perf_counter()
+    timer = Stopwatch()
     result = solver.optimize(model)
-    elapsed = time.perf_counter() - start
+    elapsed = timer.elapsed()
 
-    x = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))
-    alpha_mu, alpha_c, alpha_k, c_0, mu_0 = unpack(x)
-    rkhs_norms = {
-        "k": float(rkhs_norm_squared(alpha_k, K)),
-        "c": float(rkhs_norm_squared(alpha_c, K)),
-        "mu": float(rkhs_norm_squared(alpha_mu, K)),
-    }
+    # primal_solution appends solver-internal auxiliaries; only the leading
+    # 3n + 2 block is ours.
+    x = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))[:n_variables]
+    c_0, mu_0 = unpack(x)[3], unpack(x)[4]
 
-    def evaluate_grid(points_data):
+    # Diagnostics: solved paths and residuals on the train, dense validation,
+    # and test grids.
+    def snapshot(t_grid):
         K_eval, K_tilde_eval = integrated_kernel_matrices(
-            points_data, train_data, nu, sigma, ell
+            t_grid, train_data, kernel, sigma, ell
         )
-        k_values, c_values, mu_values, dk_values, dmu_values = path_values(
-            x, K_eval, K_tilde_eval
+        k, c, mu, dk_dt, dmu_dt = path_values(x, K_eval, K_tilde_eval, k_0)
+        k_positive = jnp.maximum(k, DOMAIN_EPS)
+        return pd.DataFrame(
+            {
+                "t": np.asarray(t_grid),
+                "k": np.asarray(k),
+                "c": np.asarray(c),
+                "mu": np.asarray(mu),
+                "resource": np.asarray(
+                    dk_dt - (production(1.0, k_positive, p) - delta * k - c)
+                ),
+                "euler": np.asarray(
+                    dmu_dt + mu * (mpk(1.0, k_positive, p) - delta - rho_hat)
+                ),
+                "shadow_price": np.asarray(mu * c**sigma_crra - 1.0),
+            }
         )
-        output_values = production(k_values)
-        mpk_values = marginal_product(k_values)
-        k_positive = jnp.maximum(k_values, DOMAIN_EPS)
-        if use_kinked_production:
-            m1_values = A_value * a * k_positive ** (a - 1.0)
-            m2_values = b_1_value * m1_values
-        else:
-            m1_values = mpk_values
-            m2_values = mpk_values
-        implied_mpk = delta + rho_hat - dmu_values / mu_values
-        mpk_lower_bound = jnp.minimum(m1_values, m2_values)
-        mpk_upper_bound = jnp.maximum(m1_values, m2_values)
-        return {
-            "t": points_data,
-            "k": k_values,
-            "c": c_values,
-            "mu": mu_values,
-            "Y": output_values,
-            "resource": dk_values - (output_values - delta * k_values - c_values),
-            "euler": dmu_values + mu_values * (mpk_values - delta - rho_hat),
-            "shadow_price": mu_values * c_values**sigma_crra - 1.0,
-            "mpk_lower_violation": jnp.maximum(mpk_lower_bound - implied_mpk, 0.0),
-            "mpk_upper_violation": jnp.maximum(implied_mpk - mpk_upper_bound, 0.0),
-        }
 
-    train_eval = evaluate_grid(train_data)
-    validation_eval = evaluate_grid(validation_data)
-    test_eval = evaluate_grid(test_data)
+    test_data = jnp.linspace(
+        0, data_set.test_T, data_set.test_points, dtype=jnp.float64
+    )
+    # Dense off-grid residual check between the training points.
+    validation_data = jnp.linspace(
+        0, data_set.train_T, max(data_set.test_points, 801), dtype=jnp.float64
+    )
+    train_df = snapshot(train_data)
+    validation_df = snapshot(validation_data)
+    test_df = snapshot(test_data)
 
-    residual_names = ["resource", "euler", "shadow_price"]
+    residual_names = ("resource", "euler", "shadow_price")
     max_train_residual = max(
-        float(jnp.max(jnp.abs(train_eval[name]))) for name in residual_names
+        float(train_df[name].abs().max()) for name in residual_names
     )
     max_validation_residual = max(
-        float(jnp.max(jnp.abs(validation_eval[name]))) for name in residual_names
+        float(validation_df[name].abs().max()) for name in residual_names
     )
-    p_lower_violation = max(
-        float(jnp.max(train_eval["mpk_lower_violation"])),
-        float(jnp.max(validation_eval["mpk_lower_violation"])),
-    )
-    p_upper_violation = max(
-        float(jnp.max(train_eval["mpk_upper_violation"])),
-        float(jnp.max(validation_eval["mpk_upper_violation"])),
-    )
+
+    # The costate-implied MPK must sit between the two branch slopes up to
+    # kink slack; violations gate acceptance under kinked production.
+    def mpk_violations(df):
+        k = np.maximum(df["k"].to_numpy(), DOMAIN_EPS)
+        m1 = A * a * k ** (a - 1.0)
+        m2 = b_1 * m1
+        implied = (
+            np.where(k > k_thr, m2, m1) - df["euler"].to_numpy() / df["mu"].to_numpy()
+        )
+        lower = np.minimum(m1, m2)
+        upper = np.maximum(m1, m2)
+        return (
+            float(np.maximum(lower - implied, 0.0).max()),
+            float(np.maximum(implied - upper, 0.0).max()),
+        )
+
+    train_lower, train_upper = mpk_violations(train_df)
+    validation_lower, validation_upper = mpk_violations(validation_df)
+    p_lower_violation = max(train_lower, validation_lower)
+    p_upper_violation = max(train_upper, validation_upper)
 
     @jax.jit
     def kernel_solution(test_points_data):
         K_test, K_tilde_test = integrated_kernel_matrices(
-            test_points_data, train_data, nu, sigma, ell
+            test_points_data, train_data, kernel, sigma, ell
         )
-        k_test, c_test, _, _, _ = path_values(x, K_test, K_tilde_test)
+        k_test, c_test, _, _, _ = path_values(x, K_test, K_tilde_test, k_0)
         return k_test, c_test
 
     finite_positive = bool(
         all(
-            jnp.all(jnp.isfinite(grid[name]))
-            for grid in (train_eval, validation_eval, test_eval)
-            for name in ("k", "c", "mu")
-        )
-        and all(
-            jnp.min(grid[name]) > 0.0
-            for grid in (train_eval, validation_eval, test_eval)
+            np.isfinite(df[name]).all() and (df[name] > 0.0).all()
+            for df in (train_df, validation_df, test_df)
             for name in ("k", "c", "mu")
         )
     )
 
-    solve_time = result.cpu_time
-    if solve_time is None:
-        solve_time = elapsed
+    solve_time = elapsed
     solver_status = str(result.optimization_status).split(".")[-1]
     solution_status = str(result.solution_status).split(".")[-1]
     rejection_reasons = []
@@ -378,27 +385,31 @@ def neoclassical_growth_kernel_uno(
         rejection_reasons.append("solution_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > TRAIN_RESIDUAL_TOL:
+    if max_train_residual > tolerance_set.train_residual:
         rejection_reasons.append("train_residual")
-    if use_kinked_production and max_validation_residual > VALIDATION_RESIDUAL_TOL:
+    if (
+        use_kinked_production
+        and max_validation_residual > tolerance_set.validation_residual
+    ):
         rejection_reasons.append("validation_residual")
     if use_kinked_production and (
-        p_lower_violation > MPK_BOUND_TOL or p_upper_violation > MPK_BOUND_TOL
+        p_lower_violation > tolerance_set.mpk_bound
+        or p_upper_violation > tolerance_set.mpk_bound
     ):
         rejection_reasons.append("p_bound")
-    solution_accepted = not rejection_reasons
 
+    # Published results.
     results = {
         "a": a,
         "delta": delta,
         "rho_hat": rho_hat,
         "sigma_crra": sigma_crra,
         "k_0": k_0,
-        "A": A_value,
-        "b_1": b_1_value,
-        "b_2": b_2_value,
+        "A": A,
+        "b_1": b_1,
+        "b_2": b_2,
         "use_kinked_production": use_kinked_production,
-        "nu": nu,
+        "kernel": kernel,
         "ell": ell,
         "sigma": sigma,
         "train_T": float(train_data[-1]),
@@ -407,64 +418,43 @@ def neoclassical_growth_kernel_uno(
         "test_points": data_set.test_points,
         "c_0": float(c_0),
         "mu_0": float(mu_0),
-        "rkhs_norm_k": rkhs_norms["k"],
-        "rkhs_norm_c": rkhs_norms["c"],
-        "rkhs_norm_mu": rkhs_norms["mu"],
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
         "p_lower_violation": p_lower_violation,
         "p_upper_violation": p_upper_violation,
-        "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_eval["euler"]))),
+        "test_euler_mean_abs": float(test_df["euler"].abs().mean()),
         "solve_time": solve_time,
-        "wall_time": elapsed,
         "solver_status": solver_status,
         "solution_status": solution_status,
-        "stationarity": result.solution_stationarity,
-        "primal_feasibility": result.solution_primal_feasibility,
-        "solution_accepted": solution_accepted,
-        "rejection_reason": "accepted"
-        if solution_accepted
-        else ",".join(rejection_reasons),
+        **acceptance_fields(rejection_reasons),
     }
 
-    train_df = pd.DataFrame(
-        {
-            name: np.asarray(train_eval[name])
-            for name in ("t", "k", "c", "mu", "resource", "euler", "shadow_price")
-        }
-    )
-    test_df = pd.DataFrame(
-        {
-            name: np.asarray(test_eval[name])
-            for name in ("t", "k", "c", "mu", "Y", "resource", "euler", "shadow_price")
-        }
-    )
-
     if not use_kinked_production:
-        benchmark_solution = neoclassical_growth_benchmark(
-            a, delta, rho_hat, sigma_crra, k_0, benchmark_grid
+        benchmark = benchmark_df(
+            [[1.0, k_0]], np.asarray(test_data), a, delta, rho_hat, sigma_crra
         )
-        k_benchmark, c_benchmark = benchmark_solution(test_data)
-        k_rel_error = jnp.abs(k_benchmark - test_eval["k"]) / k_benchmark
-        c_rel_error = jnp.abs(c_benchmark - test_eval["c"]) / c_benchmark
-        test_df["k_benchmark"] = np.asarray(k_benchmark)
-        test_df["c_benchmark"] = np.asarray(c_benchmark)
-        test_df["k_rel_error"] = np.asarray(k_rel_error)
-        test_df["c_rel_error"] = np.asarray(c_rel_error)
+        k_benchmark = benchmark["k"].to_numpy()
+        c_benchmark = benchmark["c"].to_numpy()
+        k_rel_error = np.abs(k_benchmark - test_df["k"].to_numpy()) / k_benchmark
+        c_rel_error = np.abs(c_benchmark - test_df["c"].to_numpy()) / c_benchmark
+        test_df["k_benchmark"] = k_benchmark
+        test_df["c_benchmark"] = c_benchmark
+        test_df["k_rel_error"] = k_rel_error
+        test_df["c_rel_error"] = c_rel_error
         # min/max error statistics exclude the pinned t = 0 point ([1:]): its
         # near-zero error is an artifact of the initial condition, not accuracy.
         results.update(
-            k_rel_error_mean=float(k_rel_error.mean()),
-            c_rel_error_mean=float(c_rel_error.mean()),
-            k_rel_error_max=float(k_rel_error[1:].max()),
-            c_rel_error_max=float(c_rel_error[1:].max()),
-            k_rel_error_min=float(k_rel_error[1:].min()),
-            c_rel_error_min=float(c_rel_error[1:].min()),
+            test_k_rel_error_mean=float(k_rel_error.mean()),
+            test_c_rel_error_mean=float(c_rel_error.mean()),
+            test_k_rel_error_max=float(k_rel_error[1:].max()),
+            test_c_rel_error_max=float(c_rel_error[1:].max()),
+            test_k_rel_error_min=float(k_rel_error[1:].min()),
+            test_c_rel_error_min=float(c_rel_error[1:].min()),
         )
         print(
             f"solve_time(s) = {solve_time}, "
-            f"E(|rel_error(k)|) = {results['k_rel_error_mean']:.3e}, "
-            f"E(|rel_error(c)|) = {results['c_rel_error_mean']:.3e}"
+            f"E(|rel_error(k)|) = {results['test_k_rel_error_mean']:.3e}, "
+            f"E(|rel_error(c)|) = {results['test_c_rel_error_mean']:.3e}"
         )
     else:
         print(f"solve_time(s) = {solve_time}")
@@ -478,9 +468,9 @@ def neoclassical_growth_kernel_uno(
             "delta": delta,
             "rho_hat": rho_hat,
             "sigma_crra": sigma_crra,
-            "A": A_value,
-            "b_1": b_1_value,
-            "b_2": b_2_value,
+            "A": A,
+            "b_1": b_1,
+            "b_2": b_2,
         },
         "initial_conditions": {"k_0": k_0},
     }

@@ -145,14 +145,15 @@ def optimal_advertising_kernel(
         damping_increase=lm_set.damping_increase,
     )
 
-    timer = Stopwatch()
-    result = solver.solve(
-        theta_0,
+    solve_options = dict(
         max_steps=lm_set.max_steps,
         gtol=lm_set.gtol,
         atol=lm_set.residual_atol,
         max_steps_is_success=False,
     )
+
+    timer = Stopwatch()
+    result = solver.solve(theta_0, **solve_options)
     elapsed = timer.elapsed(result)
     theta = result.x
     alpha_x, alpha_mu, alpha_u, initial = theta
@@ -242,7 +243,6 @@ def optimal_advertising_kernel(
         "train_residual_tolerance": train_residual_tolerance,
         "max_validation_residual": max_validation_residual,
         "solve_time": elapsed,
-        "wall_time": elapsed,
         "solver": "nlls-gram",
         "linear_solver": "cholesky",
         "ridge": lm_set.ridge,
@@ -281,6 +281,16 @@ def optimal_advertising_kernel(
         "train_df": train_df,
         "test_df": test_df,
         "hyperparameters": hyperparameters,
+        "solve": {
+            "solver": solver,
+            "residual_fn": residual_fn,
+            "theta_0": theta_0,
+            "p": None,
+            "residual_args": None,
+            "multi_start": None,
+            "options": solve_options,
+        },
+        "result": result,
     }
 
 

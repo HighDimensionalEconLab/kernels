@@ -16,50 +16,6 @@ DETERMINISTIC_TIMING_REPETITIONS = 1
 # Shared kinked-production basin experiment: the k_0 grid crosses the
 # concave-convex threshold and spans both basins of attraction.
 BASIN_K0_GRID = np.linspace(0.5, 4.0, 15)
-RESIDUAL_NORM_COLUMNS = (
-    "ode_residual_rms",
-    "algebraic_residual_rms",
-    "dae_residual_rms",
-)
-
-
-def compare_residual_norm_frames(kernel_df, nn_df, quality_T):
-    kernel_quality = kernel_df.loc[kernel_df["t"] <= quality_T].reset_index(drop=True)
-    nn_quality = nn_df.loc[nn_df["t"] <= quality_T].reset_index(drop=True)
-    if not np.array_equal(kernel_quality["t"].to_numpy(), nn_quality["t"].to_numpy()):
-        raise ValueError("kernel and NN quality grids must contain identical dates")
-
-    comparison = pd.DataFrame({"t": kernel_quality["t"]})
-    summary = {"quality_T": quality_T, "quality_point_count": len(comparison)}
-    for name in RESIDUAL_NORM_COLUMNS:
-        kernel_values = kernel_quality[name].to_numpy()
-        nn_values = nn_quality[name].to_numpy()
-        pointwise_ratio = np.divide(
-            nn_values,
-            kernel_values,
-            out=np.full_like(nn_values, np.inf),
-            where=kernel_values > 0.0,
-        )
-        total = nn_values + kernel_values
-        symmetric_gap = np.divide(
-            2.0 * np.abs(nn_values - kernel_values),
-            total,
-            out=np.zeros_like(total),
-            where=total > 0.0,
-        )
-        comparison[f"kernel_{name}"] = kernel_values
-        comparison[f"nn_{name}"] = nn_values
-        comparison[f"nn_to_kernel_{name}_ratio"] = pointwise_ratio
-        comparison[f"symmetric_relative_{name}_gap"] = symmetric_gap
-
-        kernel_grid_rms = float(np.sqrt(np.mean(np.square(kernel_values))))
-        nn_grid_rms = float(np.sqrt(np.mean(np.square(nn_values))))
-        summary[f"kernel_quality_grid_{name}"] = kernel_grid_rms
-        summary[f"nn_quality_grid_{name}"] = nn_grid_rms
-        summary[f"nn_to_kernel_quality_grid_{name}_ratio"] = (
-            nn_grid_rms / kernel_grid_rms if kernel_grid_rms > 0.0 else np.inf
-        )
-    return summary, comparison
 
 
 def configure_process(cache_path=".jax_cache"):
@@ -90,10 +46,17 @@ def with_option(options, key, value):
     return result
 
 
-def ensemble(func, n_seeds, start_seed=0, options=None):
-    options = options or {}
+# One solver call with the CLI's option semantics: nested dicts are
+# instantiated into the driver's settings dataclasses by jsonargparse.
+def run_solver(func, options=None):
     parser = jsonargparse.ArgumentParser(exit_on_error=False)
     parser.add_function_arguments(func)
+    cfg = parser.parse_object(options or {})
+    return func(**parser.instantiate_classes(cfg).as_dict())
+
+
+def ensemble(func, n_seeds, start_seed=0, options=None):
+    options = options or {}
     stochastic = "seed" in inspect.signature(func).parameters
     if stochastic and n_seeds < 1:
         raise ValueError("n_seeds must be positive")
@@ -108,8 +71,7 @@ def ensemble(func, n_seeds, start_seed=0, options=None):
     hyperparameters = None
     for seed in seeds:
         run_options = {**options, "seed": seed} if stochastic else options
-        cfg = parser.parse_object(run_options)
-        results, extra = func(**parser.instantiate_classes(cfg).as_dict())
+        results, extra = run_solver(func, run_options)
         rows.append({**results, "seed": seed} if stochastic else dict(results))
         # Required of every solver (collect_json depends on the saved file); identical
         # across seeds (the runtime-folded settings), so the first suffices.
@@ -259,15 +221,6 @@ def write_summary(output_dir, prefix, experiments=None):
 
 
 # --- kinked (concave-convex) production geometry ------------------------------
-
-
-def kinked_thresholds(a=1 / 3, delta=0.1, rho_hat=0.11, A=0.5, b_1=3.0, b_2=2.5):
-    # Branch switch k_thr where k^a = b_1 k^a - b_2, and the per-branch steady
-    # states from f'(k_ss) = delta + rho_hat (ex-post classification only).
-    k_thr = (b_2 / (b_1 - 1.0)) ** (1.0 / a)
-    k_ss_low = ((delta + rho_hat) / (A * a)) ** (1.0 / (a - 1.0))
-    k_ss_high = ((delta + rho_hat) / (A * a * b_1)) ** (1.0 / (a - 1.0))
-    return k_thr, k_ss_low, k_ss_high
 
 
 def classify_path_basin(k_path, k_0, k_thr, k_ss_low, k_ss_high, tol_frac=0.05):

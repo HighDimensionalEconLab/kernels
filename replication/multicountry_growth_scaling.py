@@ -12,7 +12,7 @@ from models import multicountry_growth_kernel
 from models.multicountry_growth import InitialConditionSettings
 from replication.utilities import (
     configure_process,
-    ensemble,
+    run_solver,
     save_experiment,
     write_summary,
 )
@@ -23,10 +23,6 @@ SOLVER = multicountry_growth_kernel.multicountry_growth_kernel
 # minutes per solve and the cg column stands alone.
 COUNTRY_COUNTS = [2, 3, 5, 10, 15, 25, 40, 80, 100]
 DENSE_MAX_COUNTRIES = 10
-# The gamma-common tangent is published from N=40, where its value sits in
-# one line with the N=2/N=10 sensitivity tables and the production
-# acceptance gates hold with margin.
-GAMMA_COMMON_COUNT = 40
 # Per-rung lognormal dispersion of the drawn populations and
 # productivities; curvature stays common at gamma = 2 so the rungs remain
 # within the calibrated preference class.
@@ -39,20 +35,66 @@ WIDE_STOPPING_START = 25
 WARM_TIMING_REPETITIONS = 2
 
 
+# Nothing on the ladder is symmetric: populations and productivities are
+# drawn per rung, and the solver draws seeded k_0/a_0 when they are not
+# passed (identical countries make the cross-country dynamics degenerate).
+# The parameter draws share the initial-condition seed. Shared with the
+# gamma-common driver so its tangent runs on exactly the published rung.
+def rung_parameters(num_countries):
+    parameter_key = jax.random.key(InitialConditionSettings().seed)
+    population_key, productivity_key = jax.random.split(
+        jax.random.fold_in(parameter_key, num_countries)
+    )
+    return dict(
+        gammas=(2.0,) * num_countries,
+        populations=tuple(
+            float(value)
+            for value in jnp.exp(
+                POPULATION_LOG_SIGMA
+                * jax.random.normal(population_key, (num_countries,))
+            )
+        ),
+        productivities=tuple(
+            float(value)
+            for value in jnp.exp(
+                PRODUCTIVITY_LOG_SIGMA
+                * jax.random.normal(productivity_key, (num_countries,))
+            )
+        ),
+    )
+
+
+def rung_lm_overrides(num_countries):
+    # The converged residual floors at O(ridge * ||dual||) and the dual
+    # norm grows with the cross-section, so the fixed 1e-5 train gate
+    # needs a deeper ridge floor at the wide rungs; the cg build-shift
+    # floor deepens with it so the preconditioned condition number
+    # ~ floor/ridge stays small.
+    if num_countries >= 100:
+        deep = dict(ridge=1e-13, cg_damping_floor=3e-12)
+    elif num_countries >= 25:
+        deep = dict(ridge=3e-13, cg_damping_floor=1e-11)
+    else:
+        deep = {}
+    # Wide systems need the stricter scaled-residual stop to descend from
+    # the 1e-11 continuation level to their configured ridge floor. The
+    # narrow CG systems use the looser reachable stop; 5e-8 would keep the
+    # N=2 solve running after its pointwise residual already clears the
+    # uniform 1e-5 numerical gate.
+    residual_atol = (
+        WIDE_RESIDUAL_ATOL
+        if num_countries >= WIDE_STOPPING_START
+        else NARROW_RESIDUAL_ATOL
+    )
+    return {"residual_atol": residual_atol, **deep}
+
+
 def run(
-    output_dir: str | None = None,
+    output_dir: str = ".results",
     country_counts: list[int] = COUNTRY_COUNTS,  # noqa: B006
     dense_max_countries: int = DENSE_MAX_COUNTRIES,
-    use_float64: bool = True,
 ):
-    # The ladder certifies the float64 solver's scaling; there is no float32
-    # counterpart experiment.
-    if not use_float64:
-        print(f"{PREFIX} is float64-only; skipping")
-        return
     configure_process()
-    if output_dir is None:
-        output_dir = ".results"
     meta = dict(
         n_seeds=1,
         residual_dtype="float64",
@@ -61,53 +103,8 @@ def run(
         warm_timing_repetitions=WARM_TIMING_REPETITIONS,
     )
     experiments = set()
-    # Nothing on the ladder is symmetric: populations and productivities are
-    # drawn per rung, and the solver draws seeded k_0/a_0 when they are not
-    # passed (identical countries make the cross-country dynamics
-    # degenerate). The parameter draws share the initial-condition seed.
-    parameter_key = jax.random.key(InitialConditionSettings().seed)
     for num_countries in country_counts:
-        population_key, productivity_key = jax.random.split(
-            jax.random.fold_in(parameter_key, num_countries)
-        )
-        parameters = dict(
-            gammas=(2.0,) * num_countries,
-            populations=tuple(
-                float(value)
-                for value in jnp.exp(
-                    POPULATION_LOG_SIGMA
-                    * jax.random.normal(population_key, (num_countries,))
-                )
-            ),
-            productivities=tuple(
-                float(value)
-                for value in jnp.exp(
-                    PRODUCTIVITY_LOG_SIGMA
-                    * jax.random.normal(productivity_key, (num_countries,))
-                )
-            ),
-        )
-        # The converged residual floors at O(ridge * ||dual||) and the dual
-        # norm grows with the cross-section, so the fixed 1e-5 train gate
-        # needs a deeper ridge floor at the wide rungs; the cg build-shift
-        # floor deepens with it so the preconditioned condition number
-        # ~ floor/ridge stays small.
-        if num_countries >= 100:
-            deep = dict(ridge=1e-13, cg_damping_floor=3e-12)
-        elif num_countries >= 25:
-            deep = dict(ridge=3e-13, cg_damping_floor=1e-11)
-        else:
-            deep = {}
-        # Wide systems need the stricter scaled-residual stop to descend from
-        # the 1e-11 continuation level to their configured ridge floor. The
-        # narrow CG systems use the looser reachable stop; 5e-8 would keep the
-        # N=2 solve running after its pointwise residual already clears the
-        # uniform 1e-5 numerical gate.
-        residual_atol = (
-            WIDE_RESIDUAL_ATOL
-            if num_countries >= WIDE_STOPPING_START
-            else NARROW_RESIDUAL_ATOL
-        )
+        parameters = rung_parameters(num_countries)
         solvers = ["cholesky", "cg"] if num_countries <= dense_max_countries else ["cg"]
         for solver_name in solvers:
             name = f"{'dense' if solver_name == 'cholesky' else 'cg'}_N{num_countries}"
@@ -117,22 +114,17 @@ def run(
                 "kernel_set": KERNEL_SET,
                 "lm_set": {
                     "linear_solver": solver_name,
-                    "residual_atol": residual_atol,
-                    **deep,
+                    **rung_lm_overrides(num_countries),
                 },
             }
-            # The N=40 cg rung also publishes d rate(T10)/d gamma along
-            # (1, ..., 1) -- the representative-agent CRRA comparative
-            # static, whose value is comparable against the N=2/N=10
-            # sensitivity tables -- with the implicit-AD wall time reported
-            # next to the primal solve time.
-            if solver_name == "cg" and num_countries == GAMMA_COMMON_COUNT:
-                options["gamma_common_sensitivity_times"] = [10.0]
-            compile_results, frames, hyperparameters = ensemble(
-                SOLVER,
-                n_seeds=1,
-                options=options,
-            )
+            results, extras = run_solver(SOLVER, options)
+            compile_results = pd.DataFrame([results])
+            frames = {
+                key: value
+                for key, value in extras.items()
+                if isinstance(value, pd.DataFrame)
+            }
+            hyperparameters = extras["hyperparameters"]
             if not compile_results["solution_accepted"].all():
                 raise RuntimeError(
                     f"{name} was rejected: {compile_results['rejection_reason'].iloc[0]}"
@@ -154,11 +146,9 @@ def run(
             ]
             warm_results = []
             for timing_run in range(1, WARM_TIMING_REPETITIONS + 1):
-                timed_results, _, timed_hyperparameters = ensemble(
-                    SOLVER,
-                    n_seeds=1,
-                    options=options,
-                )
+                timed_row, timed_extras = run_solver(SOLVER, options)
+                timed_results = pd.DataFrame([timed_row])
+                timed_hyperparameters = timed_extras["hyperparameters"]
                 if timed_hyperparameters != hyperparameters:
                     raise RuntimeError(
                         f"{name} changed hyperparameters across timing runs"

@@ -131,10 +131,10 @@ NU_RHO_ROWS = [
 ]
 
 NU_RHO_COLUMNS = [
-    "k_rel_error_max",
-    "c_rel_error_max",
-    "k_rel_error_min",
-    "c_rel_error_min",
+    "test_k_rel_error_max",
+    "test_c_rel_error_max",
+    "test_k_rel_error_min",
+    "test_c_rel_error_min",
 ]
 
 KERNEL_NU = {
@@ -216,14 +216,14 @@ def write_sequential_comparison_table(out):
             med(ap_nn["p_rel_error_mean"]),
             med(ap_nn["p_rel_error_max"]),
             None,
-            med(ap_nn["train_time"]),
+            med(ap_nn["solve_time"]),
             accepted_cell(ap_nn),
         ),
         (
             "Neoclassical growth",
             "Kernel",
-            med(ngm_kernel["k_rel_error_mean"]),
-            med(ngm_kernel["k_rel_error_max"]),
+            med(ngm_kernel["test_k_rel_error_mean"]),
+            med(ngm_kernel["test_k_rel_error_max"]),
             None,
             med(ngm_kernel["solve_time"]),
             accepted_cell(ngm_kernel),
@@ -231,10 +231,10 @@ def write_sequential_comparison_table(out):
         (
             "",
             "NN",
-            med(ngm_nn["test_mean_abs_k_rel_error"]),
-            med(ngm_nn["test_max_abs_k_rel_error"]),
+            med(ngm_nn["test_k_rel_error_mean"]),
+            med(ngm_nn["test_k_rel_error_max"]),
             None,
-            med(ngm_nn["train_time_success"]),
+            med(ngm_nn["solve_time_success"]),
             accepted_cell(ngm_nn),
         ),
         (
@@ -252,7 +252,7 @@ def write_sequential_comparison_table(out):
             None,
             None,
             basin_fraction("neoclassical_growth_concave_convex_nn"),
-            med(cc_nn["train_time"]),
+            med(cc_nn["solve_time"]),
             sweep_accepted("neoclassical_growth_concave_convex_nn"),
         ),
         (
@@ -270,7 +270,7 @@ def write_sequential_comparison_table(out):
             None,
             oe_max_error(oe_nn),
             None,
-            med(oe_nn["train_time_success"]),
+            med(oe_nn["solve_time_success"]),
             accepted_cell(oe_nn),
         ),
     ]
@@ -306,18 +306,18 @@ def write_neoclassical_growth_comparison_table(out):
     rows = [
         (
             "Sequential kernel",
-            med(kernel["k_rel_error_mean"]),
-            med(kernel["k_rel_error_max"]),
-            med(kernel["c_rel_error_mean"]),
+            med(kernel["test_k_rel_error_mean"]),
+            med(kernel["test_k_rel_error_max"]),
+            med(kernel["test_c_rel_error_mean"]),
             med(kernel["solve_time"]),
             accepted_cell(kernel),
         ),
         (
             "Sequential NN",
-            med(nn["test_mean_abs_k_rel_error"]),
-            med(nn["test_max_abs_k_rel_error"]),
-            med(nn["test_mean_abs_c_rel_error"]),
-            med(nn["train_time_success"]),
+            med(nn["test_k_rel_error_mean"]),
+            med(nn["test_k_rel_error_max"]),
+            med(nn["test_c_rel_error_mean"]),
+            med(nn["solve_time_success"]),
             accepted_cell(nn),
         ),
         (
@@ -333,7 +333,7 @@ def write_neoclassical_growth_comparison_table(out):
             med(nn_recursive["test_mean_abs_k_rel_error"]),
             med(nn_recursive["test_max_abs_k_rel_error"]),
             med(nn_recursive["test_mean_abs_c_rel_error"]),
-            med(nn_recursive["train_time_success"]),
+            med(nn_recursive["solve_time_success"]),
             accepted_cell(nn_recursive),
         ),
     ]
@@ -679,14 +679,14 @@ def neoclassical_growth_kernel(out):
     def errors(j):
         return {
             "solution_accepted": bool(j["n_accepted"] == 1),
-            "k_rel_error_mean": sci(med(j["k_rel_error_mean"])),
-            "c_rel_error_mean": sci(med(j["c_rel_error_mean"])),
-            "k_rel_error_max": sci(med(j["k_rel_error_max"])),
-            "c_rel_error_max": sci(med(j["c_rel_error_max"])),
-            "k_rel_error_min": sci(med(j["k_rel_error_min"])),
-            "c_rel_error_min": sci(med(j["c_rel_error_min"])),
+            "test_k_rel_error_mean": sci(med(j["test_k_rel_error_mean"])),
+            "test_c_rel_error_mean": sci(med(j["test_c_rel_error_mean"])),
+            "test_k_rel_error_max": sci(med(j["test_k_rel_error_max"])),
+            "test_c_rel_error_max": sci(med(j["test_c_rel_error_max"])),
+            "test_k_rel_error_min": sci(med(j["test_k_rel_error_min"])),
+            "test_c_rel_error_min": sci(med(j["test_c_rel_error_min"])),
             "max_train_residual": sci(med(j["max_train_residual"]), 2),
-            "wall_time": sig(med(j["wall_time"]), 2),
+            "solve_time": sig(med(j["solve_time"]), 2),
             "timing_repetitions": int(med(j["timing_repetitions"])),
             **final_damping(j),
         }
@@ -764,12 +764,12 @@ def neoclassical_growth_kernel_uno(out):
     def errors(j):
         return {
             "solution_accepted": bool(j["n_accepted"] == 1),
-            "k_rel_error_mean": sci(med(j["k_rel_error_mean"])),
-            "c_rel_error_mean": sci(med(j["c_rel_error_mean"])),
-            "k_rel_error_max": sci(med(j["k_rel_error_max"])),
-            "c_rel_error_max": sci(med(j["c_rel_error_max"])),
+            "test_k_rel_error_mean": sci(med(j["test_k_rel_error_mean"])),
+            "test_c_rel_error_mean": sci(med(j["test_c_rel_error_mean"])),
+            "test_k_rel_error_max": sci(med(j["test_k_rel_error_max"])),
+            "test_c_rel_error_max": sci(med(j["test_c_rel_error_max"])),
             "max_train_residual": sci(med(j["max_train_residual"]), 2),
-            "wall_time": sig(med(j["wall_time"]), 2),
+            "solve_time": sig(med(j["solve_time"]), 2),
             "timing_repetitions": int(med(j["timing_repetitions"])),
         }
 
@@ -785,19 +785,21 @@ def neoclassical_growth_kernel_uno(out):
     for name, _, ell in NU_RHO_ROWS:
         result = load(out, f"{prefix}_{name}")
         experiment_hp = load(out, f"{prefix}_{name}_hyperparameters")
-        nu = experiment_hp["kernel_set"]["nu"]
+        kernel_name = experiment_hp["kernel_set"]["kernel"]
         robustness_table[name if name != "baseline" else "nu05_ell10"] = {
-            "nu": "inf" if math.isinf(nu) else nu,
+            "kernel": kernel_name,
+            "nu": KERNEL_NU[kernel_name],
             "ell": ell,
             **errors(result),
         }
 
-    baseline_kernel = hp["kernel_set"]
+    baseline_kernel = hp["kernel_set"]["kernel"]
     return {
         "kernel": {
-            "nu": baseline_kernel["nu"],
-            "ell": baseline_kernel["ell"],
-            "sigma": baseline_kernel["sigma"],
+            "name": baseline_kernel,
+            "nu": KERNEL_NU[baseline_kernel],
+            "ell": hp["kernel_set"]["ell"],
+            "sigma": hp["kernel_set"]["sigma"],
         },
         "experiments": experiments,
         "robustness_table": robustness_table,
@@ -884,7 +886,7 @@ def asset_pricing_kernel(out, prefix="asset_pricing_kernel"):
                 "p_rel_error_max": sci(med(j["p_rel_error_max"])),
                 "p_rel_error_min": sci(med(j["p_rel_error_min"])),
                 "max_train_residual": sci(med(j["max_train_residual"]), 2),
-                "wall_time": sig(med(j["wall_time"]), 2),
+                "solve_time": sig(med(j["solve_time"]), 2),
                 "timing_repetitions": int(med(j["timing_repetitions"])),
                 **maybe_final_damping(j),
             }
@@ -939,7 +941,7 @@ def asset_pricing_nn(out):
                 "max_train_residual_median": sci(
                     float(accepted["max_train_residual"].median())
                 ),
-                "train_time_median": sig(float(accepted["train_time"].median())),
+                "solve_time_median": sig(float(accepted["solve_time"].median())),
                 **final_damping_summary(accepted),
             }
         },
@@ -971,7 +973,7 @@ def optimal_advertising_kernel(out):
         "mu_0": sig(med(j["mu_0"]), 4),
         "u_0": sig(med(j["u_0"]), 4),
         "max_train_residual": sci(med(j["max_train_residual"]), 2),
-        "wall_time": sig(med(j["wall_time"]), 2),
+        "solve_time": sig(med(j["solve_time"]), 2),
         "timing_repetitions": int(med(j["timing_repetitions"])),
         **final_damping(j),
     }
@@ -1004,7 +1006,7 @@ def human_capital_kernel(out):
         "max_train_residual": sci(med(j["max_train_residual"]), 2),
         "max_validation_residual": sci(med(j["max_validation_residual"]), 2),
         "max_test_feasibility": sci(med(j["max_test_feasibility"]), 2),
-        "wall_time": sig(med(j["wall_time"]), 2),
+        "solve_time": sig(med(j["solve_time"]), 2),
         "timing_repetitions": int(med(j["timing_repetitions"])),
         **final_damping(j),
     }
@@ -1041,11 +1043,11 @@ def neoclassical_growth_nn(out):
         "experiments": {
             "baseline": {
                 "frac_accepted": sig(baseline_json["frac_accepted"]),
-                "test_mean_abs_k_rel_error_median": sci(
-                    float(accepted["test_mean_abs_k_rel_error"].median())
+                "test_k_rel_error_mean_median": sci(
+                    float(accepted["test_k_rel_error_mean"].median())
                 ),
-                "test_mean_abs_c_rel_error_median": sci(
-                    float(accepted["test_mean_abs_c_rel_error"].median())
+                "test_c_rel_error_mean_median": sci(
+                    float(accepted["test_c_rel_error_mean"].median())
                 ),
                 "test_resource_mean_abs_median": sci(
                     float(accepted["test_resource_mean_abs"].median())
@@ -1064,7 +1066,7 @@ def neoclassical_growth_nn(out):
                 "frac_transversality_ok": sig(
                     float(accepted["transversality_ok"].mean())
                 ),
-                "train_time_median": sig(float(accepted["train_time"].median())),
+                "solve_time_median": sig(float(accepted["solve_time"].median())),
                 "steps_median": sig(float(accepted["steps"].median())),
                 **final_damping_summary(accepted),
                 "num_train_points": int(med(baseline_json["num_train_points"])),
@@ -1114,10 +1116,10 @@ def neoclassical_growth_nn_recursive(out):
             "max_log_tvc_residual_median": sig(
                 float(sample["max_log_tvc_residual"].median()), 4
             ),
-            "train_time_median": sig(float(sample["train_time"].median())),
+            "solve_time_median": sig(float(sample["solve_time"].median())),
             "steps_median": sig(float(sample["steps"].median())),
             **final_damping_summary(sample),
-            "num_collocation_states": int(med(j["num_collocation_states"])),
+            "num_simulation_states": int(med(j["num_simulation_states"])),
             "ode_solver": str(sample["ode_solver"].iloc[0]),
             "num_train_trajectories": int(med(j["num_train_trajectories"])),
             "num_test_trajectories": int(med(j["num_test_trajectories"])),
@@ -1188,11 +1190,11 @@ def stochastic_growth_nn_recursive(out):
                 "max_log_tvc_residual_median": sig(
                     float(accepted["max_log_tvc_residual"].median()), 4
                 ),
-                "train_time_median": sig(float(accepted["train_time"].median())),
+                "solve_time_median": sig(float(accepted["solve_time"].median())),
                 "steps_median": sig(float(accepted["steps"].median())),
                 **final_damping_summary(accepted),
                 "sde_solver": str(accepted["sde_solver"].iloc[0]),
-                "num_collocation_states": int(med(j["num_collocation_states"])),
+                "num_simulation_states": int(med(j["num_simulation_states"])),
                 "num_train_trajectories": int(med(j["num_train_trajectories"])),
                 "num_test_trajectories": int(med(j["num_test_trajectories"])),
             }
@@ -1216,7 +1218,7 @@ def neoclassical_growth_kernel_recursive(out):
             "max_log_tvc_residual": sig(med(j["max_log_tvc_residual"]), 4),
             "solve_time": sig(med(j["solve_time"])),
             "steps": int(med(j["steps"])),
-            "num_collocation_states": int(med(j["num_collocation_states"])),
+            "num_centers": int(med(j["num_centers"])),
             "penalized_parameter_count": int(med(j["penalized_parameter_count"])),
             "rkhs_norm": sig(med(j["rkhs_norm"])),
             "num_train_trajectories": int(med(j["num_train_trajectories"])),
@@ -1290,7 +1292,7 @@ def open_economy_growth_kernel(
             "ex_post_present_value_gap": sci(med(j["ex_post_present_value_gap"])),
             "ex_post_asset_tvc": sci(med(j["ex_post_asset_tvc"])),
             "ex_post_capital_tvc": sci(med(j["ex_post_capital_tvc"])),
-            "wall_time_median": sig(med(j["wall_time"])),
+            "solve_time_median": sig(med(j["solve_time"])),
             "timing_repetitions": int(med(j["timing_repetitions"])),
             **maybe_final_damping(j),
         }
@@ -1358,7 +1360,7 @@ def open_economy_growth_nn_recursive(out, prefix="open_economy_growth_nn_recursi
             "ex_post_capital_tvc_median": sci(
                 float(accepted["ex_post_capital_tvc"].median())
             ),
-            "train_time_median": sig(float(accepted["train_time"].median())),
+            "solve_time_median": sig(float(accepted["solve_time"].median())),
             **final_damping_summary(accepted),
         }
 
@@ -1415,7 +1417,7 @@ def multicountry_growth_kernel(out):
             ),
             "ex_post_asset_tvc": sci(med(j["ex_post_asset_tvc"])),
             "ex_post_capital_tvc": sci(med(j["ex_post_capital_tvc"])),
-            "wall_time_median": sig(med(j["wall_time"])),
+            "solve_time_median": sig(med(j["solve_time"])),
             "timing_repetitions": int(med(j["timing_repetitions"])),
             **final_damping(j),
         }
@@ -1467,17 +1469,16 @@ def multicountry_growth_kernel(out):
             )
         },
     }
-    # The baseline and the ten-country experiment carry the sensitivity
-    # fields only in the float64 pass.
-    first_time = MULTICOUNTRY_SENSITIVITY_TIMES[0]
-    baseline_json = load(out, f"{prefix}_baseline")
-    if f"d_rate_T{first_time}_d_alpha" in baseline_json:
+    # The implicit-AD runs are separate single-solve experiments
+    # (multicountry_growth_kernel_sensitivity.py), float64 only.
+    if (out / f"{prefix}_sensitivity.json").exists():
+        sensitivity_json = load(out, f"{prefix}_sensitivity")
         payload["sensitivity"] = multicountry_sensitivity_payload(
-            json_values(baseline_json)
+            json_values(sensitivity_json)
         )
         payload["aggregate_sensitivity"] = multicountry_aggregate_payload(
-            json_values(load(out, f"{prefix}_ten_countries")),
-            reference=json_values(baseline_json),
+            json_values(load(out, f"{prefix}_sensitivity_ten_countries")),
+            reference=json_values(sensitivity_json),
         )
     return payload
 
@@ -1534,6 +1535,9 @@ def multicountry_growth_scaling(out):
     sensitivity_rung = load(
         out, f"multicountry_growth_scaling_cg_N{MULTICOUNTRY_SCALING_GAMMA_COMMON}"
     )
+    # The tangent itself comes from the gamma-common driver's own stem; the
+    # rung's primal solve times stay with the ladder rung it extends.
+    gamma_common = load(out, "multicountry_growth_scaling_gamma_common")
     return {
         "country_counts": list(MULTICOUNTRY_SCALING_COUNTS),
         "dense_max_countries": MULTICOUNTRY_SCALING_DENSE_MAX,
@@ -1567,17 +1571,17 @@ def multicountry_growth_scaling(out):
         # alongside.
         "gamma_common_sensitivity": {
             "num_countries": MULTICOUNTRY_SCALING_GAMMA_COMMON,
-            "rate_T10": sig(med(sensitivity_rung["rate_T10"]), 4),
+            "rate_T10": sig(med(gamma_common["rate_T10"]), 4),
             "d_rate_T10_d_gamma_common": sig(
-                med(sensitivity_rung["d_rate_T10_d_gamma_common"]), 4
+                med(gamma_common["d_rate_T10_d_gamma_common"]), 4
             ),
             "solve_seconds": sig(med(sensitivity_rung["solve_time"])),
             "compile_solve_seconds": sig(med(sensitivity_rung["compile_solve_time"])),
             "sensitivity_seconds": sig(
-                med(sensitivity_rung["gamma_common_sensitivity_time"])
+                med(gamma_common["gamma_common_sensitivity_time"])
             ),
             "compile_sensitivity_seconds": sig(
-                med(sensitivity_rung["compile_gamma_common_sensitivity_time"])
+                med(gamma_common["compile_gamma_common_sensitivity_time"])
             ),
         },
     }
@@ -1611,7 +1615,7 @@ def multicountry_growth_nn(out):
             "parameter_surplus": total_params - residual_count,
             "n_seeds": int(summary["n_seeds"]),
             "fraction_accepted": sig(summary["frac_accepted"]),
-            "train_time_median": sig(float(accepted["train_time"].median())),
+            "solve_time_median": sig(float(accepted["solve_time"].median())),
             "max_train_residual_median": sci(
                 float(accepted["max_train_residual"].median())
             ),
@@ -1660,7 +1664,7 @@ def multicountry_growth_nn(out):
         two_country = accepted_values(out, f"{prefix}_sensitivity")
         payload["sensitivity"] = multicountry_sensitivity_payload(
             two_country,
-            reference=json_values(load(out, "multicountry_growth_kernel_baseline")),
+            reference=json_values(load(out, "multicountry_growth_kernel_sensitivity")),
         )
         payload["aggregate_sensitivity"] = multicountry_aggregate_payload(
             accepted_values(out, f"{prefix}_sensitivity_ten_countries"),
@@ -1669,7 +1673,7 @@ def multicountry_growth_nn(out):
     return payload
 
 
-def performance_comparisons(out, include_uno=True):
+def performance_comparisons(out):
     def accepted(prefix, experiment="baseline"):
         frame = pd.read_parquet(out / f"{prefix}_{experiment}_results.parquet")
         accepted_frame = frame[frame["solution_accepted"]]
@@ -1679,69 +1683,60 @@ def performance_comparisons(out, include_uno=True):
 
     asset_kernel = load(out, "asset_pricing_kernel_baseline")
     asset_nn = accepted("asset_pricing_nn")
-    asset_kernel_time = med(asset_kernel["wall_time"])
-    asset_nn_time = float(asset_nn["train_time"].median())
+    asset_kernel_time = med(asset_kernel["solve_time"])
+    asset_nn_time = float(asset_nn["solve_time"].median())
     asset_kernel_error = med(asset_kernel["p_rel_error_mean"])
     asset_nn_error = float(asset_nn["p_rel_error_mean"].median())
-    if include_uno:
-        asset_uno = load(out, "asset_pricing_kernel_uno_baseline")
-        asset_uno_time = med(asset_uno["wall_time"])
-        asset_uno_error = med(asset_uno["p_rel_error_mean"])
-    else:
-        asset_uno_time = asset_uno_error = None
+    asset_uno = load(out, "asset_pricing_kernel_uno_baseline")
+    asset_uno_time = med(asset_uno["solve_time"])
+    asset_uno_error = med(asset_uno["p_rel_error_mean"])
 
     growth_kernel = load(out, "neoclassical_growth_kernel_baseline")
     growth_sequential_nn = accepted("neoclassical_growth_nn")
     growth_recursive_nn = accepted("neoclassical_growth_nn_recursive", "single_ic_g0")
-    growth_kernel_time = med(growth_kernel["wall_time"])
+    growth_kernel_time = med(growth_kernel["solve_time"])
     growth_kernel_error = max(
-        med(growth_kernel["k_rel_error_mean"]),
-        med(growth_kernel["c_rel_error_mean"]),
+        med(growth_kernel["test_k_rel_error_mean"]),
+        med(growth_kernel["test_c_rel_error_mean"]),
     )
-    if include_uno:
-        growth_uno = load(out, "neoclassical_growth_kernel_uno_baseline")
-        growth_uno_time = med(growth_uno["wall_time"])
-        growth_uno_error = max(
-            med(growth_uno["k_rel_error_mean"]),
-            med(growth_uno["c_rel_error_mean"]),
-        )
-    else:
-        growth_uno_time = growth_uno_error = None
+    growth_uno = load(out, "neoclassical_growth_kernel_uno_baseline")
+    growth_uno_time = med(growth_uno["solve_time"])
+    growth_uno_error = max(
+        med(growth_uno["test_k_rel_error_mean"]),
+        med(growth_uno["test_c_rel_error_mean"]),
+    )
 
     # Both NN formulations against the same sequence-space kernel baseline: the
     # sequential MLP shares the kernel's t -> (k, c) ansatz, the recursive one
     # learns a state-space policy rolled forward by RK4.
-    def growth_nn_stats(frame):
+    def growth_nn_stats(frame, k_error_field, c_error_field):
         return (
-            float(frame["train_time"].median()),
+            float(frame["solve_time"].median()),
             max(
-                float(frame["test_mean_abs_k_rel_error"].median()),
-                float(frame["test_mean_abs_c_rel_error"].median()),
+                float(frame[k_error_field].median()),
+                float(frame[c_error_field].median()),
             ),
         )
 
     open_kernel = load(out, "open_economy_growth_kernel_baseline")
     open_sequential_nn = accepted("open_economy_growth_nn")
     open_recursive_nn = accepted("open_economy_growth_nn_recursive")
-    open_kernel_time = med(open_kernel["wall_time"])
+    open_kernel_time = med(open_kernel["solve_time"])
     open_kernel_error = med(open_kernel["max_benchmark_error"])
-    if include_uno:
-        open_uno = load(out, "open_economy_growth_kernel_uno_baseline")
-        open_uno_time = med(open_uno["wall_time"])
-        open_uno_error = med(open_uno["max_benchmark_error"])
-    else:
-        open_uno_time = open_uno_error = None
+    open_uno = load(out, "open_economy_growth_kernel_uno_baseline")
+    open_uno_time = med(open_uno["solve_time"])
+    open_uno_error = med(open_uno["max_benchmark_error"])
 
     def open_nn_stats(frame):
         return (
-            float(frame["train_time"].median()),
+            float(frame["solve_time"].median()),
             float(frame["max_benchmark_error"].median()),
         )
 
     multicountry_kernel = load(out, "multicountry_growth_kernel_initial_debt")
     multicountry_nn_frame = accepted("multicountry_growth_nn")
-    multicountry_kernel_time = med(multicountry_kernel["wall_time"])
-    multicountry_nn_time = float(multicountry_nn_frame["train_time"].median())
+    multicountry_kernel_time = med(multicountry_kernel["solve_time"])
+    multicountry_nn_time = float(multicountry_nn_frame["solve_time"].median())
     multicountry_kernel_error = med(multicountry_kernel["max_benchmark_error"])
     multicountry_nn_error = float(multicountry_nn_frame["max_benchmark_error"].median())
 
@@ -1794,11 +1789,8 @@ def performance_comparisons(out, include_uno=True):
             "multicountry growth), each seed allowed up to five "
             "multi-start restarts"
         ),
+        "uno": "median of five cached deterministic constrained solves",
     }
-    if include_uno:
-        timing_contract["uno"] = (
-            "median of five cached deterministic constrained solves"
-        )
     return {
         "timing_contract": timing_contract,
         "asset_pricing": comparison(
@@ -1812,8 +1804,16 @@ def performance_comparisons(out, include_uno=True):
             growth_kernel_time,
             growth_kernel_error,
             {
-                "sequential_nn": growth_nn_stats(growth_sequential_nn),
-                "recursive_nn": growth_nn_stats(growth_recursive_nn),
+                "sequential_nn": growth_nn_stats(
+                    growth_sequential_nn,
+                    "test_k_rel_error_mean",
+                    "test_c_rel_error_mean",
+                ),
+                "recursive_nn": growth_nn_stats(
+                    growth_recursive_nn,
+                    "test_mean_abs_k_rel_error",
+                    "test_mean_abs_c_rel_error",
+                ),
             },
             growth_uno_time,
             growth_uno_error,
@@ -1836,7 +1836,7 @@ def performance_comparisons(out, include_uno=True):
     }
 
 
-def validate_replication_contract(out, include_uno=True):
+def validate_replication_contract(out):
     # (headline experiment, expected seed count) per NN prefix; the recursive
     # growth driver's headline experiment is single_ic_g0, not baseline.
     nn_seed_counts = {
@@ -1862,13 +1862,10 @@ def validate_replication_contract(out, include_uno=True):
         "human_capital_kernel",
         "open_economy_growth_kernel",
         "multicountry_growth_kernel",
+        "open_economy_growth_kernel_uno",
+        "asset_pricing_kernel_uno",
+        "neoclassical_growth_kernel_uno",
     )
-    if include_uno:
-        kernel_prefixes += (
-            "open_economy_growth_kernel_uno",
-            "asset_pricing_kernel_uno",
-            "neoclassical_growth_kernel_uno",
-        )
     for prefix in kernel_prefixes:
         timing = pd.read_parquet(out / f"{prefix}_baseline_timing_df.parquet")
         if len(timing) != DETERMINISTIC_TIMING_REPETITIONS:
@@ -1876,65 +1873,52 @@ def validate_replication_contract(out, include_uno=True):
                 f"{prefix} must retain {DETERMINISTIC_TIMING_REPETITIONS} timing runs"
             )
 
-    # The scaling ladder runs only in the float64 pass.
-    residual_dtype = load(out, "neoclassical_growth_kernel_baseline").get(
-        "residual_dtype"
-    )
-    if residual_dtype == "float64":
-        summary = load(out, "multicountry_growth_scaling_summary")
-        expected = {f"cg_N{count}" for count in MULTICOUNTRY_SCALING_COUNTS} | {
-            f"dense_N{count}"
-            for count in MULTICOUNTRY_SCALING_COUNTS
-            if count <= MULTICOUNTRY_SCALING_DENSE_MAX
-        }
-        missing = sorted(expected - set(summary))
-        if missing:
-            raise RuntimeError(
-                f"multicountry_growth_scaling summary lacks rungs {missing}; "
-                "rerun replication.multicountry_growth_scaling"
-            )
-        for name in sorted(expected):
-            if summary[name]["frac_accepted"] != 1.0:
-                raise RuntimeError(
-                    f"multicountry_growth_scaling {name} was not accepted"
-                )
+    summary = load(out, "multicountry_growth_scaling_summary")
+    expected = {f"cg_N{count}" for count in MULTICOUNTRY_SCALING_COUNTS} | {
+        f"dense_N{count}"
+        for count in MULTICOUNTRY_SCALING_COUNTS
+        if count <= MULTICOUNTRY_SCALING_DENSE_MAX
+    }
+    missing = sorted(expected - set(summary))
+    if missing:
+        raise RuntimeError(
+            f"multicountry_growth_scaling summary lacks rungs {missing}; "
+            "rerun replication.multicountry_growth_scaling"
+        )
+    for name in sorted(expected):
+        if summary[name]["frac_accepted"] != 1.0:
+            raise RuntimeError(f"multicountry_growth_scaling {name} was not accepted")
 
 
-def collect(output_dir: str = ".results", include_uno: bool = True):
+def collect(output_dir: str = ".results"):
     out = pathlib.Path(output_dir)
-    validate_replication_contract(out, include_uno)
-    # The collected precision comes from the collected data itself.
-    residual_dtype = load(out, "neoclassical_growth_kernel_baseline").get(
-        "residual_dtype"
-    )
+    validate_replication_contract(out)
     write_nu_rho_table(out)
     write_sequential_comparison_table(out)
     write_neoclassical_growth_comparison_table(out)
-    # The sensitivity experiments run only in the float64 pass.
-    if residual_dtype == "float64":
-        write_neoclassical_sensitivity_table(out)
-        # One table per solver and cross-section width; the kernel and NN
-        # numbers stand on their own rather than being differenced.
-        write_multicountry_sensitivity_table(
-            out,
-            "multicountry_growth_kernel_baseline",
-            "multicountry_growth_sensitivity.tex",
-        )
-        write_multicountry_aggregate_table(
-            out,
-            "multicountry_growth_kernel_ten_countries",
-            "multicountry_growth_aggregate_sensitivity.tex",
-        )
-        write_multicountry_sensitivity_table(
-            out,
-            "multicountry_growth_nn_sensitivity",
-            "multicountry_growth_nn_sensitivity.tex",
-        )
-        write_multicountry_aggregate_table(
-            out,
-            "multicountry_growth_nn_sensitivity_ten_countries",
-            "multicountry_growth_nn_aggregate_sensitivity.tex",
-        )
+    write_neoclassical_sensitivity_table(out)
+    # One table per solver and cross-section width; the kernel and NN
+    # numbers stand on their own rather than being differenced.
+    write_multicountry_sensitivity_table(
+        out,
+        "multicountry_growth_kernel_sensitivity",
+        "multicountry_growth_sensitivity.tex",
+    )
+    write_multicountry_aggregate_table(
+        out,
+        "multicountry_growth_kernel_sensitivity_ten_countries",
+        "multicountry_growth_aggregate_sensitivity.tex",
+    )
+    write_multicountry_sensitivity_table(
+        out,
+        "multicountry_growth_nn_sensitivity",
+        "multicountry_growth_nn_sensitivity.tex",
+    )
+    write_multicountry_aggregate_table(
+        out,
+        "multicountry_growth_nn_sensitivity_ten_countries",
+        "multicountry_growth_nn_aggregate_sensitivity.tex",
+    )
     payload = clean(
         {
             "_meta": {
@@ -1943,7 +1927,7 @@ def collect(output_dir: str = ".results", include_uno: bool = True):
                     "paper: each value is selected and rounded to copy/paste "
                     "form here (replication/collect_json.py) and must never be "
                     "recomputed or re-rounded downstream. Cross-seed statistics "
-                    "are medians (suffix _median); deterministic wall_time values "
+                    "are medians (suffix _median); deterministic solve_time values "
                     f"are medians of {DETERMINISTIC_TIMING_REPETITIONS} cached "
                     "solve(s), except the multicountry scaling ladder, which "
                     "reports the median of two warmed solves after one separately "
@@ -1955,42 +1939,27 @@ def collect(output_dir: str = ".results", include_uno: bool = True):
                 .isoformat(timespec="seconds"),
                 "machine": machine_info(),
                 "output_dir": output_dir,
-                "residual_dtype": residual_dtype,
-                "include_uno": include_uno,
                 "band_quantiles": [int(100 * QUANTILES[0]), int(100 * QUANTILES[-1])],
             },
             "neoclassical_growth_kernel": neoclassical_growth_kernel(out),
-            **(
-                {
-                    "neoclassical_growth_kernel_uno": neoclassical_growth_kernel_uno(
-                        out
-                    ),
-                    "neoclassical_growth_concave_convex_kernel_uno": (
-                        neoclassical_growth_concave_convex_kernel(
-                            out,
-                            prefix="neoclassical_growth_concave_convex_kernel_uno",
-                            require_all=False,
-                        )
-                    ),
-                    "asset_pricing_kernel_uno": asset_pricing_kernel(
-                        out, prefix="asset_pricing_kernel_uno"
-                    ),
-                    "open_economy_growth_kernel_uno": open_economy_growth_kernel(
-                        out,
-                        prefix="open_economy_growth_kernel_uno",
-                        selection="minimum_rkhs_norm_constrained",
-                    ),
-                }
-                if include_uno
-                else {}
-            ),
-            # The all-70 basin contract is the float64 caption's claim; a
-            # float32 collection reports n_basin_correct as data (platform
-            # rounding moves which knife-edge point misclassifies).
-            "neoclassical_growth_concave_convex_kernel": (
+            "neoclassical_growth_kernel_uno": neoclassical_growth_kernel_uno(out),
+            "neoclassical_growth_concave_convex_kernel_uno": (
                 neoclassical_growth_concave_convex_kernel(
-                    out, require_all=residual_dtype == "float64"
+                    out,
+                    prefix="neoclassical_growth_concave_convex_kernel_uno",
+                    require_all=False,
                 )
+            ),
+            "asset_pricing_kernel_uno": asset_pricing_kernel(
+                out, prefix="asset_pricing_kernel_uno"
+            ),
+            "open_economy_growth_kernel_uno": open_economy_growth_kernel(
+                out,
+                prefix="open_economy_growth_kernel_uno",
+                selection="minimum_rkhs_norm_constrained",
+            ),
+            "neoclassical_growth_concave_convex_kernel": (
+                neoclassical_growth_concave_convex_kernel(out)
             ),
             # require_all=False for both NNs: solver acceptance is scored
             # separately from basin correctness, so a rejected grid point is
@@ -2018,13 +1987,9 @@ def collect(output_dir: str = ".results", include_uno: bool = True):
             ),
             "open_economy_growth_nn_recursive": open_economy_growth_nn_recursive(out),
             "multicountry_growth_kernel": multicountry_growth_kernel(out),
-            **(
-                {"multicountry_growth_scaling": multicountry_growth_scaling(out)}
-                if residual_dtype == "float64"
-                else {}
-            ),
+            "multicountry_growth_scaling": multicountry_growth_scaling(out),
             "multicountry_growth_nn": multicountry_growth_nn(out),
-            "performance_comparisons": performance_comparisons(out, include_uno),
+            "performance_comparisons": performance_comparisons(out),
         }
     )
     # allow_nan=False guarantees the output is strict JSON (any NaN raises here).

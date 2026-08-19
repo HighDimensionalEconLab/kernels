@@ -292,7 +292,8 @@ def cache_key(config):
 # Variable block as "params/..." and "nondiff/..." flat keys (nnx's supported
 # State.to_pure_dict / replace_by_pure_dict conversion, list indices numeric),
 # plus a JSON __meta__ block. RNG state is never written: a reload rebuilds
-# the structural template from meta and takes every array from the file.
+# the structural template from meta, takes the Param and Variable arrays from
+# the file, and keeps the template's RNG state.
 def save_model(path, module, meta):
     def flatten(namespace, node, out):
         if isinstance(node, dict):
@@ -319,6 +320,12 @@ def load_model(path, make_module):
         if name == "__meta__":
             continue
         namespace, _, rest = name.partition("/")
+        if namespace not in blocks:
+            raise ValueError(
+                f"{path}: unknown npz key namespace {namespace!r}; expected "
+                "params/ or nondiff/ (an artifact from the flat pre-namespace "
+                "format must be regenerated)"
+            )
         node = blocks[namespace]
         *parents, leaf = rest.split("/")
         for part in parents:
@@ -327,13 +334,22 @@ def load_model(path, make_module):
         node[int(leaf) if leaf.isdigit() else leaf] = jnp.asarray(
             array, dtype=dtype if np.issubdtype(array.dtype, np.inexact) else None
         )
-    # An empty replace_by_pure_dict is a silent no-op that would return the
-    # template's random initialization as if it were the trained module.
-    if not blocks["params"]:
-        raise ValueError(f"{path} carries no params/ arrays")
     graphdef, params, rngs, nondiff = nnx.split(
         make_module(meta, dtype), nnx.Param, nnx.RngState, ...
     )
+
+    def leaf_paths(node, prefix=()):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                yield from leaf_paths(value, (*prefix, str(key)))
+        else:
+            yield "/".join(prefix)
+
+    # A missing Param subtree in replace_by_pure_dict is a silent no-op that
+    # would keep the template's random initialization for those leaves.
+    missing = set(leaf_paths(params.to_pure_dict())) - set(leaf_paths(blocks["params"]))
+    if missing:
+        raise ValueError(f"{path} is missing params arrays: {sorted(missing)}")
     params.replace_by_pure_dict(blocks["params"])
     if blocks["nondiff"]:
         nondiff.replace_by_pure_dict(blocks["nondiff"])

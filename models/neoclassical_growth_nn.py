@@ -146,6 +146,28 @@ class GrowthPolicyNN(nnx.Module):
         return out
 
 
+# Value-hashable multi-start acceptance (it enters the jit cache by
+# identity): a learned trend admits FONC-satisfying bubble paths, so an
+# attempt passes only with a negative transversality certificate.
+@dataclass(frozen=True)
+class AcceptSaddlePath:
+    tvc_T: float
+    log_tvc_threshold: float
+
+    def __call__(self, _, result):
+        model = nnx.merge(result.args.graphdef, result.x, result.args.nondiff)
+        tvc_t = jnp.asarray(self.tvc_T, dtype=result.args.t.dtype)
+        k_T, c_T = model(tvc_t)
+        log_tvc = (
+            -result.p.rho_hat * tvc_t
+            - result.p.sigma_crra * jnp.log(c_T)
+            + jnp.log(k_T)
+        )
+        return (result.status == LMStatus.CONVERGED) & (
+            log_tvc < self.log_tvc_threshold
+        )
+
+
 def residual_fn(theta, args, p):
     model = nnx.merge(args.graphdef, theta, args.nondiff)
     values, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
@@ -285,21 +307,6 @@ def neoclassical_growth_nn(
         atol=atol,
         max_steps_is_success=False,
     )
-    # A learned trend admits FONC-satisfying bubble paths; only attempts
-    # passing the transversality certificate are accepted.
-    accept_tvc_t = jnp.asarray(data_set.test_tvc_T, dtype=dtype)
-
-    def accept_saddle_path(_, result):
-        model = nnx.merge(graphdef, result.x, nondiff)
-        k_T, c_T = model(accept_tvc_t)
-        log_tvc = (
-            -result.p.rho_hat * accept_tvc_t
-            - result.p.sigma_crra * jnp.log(c_T)
-            + jnp.log(k_T)
-        )
-        converged = result.status == LMStatus.CONVERGED
-        return converged & (log_tvc < stop_set.log_tvc_threshold)
-
     multi_start = MultiStart(
         key=multi_start_key,
         num_starts=stop_set.num_attempts,
@@ -311,7 +318,11 @@ def neoclassical_growth_nn(
             g_hat=g,
             dtype=dtype,
         ),
-        accept=accept_saddle_path if policy_settings.learn_g_hat else None,
+        accept=(
+            AcceptSaddlePath(data_set.test_tvc_T, stop_set.log_tvc_threshold)
+            if policy_settings.learn_g_hat
+            else None
+        ),
     )
 
     timer = Stopwatch()

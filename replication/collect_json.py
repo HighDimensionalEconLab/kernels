@@ -1085,24 +1085,33 @@ def neoclassical_growth_nn(out):
     for name in ("baseline_g02", "baseline_g02_learned"):
         j = load(out, f"{prefix}_{name}")
         df = pd.read_parquet(out / f"{prefix}_{name}_results.parquet")
-        sample = df[df["solution_accepted"]]
-        # The learned-trend runs can be rejected wholesale (the certificate
-        # refuses the c -> 0 root); report over all seeds in that case.
-        if sample.empty:
-            sample = df
+        accepted_sample = df[df["solution_accepted"]]
         payload["experiments"][name] = {
             "g": med(j["g"]),
             "learn_g_hat": bool(med(j["learn_g_hat"])),
             "frac_accepted": sig(j["frac_accepted"]),
-            "g_hat_median": sig(float(sample["g_hat"].median()), 4),
-            "test_k_rel_error_mean_median": sci(
-                float(sample["test_k_rel_error_mean"].median())
+            # Medians over accepted seeds; a wholesale-rejected experiment
+            # (the learned-trend certificate refusing every attempt) reports
+            # null rather than statistics of rejected solves.
+            "g_hat_median": (
+                sig(float(accepted_sample["g_hat"].median()), 4)
+                if not accepted_sample.empty
+                else None
             ),
-            "test_c_rel_error_mean_median": sci(
-                float(sample["test_c_rel_error_mean"].median())
+            "test_k_rel_error_mean_median": (
+                sci(float(accepted_sample["test_k_rel_error_mean"].median()))
+                if not accepted_sample.empty
+                else None
             ),
-            "log_tvc_residual_median": sig(
-                float(sample["log_tvc_residual"].median()), 4
+            "test_c_rel_error_mean_median": (
+                sci(float(accepted_sample["test_c_rel_error_mean"].median()))
+                if not accepted_sample.empty
+                else None
+            ),
+            "log_tvc_residual_median": (
+                sig(float(accepted_sample["log_tvc_residual"].median()), 4)
+                if not accepted_sample.empty
+                else None
             ),
         }
     # The sensitivity experiment exists only in the float64 pass; the kernel

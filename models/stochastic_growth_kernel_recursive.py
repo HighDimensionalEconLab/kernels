@@ -14,9 +14,7 @@ from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
 
 from models.neoclassical_growth import (
     InitialConditionSettings,
-    collocation_step_diagnostics,
     growth_initial_conditions,
-    trajectory_frame,
 )
 from models.neoclassical_growth_kernel_recursive import (
     KernelInvestmentPolicy,
@@ -34,12 +32,12 @@ from models.stochastic_growth_nn_recursive import (
     DataSettings,
     StructuralParameters,
     add_fd_path_diagnostics,
-    collocation_rollout,
     euler_residuals,
     log_tvc_residual,
     problem_cache_config,
-    rollout_steps,
     sample_trajectory_noise,
+    simulate,
+    simulate_train,
     trajectory_values,
 )
 from models.utilities import (
@@ -48,6 +46,7 @@ from models.utilities import (
 from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
+    long_df,
 )
 
 
@@ -159,6 +158,10 @@ def stochastic_growth_kernel_recursive(
         log_z_bar=float(np.log(z_bar)),
         z_0=train_initial_conditions[:, 0],
         k_0=train_initial_conditions[:, 1],
+        A=1.0,
+        b_1=1.0,
+        b_2=0.0,
+        k_thr=float("inf"),
     )
 
     problem_config = problem_cache_config(
@@ -195,7 +198,7 @@ def stochastic_growth_kernel_recursive(
         dtype,
         2,
     )
-    train_solution = collocation_rollout(
+    train_solution = simulate_train(
         solver,
         reference_policy,
         jnp.log(train_initial_conditions),
@@ -257,13 +260,12 @@ def stochastic_growth_kernel_recursive(
     theta = result.x
     policy = KernelInvestmentPolicy(theta, args, kernel_set)
     train_values = trajectory_values(policy, train_log_states, p)
-    train_df = trajectory_frame(
-        train_values,
-        train_solution.ts,
-        train_initial_conditions,
+    train_initial = np.asarray(train_initial_conditions)
+    train_df = long_df(
+        {"t": train_solution.ts, **train_values},
+        ("trajectory", "step"),
+        scalars={"z_0": train_initial[:, 0], "k_0": train_initial[:, 1]},
     )
-    train_df["fixed_reference_center"] = True
-    collocation_diagnostics = collocation_step_diagnostics(train_solution.ts)
 
     test_initial_log_states = jnp.log(test_initial_conditions)
     test_noise = sample_trajectory_noise(
@@ -275,7 +277,7 @@ def stochastic_growth_kernel_recursive(
         dtype,
         2,
     )
-    test_solution = rollout_steps(
+    test_solution = simulate(
         solver,
         policy,
         test_initial_log_states,
@@ -295,12 +297,17 @@ def stochastic_growth_kernel_recursive(
         and jnp.all(jnp.isfinite(test_values["c"]))
         and jnp.min(test_values["c"]) > 0.0
     )
-    test_df = trajectory_frame(test_values, test_solution.ts, test_initial_conditions)
+    test_initial = np.asarray(test_initial_conditions)
+    test_df = long_df(
+        {"t": test_solution.ts, **test_values},
+        ("trajectory", "step"),
+        scalars={"z_0": test_initial[:, 0], "k_0": test_initial[:, 1]},
+    )
 
     # Common-noise pathwise comparison against the reference NN policy: the
     # NN's held-out residuals are orders of magnitude below the FD reference,
     # so it is the tighter yardstick for the kernel solution.
-    reference_solution = rollout_steps(
+    reference_solution = simulate(
         solver,
         reference_policy,
         test_initial_log_states,
@@ -310,10 +317,9 @@ def stochastic_growth_kernel_recursive(
         p,
     )
     reference_values = trajectory_values(reference_policy, reference_solution.xs, p)
-    k_error, c_error, test_summary_df = add_fd_path_diagnostics(
-        test_df, test_values, reference_values, test_initial_conditions
-    )
+    k_error, c_error = add_fd_path_diagnostics(test_df, test_values, reference_values)
 
+    # Terminal transversality certificate on the training initial conditions.
     tvc_noise = sample_trajectory_noise(
         solver,
         jax.random.fold_in(train_ic_key, 4),
@@ -323,43 +329,17 @@ def stochastic_growth_kernel_recursive(
         dtype,
         2,
     )
-    max_log_tvc, train_terminal_log_tvc, tvc_ok = log_tvc_residual(
+    train_tvc = log_tvc_residual(
         solver,
         policy,
         jnp.log(train_initial_conditions),
         tvc_noise,
-        data_set.train_T,
         data_set.train_tvc_T,
-        p,
-        data_set,
-    )
-    max_log_tvc = float(max_log_tvc)
-    transversality_ok = bool(
-        jnp.all(tvc_ok) and max_log_tvc < stop_set.log_tvc_threshold
-    )
-    test_tvc_noise = sample_trajectory_noise(
-        solver,
-        jax.random.fold_in(test_ic_key, 2),
-        ic_set.num_test_trajectories,
         data_set.tvc_steps,
-        data_set.train_tvc_T / data_set.tvc_steps,
-        dtype,
-        2,
-    )
-    _, test_terminal_log_tvc, test_tvc_ok = log_tvc_residual(
-        solver,
-        policy,
-        test_initial_log_states,
-        test_tvc_noise,
-        data_set.train_T,
-        data_set.train_tvc_T,
         p,
-        data_set,
     )
-    test_max_log_tvc = float(jnp.max(test_terminal_log_tvc))
-    test_transversality_ok = bool(
-        jnp.all(test_tvc_ok) and test_max_log_tvc < stop_set.log_tvc_threshold
-    )
+    max_log_tvc = float(jnp.max(train_tvc))
+    transversality_ok = bool(max_log_tvc < stop_set.log_tvc_threshold)
 
     max_train_euler = float(jnp.max(jnp.abs(train_values["euler_residual"])))
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
@@ -435,11 +415,7 @@ def stochastic_growth_kernel_recursive(
             jnp.max(jnp.abs(test_values["diffusion_term"]))
         ),
         "max_log_tvc_residual": max_log_tvc,
-        "mean_log_tvc_residual": float(jnp.mean(train_terminal_log_tvc)),
-        "test_mean_log_tvc_residual": float(jnp.mean(test_terminal_log_tvc)),
-        "test_max_log_tvc_residual": test_max_log_tvc,
         "transversality_ok": transversality_ok,
-        "test_transversality_ok": test_transversality_ok,
         "min_test_c": float(jnp.min(test_values["c"])),
         "test_path_ok": test_path_ok,
         "steps": steps,
@@ -453,8 +429,7 @@ def stochastic_growth_kernel_recursive(
         "total_fit_time": total_fit_time,
         "num_train_trajectories": ic_set.num_train_trajectories,
         "num_test_trajectories": ic_set.num_test_trajectories,
-        **collocation_diagnostics,
-        "rkhs_coefficients": n_train,
+        "num_centers": n_train,
         "gram_min_eigenvalue": float(gram_eigenvalues[0]),
         "gram_max_eigenvalue": float(gram_eigenvalues[-1]),
         "test_mean_abs_k_rel_error": float(np.mean(np.abs(k_error))),
@@ -506,7 +481,6 @@ def stochastic_growth_kernel_recursive(
         "train_df": train_df,
         "test_df": test_df,
         "hyperparameters": hyperparameters,
-        "test_summary_df": test_summary_df,
     }
     return results, extras
 

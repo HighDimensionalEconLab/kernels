@@ -19,13 +19,11 @@ from tinydiffeq import SRA1, EulerMaruyama, Milstein, SaveAt, solve_sde
 from models.neoclassical_growth import (
     DOMAIN_EPS,
     InitialConditionSettings,
-    collocation_step_diagnostics,
     consumption,
     growth_initial_conditions,
-    hicks_production,
     mpk,
+    production,
     standardized_initial_states,
-    trajectory_frame,
 )
 from models.neoclassical_growth_nn_recursive import (
     DrawInvestmentPolicy,
@@ -42,6 +40,7 @@ from models.utilities import (
 from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
+    long_df,
 )
 
 SDE_SOLVERS = {
@@ -62,6 +61,10 @@ class StructuralParameters:
     log_z_bar: jax.Array
     z_0: jax.Array
     k_0: jax.Array
+    A: jax.Array
+    b_1: jax.Array
+    b_2: jax.Array
+    k_thr: jax.Array
 
     @classmethod
     def create(cls, dtype, **kwargs):
@@ -321,7 +324,7 @@ def batched_sde_rollout(solver, policy, initial_log_states, noise, T, n_steps, p
 
 
 @partial(jax.jit, static_argnames=("data_set",))
-def collocation_rollout(solver, policy, initial_log_states, noise, p, data_set):
+def simulate_train(solver, policy, initial_log_states, noise, p, data_set):
     return batched_sde_rollout(
         solver,
         policy,
@@ -334,20 +337,21 @@ def collocation_rollout(solver, policy, initial_log_states, noise, p, data_set):
 
 
 @partial(jax.jit, static_argnames=("T", "n_steps"))
-def rollout_steps(solver, policy, initial_log_states, noise, T, n_steps, p):
+def simulate(solver, policy, initial_log_states, noise, T, n_steps, p):
     return batched_sde_rollout(solver, policy, initial_log_states, noise, T, n_steps, p)
 
 
-def collocation_residuals(solver, policy, initial_log_states, noise, p, data_set):
-    solution = collocation_rollout(
-        solver, policy, initial_log_states, noise, p, data_set
+def residual_fn(theta, args, p):
+    policy = nnx.merge(args.graphdef, theta, args.nondiff)
+    solution = simulate_train(
+        args.solver, policy, args.initial_log_states, args.noise, p, args.data_set
     )
     log_states = solution.xs
     euler = euler_residuals(policy, log_states.reshape(-1, 2), p).reshape(
         log_states.shape[:2]
     )
     # Mean squared residual, so the loss threshold means the same thing at any
-    # number of trajectories or collocation points.
+    # number of trajectories or steps.
     count = jnp.asarray(euler.size, dtype=euler.dtype)
     # A nonfinite trajectory did not cover the requested economic horizon. Make
     # that a loud optimizer failure instead of fitting a prefix.
@@ -355,50 +359,23 @@ def collocation_residuals(solver, policy, initial_log_states, noise, p, data_set
         solution.ok[:, None],
         euler / jnp.sqrt(count),
         jnp.full_like(euler, jnp.inf),
-    )
-
-
-def residual_fn(theta, args, p):
-    policy = nnx.merge(args.graphdef, theta, args.nondiff)
-    return collocation_residuals(
-        args.solver, policy, args.initial_log_states, args.noise, p, args.data_set
     ).reshape(-1)
 
 
-def log_tvc_residual(
-    solver, policy, initial_log_states, noise, T_start, T_end, p, data_set
-):
-    # An empty window would certify on -inf evidence.
-    if T_start >= T_end:
-        raise ValueError("the transversality horizon must exceed the start")
-    solution = rollout_steps(
-        solver,
-        policy,
-        initial_log_states,
-        noise,
-        T_end,
-        data_set.tvc_steps,
-        p,
-    )
-    valid = (solution.ts >= T_start) & solution.ok[:, None]
-    flat_states = solution.xs.reshape(-1, 2)
-    c = jax.vmap(lambda state: consumption(policy, state, p))(flat_states).reshape(
-        solution.ts.shape
-    )
-    _, k = jnp.moveaxis(jnp.exp(solution.xs), -1, 0)
-    log_tvc = -p.rho_hat * solution.ts - p.sigma_crra * jnp.log(c) + jnp.log(k)
+# Natural-log transversality certificate at the terminal date T, normalized
+# by the initial-date certificate, per initial state: the saddle path sits
+# far negative, a capital bubble drives it positive. A failed rollout is a
+# loud +inf.
+def log_tvc_residual(solver, policy, initial_log_states, noise, T, n_steps, p):
+    solution = simulate(solver, policy, initial_log_states, noise, T, n_steps, p)
+    terminal_log_states = solution.xs[:, -1, :]
+    c_T = jax.vmap(lambda state: consumption(policy, state, p))(terminal_log_states)
+    k_T = jnp.exp(terminal_log_states[:, 1])
     c_0 = jax.vmap(lambda state: consumption(policy, state, p))(initial_log_states)
     k_0 = jnp.exp(initial_log_states[:, 1])
+    log_tvc = -p.rho_hat * T - p.sigma_crra * jnp.log(c_T) + jnp.log(k_T)
     initial_log_tvc = -p.sigma_crra * jnp.log(c_0) + jnp.log(k_0)
-    normalized_log_tvc = log_tvc - initial_log_tvc[:, None]
-    # Alongside the windowed max, the per-trajectory certificate at the single
-    # terminal date T_end; a failed rollout is a loud +inf.
-    terminal_log_tvc = jnp.where(solution.ok, normalized_log_tvc[:, -1], jnp.inf)
-    return (
-        jnp.max(jnp.where(valid, normalized_log_tvc, -jnp.inf)),
-        terminal_log_tvc,
-        solution.ok,
-    )
+    return jnp.where(solution.ok, log_tvc - initial_log_tvc, jnp.inf)
 
 
 # The FD consumption policy as a rollout-compatible callable: bilinear
@@ -423,7 +400,7 @@ class FDInterpolatedPolicy:
             mode="nearest",
         )[0]
         z, k = jnp.exp(log_state)
-        return hicks_production(z, k, p) - c
+        return production(z, k, p) - c
 
 
 @lru_cache(maxsize=None)
@@ -460,7 +437,7 @@ def cached_stochastic_benchmark(
 # Common-noise pathwise errors against the FD policy: the exogenous z path is
 # identical under both policies, so the comparison isolates the capital and
 # consumption responses.
-def add_fd_path_diagnostics(test_df, test_values, fd_values, test_initial_conditions):
+def add_fd_path_diagnostics(test_df, test_values, fd_values):
     k_benchmark = np.asarray(fd_values["k"])
     c_benchmark = np.asarray(fd_values["c"])
     k_error = (np.asarray(test_values["k"]) - k_benchmark) / np.abs(k_benchmark).clip(
@@ -472,28 +449,12 @@ def add_fd_path_diagnostics(test_df, test_values, fd_values, test_initial_condit
     columns = {
         "k_benchmark": k_benchmark,
         "c_benchmark": c_benchmark,
-        "i_benchmark": np.asarray(fd_values["i"]),
         "k_rel_error": k_error,
         "c_rel_error": c_error,
-        "k_abs_rel_error": np.abs(k_error),
-        "c_abs_rel_error": np.abs(c_error),
     }
     for name, value in columns.items():
         test_df[name] = np.asarray(value).reshape(-1)
-
-    initial = np.asarray(test_initial_conditions)
-    test_summary_df = pd.DataFrame(
-        {
-            "trajectory": np.arange(initial.shape[0]),
-            "z_0": initial[:, 0],
-            "k_0": initial[:, 1],
-            "mean_k_abs_rel_error": np.mean(np.abs(k_error), axis=1),
-            "median_k_abs_rel_error": np.median(np.abs(k_error), axis=1),
-            "mean_c_abs_rel_error": np.mean(np.abs(c_error), axis=1),
-            "median_c_abs_rel_error": np.median(np.abs(c_error), axis=1),
-        }
-    )
-    return k_error, c_error, test_summary_df
+    return k_error, c_error
 
 
 # nnx.jit so one compiled evaluation serves both the nnx policy and the FD
@@ -595,6 +556,10 @@ def stochastic_growth_nn_recursive(
         log_z_bar=math.log(z_bar),
         z_0=train_initial_conditions[:, 0],
         k_0=train_initial_conditions[:, 1],
+        A=1.0,
+        b_1=1.0,
+        b_2=0.0,
+        k_thr=float("inf"),
     )
 
     fit_start = time.perf_counter()
@@ -608,11 +573,10 @@ def stochastic_growth_nn_recursive(
     )
     # The initial training draws consume train_ic_key itself; the epoch,
     # restart, and noise streams chain from independent fold-ins of the same
-    # key, and the test noise streams chain from test_ic_key.
+    # key, and the test noise stream chains from test_ic_key.
     train_noise_key = jax.random.fold_in(train_ic_key, 3)
     tvc_noise_key = jax.random.fold_in(train_ic_key, 4)
     test_noise_key = jax.random.fold_in(test_ic_key, 1)
-    test_tvc_noise_key = jax.random.fold_in(test_ic_key, 2)
     residual_args = ResidualArgs(
         graphdef=graphdef,
         nondiff=nondiff,
@@ -778,18 +742,18 @@ def stochastic_growth_nn_recursive(
     # returned on.
     train_batch_log_states = solve_args.initial_log_states
     train_batch_initial_conditions = jnp.exp(train_batch_log_states)
-    train_solution = collocation_rollout(
+    train_solution = simulate_train(
         solver, policy, train_batch_log_states, solve_args.noise, p, data_set
     )
     train_log_states = train_solution.xs
     train_values = trajectory_values(policy, train_log_states, p)
-    train_df = trajectory_frame(
-        train_values,
-        train_solution.ts,
-        train_batch_initial_conditions,
+    train_initial = np.asarray(train_batch_initial_conditions)
+    train_df = long_df(
+        {"t": train_solution.ts, **train_values},
+        ("trajectory", "step"),
+        scalars={"z_0": train_initial[:, 0], "k_0": train_initial[:, 1]},
     )
-    train_df["collocation_step_index"] = train_df.groupby("trajectory").cumcount()
-    collocation_diagnostics = collocation_step_diagnostics(train_solution.ts)
+    num_simulation_states = int(train_solution.ts.size)
 
     test_initial_log_states = jnp.log(test_initial_conditions)
     test_noise = sample_trajectory_noise(
@@ -801,7 +765,7 @@ def stochastic_growth_nn_recursive(
         dtype,
         2,
     )
-    test_solution = rollout_steps(
+    test_solution = simulate(
         solver,
         policy,
         test_initial_log_states,
@@ -821,8 +785,14 @@ def stochastic_growth_nn_recursive(
         and jnp.all(jnp.isfinite(test_values["c"]))
         and jnp.min(test_values["c"]) > 0.0
     )
-    test_df = trajectory_frame(test_values, test_solution.ts, test_initial_conditions)
+    test_initial = np.asarray(test_initial_conditions)
+    test_df = long_df(
+        {"t": test_solution.ts, **test_values},
+        ("trajectory", "step"),
+        scalars={"z_0": test_initial[:, 0], "k_0": test_initial[:, 1]},
+    )
 
+    # Terminal transversality certificate on the training batch.
     train_tvc_noise = sample_trajectory_noise(
         solver,
         tvc_noise_key,
@@ -832,43 +802,17 @@ def stochastic_growth_nn_recursive(
         dtype,
         2,
     )
-    max_log_tvc, train_terminal_log_tvc, tvc_ok = log_tvc_residual(
+    train_tvc = log_tvc_residual(
         solver,
         policy,
         train_batch_log_states,
         train_tvc_noise,
-        data_set.train_T,
         data_set.train_tvc_T,
-        p,
-        data_set,
-    )
-    max_log_tvc = float(max_log_tvc)
-    transversality_ok = bool(
-        jnp.all(tvc_ok) and max_log_tvc < stop_set.log_tvc_threshold
-    )
-    test_tvc_noise = sample_trajectory_noise(
-        solver,
-        test_tvc_noise_key,
-        ic_set.num_test_trajectories,
         data_set.tvc_steps,
-        data_set.train_tvc_T / data_set.tvc_steps,
-        dtype,
-        2,
-    )
-    _, test_terminal_log_tvc, test_tvc_ok = log_tvc_residual(
-        solver,
-        policy,
-        test_initial_log_states,
-        test_tvc_noise,
-        data_set.train_T,
-        data_set.train_tvc_T,
         p,
-        data_set,
     )
-    test_max_log_tvc = float(jnp.max(test_terminal_log_tvc))
-    test_transversality_ok = bool(
-        jnp.all(test_tvc_ok) and test_max_log_tvc < stop_set.log_tvc_threshold
-    )
+    max_log_tvc = float(jnp.max(train_tvc))
+    transversality_ok = bool(max_log_tvc < stop_set.log_tvc_threshold)
     max_train_euler = float(train_df["euler_residual"].abs().max())
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
     test_trajectory_euler = jnp.mean(jnp.abs(test_values["euler_residual"]), axis=1)
@@ -931,11 +875,6 @@ def stochastic_growth_nn_recursive(
             jnp.mean(jnp.abs(test_values["diffusion_term"]))
         ),
         "max_log_tvc_residual": max_log_tvc,
-        "mean_log_tvc_residual": float(jnp.mean(train_terminal_log_tvc)),
-        "test_mean_log_tvc_residual": float(jnp.mean(test_terminal_log_tvc)),
-        "test_max_log_tvc_residual": test_max_log_tvc,
-        "test_transversality_ok": test_transversality_ok,
-        "tvc_normalization": "relative_to_initial_log_certificate",
         "transversality_ok": transversality_ok,
         "min_test_c": float(jnp.min(test_values["c"])),
         "test_path_ok": test_path_ok,
@@ -953,8 +892,8 @@ def stochastic_growth_nn_recursive(
         "solution_accepted": solver_accepted,
         "num_train_trajectories": ic_set.num_train_trajectories,
         "num_test_trajectories": ic_set.num_test_trajectories,
-        **collocation_diagnostics,
-        "collocation_path_ok": bool(jnp.all(train_solution.ok)),
+        "num_simulation_states": num_simulation_states,
+        "train_path_ok": bool(jnp.all(train_solution.ok)),
         "observed_log_z_min": float(observed_log_z.min()),
         "observed_log_z_max": float(observed_log_z.max()),
         "observed_log_z_p025": float(np.quantile(observed_log_z, 0.025)),
@@ -994,7 +933,7 @@ def stochastic_growth_nn_recursive(
         log_k_grid=jnp.asarray(fd["log_k_grid"], dtype=dtype),
         consumption_grid=jnp.asarray(fd["c"], dtype=dtype),
     )
-    fd_solution = rollout_steps(
+    fd_solution = simulate(
         solver,
         fd_policy,
         test_initial_log_states,
@@ -1004,9 +943,7 @@ def stochastic_growth_nn_recursive(
         p,
     )
     fd_values = trajectory_values(fd_policy, fd_solution.xs, p)
-    k_error, c_error, test_summary_df = add_fd_path_diagnostics(
-        test_df, test_values, fd_values, test_initial_conditions
-    )
+    k_error, c_error = add_fd_path_diagnostics(test_df, test_values, fd_values)
     results.update(
         fd_benchmark_iterations=int(fd["iterations"]),
         # The FD reference's own residual level in the same metric: NN-vs-FD
@@ -1017,14 +954,6 @@ def stochastic_growth_nn_recursive(
         fd_test_euler_max=float(jnp.max(jnp.abs(fd_values["euler_residual"]))),
         test_mean_abs_k_rel_error=float(np.mean(np.abs(k_error))),
         test_mean_abs_c_rel_error=float(np.mean(np.abs(c_error))),
-        test_median_abs_k_rel_error=float(np.median(np.abs(k_error))),
-        test_median_abs_c_rel_error=float(np.median(np.abs(c_error))),
-        test_median_trajectory_mean_abs_k_rel_error=float(
-            test_summary_df["mean_k_abs_rel_error"].median()
-        ),
-        test_median_trajectory_mean_abs_c_rel_error=float(
-            test_summary_df["mean_c_abs_rel_error"].median()
-        ),
         test_max_abs_k_rel_error=float(np.max(np.abs(k_error))),
         test_max_abs_c_rel_error=float(np.max(np.abs(c_error))),
     )
@@ -1111,7 +1040,6 @@ def stochastic_growth_nn_recursive(
         "test_df": test_df,
         "policy_df": policy_df,
         "hyperparameters": hyperparameters,
-        "test_summary_df": test_summary_df,
     }
     # A cache hit loads the policy from disk instead of solving, so there is
     # no primal solve to describe.

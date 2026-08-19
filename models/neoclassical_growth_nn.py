@@ -19,9 +19,8 @@ from nlls_gram import (
 from models.neoclassical_growth import (
     DOMAIN_EPS,
     StructuralParameters,
-    marginal_product,
+    mpk,
     production,
-    resolve_kink_family,
     steady_flow_consumption_guess,
 )
 from models.neoclassical_growth_benchmark import benchmark_df
@@ -132,29 +131,6 @@ class GrowthPolicyNN(nnx.Module):
         return output_scale * unit_softplus(self.head(h))
 
 
-def policy_values(model, t, p):
-    values, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
-        t
-    )
-    k = values[:, 0]
-    c = values[:, 1]
-    dk_dt = derivatives[:, 0]
-    dc_dt = derivatives[:, 1]
-    output = production(k, p)
-    mpk = marginal_product(k, p)
-    return {
-        "t": t,
-        "k": k,
-        "c": c,
-        "dk_dt": dk_dt,
-        "dc_dt": dc_dt,
-        "Y": output,
-        "mpk": mpk,
-        "resource": dk_dt - (output - p.delta * k - c),
-        "euler": dc_dt - c * (mpk - p.delta - p.rho_hat) / p.sigma_crra,
-    }
-
-
 def residual_fn(theta, args, p):
     model = nnx.merge(args.graphdef, theta, args.nondiff)
     values, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
@@ -164,27 +140,42 @@ def residual_fn(theta, args, p):
     c = values[:, 1]
     dk_dt = derivatives[:, 0]
     dc_dt = derivatives[:, 1]
-    resource = dk_dt - (production(k, p) - p.delta * k - c)
-    euler = dc_dt - c * (marginal_product(k, p) - p.delta - p.rho_hat) / p.sigma_crra
+    resource = dk_dt - (production(1.0, k, p) - p.delta * k - c)
+    euler = dc_dt - c * (mpk(1.0, k, p) - p.delta - p.rho_hat) / p.sigma_crra
     ic = model(jnp.asarray(0.0, dtype=args.t.dtype))[0] - p.k_0
     residual = jnp.concatenate([resource, euler, jnp.atleast_1d(ic)])
     return residual / jnp.sqrt(residual.size)
 
 
-def snapshot(data, model, p):
-    values = jax.device_get(policy_values(model, data["t"], p))
-    columns = {key: np.asarray(value) for key, value in values.items()}
-    df = pd.DataFrame(columns)
-    if "k_benchmark" in data:
-        k_bar = np.asarray(jax.device_get(data["k_benchmark"]))
-        c_bar = np.asarray(jax.device_get(data["c_benchmark"]))
-        df["k_benchmark"] = k_bar
-        df["c_benchmark"] = c_bar
-        df["k_rel_error"] = np.abs(df["k"] - k_bar) / np.maximum(
-            np.abs(k_bar), DOMAIN_EPS
+# Model paths and residuals on a time grid, with relative errors against the
+# benchmark when one exists (the smooth family).
+def snapshot(model, t, p, benchmark=None):
+    values, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
+        t
+    )
+    k = values[:, 0]
+    c = values[:, 1]
+    dk_dt = derivatives[:, 0]
+    dc_dt = derivatives[:, 1]
+    df = pd.DataFrame(
+        {
+            "t": np.asarray(t),
+            "k": np.asarray(k),
+            "c": np.asarray(c),
+            "resource": np.asarray(dk_dt - (production(1.0, k, p) - p.delta * k - c)),
+            "euler": np.asarray(
+                dc_dt - c * (mpk(1.0, k, p) - p.delta - p.rho_hat) / p.sigma_crra
+            ),
+        }
+    )
+    if benchmark is not None:
+        df["k_benchmark"] = benchmark["k"].to_numpy()
+        df["c_benchmark"] = benchmark["c"].to_numpy()
+        df["k_rel_error"] = np.abs(df["k"] - df["k_benchmark"]) / np.maximum(
+            np.abs(df["k_benchmark"]), DOMAIN_EPS
         )
-        df["c_rel_error"] = np.abs(df["c"] - c_bar) / np.maximum(
-            np.abs(c_bar), DOMAIN_EPS
+        df["c_rel_error"] = np.abs(df["c"] - df["c_benchmark"]) / np.maximum(
+            np.abs(df["c_benchmark"]), DOMAIN_EPS
         )
     return df
 
@@ -212,11 +203,16 @@ def neoclassical_growth_nn(
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
 ):
+    # Model setup.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
-    use_kinked_production, A_value, b_1_value, b_2_value = resolve_kink_family(
-        A, b_1, b_2
-    )
+    # Kinked production is enabled exactly when all of A, b_1, b_2 are given.
+    use_kinked_production = not (A is None or b_1 is None or b_2 is None)
+    if use_kinked_production:
+        A, b_1, b_2 = float(A), float(b_1), float(b_2)
+        k_thr = (b_2 / (b_1 - 1.0)) ** (1.0 / a)
+    else:
+        A, b_1, b_2, k_thr = 1.0, 1.0, 0.0, float("inf")
 
     dtype = jnp.float64 if use_float64 else jnp.float32
     p = StructuralParameters.create(
@@ -226,15 +222,14 @@ def neoclassical_growth_nn(
         rho_hat=rho_hat,
         sigma_crra=sigma_crra,
         k_0=k_0,
-        A=A_value,
-        b_1=b_1_value,
-        b_2=b_2_value,
+        A=A,
+        b_1=b_1,
+        b_2=b_2,
+        k_thr=k_thr,
     )
 
     t_train = make_train_t_grid(data_set, dtype)
-    c_flow_guess = steady_flow_consumption_guess(
-        k_0, a, delta, A_value, b_1_value, b_2_value
-    )
+    c_flow_guess = steady_flow_consumption_guess(k_0, a, delta, A, b_1, b_2)
     policy_settings = replace(nn_set, input_scale=max(float(data_set.train_T), 1.0))
     k_scale = max(float(k_0), DOMAIN_EPS)
     c_scale = c_flow_guess
@@ -249,6 +244,7 @@ def neoclassical_growth_nn(
     graphdef, theta_0, nondiff = nnx.split(model, nnx.Param, ...)
     residual_args = ResidualArgs(graphdef=graphdef, nondiff=nondiff, t=t_train)
 
+    # Multi-start Levenberg-Marquardt solve.
     solver = LevenbergMarquardt(
         residual_fn,
         init_damping=lm_set.init_damping,
@@ -294,9 +290,9 @@ def neoclassical_growth_nn(
     train_loss = float(result.info.loss)
     accepted = bool(result.multi_start.accepted)
 
-    train_data = {"t": t_train}
+    # Diagnostics against the benchmark.
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
-    test_data = {"t": test_t}
+    train_benchmark = test_benchmark = None
     if not use_kinked_production:
         train_benchmark = benchmark_df(
             [[1.0, k_0]], np.asarray(t_train), a, delta, rho_hat, sigma_crra
@@ -304,61 +300,36 @@ def neoclassical_growth_nn(
         test_benchmark = benchmark_df(
             [[1.0, k_0]], np.asarray(test_t), a, delta, rho_hat, sigma_crra
         )
-        train_data = {
-            **train_data,
-            "k_benchmark": train_benchmark["k"].to_numpy(),
-            "c_benchmark": train_benchmark["c"].to_numpy(),
-        }
-        test_data = {
-            **test_data,
-            "k_benchmark": test_benchmark["k"].to_numpy(),
-            "c_benchmark": test_benchmark["c"].to_numpy(),
-        }
+    train_df = snapshot(model, t_train, p, train_benchmark)
+    test_df = snapshot(model, test_t, p, test_benchmark)
 
-    train_df = snapshot(train_data, model, p)
-    test_df = snapshot(test_data, model, p)
     tvc_t = jnp.asarray(data_set.test_tvc_T, dtype=dtype)
-    tvc_values = policy_values(model, jnp.atleast_1d(tvc_t), p)
-    log_tvc = float(
-        -p.rho_hat * tvc_t
-        - p.sigma_crra * jnp.log(tvc_values["c"][0])
-        + jnp.log(tvc_values["k"][0])
-    )
+    k_T, c_T = model(tvc_t)
+    log_tvc = float(-p.rho_hat * tvc_t - p.sigma_crra * jnp.log(c_T) + jnp.log(k_T))
     transversality_ok = bool(log_tvc < stop_set.log_tvc_threshold)
 
-    train_resource_mean_abs = float(train_df["resource"].abs().mean())
-    train_euler_mean_abs = float(train_df["euler"].abs().mean())
-    test_resource_mean_abs = float(test_df["resource"].abs().mean())
-    test_euler_mean_abs = float(test_df["euler"].abs().mean())
-    max_train_residual = float(
-        max(train_df["resource"].abs().max(), train_df["euler"].abs().max())
-    )
-    max_test_residual = float(
-        max(test_df["resource"].abs().max(), test_df["euler"].abs().max())
-    )
-
+    # Published results.
     results = {
         "a": a,
         "delta": delta,
         "rho_hat": rho_hat,
         "sigma_crra": sigma_crra,
         "k_0": k_0,
-        "A": A_value,
-        "b_1": b_1_value,
-        "b_2": b_2_value,
+        "A": A,
+        "b_1": b_1,
+        "b_2": b_2,
         "use_kinked_production": use_kinked_production,
         "seed": seed,
         # Measured, not requested: a float64 leak upstream shows up here.
-        "residual_dtype": str(tvc_values["euler"].dtype),
+        "residual_dtype": str(k_T.dtype),
         "solver": "nlls-gram",
         "train_loss": train_loss,
         "final_damping": float(result.lm_state.damping),
-        "train_resource_mean_abs": train_resource_mean_abs,
-        "train_euler_mean_abs": train_euler_mean_abs,
-        "test_resource_mean_abs": test_resource_mean_abs,
-        "test_euler_mean_abs": test_euler_mean_abs,
-        "max_train_residual": max_train_residual,
-        "max_test_residual": max_test_residual,
+        "test_resource_mean_abs": float(test_df["resource"].abs().mean()),
+        "test_euler_mean_abs": float(test_df["euler"].abs().mean()),
+        "max_train_residual": float(
+            max(train_df["resource"].abs().max(), train_df["euler"].abs().max())
+        ),
         "log_tvc_residual": log_tvc,
         "transversality_ok": transversality_ok,
         "steps": steps,
@@ -381,8 +352,6 @@ def neoclassical_growth_nn(
             test_c_rel_error_mean=float(test_df["c_rel_error"].mean()),
             test_k_rel_error_max=float(test_df["k_rel_error"].abs().max()),
             test_c_rel_error_max=float(test_df["c_rel_error"].abs().max()),
-            train_k_rel_error_mean=float(train_df["k_rel_error"].mean()),
-            train_c_rel_error_mean=float(train_df["c_rel_error"].mean()),
         )
 
     if verbose:
@@ -400,9 +369,9 @@ def neoclassical_growth_nn(
             "delta": delta,
             "rho_hat": rho_hat,
             "sigma_crra": sigma_crra,
-            "A": A_value,
-            "b_1": b_1_value,
-            "b_2": b_2_value,
+            "A": A,
+            "b_1": b_1,
+            "b_2": b_2,
         },
         "initial_conditions": {"k_0": k_0},
     }

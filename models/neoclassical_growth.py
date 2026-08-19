@@ -6,12 +6,8 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
-import numpy as np
-import pandas as pd
 from flax import nnx, struct
-from tinydiffeq import RK4, ConstantStepSize, IController, SaveAt, Tsit5, solve_ode
-
-from models.neoclassical_growth_benchmark import benchmark_df
+from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 
 DOMAIN_EPS = 1e-8
 
@@ -31,8 +27,9 @@ class KinkedCalibration:
 KINKED_CALIBRATION = KinkedCalibration()
 
 
-# (A, b_1, b_2) = (1, 1, 0) is smooth Cobb-Douglas; the kinked family sets
-# all three.
+# (A, b_1, b_2, k_thr) = (1, 1, 0, inf) is smooth Cobb-Douglas; the kinked
+# family sets all four, with k_thr = (b_2 / (b_1 - 1))^{1/a} the branch
+# switch.
 @struct.dataclass
 class StructuralParameters:
     a: jax.Array
@@ -43,6 +40,7 @@ class StructuralParameters:
     A: jax.Array
     b_1: jax.Array
     b_2: jax.Array
+    k_thr: jax.Array
 
     @classmethod
     def create(cls, dtype, **kwargs):
@@ -59,6 +57,10 @@ class RecursiveParameters:
     rho_hat: jax.Array
     sigma_crra: jax.Array
     g: jax.Array
+    A: jax.Array
+    b_1: jax.Array
+    b_2: jax.Array
+    k_thr: jax.Array
 
     @classmethod
     def create(cls, dtype, **kwargs):
@@ -67,50 +69,24 @@ class RecursiveParameters:
         )
 
 
-def resolve_kink_family(A, b_1, b_2):
-    kinked_parameter_count = sum(parameter is not None for parameter in (A, b_1, b_2))
-    if kinked_parameter_count not in {0, 3}:
-        raise ValueError("Set all of A, b_1, and b_2, or set none of them.")
-    return (
-        kinked_parameter_count == 3,
-        1.0 if A is None else float(A),
-        1.0 if b_1 is None else float(b_1),
-        0.0 if b_2 is None else float(b_2),
-    )
-
-
-def production(k, p):
-    base = k**p.a
-    return p.A * jnp.maximum(base, p.b_1 * base - p.b_2)
-
-
-def marginal_product(k, p):
-    base = k**p.a
-    branch = jnp.where(p.b_1 * base - p.b_2 > base, p.b_1, 1.0)
-    return p.A * branch * (p.a * k ** (p.a - 1.0))
-
-
-# Flat steady-flow warm start c(0) = f(k_0) - delta k_0, floored away from
-# zero.
-def steady_flow_consumption_guess(k_0, a, delta, A, b_1, b_2):
-    base = k_0**a
-    return max(A * max(base, b_1 * base - b_2) - delta * k_0, DOMAIN_EPS)
-
-
-# Hicks-neutral technology: z is the TFP level, so Y = z k^a. Balanced growth
+# Hicks-neutral technology: Y = z A max(k^a, b_1 k^a - b_2). Balanced growth
 # at per-capita rate g needs the TFP trend (1 - a) g; the labor-augmenting
 # index z^{1/(1-a)} grows at g and is the detrending scale for quantities.
-def hicks_production(z, k, p):
-    return z * k**p.a
+def production(z, k, p):
+    base = k**p.a
+    return z * p.A * jnp.maximum(base, p.b_1 * base - p.b_2)
 
 
+# Marginal product, kinked at k_thr: the branch switch is intrinsic to the
+# model's first-order condition and measure-zero through the where.
 def mpk(z, k, p):
-    return p.a * z * k ** (p.a - 1.0)
+    branch = jnp.where(k > p.k_thr, p.b_1, 1.0)
+    return z * p.A * p.a * branch * k ** (p.a - 1.0)
 
 
 def consumption(policy, log_state, p):
     z, k = jnp.exp(log_state)
-    return hicks_production(z, k, p) - policy(log_state, p)
+    return production(z, k, p) - policy(log_state, p)
 
 
 def log_state_drift(policy, log_state, p):
@@ -139,6 +115,13 @@ def euler_residuals(policy, log_states, p):
         )
 
     return jax.vmap(residual_scalar)(log_states)
+
+
+# Flat steady-flow warm start c(0) = f(k_0) - delta k_0, floored away from
+# zero.
+def steady_flow_consumption_guess(k_0, a, delta, A, b_1, b_2):
+    base = k_0**a
+    return max(A * max(base, b_1 * base - b_2) - delta * k_0, DOMAIN_EPS)
 
 
 # Closed-form steady state of the static smooth model (z = 1, g = 0):
@@ -187,19 +170,6 @@ def kinked_thresholds(
     k_ss_low = ((delta + rho_hat) / (A * a)) ** (1.0 / (a - 1.0))
     k_ss_high = ((delta + rho_hat) / (A * a * b_1)) ** (1.0 / (a - 1.0))
     return k_thr, k_ss_low, k_ss_high
-
-
-# Well-posedness of the planner objective, not steady-state structure:
-# finiteness of discounted utility needs rho_hat + (sigma - 1) g > 0, the
-# discounted-capital certificate needs g < rho_hat, and detrended capital
-# needs positive effective depreciation.
-def validate_balanced_growth(delta, rho_hat, sigma_crra, g):
-    if g >= rho_hat:
-        raise ValueError("g must be less than rho_hat")
-    if rho_hat + (sigma_crra - 1.0) * g <= 0.0:
-        raise ValueError("rho_hat + (sigma_crra - 1) * g must be positive")
-    if delta + g <= 0.0:
-        raise ValueError("delta + g must be positive")
 
 
 @dataclass(frozen=True)
@@ -307,18 +277,15 @@ def growth_initial_conditions(z_0, k_0, ic_set, dtype):
     )
 
 
-def initial_kappa(initial_conditions, a):
-    return np.asarray(
-        initial_conditions[:, 1] / initial_conditions[:, 0] ** (1.0 / (1.0 - a))
-    )
-
-
 def log_state_drift_field(log_state, _, args, p):
     policy, structural = p
     return log_state_drift(policy, log_state, structural)
 
 
-def batched_rollout(policy, initial_log_states, T, budget, dt_0, p):
+# Fixed-step RK4 rollout of the policy from a batch of initial log states,
+# saving the integrator's own steps.
+@partial(jax.jit, static_argnames=("T", "n_steps"))
+def simulate(policy, initial_log_states, T, n_steps, p):
     def solve_one(initial_log_state):
         return solve_ode(
             log_state_drift_field,
@@ -326,9 +293,9 @@ def batched_rollout(policy, initial_log_states, T, budget, dt_0, p):
             0.0,
             T,
             initial_log_state,
-            dt_0=dt_0,
+            dt_0=T / n_steps,
             controller=ConstantStepSize(),
-            max_steps=budget,
+            max_steps=n_steps,
             save_at=SaveAt(steps=True),
             p=(policy, p),
         )
@@ -336,247 +303,20 @@ def batched_rollout(policy, initial_log_states, T, budget, dt_0, p):
     return jax.vmap(solve_one)(initial_log_states)
 
 
-@partial(jax.jit, static_argnames=("data_set",))
-def collocation_rollout(policy, initial_log_states, p, data_set):
-    budget = data_set.train_points - 1
-    if data_set.ode_solver == "rk4":
-        return batched_rollout(
-            policy,
-            initial_log_states,
-            data_set.train_T,
-            budget,
-            data_set.train_T / budget,
-            p,
-        )
-    dt_0 = (
-        data_set.train_T / budget
-        if data_set.initial_dt is None
-        else data_set.initial_dt
-    )
-
-    def solve_one(initial_log_state):
-        return solve_ode(
-            log_state_drift_field,
-            Tsit5(),
-            0.0,
-            data_set.train_T,
-            initial_log_state,
-            dt_0=dt_0,
-            controller=IController(rtol=data_set.rtol, atol=data_set.atol),
-            max_steps=budget,
-            save_at=SaveAt(steps=True),
-            p=(policy, p),
-        )
-
-    return jax.vmap(solve_one)(initial_log_states)
-
-
-@partial(jax.jit, static_argnames=("T", "budget", "dt_0"))
-def rollout_steps(policy, initial_log_states, T, budget, dt_0, p):
-    return batched_rollout(policy, initial_log_states, T, budget, dt_0, p)
-
-
-def collocation_residuals(policy, initial_log_states, p, data_set):
-    solution = collocation_rollout(policy, initial_log_states, p, data_set)
-    log_states = solution.xs
-    euler = euler_residuals(policy, log_states.reshape(-1, 2), p).reshape(
-        log_states.shape[:2]
-    )
-    # Mean squared residual, so the loss threshold means the same thing at any
-    # number of trajectories or collocation points. An adaptive rollout only
-    # fills the accepted prefix of the step buffer, so both the residuals and
-    # the count are restricted to that prefix.
-    if data_set.ode_solver == "rk4":
-        count = jnp.asarray(euler.size, dtype=euler.dtype)
-        normalized = euler / jnp.sqrt(count)
-    else:
-        active = solution.accepted
-        count = jnp.maximum(jnp.sum(active), 1).astype(euler.dtype)
-        normalized = jnp.where(active, euler, 0.0) / jnp.sqrt(count)
-    # A nonfinite trajectory did not cover the requested economic horizon. Make
-    # that a loud optimizer failure instead of fitting a prefix.
-    return jnp.where(
-        solution.ok[:, None],
-        normalized,
-        jnp.full_like(euler, jnp.inf),
-    )
-
-
-def log_tvc_residual(policy, initial_log_states, T_start, T_end, p, data_set):
-    # An empty window would certify on -inf evidence.
-    if T_start >= T_end:
-        raise ValueError("the transversality horizon must exceed the start")
-    solution = rollout_steps(
-        policy,
-        initial_log_states,
-        T_end,
-        data_set.tvc_steps,
-        T_end / data_set.tvc_steps,
-        p,
-    )
-    valid = (solution.ts >= T_start) & solution.ok[:, None]
-    flat_states = solution.xs.reshape(-1, 2)
-    c = jax.vmap(lambda state: consumption(policy, state, p))(flat_states).reshape(
-        solution.ts.shape
-    )
-    _, k = jnp.moveaxis(jnp.exp(solution.xs), -1, 0)
-    log_tvc = -p.rho_hat * solution.ts - p.sigma_crra * jnp.log(c) + jnp.log(k)
+# Natural-log transversality certificate at the terminal date T, normalized
+# by the initial-date certificate, per initial state: the saddle path sits
+# far negative, a capital bubble drives it positive. A failed rollout is a
+# loud +inf.
+def log_tvc_residual(policy, initial_log_states, T, n_steps, p):
+    solution = simulate(policy, initial_log_states, T, n_steps, p)
+    terminal_log_states = solution.xs[:, -1, :]
+    c_T = jax.vmap(lambda state: consumption(policy, state, p))(terminal_log_states)
+    k_T = jnp.exp(terminal_log_states[:, 1])
     c_0 = jax.vmap(lambda state: consumption(policy, state, p))(initial_log_states)
     k_0 = jnp.exp(initial_log_states[:, 1])
+    log_tvc = -p.rho_hat * T - p.sigma_crra * jnp.log(c_T) + jnp.log(k_T)
     initial_log_tvc = -p.sigma_crra * jnp.log(c_0) + jnp.log(k_0)
-    normalized_log_tvc = log_tvc - initial_log_tvc[:, None]
-    # Alongside the windowed max, the per-trajectory certificate at the single
-    # terminal date T_end; a failed rollout is a loud +inf.
-    terminal_log_tvc = jnp.where(solution.ok, normalized_log_tvc[:, -1], jnp.inf)
-    return (
-        jnp.max(jnp.where(valid, normalized_log_tvc, -jnp.inf)),
-        terminal_log_tvc,
-        solution.ok,
-    )
-
-
-def tvc_certificates(
-    policy, train_log_states, test_log_states, p, data_set, log_tvc_threshold
-):
-    max_log_tvc, train_terminal_log_tvc, tvc_ok = log_tvc_residual(
-        policy,
-        train_log_states,
-        data_set.train_T,
-        data_set.train_tvc_T,
-        p,
-        data_set,
-    )
-    max_log_tvc = float(max_log_tvc)
-    transversality_ok = bool(jnp.all(tvc_ok) and max_log_tvc < log_tvc_threshold)
-    _, test_terminal_log_tvc, test_tvc_ok = log_tvc_residual(
-        policy,
-        test_log_states,
-        data_set.train_T,
-        data_set.train_tvc_T,
-        p,
-        data_set,
-    )
-    test_max_log_tvc = float(jnp.max(test_terminal_log_tvc))
-    test_transversality_ok = bool(
-        jnp.all(test_tvc_ok) and test_max_log_tvc < log_tvc_threshold
-    )
-    return {
-        "max_log_tvc_residual": max_log_tvc,
-        "mean_log_tvc_residual": float(jnp.mean(train_terminal_log_tvc)),
-        "test_mean_log_tvc_residual": float(jnp.mean(test_terminal_log_tvc)),
-        "test_max_log_tvc_residual": test_max_log_tvc,
-        "test_transversality_ok": test_transversality_ok,
-        "tvc_normalization": "relative_to_initial_log_certificate",
-        "transversality_ok": transversality_ok,
-    }
-
-
-def benchmark_trajectories(a, delta, rho_hat, sigma_crra, g, initial_conditions, times):
-    times = np.asarray(times, dtype=float)
-    frame = benchmark_df(initial_conditions, times, a, delta, rho_hat, sigma_crra, g)
-    k_paths = frame["k"].to_numpy().reshape(len(initial_conditions), -1)
-    c_paths = frame["c"].to_numpy().reshape(len(initial_conditions), -1)
-    z_paths = np.asarray(initial_conditions)[:, :1] * np.exp(
-        (1.0 - a) * g * times[None, :]
-    )
-    return z_paths, k_paths, c_paths
-
-
-def benchmark_policy_grid(a, delta, rho_hat, sigma_crra, g, kappa_grid, data_set):
-    # Interpolate c_tilde(kappa) from benchmark transitions started at the
-    # low, middle, and high grid points. The long transitions overlap in the
-    # interior and asymptote toward balanced growth from both sides, so the
-    # interpolation support is dense without ever computing a steady state.
-    # Sampling stops at the training horizon to stay out of the terminal
-    # boundary layer of the truncated BVP.
-    policy_sample_T = max(data_set.train_T, data_set.test_T)
-    benchmark_times = np.linspace(0.0, policy_sample_T, 801)
-    kappa_starts = np.unique(
-        [kappa_grid[0], kappa_grid[len(kappa_grid) // 2], kappa_grid[-1]]
-    )
-    frame = benchmark_df(
-        [[1.0, kappa_start] for kappa_start in kappa_starts],
-        benchmark_times,
-        a,
-        delta,
-        rho_hat,
-        sigma_crra,
-        g,
-    )
-    by_kappa = frame.sort_values("kappa")
-    return np.interp(kappa_grid, by_kappa["kappa"], by_kappa["c_tilde"])
-
-
-def add_benchmark_path_diagnostics(
-    test_df,
-    test_values,
-    test_initial_conditions,
-    z_benchmark,
-    k_benchmark,
-    c_benchmark,
-    *,
-    a,
-    delta,
-    g,
-):
-    k_error = (np.asarray(test_values["k"]) - k_benchmark) / np.abs(k_benchmark).clip(
-        min=DOMAIN_EPS
-    )
-    c_error = (np.asarray(test_values["c"]) - c_benchmark) / np.abs(c_benchmark).clip(
-        min=DOMAIN_EPS
-    )
-    scale_benchmark = z_benchmark ** (1.0 / (1.0 - a))
-    kappa_benchmark = k_benchmark / scale_benchmark
-    c_tilde_benchmark = c_benchmark / scale_benchmark
-    i_benchmark = z_benchmark * k_benchmark**a - c_benchmark
-    dk_benchmark = i_benchmark - delta * k_benchmark
-    dkappa_benchmark = i_benchmark / scale_benchmark - (delta + g) * kappa_benchmark
-
-    columns = {
-        "z_benchmark": z_benchmark,
-        "k_benchmark": k_benchmark,
-        "c_benchmark": c_benchmark,
-        "kappa_benchmark": kappa_benchmark,
-        "c_tilde_benchmark": c_tilde_benchmark,
-        "i_benchmark": i_benchmark,
-        "dk_benchmark": dk_benchmark,
-        "dkappa_benchmark": dkappa_benchmark,
-        "k_rel_error": k_error,
-        "c_rel_error": c_error,
-        "k_abs_rel_error": np.abs(k_error),
-        "c_abs_rel_error": np.abs(c_error),
-    }
-    for name, value in columns.items():
-        test_df[name] = np.asarray(value).reshape(-1)
-
-    initial = np.asarray(test_initial_conditions)
-    test_summary_df = pd.DataFrame(
-        {
-            "trajectory": np.arange(initial.shape[0]),
-            "z_0": initial[:, 0],
-            "k_0": initial[:, 1],
-            "kappa_0": initial[:, 1] / initial[:, 0] ** (1.0 / (1.0 - a)),
-            "mean_k_abs_rel_error": np.mean(np.abs(k_error), axis=1),
-            "median_k_abs_rel_error": np.median(np.abs(k_error), axis=1),
-            "mean_c_abs_rel_error": np.mean(np.abs(c_error), axis=1),
-            "median_c_abs_rel_error": np.median(np.abs(c_error), axis=1),
-        }
-    )
-    error_fields = {
-        "test_mean_abs_k_rel_error": float(np.mean(np.abs(k_error))),
-        "test_mean_abs_c_rel_error": float(np.mean(np.abs(c_error))),
-        "test_median_abs_k_rel_error": float(np.median(np.abs(k_error))),
-        "test_median_abs_c_rel_error": float(np.median(np.abs(c_error))),
-        "test_median_trajectory_mean_abs_k_rel_error": float(
-            test_summary_df["mean_k_abs_rel_error"].median()
-        ),
-        "test_median_trajectory_mean_abs_c_rel_error": float(
-            test_summary_df["mean_c_abs_rel_error"].median()
-        ),
-        "test_max_abs_k_rel_error": float(np.max(np.abs(k_error))),
-        "test_max_abs_c_rel_error": float(np.max(np.abs(c_error))),
-    }
-    return test_summary_df, error_fields
+    return jnp.where(solution.ok, log_tvc - initial_log_tvc, jnp.inf)
 
 
 # nnx.jit so one compiled evaluation serves both the nnx policy and the
@@ -593,161 +333,12 @@ def trajectory_values(policy, log_states, p):
     z, k = jnp.moveaxis(jnp.exp(log_states), -1, 0)
     scale = z ** (1.0 / (1.0 - p.a))
     kappa = k / scale
-    dk = investment - p.delta * k
-    dz = (1.0 - p.a) * p.g * z
     dkappa = investment / scale - (p.delta + p.g) * kappa
     return {
         "z": z,
         "k": k,
         "kappa": kappa,
-        "i": investment,
         "c": c,
-        "dz": dz,
-        "dk": dk,
         "dkappa": dkappa,
         "euler_residual": euler,
     }
-
-
-SCALE_INVARIANCE_LAMBDAS = (math.exp(-0.25), 1.0, math.exp(0.25))
-
-
-# i/k at matched kappa under common scales (z, k) -> (lam^{1-a} z, lam k),
-# which hold kappa = k / z^{1/(1-a)} fixed; the dispersion across columns is
-# zero iff the policy is homothetic.
-def scale_invariance_columns(policy, kappa_grid, p, dtype, suffix):
-    log_lambdas = jnp.log(jnp.asarray(SCALE_INVARIANCE_LAMBDAS, dtype=dtype))
-    log_kappa = jnp.log(jnp.asarray(kappa_grid, dtype=dtype))
-    states = jnp.stack(
-        [
-            jnp.broadcast_to(
-                (1.0 - p.a) * log_lambdas[:, None],
-                (len(log_lambdas), log_kappa.size),
-            ),
-            log_lambdas[:, None] + log_kappa[None, :],
-        ],
-        axis=-1,
-    )
-    values = trajectory_values(policy, states, p)
-    i_over_k = np.asarray(values["i"] / values["k"])
-    return {
-        f"i_over_k_scale_{tag}_{suffix}": i_over_k[row]
-        for row, tag in enumerate(("lo", "mid", "hi"))
-    }
-
-
-def trajectory_frame(values, times, initial_conditions):
-    num_trajectories, num_times = values["z"].shape
-    initial = np.asarray(initial_conditions)
-    trajectory = np.repeat(np.arange(num_trajectories), num_times)
-    frame = pd.DataFrame(
-        {
-            "trajectory": trajectory,
-            "t": np.asarray(times).reshape(-1),
-            "z_0": initial[trajectory, 0],
-            "k_0": initial[trajectory, 1],
-            "kappa_0": np.asarray(values["kappa"])[trajectory, 0],
-        }
-    )
-    for name, value in values.items():
-        frame[name] = np.asarray(value).reshape(-1)
-    return frame
-
-
-def collocation_step_diagnostics(times, accepted=None):
-    # accepted (adaptive rollouts) masks the valid prefix of each step
-    # buffer; None means every saved step is a collocation state.
-    times = np.asarray(times)
-    if accepted is None:
-        accepted = np.ones(times.shape, dtype=bool)
-    else:
-        accepted = np.asarray(accepted)
-    step_sizes = np.concatenate(
-        [np.diff(row_times[row_mask]) for row_times, row_mask in zip(times, accepted)]
-    )
-    return {
-        "num_collocation_states": int(accepted.sum()),
-        "collocation_states_per_trajectory": int(accepted.sum(axis=1).max()),
-        "collocation_dt": float(step_sizes.max()) if step_sizes.size else np.nan,
-        "collocation_dt_min": float(step_sizes.min()) if step_sizes.size else np.nan,
-    }
-
-
-# Diagnostic grid bounds come from the realized states, never a steady
-# state. Snapping to a coarse log lattice keeps the cached benchmark
-# starts shared across seeds and data draws.
-def kappa_diagnostic_grid(
-    train_kappa, test_kappa, train_kappa_0, test_kappa_0, policy_grid_size, dtype
-):
-    observed_kappa = np.concatenate(
-        [train_kappa, test_kappa, train_kappa_0, test_kappa_0]
-    )
-    observed_kappa = observed_kappa[np.isfinite(observed_kappa) & (observed_kappa > 0)]
-    if observed_kappa.size == 0:
-        raise ValueError("no finite positive kappa was observed")
-    log_lo = math.floor(math.log(observed_kappa.min()) / 0.05) * 0.05
-    log_hi = math.ceil(math.log(observed_kappa.max()) / 0.05) * 0.05
-    log_margin = 0.05 * (log_hi - log_lo) + 1e-6
-    kappa_grid = np.exp(
-        np.linspace(log_lo - log_margin, log_hi + log_margin, policy_grid_size)
-    )
-    grid_log_states = jnp.stack(
-        [
-            jnp.zeros(policy_grid_size, dtype=dtype),
-            jnp.log(jnp.asarray(kappa_grid, dtype=dtype)),
-        ],
-        axis=1,
-    )
-    return kappa_grid, grid_log_states
-
-
-# The published kappa-grid policy comparison; `suffix` tags the solver's
-# columns next to the shared benchmark ones.
-def policy_diagnostics_frame(
-    policy,
-    train_kappa,
-    test_kappa,
-    train_kappa_0,
-    test_kappa_0,
-    a,
-    delta,
-    rho_hat,
-    sigma_crra,
-    g,
-    p,
-    data_set,
-    dtype,
-    suffix,
-):
-    kappa_grid, grid_log_states = kappa_diagnostic_grid(
-        train_kappa,
-        test_kappa,
-        train_kappa_0,
-        test_kappa_0,
-        data_set.policy_grid_size,
-        dtype,
-    )
-    grid_values = trajectory_values(policy, grid_log_states[None, :, :], p)
-    output_per_z = np.asarray(jnp.asarray(kappa_grid, dtype=dtype) ** p.a)
-    c_benchmark_grid = benchmark_policy_grid(
-        a, delta, rho_hat, sigma_crra, g, kappa_grid, data_set
-    )
-    return pd.DataFrame(
-        {
-            "kappa": kappa_grid,
-            f"investment_share_{suffix}": np.asarray(grid_values["i"][0])
-            / output_per_z,
-            # The learned map itself: unit_softplus of the raw policy, since
-            # the grid fixes z = 1 so k = kappa.
-            f"i_over_delta_k_{suffix}": np.asarray(grid_values["i"][0])
-            / (delta * np.asarray(kappa_grid)),
-            f"i_per_z_{suffix}": np.asarray(grid_values["i"][0]),
-            f"c_tilde_{suffix}": np.asarray(grid_values["c"][0]),
-            f"dkappa_{suffix}": np.asarray(grid_values["dkappa"][0]),
-            **scale_invariance_columns(policy, kappa_grid, p, dtype, suffix),
-            "c_tilde_benchmark": c_benchmark_grid,
-            "dkappa_benchmark": (
-                kappa_grid**a - c_benchmark_grid - (delta + g) * kappa_grid
-            ),
-        }
-    )

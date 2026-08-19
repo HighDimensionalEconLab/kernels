@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pandas as pd
 from flax import nnx
 from nlls_gram import LMStatus
 
@@ -74,6 +75,25 @@ def finite_difference_directional(f, x, v, eps_f, order=4):
         *outputs,
     )
     return derivative, h
+
+
+# Long-format DataFrame from a dict of same-shaped arrays: one row per
+# element, index columns from np.indices (one per index name), one data
+# column per key. `scalars` maps column name -> python scalar, or array
+# indexed by the FIRST index (e.g. one value per trajectory), broadcast
+# across that index's rows.
+def long_df(tree, index_names, scalars=None):
+    named = jax.device_get(dict(tree))
+    shape = next(iter(named.values())).shape
+    idx = np.indices(shape).reshape(len(index_names), -1)
+    data = dict(zip(index_names, idx))
+    for name, value in (scalars or {}).items():
+        value = np.asarray(value)
+        data[name] = (
+            value[idx[0]] if value.ndim else np.broadcast_to(value, idx[0].shape)
+        )
+    data.update({name: arr.reshape(-1) for name, arr in named.items()})
+    return pd.DataFrame(data)
 
 
 # perf_counter anchored at construction; elapsed(x) blocks on x first so

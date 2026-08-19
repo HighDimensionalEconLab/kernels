@@ -23,26 +23,23 @@ from models.kernels import (
     rkhs_norm_squared,
 )
 from models.neoclassical_growth import (
+    DOMAIN_EPS,
     InitialConditionSettings,
     RecursiveParameters,
-    add_benchmark_path_diagnostics,
-    benchmark_trajectories,
     euler_residuals,
     growth_initial_conditions,
-    initial_kappa,
-    policy_diagnostics_frame,
-    rollout_steps,
-    trajectory_frame,
+    log_tvc_residual,
+    simulate,
     trajectory_values,
-    tvc_certificates,
-    validate_balanced_growth,
 )
+from models.neoclassical_growth_benchmark import benchmark_df
 from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
 from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
+    long_df,
     unit_softplus,
 )
 
@@ -58,7 +55,6 @@ class DataSettings:
     tvc_steps: int = 256
     train_tvc_T: float = CONSTANTS.transversality_T
     test_T: float = CONSTANTS.test_T
-    policy_grid_size: int = 100
 
 
 @jax.tree_util.register_static
@@ -133,32 +129,23 @@ def nonhomothetic_state_features(x, centers, kernel_set):
     return additive_matern_state_features(family, x, centers, sigmas, lengthscales)
 
 
+# Frozen collocation design: the exact benchmark paths of the training
+# initial conditions on the training date grid.
 def fixed_collocation_data(
-    a,
-    delta,
-    rho_hat,
-    sigma_crra,
-    g,
-    initial_conditions,
-    data_set,
-    *,
-    dtype,
+    a, delta, rho_hat, sigma_crra, g, initial_conditions, data_set, *, dtype
 ):
     train_times = np.linspace(0.0, data_set.train_T, data_set.train_points)
-    z, k, c = benchmark_trajectories(
-        a,
-        delta,
-        rho_hat,
-        sigma_crra,
-        g,
-        initial_conditions,
-        train_times,
+    benchmark = benchmark_df(
+        initial_conditions, train_times, a, delta, rho_hat, sigma_crra, g
+    )
+    k = benchmark["k"].to_numpy().reshape(len(initial_conditions), -1)
+    z = np.asarray(initial_conditions)[:, :1] * np.exp(
+        (1.0 - a) * g * train_times[None, :]
     )
     log_states = np.stack([np.log(z), np.log(k)], axis=-1)
     return (
         jnp.asarray(np.broadcast_to(train_times, k.shape), dtype=dtype),
         jnp.asarray(log_states, dtype=dtype),
-        jnp.asarray(c, dtype=dtype),
     )
 
 
@@ -260,10 +247,10 @@ def neoclassical_growth_kernel_recursive(
     stop_set: StoppingCriteria = StoppingCriteria(),
     verbose: bool = True,
 ):
+    # Model and collocation design setup.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    validate_balanced_growth(delta, rho_hat, sigma_crra, g)
     state_kernels = tuple(
         f"{structure}_{family}"
         for structure in ("ard", "additive")
@@ -286,10 +273,14 @@ def neoclassical_growth_kernel_recursive(
         rho_hat=rho_hat,
         sigma_crra=sigma_crra,
         g=g,
+        A=1.0,
+        b_1=1.0,
+        b_2=0.0,
+        k_thr=float("inf"),
     )
 
     fit_start = time.perf_counter()
-    train_times, train_log_states, train_c_benchmark = fixed_collocation_data(
+    train_times, train_log_states = fixed_collocation_data(
         a,
         delta,
         rho_hat,
@@ -300,17 +291,21 @@ def neoclassical_growth_kernel_recursive(
         dtype=dtype,
     )
     args = build_residual_args(train_log_states, kernel_set, a, z_0, k_0)
-    n_train = args.centers.shape[0]
-    shifted_gram = args.gram + kernel_set.metric_epsilon * jnp.eye(n_train, dtype=dtype)
+    n_centers = args.centers.shape[0]
+    shifted_gram = args.gram + kernel_set.metric_epsilon * jnp.eye(
+        n_centers, dtype=dtype
+    )
     metric = RepeatedFactorMetric(
         jnp.linalg.cholesky(shifted_gram, upper=True),
         repeats=1,
     )
-    theta_0 = (jnp.zeros(n_train, dtype=dtype),)
+    theta_0 = (jnp.zeros(n_centers, dtype=dtype),)
     if kernel_set.free_constant:
         theta_0 = theta_0 + (jnp.zeros((), dtype=dtype),)
     if kernel_set.linear_mean:
         theta_0 = theta_0 + (jnp.zeros(2, dtype=dtype),)
+
+    # Ridge Levenberg-Marquardt solve.
     solver = RidgeLevenbergMarquardt(
         partial(residual_fn, kernel_set=kernel_set),
         metric=metric,
@@ -351,26 +346,18 @@ def neoclassical_growth_kernel_recursive(
     alpha = theta[0]
     h_const = float(theta[1]) if kernel_set.free_constant else 0.0
     policy = KernelInvestmentPolicy(theta, args, kernel_set)
-    train_values = trajectory_values(policy, train_log_states, p)
-    train_df = trajectory_frame(
-        train_values,
-        train_times,
-        train_initial_conditions,
-    )
-    train_c_benchmark_np = np.asarray(train_c_benchmark).reshape(-1)
-    train_df["c_benchmark"] = train_c_benchmark_np
-    train_df["i_benchmark"] = (
-        np.asarray(train_df["z"] * train_df["k"] ** a) - train_c_benchmark_np
-    )
-    train_df["fixed_exact_center"] = True
 
-    test_solution = rollout_steps(
-        policy,
-        jnp.log(test_initial_conditions),
-        test_T,
-        n_test_steps,
-        test_T / n_test_steps,
-        p,
+    # Diagnostics on the frozen centers and held-out rollouts.
+    train_values = trajectory_values(policy, train_log_states, p)
+    train_initial = np.asarray(train_initial_conditions)
+    train_df = long_df(
+        {"t": train_times, **train_values},
+        ("trajectory", "step"),
+        scalars={"z_0": train_initial[:, 0], "k_0": train_initial[:, 1]},
+    )
+
+    test_solution = simulate(
+        policy, jnp.log(test_initial_conditions), test_T, n_test_steps, p
     )
     jax.block_until_ready(test_solution)
     test_log_states = jnp.where(
@@ -383,48 +370,63 @@ def neoclassical_growth_kernel_recursive(
         and jnp.all(jnp.isfinite(test_values["c"]))
         and jnp.min(test_values["c"]) > 0.0
     )
-    test_df = trajectory_frame(test_values, test_solution.ts, test_initial_conditions)
-
-    z_benchmark, k_benchmark, c_benchmark = benchmark_trajectories(
+    test_initial = np.asarray(test_initial_conditions)
+    test_df = long_df(
+        {"t": test_solution.ts, **test_values},
+        ("trajectory", "step"),
+        scalars={"z_0": test_initial[:, 0], "k_0": test_initial[:, 1]},
+    )
+    benchmark = benchmark_df(
+        test_initial,
+        np.asarray(test_solution.ts[0]),
         a,
         delta,
         rho_hat,
         sigma_crra,
         g,
-        test_initial_conditions,
-        np.asarray(test_solution.ts[0]),
     )
-    test_summary_df, error_fields = add_benchmark_path_diagnostics(
-        test_df,
-        test_values,
-        test_initial_conditions,
-        z_benchmark,
-        k_benchmark,
-        c_benchmark,
-        a=a,
-        delta=delta,
-        g=g,
+    test_df = test_df.merge(
+        benchmark[["trajectory", "t", "k", "c"]],
+        on=["trajectory", "t"],
+        suffixes=("", "_benchmark"),
     )
+    test_df["k_rel_error"] = (test_df["k"] - test_df["k_benchmark"]) / test_df[
+        "k_benchmark"
+    ].abs().clip(lower=DOMAIN_EPS)
+    test_df["c_rel_error"] = (test_df["c"] - test_df["c_benchmark"]) / test_df[
+        "c_benchmark"
+    ].abs().clip(lower=DOMAIN_EPS)
+    abs_errors = test_df[["k_rel_error", "c_rel_error"]].abs()
+    trajectory_mean = abs_errors.groupby(test_df["trajectory"]).mean()
+    error_fields = {
+        "test_mean_abs_k_rel_error": float(abs_errors["k_rel_error"].mean()),
+        "test_mean_abs_c_rel_error": float(abs_errors["c_rel_error"].mean()),
+        "test_max_abs_k_rel_error": float(abs_errors["k_rel_error"].max()),
+        "test_median_trajectory_mean_abs_k_rel_error": float(
+            trajectory_mean["k_rel_error"].median()
+        ),
+        "test_median_trajectory_mean_abs_c_rel_error": float(
+            trajectory_mean["c_rel_error"].median()
+        ),
+    }
 
-    tvc_fields = tvc_certificates(
+    # Terminal transversality certificate on the training initial conditions.
+    train_tvc = log_tvc_residual(
         policy,
         jnp.log(train_initial_conditions),
-        jnp.log(test_initial_conditions),
+        data_set.train_tvc_T,
+        data_set.tvc_steps,
         p,
-        data_set,
-        stop_set.log_tvc_threshold,
     )
+    max_log_tvc_residual = float(jnp.max(train_tvc))
+    transversality_ok = bool(max_log_tvc_residual < stop_set.log_tvc_threshold)
 
     max_train_euler = float(jnp.max(jnp.abs(train_values["euler_residual"])))
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
     test_trajectory_euler = jnp.mean(jnp.abs(test_values["euler_residual"]), axis=1)
-
     gram_eigenvalues = jnp.linalg.eigvalsh(args.gram)
-    train_kappa_0 = initial_kappa(train_initial_conditions, a)
-    test_kappa_0 = initial_kappa(test_initial_conditions, a)
-    train_kappa = train_df["kappa"].to_numpy()
-    test_kappa = test_df["kappa"].to_numpy()
-    collocation_kappa_spread = float(np.max(train_kappa) / np.min(train_kappa))
+
+    # Published results.
     results = {
         "variant": "fixed_recursive_kernel",
         "collocation_design": "frozen_exact_benchmark_states",
@@ -470,7 +472,7 @@ def neoclassical_growth_kernel_recursive(
         "h_const": h_const,
         "rkhs_norm": float(rkhs_norm_squared(alpha, args.gram)),
         "shifted_metric_norm": float(rkhs_norm_squared(alpha, shifted_gram)),
-        "penalized_parameter_count": n_train,
+        "penalized_parameter_count": n_centers,
         "unpenalized_parameter_count": (1 if kernel_set.free_constant else 0)
         + (2 if kernel_set.linear_mean else 0),
         "gram_min_eigenvalue": float(gram_eigenvalues[0]),
@@ -487,7 +489,8 @@ def neoclassical_growth_kernel_recursive(
             jnp.quantile(test_trajectory_euler, 0.9)
         ),
         "test_trajectory_euler_mean_abs_max": float(jnp.max(test_trajectory_euler)),
-        **tvc_fields,
+        "max_log_tvc_residual": max_log_tvc_residual,
+        "transversality_ok": transversality_ok,
         "min_test_c": float(jnp.min(test_values["c"])),
         "test_path_ok": test_path_ok,
         **error_fields,
@@ -499,16 +502,7 @@ def neoclassical_growth_kernel_recursive(
         "solution_accepted": solver_converged,
         "num_train_trajectories": ic_set.num_train_trajectories,
         "num_test_trajectories": ic_set.num_test_trajectories,
-        "num_collocation_states": n_train,
-        "collocation_kappa_spread": collocation_kappa_spread,
-        "collocation_log_kappa_min": float(np.log(np.min(train_kappa))),
-        "collocation_log_kappa_max": float(np.log(np.max(train_kappa))),
-        "test_log_kappa_min": float(np.log(np.nanmin(test_kappa))),
-        "test_log_kappa_max": float(np.log(np.nanmax(test_kappa))),
-        "train_kappa_0_min": float(train_kappa_0.min()),
-        "train_kappa_0_max": float(train_kappa_0.max()),
-        "test_kappa_0_min": float(test_kappa_0.min()),
-        "test_kappa_0_max": float(test_kappa_0.max()),
+        "num_centers": n_centers,
         "train_log_z_variance": ic_set.train_log_z_variance,
         "train_log_k_variance": ic_set.train_log_k_variance,
         "test_log_z_variance": ic_draw.test_log_z_variance,
@@ -527,22 +521,6 @@ def neoclassical_growth_kernel_recursive(
             log_k_lengthscale=ell_k,
         )
 
-    policy_df = policy_diagnostics_frame(
-        policy,
-        train_kappa,
-        test_df["kappa"].to_numpy(),
-        train_kappa_0,
-        test_kappa_0,
-        a,
-        delta,
-        rho_hat,
-        sigma_crra,
-        g,
-        p,
-        data_set,
-        dtype,
-        "kernel",
-    )
     hyperparameters = {
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
@@ -574,8 +552,6 @@ def neoclassical_growth_kernel_recursive(
         "test_initial_conditions": test_initial_conditions,
         "train_df": train_df,
         "test_df": test_df,
-        "test_summary_df": test_summary_df,
-        "policy_df": policy_df,
         "hyperparameters": hyperparameters,
     }
 

@@ -6,37 +6,36 @@ import math
 import pathlib
 import time
 from dataclasses import asdict, dataclass, replace
+from functools import partial
 
 import jax
 import jax.numpy as jnp
 import jsonargparse
 import numpy as np
+import pandas as pd
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import DrawNNXModule, LevenbergMarquardt, LMAction, LMStatus, MultiStart
+from tinydiffeq import RK4, ConstantStepSize, IController, SaveAt, Tsit5, solve_ode
 
 from models.neoclassical_growth import (
+    DOMAIN_EPS,
     InitialConditionSettings,
     RecursiveParameters,
-    add_benchmark_path_diagnostics,
-    benchmark_trajectories,
-    collocation_residuals,
-    collocation_rollout,
-    collocation_step_diagnostics,
+    euler_residuals,
     growth_initial_conditions,
-    initial_kappa,
-    policy_diagnostics_frame,
-    rollout_steps,
+    log_state_drift_field,
+    log_tvc_residual,
+    simulate,
     standardized_initial_states,
-    trajectory_frame,
     trajectory_values,
-    tvc_certificates,
-    validate_balanced_growth,
 )
+from models.neoclassical_growth_benchmark import benchmark_df
 from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
     OptimizerSettings,
+    long_df,
     unit_softplus,
 )
 from models.utilities import (
@@ -46,7 +45,7 @@ from models.utilities import (
 
 @dataclass(frozen=True)
 class DataSettings:
-    # Training collocation on the integrator's own states: n points from
+    # Training residuals on the integrator's own states: n points from
     # n - 1 steps including the initial condition, nothing interpolated.
     # "rk4" spends the budget on a fixed grid; "tsit5" spends it adaptively
     # and enforces residuals on the accepted steps only. rtol/atol/initial_dt
@@ -332,10 +331,64 @@ class DrawInvestmentPolicy:
         )
 
 
+# Training rollout on the integrator's own states.
+@partial(jax.jit, static_argnames=("data_set",))
+def simulate_train(policy, initial_log_states, p, data_set):
+    budget = data_set.train_points - 1
+    if data_set.ode_solver == "rk4":
+        solver = RK4()
+        controller = ConstantStepSize()
+        dt_0 = data_set.train_T / budget
+    else:
+        solver = Tsit5()
+        controller = IController(rtol=data_set.rtol, atol=data_set.atol)
+        dt_0 = (
+            data_set.train_T / budget
+            if data_set.initial_dt is None
+            else data_set.initial_dt
+        )
+
+    def solve_one(initial_log_state):
+        return solve_ode(
+            log_state_drift_field,
+            solver,
+            0.0,
+            data_set.train_T,
+            initial_log_state,
+            dt_0=dt_0,
+            controller=controller,
+            max_steps=budget,
+            save_at=SaveAt(steps=True),
+            p=(policy, p),
+        )
+
+    return jax.vmap(solve_one)(initial_log_states)
+
+
 def residual_fn(theta, args, p):
     policy = nnx.merge(args.graphdef, theta, args.nondiff)
-    return collocation_residuals(
-        policy, args.initial_log_states, p, args.data_set
+    solution = simulate_train(policy, args.initial_log_states, p, args.data_set)
+    log_states = solution.xs
+    euler = euler_residuals(policy, log_states.reshape(-1, 2), p).reshape(
+        log_states.shape[:2]
+    )
+    # Mean squared residual, so the loss threshold means the same thing at any
+    # number of trajectories or steps. An adaptive rollout only fills the
+    # accepted prefix of the step buffer, so both the residuals and the count
+    # are restricted to that prefix.
+    if args.data_set.ode_solver == "rk4":
+        count = jnp.asarray(euler.size, dtype=euler.dtype)
+        normalized = euler / jnp.sqrt(count)
+    else:
+        active = solution.accepted
+        count = jnp.maximum(jnp.sum(active), 1).astype(euler.dtype)
+        normalized = jnp.where(active, euler, 0.0) / jnp.sqrt(count)
+    # A nonfinite trajectory did not cover the requested economic horizon. Make
+    # that a loud optimizer failure instead of fitting a prefix.
+    return jnp.where(
+        solution.ok[:, None],
+        normalized,
+        jnp.full_like(euler, jnp.inf),
     ).reshape(-1)
 
 
@@ -370,10 +423,10 @@ def neoclassical_growth_nn_recursive(
     save_policy: str | None = None,
     verbose: bool = True,
 ):
+    # Model and training design setup.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    validate_balanced_growth(delta, rho_hat, sigma_crra, g)
     if data_set.ode_solver not in {"rk4", "tsit5"}:
         raise ValueError("ode_solver must be 'rk4' or 'tsit5'")
     n_test_steps = data_set.test_points - 1
@@ -395,6 +448,10 @@ def neoclassical_growth_nn_recursive(
         rho_hat=rho_hat,
         sigma_crra=sigma_crra,
         g=g,
+        A=1.0,
+        b_1=1.0,
+        b_2=0.0,
+        k_thr=float("inf"),
     )
 
     fit_start = time.perf_counter()
@@ -467,6 +524,8 @@ def neoclassical_growth_nn_recursive(
         / f"neoclassical_growth_nn_recursive_policy_{cache_key}.npz"
     )
     cache_hit = cache_path is not None and cache_path.exists()
+
+    # Multi-start Levenberg-Marquardt training (or a cache load).
     if cache_hit:
         policy, cached_meta = load_investment_policy(cache_path)
         _, theta_final, _ = nnx.split(policy, nnx.Param, ...)
@@ -567,35 +626,28 @@ def neoclassical_growth_nn_recursive(
     # Training diagnostics use the batch the solution was returned on.
     train_batch_log_states = solve_args.initial_log_states
     train_batch_initial_conditions = jnp.exp(train_batch_log_states)
-    train_solution = collocation_rollout(policy, train_batch_log_states, p, data_set)
-    train_log_states = train_solution.xs
-    train_values = trajectory_values(policy, train_log_states, p)
-    train_df = trajectory_frame(
-        train_values,
-        train_solution.ts,
-        train_batch_initial_conditions,
+    train_solution = simulate_train(policy, train_batch_log_states, p, data_set)
+    train_values = trajectory_values(policy, train_solution.xs, p)
+    train_initial = np.asarray(train_batch_initial_conditions)
+    train_df = long_df(
+        {"t": train_solution.ts, **train_values},
+        ("trajectory", "step"),
+        scalars={"z_0": train_initial[:, 0], "k_0": train_initial[:, 1]},
     )
     # Adaptive rollouts pad the step buffer past the accepted prefix; those
-    # rows are not collocation states and leave the frame here.
+    # rows are not training states and leave the frame here.
     train_accepted = (
         None if data_set.ode_solver == "rk4" else np.asarray(train_solution.accepted)
     )
     if train_accepted is not None:
         train_df = train_df[train_accepted.reshape(-1)].reset_index(drop=True)
-    train_df["collocation_step_index"] = train_df.groupby("trajectory").cumcount()
-    collocation_diagnostics = collocation_step_diagnostics(
-        train_solution.ts, train_accepted
+    num_simulation_states = int(
+        train_solution.ts.size if train_accepted is None else train_accepted.sum()
     )
 
+    # Held-out rollouts and benchmark errors.
     test_initial_log_states = jnp.log(test_initial_conditions)
-    test_solution = rollout_steps(
-        policy,
-        test_initial_log_states,
-        test_T,
-        n_test_steps,
-        test_T / n_test_steps,
-        p,
-    )
+    test_solution = simulate(policy, test_initial_log_states, test_T, n_test_steps, p)
     jax.block_until_ready(test_solution)
     test_log_states = jnp.where(
         test_solution.ok[:, None, None], test_solution.xs, jnp.nan
@@ -607,25 +659,103 @@ def neoclassical_growth_nn_recursive(
         and jnp.all(jnp.isfinite(test_values["c"]))
         and jnp.min(test_values["c"]) > 0.0
     )
-    test_df = trajectory_frame(test_values, test_solution.ts, test_initial_conditions)
-
-    tvc_fields = tvc_certificates(
-        policy,
-        train_batch_log_states,
-        test_initial_log_states,
-        p,
-        data_set,
-        stop_set.log_tvc_threshold,
+    test_initial = np.asarray(test_initial_conditions)
+    test_df = long_df(
+        {"t": test_solution.ts, **test_values},
+        ("trajectory", "step"),
+        scalars={"z_0": test_initial[:, 0], "k_0": test_initial[:, 1]},
     )
+    benchmark = benchmark_df(
+        test_initial,
+        np.asarray(test_solution.ts[0]),
+        a,
+        delta,
+        rho_hat,
+        sigma_crra,
+        g,
+    )
+    test_df = test_df.merge(
+        benchmark[["trajectory", "t", "k", "c"]],
+        on=["trajectory", "t"],
+        suffixes=("", "_benchmark"),
+    )
+    test_df["k_rel_error"] = (test_df["k"] - test_df["k_benchmark"]) / test_df[
+        "k_benchmark"
+    ].abs().clip(lower=DOMAIN_EPS)
+    test_df["c_rel_error"] = (test_df["c"] - test_df["c_benchmark"]) / test_df[
+        "c_benchmark"
+    ].abs().clip(lower=DOMAIN_EPS)
+    abs_errors = test_df[["k_rel_error", "c_rel_error"]].abs()
+    trajectory_mean = abs_errors.groupby(test_df["trajectory"]).mean()
+    error_fields = {
+        "test_mean_abs_k_rel_error": float(abs_errors["k_rel_error"].mean()),
+        "test_mean_abs_c_rel_error": float(abs_errors["c_rel_error"].mean()),
+        "test_max_abs_k_rel_error": float(abs_errors["k_rel_error"].max()),
+        "test_median_trajectory_mean_abs_k_rel_error": float(
+            trajectory_mean["k_rel_error"].median()
+        ),
+        "test_median_trajectory_mean_abs_c_rel_error": float(
+            trajectory_mean["c_rel_error"].median()
+        ),
+    }
+
+    # Terminal transversality certificate on the training batch.
+    train_tvc = log_tvc_residual(
+        policy, train_batch_log_states, data_set.train_tvc_T, data_set.tvc_steps, p
+    )
+    max_log_tvc_residual = float(jnp.max(train_tvc))
+    transversality_ok = bool(max_log_tvc_residual < stop_set.log_tvc_threshold)
+
     max_train_euler = float(train_df["euler_residual"].abs().max())
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
     test_trajectory_euler = jnp.mean(jnp.abs(test_values["euler_residual"]), axis=1)
 
-    train_kappa_0 = initial_kappa(train_batch_initial_conditions, a)
-    test_kappa_0 = initial_kappa(test_initial_conditions, a)
-    train_kappa = train_df["kappa"].to_numpy()
-    test_kappa = test_df["kappa"].to_numpy()
-    collocation_kappa_spread = float(np.max(train_kappa) / np.min(train_kappa))
+    # Learned policy vs benchmark on a kappa grid: z = 1 there, so k = kappa,
+    # and the benchmark support pools the solved detrended test paths.
+    observed_kappa = np.concatenate(
+        [train_df["kappa"].to_numpy(), test_df["kappa"].to_numpy()]
+    )
+    observed_kappa = observed_kappa[np.isfinite(observed_kappa) & (observed_kappa > 0)]
+    log_lo = np.log(observed_kappa.min())
+    log_hi = np.log(observed_kappa.max())
+    log_margin = 0.05 * (log_hi - log_lo) + 1e-6
+    kappa_grid = np.exp(
+        np.linspace(log_lo - log_margin, log_hi + log_margin, data_set.policy_grid_size)
+    )
+    grid_log_states = jnp.stack(
+        [
+            jnp.zeros(data_set.policy_grid_size, dtype=dtype),
+            jnp.log(jnp.asarray(kappa_grid, dtype=dtype)),
+        ],
+        axis=1,
+    )
+    grid_values = trajectory_values(policy, grid_log_states[None, :, :], p)
+    benchmark_by_kappa = benchmark.sort_values("kappa")
+    # NaN outside the solved-path support: the benchmark is unknown there,
+    # and a clamped extrapolation would draw a spurious curve.
+    supported = (kappa_grid >= benchmark_by_kappa["kappa"].min()) & (
+        kappa_grid <= benchmark_by_kappa["kappa"].max()
+    )
+    c_tilde_benchmark = np.where(
+        supported,
+        np.interp(
+            kappa_grid, benchmark_by_kappa["kappa"], benchmark_by_kappa["c_tilde"]
+        ),
+        np.nan,
+    )
+    policy_df = pd.DataFrame(
+        {
+            "kappa": kappa_grid,
+            "c_tilde_nn": np.asarray(grid_values["c"][0]),
+            "dkappa_nn": np.asarray(grid_values["dkappa"][0]),
+            "c_tilde_benchmark": c_tilde_benchmark,
+            "dkappa_benchmark": (
+                kappa_grid**a - c_tilde_benchmark - (delta + g) * kappa_grid
+            ),
+        }
+    )
+
+    # Published results.
     results = {
         "variant": "recursive_nn",
         "homothetic_representation": hc_set.homothetic_representation,
@@ -667,7 +797,8 @@ def neoclassical_growth_nn_recursive(
             jnp.quantile(test_trajectory_euler, 0.9)
         ),
         "test_trajectory_euler_mean_abs_max": float(jnp.max(test_trajectory_euler)),
-        **tvc_fields,
+        "max_log_tvc_residual": max_log_tvc_residual,
+        "transversality_ok": transversality_ok,
         "min_test_c": float(jnp.min(test_values["c"])),
         "test_path_ok": test_path_ok,
         "steps": steps,
@@ -684,17 +815,8 @@ def neoclassical_growth_nn_recursive(
         "solution_accepted": solver_accepted,
         "num_train_trajectories": ic_set.num_train_trajectories,
         "num_test_trajectories": ic_set.num_test_trajectories,
-        **collocation_diagnostics,
-        "collocation_path_ok": bool(jnp.all(train_solution.ok)),
-        "collocation_kappa_spread": collocation_kappa_spread,
-        "collocation_log_kappa_min": float(np.log(np.min(train_kappa))),
-        "collocation_log_kappa_max": float(np.log(np.max(train_kappa))),
-        "test_log_kappa_min": float(np.log(np.nanmin(test_kappa))),
-        "test_log_kappa_max": float(np.log(np.nanmax(test_kappa))),
-        "train_kappa_0_min": float(train_kappa_0.min()),
-        "train_kappa_0_max": float(train_kappa_0.max()),
-        "test_kappa_0_min": float(test_kappa_0.min()),
-        "test_kappa_0_max": float(test_kappa_0.max()),
+        "num_simulation_states": num_simulation_states,
+        "train_path_ok": bool(jnp.all(train_solution.ok)),
         "train_log_z_variance": ic_set.train_log_z_variance,
         "train_log_k_variance": ic_set.train_log_k_variance,
         "test_log_z_variance": ic_draw.test_log_z_variance,
@@ -709,46 +831,8 @@ def neoclassical_growth_nn_recursive(
         "train_T": data_set.train_T,
         "test_T": test_T,
         "train_tvc_T": data_set.train_tvc_T,
+        **error_fields,
     }
-
-    z_benchmark, k_benchmark, c_benchmark = benchmark_trajectories(
-        a,
-        delta,
-        rho_hat,
-        sigma_crra,
-        g,
-        test_initial_conditions,
-        np.asarray(test_solution.ts[0]),
-    )
-    test_summary_df, error_fields = add_benchmark_path_diagnostics(
-        test_df,
-        test_values,
-        test_initial_conditions,
-        z_benchmark,
-        k_benchmark,
-        c_benchmark,
-        a=a,
-        delta=delta,
-        g=g,
-    )
-    results.update(error_fields)
-
-    policy_df = policy_diagnostics_frame(
-        policy,
-        train_kappa,
-        test_df["kappa"].to_numpy(),
-        train_kappa_0,
-        test_kappa_0,
-        a,
-        delta,
-        rho_hat,
-        sigma_crra,
-        g,
-        p,
-        data_set,
-        dtype,
-        "nn",
-    )
 
     hyperparameters = {
         "hc_set": asdict(hc_set),
@@ -781,7 +865,6 @@ def neoclassical_growth_nn_recursive(
         "test_df": test_df,
         "policy_df": policy_df,
         "hyperparameters": hyperparameters,
-        "test_summary_df": test_summary_df,
     }
     # A cache hit loads the policy from disk instead of solving, so there is
     # no primal solve to describe.

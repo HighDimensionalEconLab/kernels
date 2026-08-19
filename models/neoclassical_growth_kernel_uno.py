@@ -12,13 +12,11 @@ import unopy
 from models.kernels import (
     integrated_kernel_matrices,
     normalize_kernel,
-    rkhs_norm_squared,
 )
 from models.neoclassical_growth import (
     StructuralParameters,
-    marginal_product,
+    mpk,
     production,
-    resolve_kink_family,
     steady_flow_consumption_guess,
 )
 from models.neoclassical_growth_benchmark import benchmark_df
@@ -70,10 +68,8 @@ def objective(x, K):
 def constraints(x, K, K_tilde, p):
     k, c, mu, dk_dt, dmu_dt = path_values(x, K, K_tilde, p.k_0)
     k_positive = jnp.maximum(k, DOMAIN_EPS)
-    output = production(k_positive, p)
-    mpk = marginal_product(k_positive, p)
-    resource = dk_dt - (output - p.delta * k - c)
-    euler = dmu_dt + mu * (mpk - p.delta - p.rho_hat)
+    resource = dk_dt - (production(1.0, k_positive, p) - p.delta * k - c)
+    euler = dmu_dt + mu * (mpk(1.0, k_positive, p) - p.delta - p.rho_hat)
     shadow_price = mu * c**p.sigma_crra - 1.0
     return jnp.concatenate([resource, euler, shadow_price, k, c, mu])
 
@@ -145,12 +141,17 @@ def neoclassical_growth_kernel_uno(
     c_0_guess: float | None = None,  # overrides the flat steady-flow warm start
     verbose: bool = False,
 ):
-    # IPOPT works in float64 C arrays, so this solver is float64-only.
+    # Model setup. IPOPT works in float64 C arrays, so this solver is
+    # float64-only.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
-    use_kinked_production, A_value, b_1_value, b_2_value = resolve_kink_family(
-        A, b_1, b_2
-    )
+    # Kinked production is enabled exactly when all of A, b_1, b_2 are given.
+    use_kinked_production = not (A is None or b_1 is None or b_2 is None)
+    if use_kinked_production:
+        A, b_1, b_2 = float(A), float(b_1), float(b_2)
+        k_thr = (b_2 / (b_1 - 1.0)) ** (1.0 / a)
+    else:
+        A, b_1, b_2, k_thr = 1.0, 1.0, 0.0, float("inf")
     if solver_set is None:
         solver_set = (
             KINKED_SOLVER_SETTINGS if use_kinked_production else SolverSettings()
@@ -178,14 +179,13 @@ def neoclassical_growth_kernel_uno(
         rho_hat=rho_hat,
         sigma_crra=sigma_crra,
         k_0=k_0,
-        A=A_value,
-        b_1=b_1_value,
-        b_2=b_2_value,
+        A=A,
+        b_1=b_1,
+        b_2=b_2,
+        k_thr=k_thr,
     )
 
-    c_flow_guess = steady_flow_consumption_guess(
-        k_0, a, delta, A_value, b_1_value, b_2_value
-    )
+    c_flow_guess = steady_flow_consumption_guess(k_0, a, delta, A, b_1, b_2)
     if c_0_guess is not None:
         c_flow_guess = max(float(c_0_guess), DOMAIN_EPS)
     x_initial = np.zeros(n_variables, dtype=np.float64)
@@ -208,6 +208,7 @@ def neoclassical_growth_kernel_uno(
         ]
     )
 
+    # IPOPT model wiring.
     model = unopy.Model(
         unopy.PROBLEM_NONLINEAR,
         n_variables,
@@ -292,68 +293,71 @@ def neoclassical_growth_kernel_uno(
     # primal_solution appends solver-internal auxiliaries; only the leading
     # 3n + 2 block is ours.
     x = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))[:n_variables]
-    alpha_mu, alpha_c, alpha_k, c_0, mu_0 = unpack(x)
+    c_0, mu_0 = unpack(x)[3], unpack(x)[4]
+
+    # Diagnostics: solved paths and residuals on the train, dense validation,
+    # and test grids.
+    def snapshot(t_grid):
+        K_eval, K_tilde_eval = integrated_kernel_matrices(
+            t_grid, train_data, kernel, sigma, ell
+        )
+        k, c, mu, dk_dt, dmu_dt = path_values(x, K_eval, K_tilde_eval, k_0)
+        k_positive = jnp.maximum(k, DOMAIN_EPS)
+        return pd.DataFrame(
+            {
+                "t": np.asarray(t_grid),
+                "k": np.asarray(k),
+                "c": np.asarray(c),
+                "mu": np.asarray(mu),
+                "resource": np.asarray(
+                    dk_dt - (production(1.0, k_positive, p) - delta * k - c)
+                ),
+                "euler": np.asarray(
+                    dmu_dt + mu * (mpk(1.0, k_positive, p) - delta - rho_hat)
+                ),
+                "shadow_price": np.asarray(mu * c**sigma_crra - 1.0),
+            }
+        )
 
     test_data = jnp.linspace(
         0, data_set.test_T, data_set.test_points, dtype=jnp.float64
     )
     # Dense off-grid residual check between the training points.
-    validation_points = max(data_set.test_points, 801)
     validation_data = jnp.linspace(
-        0, data_set.train_T, validation_points, dtype=jnp.float64
+        0, data_set.train_T, max(data_set.test_points, 801), dtype=jnp.float64
     )
+    train_df = snapshot(train_data)
+    validation_df = snapshot(validation_data)
+    test_df = snapshot(test_data)
 
-    def evaluate_grid(points_data):
-        K_eval, K_tilde_eval = integrated_kernel_matrices(
-            points_data, train_data, kernel, sigma, ell
-        )
-        k_values, c_values, mu_values, dk_values, dmu_values = path_values(
-            x, K_eval, K_tilde_eval, k_0
-        )
-        k_positive = jnp.maximum(k_values, DOMAIN_EPS)
-        output_values = production(k_positive, p)
-        mpk_values = marginal_product(k_positive, p)
-        if use_kinked_production:
-            m1_values = p.A * p.a * k_positive ** (p.a - 1.0)
-            m2_values = p.b_1 * m1_values
-        else:
-            m1_values = mpk_values
-            m2_values = mpk_values
-        implied_mpk = delta + rho_hat - dmu_values / mu_values
-        mpk_lower_bound = jnp.minimum(m1_values, m2_values)
-        mpk_upper_bound = jnp.maximum(m1_values, m2_values)
-        return {
-            "t": points_data,
-            "k": k_values,
-            "c": c_values,
-            "mu": mu_values,
-            "Y": output_values,
-            "resource": dk_values - (output_values - delta * k_values - c_values),
-            "euler": dmu_values + mu_values * (mpk_values - delta - rho_hat),
-            "shadow_price": mu_values * c_values**sigma_crra - 1.0,
-            "mpk_lower_violation": jnp.maximum(mpk_lower_bound - implied_mpk, 0.0),
-            "mpk_upper_violation": jnp.maximum(implied_mpk - mpk_upper_bound, 0.0),
-        }
-
-    train_eval = evaluate_grid(train_data)
-    validation_eval = evaluate_grid(validation_data)
-    test_eval = evaluate_grid(test_data)
-
-    residual_names = ["resource", "euler", "shadow_price"]
+    residual_names = ("resource", "euler", "shadow_price")
     max_train_residual = max(
-        float(jnp.max(jnp.abs(train_eval[name]))) for name in residual_names
+        float(train_df[name].abs().max()) for name in residual_names
     )
     max_validation_residual = max(
-        float(jnp.max(jnp.abs(validation_eval[name]))) for name in residual_names
+        float(validation_df[name].abs().max()) for name in residual_names
     )
-    p_lower_violation = max(
-        float(jnp.max(train_eval["mpk_lower_violation"])),
-        float(jnp.max(validation_eval["mpk_lower_violation"])),
-    )
-    p_upper_violation = max(
-        float(jnp.max(train_eval["mpk_upper_violation"])),
-        float(jnp.max(validation_eval["mpk_upper_violation"])),
-    )
+
+    # The costate-implied MPK must sit between the two branch slopes up to
+    # kink slack; violations gate acceptance under kinked production.
+    def mpk_violations(df):
+        k = np.maximum(df["k"].to_numpy(), DOMAIN_EPS)
+        m1 = A * a * k ** (a - 1.0)
+        m2 = b_1 * m1
+        implied = (
+            np.where(k > k_thr, m2, m1) - df["euler"].to_numpy() / df["mu"].to_numpy()
+        )
+        lower = np.minimum(m1, m2)
+        upper = np.maximum(m1, m2)
+        return (
+            float(np.maximum(lower - implied, 0.0).max()),
+            float(np.maximum(implied - upper, 0.0).max()),
+        )
+
+    train_lower, train_upper = mpk_violations(train_df)
+    validation_lower, validation_upper = mpk_violations(validation_df)
+    p_lower_violation = max(train_lower, validation_lower)
+    p_upper_violation = max(train_upper, validation_upper)
 
     @jax.jit
     def kernel_solution(test_points_data):
@@ -365,13 +369,8 @@ def neoclassical_growth_kernel_uno(
 
     finite_positive = bool(
         all(
-            jnp.all(jnp.isfinite(grid[name]))
-            for grid in (train_eval, validation_eval, test_eval)
-            for name in ("k", "c", "mu")
-        )
-        and all(
-            jnp.min(grid[name]) > 0.0
-            for grid in (train_eval, validation_eval, test_eval)
+            np.isfinite(df[name]).all() and (df[name] > 0.0).all()
+            for df in (train_df, validation_df, test_df)
             for name in ("k", "c", "mu")
         )
     )
@@ -399,15 +398,16 @@ def neoclassical_growth_kernel_uno(
     ):
         rejection_reasons.append("p_bound")
 
+    # Published results.
     results = {
         "a": a,
         "delta": delta,
         "rho_hat": rho_hat,
         "sigma_crra": sigma_crra,
         "k_0": k_0,
-        "A": A_value,
-        "b_1": b_1_value,
-        "b_2": b_2_value,
+        "A": A,
+        "b_1": b_1,
+        "b_2": b_2,
         "use_kinked_production": use_kinked_production,
         "kernel": kernel,
         "ell": ell,
@@ -418,34 +418,16 @@ def neoclassical_growth_kernel_uno(
         "test_points": data_set.test_points,
         "c_0": float(c_0),
         "mu_0": float(mu_0),
-        "rkhs_norm_k": float(rkhs_norm_squared(alpha_k, K)),
-        "rkhs_norm_c": float(rkhs_norm_squared(alpha_c, K)),
-        "rkhs_norm_mu": float(rkhs_norm_squared(alpha_mu, K)),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
         "p_lower_violation": p_lower_violation,
         "p_upper_violation": p_upper_violation,
-        "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_eval["euler"]))),
+        "test_euler_mean_abs": float(test_df["euler"].abs().mean()),
         "solve_time": solve_time,
         "solver_status": solver_status,
         "solution_status": solution_status,
-        "stationarity": result.solution_stationarity,
-        "primal_feasibility": result.solution_primal_feasibility,
         **acceptance_fields(rejection_reasons),
     }
-
-    train_df = pd.DataFrame(
-        {
-            name: np.asarray(train_eval[name])
-            for name in ("t", "k", "c", "mu", "resource", "euler", "shadow_price")
-        }
-    )
-    test_df = pd.DataFrame(
-        {
-            name: np.asarray(test_eval[name])
-            for name in ("t", "k", "c", "mu", "Y", "resource", "euler", "shadow_price")
-        }
-    )
 
     if not use_kinked_production:
         benchmark = benchmark_df(
@@ -453,12 +435,12 @@ def neoclassical_growth_kernel_uno(
         )
         k_benchmark = benchmark["k"].to_numpy()
         c_benchmark = benchmark["c"].to_numpy()
-        k_rel_error = jnp.abs(k_benchmark - test_eval["k"]) / k_benchmark
-        c_rel_error = jnp.abs(c_benchmark - test_eval["c"]) / c_benchmark
-        test_df["k_benchmark"] = np.asarray(k_benchmark)
-        test_df["c_benchmark"] = np.asarray(c_benchmark)
-        test_df["k_rel_error"] = np.asarray(k_rel_error)
-        test_df["c_rel_error"] = np.asarray(c_rel_error)
+        k_rel_error = np.abs(k_benchmark - test_df["k"].to_numpy()) / k_benchmark
+        c_rel_error = np.abs(c_benchmark - test_df["c"].to_numpy()) / c_benchmark
+        test_df["k_benchmark"] = k_benchmark
+        test_df["c_benchmark"] = c_benchmark
+        test_df["k_rel_error"] = k_rel_error
+        test_df["c_rel_error"] = c_rel_error
         # min/max error statistics exclude the pinned t = 0 point ([1:]): its
         # near-zero error is an artifact of the initial condition, not accuracy.
         results.update(
@@ -486,9 +468,9 @@ def neoclassical_growth_kernel_uno(
             "delta": delta,
             "rho_hat": rho_hat,
             "sigma_crra": sigma_crra,
-            "A": A_value,
-            "b_1": b_1_value,
-            "b_2": b_2_value,
+            "A": A,
+            "b_1": b_1,
+            "b_2": b_2,
         },
         "initial_conditions": {"k_0": k_0},
     }

@@ -68,6 +68,9 @@ def run(
         data_set=dict(train_T=20.0, train_points=21, test_T=30.0),
     )
 
+    run_experiment("baseline_g02", output_dir, g=0.02)
+    run_experiment("baseline_g02_learned", output_dir, g=0.02, learn_g_hat=True)
+
     write_summary(output_dir, PREFIX)
 
 

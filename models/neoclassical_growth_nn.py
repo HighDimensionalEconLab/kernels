@@ -13,6 +13,7 @@ from jax.flatten_util import ravel_pytree
 from nlls_gram import (
     DrawNNXModule,
     LevenbergMarquardt,
+    LMStatus,
     MultiStart,
 )
 
@@ -65,6 +66,9 @@ class GrowthPolicySettings:
     hidden_bias: bool = True
     output_bias: bool = True
     input_scale: float = 40.0
+    # Trend e^{g_hat t} on both heads: a learned Param (init 0) or fixed at
+    # the constructor's g_hat.
+    learn_g_hat: bool = False
 
 
 @struct.dataclass
@@ -72,6 +76,7 @@ class ResidualArgs:
     graphdef: nnx.GraphDef
     nondiff: nnx.State
     t: jax.Array
+    z: jax.Array
 
 
 class GrowthPolicyNN(nnx.Module):
@@ -81,6 +86,7 @@ class GrowthPolicyNN(nnx.Module):
         *,
         k_scale: float,
         c_scale: float,
+        g_hat: float = 0.0,
         dtype,
         rngs: nnx.Rngs,
     ):
@@ -90,6 +96,12 @@ class GrowthPolicyNN(nnx.Module):
         # when they change) but sit outside the differentiated Param state.
         self.k_scale = nnx.Variable(jnp.asarray(k_scale, dtype=dtype))
         self.c_scale = nnx.Variable(jnp.asarray(c_scale, dtype=dtype))
+        # trend is static so the trendless graph stays exactly the legacy one.
+        self.trend = nnx.static(settings.learn_g_hat or g_hat != 0.0)
+        if settings.learn_g_hat:
+            self.g_hat = nnx.Param(jnp.zeros((), dtype=dtype))
+        else:
+            self.g_hat = nnx.Variable(jnp.asarray(g_hat, dtype=dtype))
         self.layers = nnx.List(
             [
                 nnx.Linear(
@@ -128,7 +140,10 @@ class GrowthPolicyNN(nnx.Module):
         for layer in self.layers:
             h = self.hidden_activation(layer(h))
         output_scale = jnp.stack([self.k_scale[...], self.c_scale[...]])
-        return output_scale * unit_softplus(self.head(h))
+        out = output_scale * unit_softplus(self.head(h))
+        if self.trend:
+            out = jnp.exp(self.g_hat[...] * t) * out
+        return out
 
 
 def residual_fn(theta, args, p):
@@ -140,8 +155,9 @@ def residual_fn(theta, args, p):
     c = values[:, 1]
     dk_dt = derivatives[:, 0]
     dc_dt = derivatives[:, 1]
-    resource = dk_dt - (production(1.0, k, p) - p.delta * k - c)
-    euler = dc_dt - c * (mpk(1.0, k, p) - p.delta - p.rho_hat) / p.sigma_crra
+    z = 1.0 if args.z is None else args.z
+    resource = dk_dt - (production(z, k, p) - p.delta * k - c)
+    euler = dc_dt - c * (mpk(z, k, p) - p.delta - p.rho_hat) / p.sigma_crra
     ic = model(jnp.asarray(0.0, dtype=args.t.dtype))[0] - p.k_0
     residual = jnp.concatenate([resource, euler, jnp.atleast_1d(ic)])
     return residual / jnp.sqrt(residual.size)
@@ -149,7 +165,7 @@ def residual_fn(theta, args, p):
 
 # Model paths and residuals on a time grid, with relative errors against the
 # benchmark when one exists (the smooth family).
-def snapshot(model, t, p, benchmark=None):
+def snapshot(model, t, p, benchmark=None, z=1.0):
     values, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
         t
     )
@@ -162,9 +178,9 @@ def snapshot(model, t, p, benchmark=None):
             "t": np.asarray(t),
             "k": np.asarray(k),
             "c": np.asarray(c),
-            "resource": np.asarray(dk_dt - (production(1.0, k, p) - p.delta * k - c)),
+            "resource": np.asarray(dk_dt - (production(z, k, p) - p.delta * k - c)),
             "euler": np.asarray(
-                dc_dt - c * (mpk(1.0, k, p) - p.delta - p.rho_hat) / p.sigma_crra
+                dc_dt - c * (mpk(z, k, p) - p.delta - p.rho_hat) / p.sigma_crra
             ),
         }
     )
@@ -185,6 +201,9 @@ def neoclassical_growth_nn(
     delta: float = CONSTANTS.delta,
     rho_hat: float = CONSTANTS.rho_hat,
     k_0: float = 1.0,
+    # Hicks-neutral trend Z(t) = e^{(1-a) g t} enters the residuals as data;
+    # nn_set.learn_g_hat frees the trend rate instead of fixing it at g.
+    g: float = 0.0,
     A: float | None = None,
     b_1: float | None = None,
     b_2: float | None = None,
@@ -229,6 +248,7 @@ def neoclassical_growth_nn(
     )
 
     t_train = make_train_t_grid(data_set, dtype)
+    z_train = jnp.exp((1.0 - a) * g * t_train) if g != 0.0 else None
     c_flow_guess = steady_flow_consumption_guess(k_0, a, delta, A, b_1, b_2)
     policy_settings = replace(nn_set, input_scale=max(float(data_set.train_T), 1.0))
     k_scale = max(float(k_0), DOMAIN_EPS)
@@ -238,11 +258,14 @@ def neoclassical_growth_nn(
         policy_settings,
         k_scale=k_scale,
         c_scale=c_scale,
+        g_hat=g,
         dtype=dtype,
         rngs=nnx.Rngs(init_key),
     )
     graphdef, theta_0, nondiff = nnx.split(model, nnx.Param, ...)
-    residual_args = ResidualArgs(graphdef=graphdef, nondiff=nondiff, t=t_train)
+    residual_args = ResidualArgs(
+        graphdef=graphdef, nondiff=nondiff, t=t_train, z=z_train
+    )
 
     # Multi-start Levenberg-Marquardt solve.
     solver = LevenbergMarquardt(
@@ -262,6 +285,21 @@ def neoclassical_growth_nn(
         atol=atol,
         max_steps_is_success=False,
     )
+    # A learned trend admits FONC-satisfying bubble paths; only attempts
+    # passing the transversality certificate are accepted.
+    accept_tvc_t = jnp.asarray(data_set.test_tvc_T, dtype=dtype)
+
+    def accept_saddle_path(_, result):
+        model = nnx.merge(graphdef, result.x, nondiff)
+        k_T, c_T = model(accept_tvc_t)
+        log_tvc = (
+            -result.p.rho_hat * accept_tvc_t
+            - result.p.sigma_crra * jnp.log(c_T)
+            + jnp.log(k_T)
+        )
+        converged = result.status == LMStatus.CONVERGED
+        return converged & (log_tvc < stop_set.log_tvc_threshold)
+
     multi_start = MultiStart(
         key=multi_start_key,
         num_starts=stop_set.num_attempts,
@@ -270,8 +308,10 @@ def neoclassical_growth_nn(
             policy_settings,
             k_scale=k_scale,
             c_scale=c_scale,
+            g_hat=g,
             dtype=dtype,
         ),
+        accept=accept_saddle_path if policy_settings.learn_g_hat else None,
     )
 
     timer = Stopwatch()
@@ -293,15 +333,20 @@ def neoclassical_growth_nn(
     # Diagnostics against the benchmark.
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     train_benchmark = test_benchmark = None
+    z_test = jnp.exp((1.0 - a) * g * test_t) if g != 0.0 else None
     if not use_kinked_production:
         train_benchmark = benchmark_df(
-            [[1.0, k_0]], np.asarray(t_train), a, delta, rho_hat, sigma_crra
+            [[1.0, k_0]], np.asarray(t_train), a, delta, rho_hat, sigma_crra, g
         )
         test_benchmark = benchmark_df(
-            [[1.0, k_0]], np.asarray(test_t), a, delta, rho_hat, sigma_crra
+            [[1.0, k_0]], np.asarray(test_t), a, delta, rho_hat, sigma_crra, g
         )
-    train_df = snapshot(model, t_train, p, train_benchmark)
-    test_df = snapshot(model, test_t, p, test_benchmark)
+    train_df = snapshot(
+        model, t_train, p, train_benchmark, z=1.0 if z_train is None else z_train
+    )
+    test_df = snapshot(
+        model, test_t, p, test_benchmark, z=1.0 if z_test is None else z_test
+    )
 
     tvc_t = jnp.asarray(data_set.test_tvc_T, dtype=dtype)
     k_T, c_T = model(tvc_t)
@@ -309,12 +354,18 @@ def neoclassical_growth_nn(
     transversality_ok = bool(log_tvc < stop_set.log_tvc_threshold)
 
     # Published results.
+    g_hat_value = float(model.g_hat[...])
+
     results = {
         "a": a,
         "delta": delta,
         "rho_hat": rho_hat,
         "sigma_crra": sigma_crra,
         "k_0": k_0,
+        "g": g,
+        "learn_g_hat": policy_settings.learn_g_hat,
+        "g_hat": g_hat_value,
+        "g_hat_error": g_hat_value - g,
         "A": A,
         "b_1": b_1,
         "b_2": b_2,
@@ -369,6 +420,7 @@ def neoclassical_growth_nn(
             "delta": delta,
             "rho_hat": rho_hat,
             "sigma_crra": sigma_crra,
+            "g": g,
             "A": A,
             "b_1": b_1,
             "b_2": b_2,

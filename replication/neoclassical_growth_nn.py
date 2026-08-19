@@ -16,7 +16,12 @@ SOLVER = neoclassical_growth_nn.neoclassical_growth_nn
 
 # The sensitivity experiment lives in neoclassical_growth_nn_sensitivity.py;
 # both drivers regenerate the shared summary from whatever is on disk.
-SUMMARY_EXPERIMENTS = {"baseline", "sensitivity"}
+SUMMARY_EXPERIMENTS = {
+    "baseline",
+    "baseline_g02",
+    "baseline_g02_learned",
+    "sensitivity",
+}
 
 
 def run(
@@ -27,27 +32,39 @@ def run(
     verbose: bool = False,
 ):
     configure_process()
-    print(f"baseline: {n_seeds} seeds -> {output_dir}/")
-    results_df, frames, hyperparameters = ensemble(
-        SOLVER,
-        n_seeds,
-        options={
-            "verbose": verbose,
-            "k_0": 1.0,
+
+    experiments = {
+        "baseline": {},
+        "baseline_g02": {"g": 0.02, "stop_set": {"train_loss_threshold": 1e-14}},
+        "baseline_g02_learned": {
+            "g": 0.02,
+            "nn_set": {"learn_g_hat": True},
+            "stop_set": {"train_loss_threshold": 1e-14},
         },
-    )
-    save_experiment(
-        "baseline",
-        results_df,
-        frames,
-        output_dir,
-        {
-            "n_seeds": n_seeds,
-            "residual_dtype": "float64",
-        },
-        prefix=PREFIX,
-        hyperparameters=hyperparameters,
-    )
+    }
+    for name, experiment in experiments.items():
+        print(f"{name}: {n_seeds} seeds -> {output_dir}/")
+        results_df, frames, hyperparameters = ensemble(
+            SOLVER,
+            n_seeds,
+            options={
+                "verbose": verbose,
+                "k_0": 1.0,
+                **experiment,
+            },
+        )
+        save_experiment(
+            name,
+            results_df,
+            frames,
+            output_dir,
+            {
+                "n_seeds": n_seeds,
+                "residual_dtype": "float64",
+            },
+            prefix=PREFIX,
+            hyperparameters=hyperparameters,
+        )
 
     # Explicit set: the prefix is a strict prefix of
     # neoclassical_growth_nn_recursive, whose JSONs share the glob.

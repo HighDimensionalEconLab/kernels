@@ -13,14 +13,11 @@ from flax import struct
 from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
 
 from models.kernels import (
-    MATERN_STATE_FAMILIES,
-    additive_matern_state_features,
-    additive_rbf_state_features,
-    ard_matern_state_features,
-    ard_rbf_state_features,
+    STATE_KERNEL_NAMES,
     rbf_state_features,
     rbf_state_gram,
     rkhs_norm_squared,
+    state_features,
 )
 from models.neoclassical_growth import (
     DOMAIN_EPS,
@@ -114,21 +111,6 @@ def state_lengthscales(kernel_set):
     )
 
 
-def nonhomothetic_state_features(x, centers, kernel_set):
-    dtype = x.dtype
-    lengthscales = jnp.asarray(state_lengthscales(kernel_set), dtype)
-    structure, _, family = kernel_set.state_kernel.partition("_")
-    if structure == "ard":
-        sigma = jnp.asarray(kernel_set.amplitude, dtype)
-        if family == "rbf":
-            return ard_rbf_state_features(x, centers, sigma, lengthscales)
-        return ard_matern_state_features(family, x, centers, sigma, lengthscales)
-    sigmas = jnp.full(2, kernel_set.amplitude, dtype)
-    if family == "rbf":
-        return additive_rbf_state_features(x, centers, sigmas, lengthscales)
-    return additive_matern_state_features(family, x, centers, sigmas, lengthscales)
-
-
 # Frozen collocation design: the exact benchmark paths of the training
 # initial conditions on the training date grid.
 def fixed_collocation_data(
@@ -163,7 +145,13 @@ def build_residual_args(train_log_states, kernel_set, a, z_0=1.0, k_0=1.0):
         )
     else:
         centers = flat_states - state_offset
-        gram = nonhomothetic_state_features(centers, centers, kernel_set)
+        gram = state_features(
+            kernel_set.state_kernel,
+            centers,
+            centers,
+            kernel_set.amplitude,
+            state_lengthscales(kernel_set),
+        )
     gram = (gram + gram.T) / 2.0
     return ResidualArgs(
         centers=centers,
@@ -188,7 +176,13 @@ def raw_policy(theta, args, log_state, kernel_set):
         h = features @ alpha
     else:
         x = log_state - args.state_offset
-        features = nonhomothetic_state_features(x, args.centers, kernel_set)
+        features = state_features(
+            kernel_set.state_kernel,
+            x,
+            args.centers,
+            kernel_set.amplitude,
+            state_lengthscales(kernel_set),
+        )
         h = features @ alpha
         # The linear-mean coefficients are the last theta leaf, after the free
         # constant when both are present; like h_const they are unpenalized.
@@ -251,12 +245,7 @@ def neoclassical_growth_kernel_recursive(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    state_kernels = tuple(
-        f"{structure}_{family}"
-        for structure in ("ard", "additive")
-        for family in ("rbf", *MATERN_STATE_FAMILIES)
-    )
-    if kernel_set.state_kernel not in state_kernels:
+    if kernel_set.state_kernel not in STATE_KERNEL_NAMES:
         raise ValueError(f"unknown state_kernel: {kernel_set.state_kernel!r}")
     if kernel_set.linear_mean and kernel_set.homothetic_representation:
         raise ValueError("linear_mean requires homothetic_representation=False")

@@ -19,13 +19,7 @@ from nlls_gram import (
     RidgeLevenbergMarquardt,
 )
 
-from models.kernels import (
-    MATERN_STATE_FAMILIES,
-    additive_matern_state_features,
-    additive_rbf_state_features,
-    ard_matern_state_features,
-    ard_rbf_state_features,
-)
+from models.kernels import STATE_KERNEL_NAMES, state_features
 from models.neoclassical_growth import standardized_initial_states
 from models.neoclassical_growth_nn_recursive import policy_cache_key
 from models.open_economy_growth import ModelParameters, production
@@ -117,21 +111,6 @@ def state_lengthscales(kernel_set):
     return tuple(kernel_set.lengthscale if ell is None else ell for ell in per_axis)
 
 
-def state_features(x, centers, kernel_set):
-    dtype = x.dtype
-    lengthscales = jnp.asarray(state_lengthscales(kernel_set), dtype)
-    structure, _, family = kernel_set.state_kernel.partition("_")
-    if structure == "ard":
-        sigma = jnp.asarray(kernel_set.amplitude, dtype)
-        if family == "rbf":
-            return ard_rbf_state_features(x, centers, sigma, lengthscales)
-        return ard_matern_state_features(family, x, centers, sigma, lengthscales)
-    sigmas = jnp.full(4, kernel_set.amplitude, dtype)
-    if family == "rbf":
-        return additive_rbf_state_features(x, centers, sigmas, lengthscales)
-    return additive_matern_state_features(family, x, centers, sigmas, lengthscales)
-
-
 @struct.dataclass
 class ResidualArgs:
     centers: jax.Array
@@ -151,7 +130,13 @@ def build_residual_args(train_states, kernel_set, reference_policy):
     centers = jax.vmap(lambda state: normalize_state(state, state_center, state_scale))(
         flat_states
     )
-    gram = state_features(centers, centers, kernel_set)
+    gram = state_features(
+        kernel_set.state_kernel,
+        centers,
+        centers,
+        kernel_set.amplitude,
+        state_lengthscales(kernel_set),
+    )
     gram = (gram + gram.T) / 2.0
     return ResidualArgs(
         centers=centers,
@@ -177,7 +162,13 @@ class KernelSequentialPolicy:
 
     def __call__(self, state):
         x = normalize_state(state, self.args.state_center, self.args.state_scale)
-        features = state_features(x, self.args.centers, self.kernel_set)
+        features = state_features(
+            self.kernel_set.state_kernel,
+            x,
+            self.args.centers,
+            self.kernel_set.amplitude,
+            state_lengthscales(self.kernel_set),
+        )
         raw = jnp.stack([features @ self.theta[0], features @ self.theta[1]])
         index = 2
         if self.kernel_set.free_constant:
@@ -274,12 +265,7 @@ def stochastic_open_economy_growth_kernel_recursive(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    state_kernels = tuple(
-        f"{structure}_{family}"
-        for structure in ("ard", "additive")
-        for family in ("rbf", *MATERN_STATE_FAMILIES)
-    )
-    if kernel_set.state_kernel not in state_kernels:
+    if kernel_set.state_kernel not in STATE_KERNEL_NAMES:
         raise ValueError(f"unknown state_kernel: {kernel_set.state_kernel!r}")
 
     train_variances = (

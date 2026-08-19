@@ -1,0 +1,14 @@
+\begin{tabular}{llrrrrr}
+\toprule
+Model & Solver & Mean rel.\ error & Max rel.\ error & Correct basin & Time (s) & Accepted \\
+\midrule
+Asset pricing & Kernel & 5.7e-04 & 1.7e-03 & -- & 0.21 & 1/1 \\
+ & NN & 4.3e-05 & 2.0e-04 & -- & 0.017 & 7/7 \\
+Neoclassical growth & Kernel & 1.9e-04 & 1.5e-03 & -- & 0.14 & 1/1 \\
+ & NN & 2.6e-07 & 3.2e-06 & -- & 0.36 & 7/7 \\
+Concave-convex & Kernel & -- & -- & 70/70 & 0.053 & 70/70 \\
+ & NN & -- & -- & 70/70 & 0.33 & 70/70 \\
+Open economy & Kernel & -- & 9.4e-04 & -- & 0.54 & 1/1 \\
+ & NN & -- & 8.1e-06 & -- & 1 & 7/7 \\
+\bottomrule
+\end{tabular}

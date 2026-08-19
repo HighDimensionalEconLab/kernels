@@ -125,6 +125,30 @@ def additive_rbf_state_gram(centers, sigmas, lengthscales):
     return additive_rbf_state_features(centers, centers, sigmas, lengthscales)
 
 
+STATE_KERNEL_NAMES = tuple(
+    f"{structure}_{family}"
+    for structure in ("ard", "additive")
+    for family in ("rbf", *MATERN_STATE_FAMILIES)
+)
+
+
+# ard: one amplitude, product of per-axis correlations. additive: one
+# amplitude per axis, sum of them. The axis count comes from lengthscales.
+def state_features(name, x, centers, amplitude, lengthscales):
+    dtype = x.dtype
+    lengthscales = jnp.asarray(lengthscales, dtype)
+    structure, _, family = name.partition("_")
+    if structure == "ard":
+        sigma = jnp.asarray(amplitude, dtype)
+        if family == "rbf":
+            return ard_rbf_state_features(x, centers, sigma, lengthscales)
+        return ard_matern_state_features(family, x, centers, sigma, lengthscales)
+    sigmas = jnp.full(lengthscales.shape, amplitude, dtype)
+    if family == "rbf":
+        return additive_rbf_state_features(x, centers, sigmas, lengthscales)
+    return additive_matern_state_features(family, x, centers, sigmas, lengthscales)
+
+
 # Each half-integer Matern kernel is sigma^2 pi(a d) e^{-a d} with pi a
 # degree-p polynomial and a the decay rate below; its antiderivative is
 # h(d) = int_0^d k = (sigma^2/a) [c - e^{-a d} eta(a d)] with eta a degree-p

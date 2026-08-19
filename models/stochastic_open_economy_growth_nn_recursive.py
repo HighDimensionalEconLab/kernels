@@ -25,11 +25,10 @@ from models.stochastic_open_economy_growth import (
     ToleranceSettings,
     collocation_residuals,
     collocation_rollout,
-    load_sequential_policy,
+    make_sequential_policy,
     problem_cache_config,
     production,
     rollout_steps,
-    save_sequential_policy,
     trajectory_frame,
     trajectory_values,
     transversality_expectation_frame,
@@ -46,7 +45,9 @@ from models.utilities import (
     Stopwatch,
     acceptance_fields,
     cache_key,
+    load_model,
     sample_trajectory_noise,
+    save_model,
     standardized_initial_states,
 )
 
@@ -457,7 +458,7 @@ def stochastic_open_economy_growth_nn_recursive(
     )
     cache_hit = cache_path is not None and cache_path.exists()
     if cache_hit:
-        policy, cached_meta = load_sequential_policy(cache_path)
+        policy, cached_meta = load_model(cache_path, make_sequential_policy)
         theta_final = nnx.split(policy, nnx.Param, ...)[1]
         # The saved policy is the end of the ladder: diagnostics must run at
         # full shock scale, never the fresh args' fractional scale.
@@ -941,24 +942,16 @@ def stochastic_open_economy_growth_nn_recursive(
         "train_loss": train_loss,
         "test_euler_mean_abs": results["test_euler_mean_abs"],
     }
+    policy_meta = {
+        "settings": asdict(nn_set),
+        "structural": structural,
+        "initial_state": initial_state,
+        **policy_extra,
+    }
     if cache_path is not None and not cache_hit:
-        save_sequential_policy(
-            cache_path,
-            policy,
-            nn_set,
-            structural=structural,
-            initial_state=initial_state,
-            extra=policy_extra,
-        )
+        save_model(cache_path, policy, policy_meta)
     if save_policy is not None:
-        save_sequential_policy(
-            save_policy,
-            policy,
-            nn_set,
-            structural=structural,
-            initial_state=initial_state,
-            extra=policy_extra,
-        )
+        save_model(save_policy, policy, policy_meta)
     return results, {
         "model": policy,
         "parameters": p,

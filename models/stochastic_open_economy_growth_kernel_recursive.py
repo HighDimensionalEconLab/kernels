@@ -30,7 +30,7 @@ from models.stochastic_open_economy_growth import (
     ToleranceSettings,
     collocation_rollout,
     euler_residual_terms,
-    load_sequential_policy,
+    make_sequential_policy,
     normalize_state,
     policy_outputs,
     problem_cache_config,
@@ -48,6 +48,7 @@ from models.utilities import (
     Stopwatch,
     acceptance_fields,
     cache_key,
+    load_model,
     sample_trajectory_noise,
     standardized_initial_states,
 )
@@ -212,7 +213,7 @@ def load_reference_policy(policy_dir, problem_config):
             "--policy_cache first"
         )
     best = min(candidates, key=lambda pair: pair[0])[1]
-    policy, meta = load_sequential_policy(best)
+    policy, meta = load_model(best, make_sequential_policy)
     return policy, meta, best
 
 

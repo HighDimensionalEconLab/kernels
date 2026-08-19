@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from functools import lru_cache, partial
 from typing import Literal
 
@@ -17,8 +17,6 @@ from models.stochastic_growth_benchmark import stochastic_growth_benchmark
 from models.utilities import (
     ACTIVATIONS,
     DOMAIN_EPS,
-    load_model,
-    save_model,
     unit_softplus,
 )
 from models.utilities import (
@@ -526,23 +524,6 @@ def make_investment_policy(meta, dtype):
     return InvestmentPolicyNN(
         InvestmentPolicySettings(**meta["settings"]), dtype=dtype, rngs=nnx.Rngs(0)
     )
-
-
-def save_investment_policy(path, policy, settings, *, structural=None, extra=None):
-    meta = {"settings": asdict(settings)}
-    if structural is not None:
-        meta["structural"] = {
-            name: float(np.asarray(value))
-            for name, value in structural.items()
-            if np.asarray(value).ndim == 0
-        }
-    if extra:
-        meta.update(extra)
-    save_model(path, policy, meta)
-
-
-def load_investment_policy(path):
-    return load_model(path, make_investment_policy)
 
 
 @jax.tree_util.register_static

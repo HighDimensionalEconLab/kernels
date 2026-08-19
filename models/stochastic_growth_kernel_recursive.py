@@ -22,8 +22,8 @@ from models.stochastic_growth import (
     build_residual_args,
     euler_residuals,
     growth_initial_conditions,
-    load_investment_policy,
     log_tvc_residual,
+    make_investment_policy,
     problem_cache_config,
     simulate,
     simulate_train,
@@ -38,6 +38,7 @@ from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
     cache_key,
+    load_model,
     long_df,
     sample_trajectory_noise,
 )
@@ -72,7 +73,7 @@ def load_reference_policy(policy_dir, problem_config):
             "run stochastic_growth_nn_recursive with --policy_cache first"
         )
     _, best = min(candidates, key=lambda pair: pair[0])
-    policy, meta = load_investment_policy(best)
+    policy, meta = load_model(best, make_investment_policy)
     return policy, meta, best
 
 

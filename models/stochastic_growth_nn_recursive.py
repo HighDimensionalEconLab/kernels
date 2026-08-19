@@ -26,10 +26,9 @@ from models.stochastic_growth import (
     cached_stochastic_benchmark,
     euler_residuals,
     growth_initial_conditions,
-    load_investment_policy,
     log_tvc_residual,
+    make_investment_policy,
     problem_cache_config,
-    save_investment_policy,
     simulate,
     simulate_train,
     trajectory_values,
@@ -40,8 +39,10 @@ from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
     cache_key,
+    load_model,
     long_df,
     sample_trajectory_noise,
+    save_model,
     standardized_initial_states,
 )
 from models.utilities import (
@@ -339,7 +340,7 @@ def stochastic_growth_nn_recursive(
     )
     cache_hit = cache_path is not None and cache_path.exists()
     if cache_hit:
-        policy, cached_meta = load_investment_policy(cache_path)
+        policy, cached_meta = load_model(cache_path, make_investment_policy)
         theta_final, solve_args = nnx.split(policy, nnx.Param, ...)[1], residual_args
         steps = 0
         epochs_run = 0
@@ -771,14 +772,11 @@ def stochastic_growth_nn_recursive(
         "train_loss": train_loss,
         "test_euler_mean_abs": results["test_euler_mean_abs"],
     }
+    policy_meta = {"settings": asdict(hc_set), "structural": structural, **policy_extra}
     if cache_path is not None and not cache_hit:
-        save_investment_policy(
-            cache_path, policy, hc_set, structural=structural, extra=policy_extra
-        )
+        save_model(cache_path, policy, policy_meta)
     if save_policy is not None:
-        save_investment_policy(
-            save_policy, policy, hc_set, structural=structural, extra=policy_extra
-        )
+        save_model(save_policy, policy, policy_meta)
     return results, extras
 
 

@@ -14,8 +14,6 @@ from tinydiffeq import SaveAt, solve_sde
 
 from models.utilities import (
     ACTIVATIONS,
-    load_model,
-    save_model,
     unit_softplus,
 )
 
@@ -646,20 +644,3 @@ def make_sequential_policy(meta, dtype):
     return SequentialPolicyNN(
         SequentialPolicySettings(**meta["settings"]), dtype=dtype, rngs=nnx.Rngs(0)
     )
-
-
-def save_sequential_policy(path, policy, nn_set, *, structural, initial_state, extra):
-    save_model(
-        path,
-        policy,
-        {
-            "settings": asdict(nn_set),
-            "structural": structural,
-            "initial_state": initial_state,
-            **extra,
-        },
-    )
-
-
-def load_sequential_policy(path):
-    return load_model(path, make_sequential_policy)

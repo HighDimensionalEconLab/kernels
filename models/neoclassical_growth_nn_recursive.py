@@ -174,23 +174,6 @@ def make_investment_policy(meta, dtype):
     )
 
 
-def save_investment_policy(path, policy, settings, *, structural=None, extra=None):
-    meta = {"settings": asdict(settings)}
-    if structural is not None:
-        meta["structural"] = {
-            name: float(np.asarray(value))
-            for name, value in structural.items()
-            if np.asarray(value).ndim == 0
-        }
-    if extra:
-        meta.update(extra)
-    save_model(path, policy, meta)
-
-
-def load_investment_policy(path):
-    return load_model(path, make_investment_policy)
-
-
 # At each interior epoch boundary: redraw the training ICs, stop on a
 # nonfinite or converged fresh-batch loss, else continue with damping reset.
 @dataclass(frozen=True)
@@ -481,7 +464,7 @@ def neoclassical_growth_nn_recursive(
 
     # Multi-start Levenberg-Marquardt training (or a cache load).
     if cache_hit:
-        policy, cached_meta = load_investment_policy(cache_path)
+        policy, cached_meta = load_model(cache_path, make_investment_policy)
         _, theta_final, _ = nnx.split(policy, nnx.Param, ...)
         solve_args = residual_args
         steps = 0
@@ -804,14 +787,11 @@ def neoclassical_growth_nn_recursive(
         "train_loss": train_loss,
         "test_euler_mean_abs": results["test_euler_mean_abs"],
     }
+    policy_meta = {"settings": asdict(hc_set), "structural": structural, **policy_extra}
     if cache_path is not None and not cache_hit:
-        save_investment_policy(
-            cache_path, policy, hc_set, structural=structural, extra=policy_extra
-        )
+        save_model(cache_path, policy, policy_meta)
     if save_policy is not None:
-        save_investment_policy(
-            save_policy, policy, hc_set, structural=structural, extra=policy_extra
-        )
+        save_model(save_policy, policy, policy_meta)
     return results, extras
 
 

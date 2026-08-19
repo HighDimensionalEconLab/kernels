@@ -30,12 +30,10 @@ PREFIX = "neoclassical_growth_recursive_comparison"
 # solves rather than filtered by it.
 def apply_common_validation(results):
     results = results.copy()
-    collocation_path_ok = (
-        results["collocation_path_ok"].astype(bool)
-        if "collocation_path_ok" in results
-        else True
+    train_path_ok = (
+        results["train_path_ok"].astype(bool) if "train_path_ok" in results else True
     )
-    common_accepted = results["solution_accepted"].astype(bool) & collocation_path_ok
+    common_accepted = results["solution_accepted"].astype(bool) & train_path_ok
     results["native_solution_accepted"] = results["solution_accepted"]
     results["common_validation_accepted"] = common_accepted
     results["solution_accepted"] = common_accepted
@@ -52,11 +50,11 @@ def method_summary(method, results):
         "frac_accepted": float(results["common_validation_accepted"].mean()),
         "optimizer_solve_time": float(sample["solve_time"].median()),
         "total_fit_time": float(sample["total_fit_time"].median()),
-        "test_median_abs_k_rel_error": float(
-            sample["test_median_abs_k_rel_error"].median()
+        "test_mean_abs_k_rel_error": float(
+            sample["test_mean_abs_k_rel_error"].median()
         ),
-        "test_median_abs_c_rel_error": float(
-            sample["test_median_abs_c_rel_error"].median()
+        "test_mean_abs_c_rel_error": float(
+            sample["test_mean_abs_c_rel_error"].median()
         ),
         "test_median_trajectory_mean_abs_k_rel_error": float(
             sample["test_median_trajectory_mean_abs_k_rel_error"].median()
@@ -131,8 +129,6 @@ def run(
         "tvc_steps": tvc_steps,
         "test_T": test_T,
         "test_points": test_points,
-        "benchmark_T": max(200.0, train_T, test_T),
-        "benchmark_points": 801,
     }
     ic_set = {
         "data_seed": data_seed,
@@ -227,7 +223,7 @@ def run(
             "initial_conditions": {"z_0": z_0, "k_0": k_0},
             "common_validation": {
                 "requires_solver_converged": True,
-                "requires_collocation_path_ok": True,
+                "requires_train_path_ok": True,
                 "benchmark_errors_are_reported_not_gated": True,
             },
         },

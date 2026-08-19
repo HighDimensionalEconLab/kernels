@@ -8,7 +8,6 @@ from flax import nnx
 from nlls_gram import LMStatus
 
 from models.neoclassical_growth import neoclassical_steady_state_sensitivities
-from models.neoclassical_growth_nn import policy_values
 from replication.neoclassical_growth_nn import PREFIX, SOLVER, SUMMARY_EXPERIMENTS
 from replication.utilities import (
     configure_process,
@@ -64,8 +63,8 @@ def run(
         def paths_at_sensitivity_times(p_value):
             solved = solver.solve(result.x, residual_args, p=p_value, **spec["options"])
             policy = nnx.merge(residual_args.graphdef, solved.x, residual_args.nondiff)
-            values = policy_values(policy, t_sens, p_value)
-            return jnp.column_stack([values["k"], values["c"]]), solved.status
+            # The model maps t -> [k(t), c(t)] directly.
+            return jax.vmap(policy)(t_sens), solved.status
 
         jacobian, status = jax.jacrev(paths_at_sensitivity_times, has_aux=True)(
             spec["p"]
@@ -75,12 +74,12 @@ def run(
         # tangents, indistinguishable from a genuine null effect.
         if int(status) != LMStatus.CONVERGED:
             raise RuntimeError("the sensitivity re-solve did not converge")
-        primal_values = policy_values(extras["model"], t_sens, spec["p"])
+        primal_values = jax.vmap(extras["model"])(t_sens)
         fields = {}
         for index, time_value in enumerate(SENSITIVITY_TIMES):
             suffix = f"T{time_value:g}".replace(".", "p")
-            fields[f"k_{suffix}"] = float(primal_values["k"][index])
-            fields[f"c_{suffix}"] = float(primal_values["c"][index])
+            fields[f"k_{suffix}"] = float(primal_values[index, 0])
+            fields[f"c_{suffix}"] = float(primal_values[index, 1])
             for name in ("a", "delta", "rho_hat", "sigma_crra", "k_0"):
                 fields[f"d_k_{suffix}_d_{name}"] = float(
                     getattr(jacobian, name)[index, 0]

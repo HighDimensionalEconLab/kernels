@@ -723,9 +723,10 @@ def neoclassical_growth_kernel(out):
     }
     for name in ("baseline_g02", "baseline_g02_learned"):
         j = load(out, f"{prefix}_{name}")
+        g02_hp = load(out, f"{prefix}_{name}_hyperparameters")
         experiments[name] = {
             "g": med(j["g"]),
-            "learn_g_hat": bool(med(j["learn_g_hat"])),
+            "learn_g_hat": g02_hp["parameters"]["learn_g_hat"],
             "g_hat": sig(med(j["g_hat"]), 4),
             "g_hat_error": sci(med(j["g_hat_error"]), 3),
             **errors(j),
@@ -1084,11 +1085,12 @@ def neoclassical_growth_nn(out):
     }
     for name in ("baseline_g02", "baseline_g02_learned"):
         j = load(out, f"{prefix}_{name}")
+        g02_hp = load(out, f"{prefix}_{name}_hyperparameters")
         df = pd.read_parquet(out / f"{prefix}_{name}_results.parquet")
         accepted_sample = df[df["solution_accepted"]]
         payload["experiments"][name] = {
             "g": med(j["g"]),
-            "learn_g_hat": bool(med(j["learn_g_hat"])),
+            "learn_g_hat": g02_hp["nn_set"]["learn_g_hat"],
             "frac_accepted": sig(j["frac_accepted"]),
             # Medians over accepted seeds; a wholesale-rejected experiment
             # (the learned-trend certificate refusing every attempt) reports

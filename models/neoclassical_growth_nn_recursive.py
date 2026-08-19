@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import pathlib
@@ -18,23 +17,24 @@ from nlls_gram import DrawNNXModule, LevenbergMarquardt, LMAction, LMStatus, Mul
 from tinydiffeq import RK4, ConstantStepSize, IController, SaveAt, Tsit5, solve_ode
 
 from models.neoclassical_growth import (
-    DOMAIN_EPS,
-    InitialConditionSettings,
     RecursiveParameters,
     euler_residuals,
-    growth_initial_conditions,
     log_state_drift_field,
     log_tvc_residual,
     simulate,
-    standardized_initial_states,
     trajectory_values,
 )
 from models.neoclassical_growth_benchmark import benchmark_df
 from models.utilities import (
     ACTIVATIONS,
+    DOMAIN_EPS,
     STATUS_TO_REASON,
+    InitialConditionSettings,
     OptimizerSettings,
+    cache_key,
+    growth_initial_conditions,
     long_df,
+    standardized_initial_states,
     unit_softplus,
 )
 from models.utilities import (
@@ -225,14 +225,6 @@ def load_investment_policy(path):
         )
     theta.replace_by_pure_dict(nested)
     return nnx.merge(graphdef, theta, nondiff), meta
-
-
-# Content-addressed policy filenames: the key hashes every input that
-# determines the trained artifact, so existence of
-# <dir>/<model>_policy_<key>.npz is a cache hit for an identical run.
-def policy_cache_key(config):
-    canonical = json.dumps(config, sort_keys=True, default=float)
-    return hashlib.sha256(canonical.encode()).hexdigest()[:12]
 
 
 # At each interior epoch boundary: redraw the training ICs, stop on a
@@ -512,14 +504,14 @@ def neoclassical_growth_nn_recursive(
         "opt_set": asdict(opt_set),
         "stop_set": asdict(stop_set),
     }
-    problem_key = policy_cache_key(problem_config)
-    run_key = policy_cache_key(run_config)
-    cache_key = f"{problem_key}-{run_key}"
+    problem_key = cache_key(problem_config)
+    run_key = cache_key(run_config)
+    policy_key = f"{problem_key}-{run_key}"
     cache_path = (
         None
         if policy_cache is None
         else pathlib.Path(policy_cache)
-        / f"neoclassical_growth_nn_recursive_policy_{cache_key}.npz"
+        / f"neoclassical_growth_nn_recursive_policy_{policy_key}.npz"
     )
     cache_hit = cache_path is not None and cache_path.exists()
 
@@ -740,7 +732,7 @@ def neoclassical_growth_nn_recursive(
         "max_train_euler": max_train_euler,
         "max_test_euler": max_test_euler,
         "final_damping": final_damping,
-        "policy_cache_key": cache_key,
+        "policy_cache_key": policy_key,
         "policy_cache_hit": cache_hit,
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_values["euler_residual"]))),
         "test_trajectory_euler_mean_abs_p50": float(
@@ -842,7 +834,7 @@ def neoclassical_growth_nn_recursive(
         "model": "neoclassical_growth_nn_recursive",
         "problem_key": problem_key,
         "run_key": run_key,
-        "cache_key": cache_key,
+        "cache_key": policy_key,
         "config": {"problem": problem_config, "run": run_config},
         "solution_accepted": solver_accepted,
         "train_loss": train_loss,

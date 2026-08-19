@@ -26,6 +26,7 @@ from models.open_economy_growth import (
 from models.open_economy_growth_benchmark import open_economy_growth_benchmark
 from models.utilities import (
     ACTIVATIONS,
+    DOMAIN_EPS,
     STATUS_TO_REASON,
     OptimizerSettings,
     Stopwatch,
@@ -40,7 +41,6 @@ from models.utilities import (
 # root, whereas a smooth bounded CA(k) cannot represent the singular explosive
 # asset branch as capital converges. No terminal, TVC, no-Ponzi, steady-state,
 # or benchmark information enters the residual or initialization.
-DOMAIN_EPS = 1e-8
 
 
 # Acceptance gates, CLI-reachable so a float32 caller can pass its own bar

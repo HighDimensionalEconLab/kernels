@@ -17,7 +17,6 @@ from nlls_gram import (
 )
 
 from models.neoclassical_growth import (
-    DOMAIN_EPS,
     StructuralParameters,
     mpk,
     production,
@@ -26,6 +25,7 @@ from models.neoclassical_growth import (
 from models.neoclassical_growth_benchmark import benchmark_df
 from models.utilities import (
     ACTIVATIONS,
+    DOMAIN_EPS,
     STATUS_TO_REASON,
     OptimizerSettings,
     Stopwatch,

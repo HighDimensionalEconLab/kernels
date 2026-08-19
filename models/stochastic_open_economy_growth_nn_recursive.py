@@ -14,27 +14,28 @@ import pandas as pd
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import DrawNNXModule, LevenbergMarquardt, LMAction, LMStatus, MultiStart
-from tinydiffeq import SRA1, EulerMaruyama, Milstein, SaveAt, solve_sde
+from tinydiffeq import SaveAt, solve_sde
 
-from models.neoclassical_growth import standardized_initial_states
-from models.neoclassical_growth_nn_recursive import policy_cache_key
 from models.open_economy_growth import ModelParameters, marginal_product, production
 from models.open_economy_growth_benchmark import open_economy_growth_benchmark
-from models.stochastic_growth_nn_recursive import sample_trajectory_noise
 from models.utilities import (
     ACTIVATIONS,
+    DOMAIN_EPS,
     NEOCLASSICAL_GROWTH_CONSTANTS,
+    SDE_SOLVERS,
     STATUS_TO_REASON,
     OptimizerSettings,
     Stopwatch,
     acceptance_fields,
+    cache_key,
+    sample_trajectory_noise,
+    standardized_initial_states,
     unit_softplus,
 )
 
 # Recursive stochastic small open economy on (log z, log k, a/output_scale,
 # rate_gap). No benchmark or steady-state information enters the residual or
 # initialization; the deterministic benchmark is ex-post diagnostics only.
-DOMAIN_EPS = 1e-8
 
 # Annual AR(1) -> OU: e^(-kappa_r) = rho, sigma_r^2/(2 kappa_r) = sd^2/(1-rho^2).
 # World-rate process from Uribe & Yue (2006, eq. 15): quarterly rho = 0.83 on
@@ -50,12 +51,6 @@ WORLD_RATE_KAPPA = -math.log(WORLD_RATE_AR1_RHO)
 WORLD_RATE_SIGMA = WORLD_RATE_AR1_INNOVATION_SD * math.sqrt(
     2.0 * WORLD_RATE_KAPPA / (1.0 - WORLD_RATE_AR1_RHO**2)
 )
-
-SDE_SOLVERS = {
-    "sra1": SRA1(),
-    "milstein": Milstein(),
-    "euler_maruyama": EulerMaruyama(),
-}
 
 # The residual differentiates the policy twice, so no kinked activation.
 SMOOTH_ACTIVATIONS = frozenset(ACTIVATIONS) - {"relu"}
@@ -1067,14 +1062,14 @@ def stochastic_open_economy_growth_nn_recursive(
         "opt_set": asdict(opt_set),
         "stop_set": asdict(stop_set),
     }
-    problem_key = policy_cache_key(problem_config)
-    run_key = policy_cache_key(run_config)
-    cache_key = f"{problem_key}-{run_key}"
+    problem_key = cache_key(problem_config)
+    run_key = cache_key(run_config)
+    policy_key = f"{problem_key}-{run_key}"
     cache_path = (
         None
         if policy_cache is None
         else pathlib.Path(policy_cache)
-        / f"stochastic_open_economy_growth_nn_recursive_policy_{cache_key}.npz"
+        / f"stochastic_open_economy_growth_nn_recursive_policy_{policy_key}.npz"
     )
     cache_hit = cache_path is not None and cache_path.exists()
     if cache_hit:
@@ -1491,7 +1486,7 @@ def stochastic_open_economy_growth_nn_recursive(
         "attempt": attempt,
         "stopping_reason": stopping_reason,
         "final_damping": final_damping,
-        "policy_cache_key": cache_key,
+        "policy_cache_key": policy_key,
         "policy_cache_hit": cache_hit,
         "solve_time": solve_time,
         "setup_time": setup_time,
@@ -1572,7 +1567,7 @@ def stochastic_open_economy_growth_nn_recursive(
         "model": "stochastic_open_economy_growth_nn_recursive",
         "problem_key": problem_key,
         "run_key": run_key,
-        "cache_key": cache_key,
+        "cache_key": policy_key,
         "config": {"problem": problem_config, "run": run_config},
         "solver_accepted": solver_accepted,
         "solution_accepted": solution_accepted,

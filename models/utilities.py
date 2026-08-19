@@ -1,4 +1,7 @@
+import hashlib
+import json
 import math
+import pathlib
 import time
 from dataclasses import dataclass
 
@@ -8,6 +11,9 @@ import numpy as np
 import pandas as pd
 from flax import nnx
 from nlls_gram import LMStatus
+from tinydiffeq import SRA1, EulerMaruyama, Milstein
+
+DOMAIN_EPS = 1e-8
 
 STATUS_TO_REASON = {
     LMStatus.CONVERGED: "converged",
@@ -180,6 +186,111 @@ NEOCLASSICAL_GROWTH_CONSTANTS = GrowthConstants(
 )
 
 
+@dataclass(frozen=True)
+class InitialConditionSettings:
+    # One data_seed fixes independent train and test draws around (z_0, k_0),
+    # separate from the NN seed; a zero log variance pins its axis at the base.
+    data_seed: int = 0
+    num_train_trajectories: int = 1
+    num_test_trajectories: int = 50
+    train_log_z_variance: float = 0.0
+    train_log_k_variance: float = 0.0
+    # None inherits the training variances; results record the resolved values.
+    test_log_z_variance: float | None = None
+    test_log_k_variance: float | None = None
+    # Recenter the held-out draws when set (out-of-distribution testing).
+    test_z_0: float | None = None
+    test_k_0: float | None = None
+
+
+def draw_initial_conditions(
+    z_0, k_0, num_trajectories, log_z_variance, log_k_variance, key, dtype
+):
+    base = jnp.asarray([z_0, k_0], dtype=dtype)
+    if log_z_variance == 0.0 and log_k_variance == 0.0:
+        return jnp.tile(base, (num_trajectories, 1))
+    if num_trajectories < 2:
+        raise ValueError("positive log variances require at least two trajectories")
+    draws = jax.random.normal(key, (num_trajectories, 2), dtype=dtype)
+    # Center and standardize each column so every axis carries exactly the
+    # requested population variance; a zero variance pins its axis at the base.
+    centered = draws - jnp.mean(draws, axis=0, keepdims=True)
+    standardized = centered / jnp.sqrt(jnp.mean(centered**2, axis=0, keepdims=True))
+    scales = jnp.sqrt(jnp.asarray([log_z_variance, log_k_variance], dtype=dtype))
+    return jnp.exp(jnp.log(base)[None, :] + scales[None, :] * standardized)
+
+
+def standardized_initial_states(key, center, scales, num_trajectories):
+    # Additive in the caller's coordinate, unlike the multiplicative
+    # draw_initial_conditions: additive spreads keep a level axis
+    # non-degenerate at a zero center. One trajectory pins the batch at the
+    # center.
+    if num_trajectories == 1:
+        return center[None, :]
+    draws = jax.random.normal(key, (num_trajectories, center.size), dtype=center.dtype)
+    centered = draws - jnp.mean(draws, axis=0, keepdims=True)
+    standardized = centered / jnp.sqrt(jnp.mean(centered**2, axis=0, keepdims=True))
+    return center[None, :] + scales[None, :] * standardized
+
+
+# Train and test draws from one data_seed; the resolved test design rides
+# along for the results dicts.
+@dataclass(frozen=True)
+class InitialConditionDraw:
+    train_ic_key: jax.Array
+    test_ic_key: jax.Array
+    train_initial_conditions: jax.Array
+    test_initial_conditions: jax.Array
+    test_z_center: float
+    test_k_center: float
+    test_log_z_variance: float
+    test_log_k_variance: float
+
+
+def growth_initial_conditions(z_0, k_0, ic_set, dtype):
+    train_ic_key, test_ic_key = jax.random.split(jax.random.key(ic_set.data_seed))
+    train_initial_conditions = draw_initial_conditions(
+        z_0,
+        k_0,
+        ic_set.num_train_trajectories,
+        ic_set.train_log_z_variance,
+        ic_set.train_log_k_variance,
+        train_ic_key,
+        dtype,
+    )
+    test_z_center = z_0 if ic_set.test_z_0 is None else ic_set.test_z_0
+    test_k_center = k_0 if ic_set.test_k_0 is None else ic_set.test_k_0
+    test_log_z_variance = (
+        ic_set.train_log_z_variance
+        if ic_set.test_log_z_variance is None
+        else ic_set.test_log_z_variance
+    )
+    test_log_k_variance = (
+        ic_set.train_log_k_variance
+        if ic_set.test_log_k_variance is None
+        else ic_set.test_log_k_variance
+    )
+    test_initial_conditions = draw_initial_conditions(
+        test_z_center,
+        test_k_center,
+        ic_set.num_test_trajectories,
+        test_log_z_variance,
+        test_log_k_variance,
+        test_ic_key,
+        dtype,
+    )
+    return InitialConditionDraw(
+        train_ic_key=train_ic_key,
+        test_ic_key=test_ic_key,
+        train_initial_conditions=train_initial_conditions,
+        test_initial_conditions=test_initial_conditions,
+        test_z_center=test_z_center,
+        test_k_center=test_k_center,
+        test_log_z_variance=test_log_z_variance,
+        test_log_k_variance=test_log_k_variance,
+    )
+
+
 # Gram-form Levenberg-Marquardt settings shared across solvers; each solver
 # pins its tuned values inline in its opt_set signature default.
 @dataclass(frozen=True)
@@ -241,3 +352,81 @@ ACTIVATIONS = {
     "unit_softplus": unit_softplus,
     "identity": nnx.identity,
 }
+
+SDE_SOLVERS = {
+    "sra1": SRA1(),
+    "milstein": Milstein(),
+    "euler_maruyama": EulerMaruyama(),
+}
+
+
+def sample_trajectory_noise(
+    solver, key, num_trajectories, n_steps, dt, dtype, state_size
+):
+    reference_state = jnp.zeros(state_size, dtype=dtype)
+    dt = jnp.asarray(dt, dtype=dtype)
+    return jax.vmap(
+        lambda trajectory_key: solver.sample_noise(
+            reference_state, trajectory_key, n_steps, dt, dtype
+        )
+    )(jax.random.split(key, num_trajectories))
+
+
+# Content-addressed policy filenames: the key hashes every input that
+# determines the trained artifact, so existence of
+# <dir>/<model>_policy_<key>.npz is a cache hit for an identical run.
+def cache_key(config):
+    canonical = json.dumps(config, sort_keys=True, default=float)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:12]
+
+
+# One .npz per trained module: the nnx.Param block and the non-differentiated
+# Variable block as "params/..." and "nondiff/..." flat keys (nnx's supported
+# State.to_pure_dict / replace_by_pure_dict conversion, list indices numeric),
+# plus a JSON __meta__ block. RNG state is never written: a reload rebuilds
+# the structural template from meta and takes every array from the file.
+def save_model(path, module, meta):
+    def flatten(namespace, node, out):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                flatten((*namespace, str(key)), value, out)
+        else:
+            out["/".join(namespace)] = np.asarray(node)
+        return out
+
+    _, params, _, nondiff = nnx.split(module, nnx.Param, nnx.RngState, ...)
+    arrays = flatten(("params",), params.to_pure_dict(), {})
+    flatten(("nondiff",), nondiff.to_pure_dict(), arrays)
+    meta = {**meta, "dtype": str(next(iter(arrays.values())).dtype)}
+    pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, __meta__=np.asarray(json.dumps(meta)), **arrays)
+
+
+def load_model(path, make_module):
+    data = np.load(path)
+    meta = json.loads(str(data["__meta__"]))
+    dtype = jnp.dtype(meta["dtype"])
+    blocks = {"params": {}, "nondiff": {}}
+    for name in data.files:
+        if name == "__meta__":
+            continue
+        namespace, _, rest = name.partition("/")
+        node = blocks[namespace]
+        *parents, leaf = rest.split("/")
+        for part in parents:
+            node = node.setdefault(int(part) if part.isdigit() else part, {})
+        array = data[name]
+        node[int(leaf) if leaf.isdigit() else leaf] = jnp.asarray(
+            array, dtype=dtype if np.issubdtype(array.dtype, np.inexact) else None
+        )
+    # An empty replace_by_pure_dict is a silent no-op that would return the
+    # template's random initialization as if it were the trained module.
+    if not blocks["params"]:
+        raise ValueError(f"{path} carries no params/ arrays")
+    graphdef, params, rngs, nondiff = nnx.split(
+        make_module(meta, dtype), nnx.Param, nnx.RngState, ...
+    )
+    params.replace_by_pure_dict(blocks["params"])
+    if blocks["nondiff"]:
+        nondiff.replace_by_pure_dict(blocks["nondiff"])
+    return nnx.merge(graphdef, params, rngs, nondiff), meta

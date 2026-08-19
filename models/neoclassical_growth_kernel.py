@@ -15,7 +15,6 @@ from models.kernels import (
     normalize_kernel,
 )
 from models.neoclassical_growth import (
-    DOMAIN_EPS,
     StructuralParameters,
     mpk,
     production,
@@ -23,13 +22,14 @@ from models.neoclassical_growth import (
 )
 from models.neoclassical_growth_benchmark import benchmark_df
 from models.utilities import (
-    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
-)
-from models.utilities import (
+    DOMAIN_EPS,
     STATUS_TO_REASON,
     Stopwatch,
     acceptance_fields,
     make_train_t_grid,
+)
+from models.utilities import (
+    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
 
 

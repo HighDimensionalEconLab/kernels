@@ -20,12 +20,8 @@ from nlls_gram import (
 )
 
 from models.kernels import STATE_KERNEL_NAMES, state_features
-from models.neoclassical_growth import standardized_initial_states
-from models.neoclassical_growth_nn_recursive import policy_cache_key
 from models.open_economy_growth import ModelParameters, production
-from models.stochastic_growth_nn_recursive import sample_trajectory_noise
 from models.stochastic_open_economy_growth_nn_recursive import (
-    SDE_SOLVERS,
     WORLD_RATE_KAPPA,
     WORLD_RATE_SIGMA,
     DataSettings,
@@ -43,14 +39,17 @@ from models.stochastic_open_economy_growth_nn_recursive import (
     trajectory_values,
 )
 from models.utilities import (
+    DOMAIN_EPS,
     NEOCLASSICAL_GROWTH_CONSTANTS,
+    SDE_SOLVERS,
     STATUS_TO_REASON,
     OptimizerSettings,
     Stopwatch,
     acceptance_fields,
+    cache_key,
+    sample_trajectory_noise,
+    standardized_initial_states,
 )
-
-DOMAIN_EPS = 1e-8
 
 
 @dataclass(frozen=True)
@@ -198,7 +197,7 @@ def residual_fn(theta, args, p, kernel_set):
 # Best accepted artifact for this problem hash by held-out residual; no
 # fallback -- cache the NN first with --policy_cache.
 def load_reference_policy(policy_dir, problem_config):
-    problem_key = policy_cache_key(problem_config)
+    problem_key = cache_key(problem_config)
     pattern = f"stochastic_open_economy_growth_nn_recursive_policy_{problem_key}-*.npz"
     candidates = []
     for path in sorted(pathlib.Path(policy_dir).glob(pattern)):

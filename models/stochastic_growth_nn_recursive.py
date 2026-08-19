@@ -14,40 +14,36 @@ import pandas as pd
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
-from tinydiffeq import SRA1, EulerMaruyama, Milstein, SaveAt, solve_sde
+from tinydiffeq import SaveAt, solve_sde
 
 from models.neoclassical_growth import (
-    DOMAIN_EPS,
-    InitialConditionSettings,
     consumption,
-    growth_initial_conditions,
     mpk,
     production,
-    standardized_initial_states,
 )
 from models.neoclassical_growth_nn_recursive import (
     DrawInvestmentPolicy,
     InvestmentPolicyNN,
     InvestmentPolicySettings,
     load_investment_policy,
-    policy_cache_key,
     save_investment_policy,
 )
 from models.stochastic_growth_benchmark import stochastic_growth_benchmark
 from models.utilities import (
-    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
+    DOMAIN_EPS,
+    SDE_SOLVERS,
+    STATUS_TO_REASON,
+    InitialConditionSettings,
+    OptimizerSettings,
+    cache_key,
+    growth_initial_conditions,
+    long_df,
+    sample_trajectory_noise,
+    standardized_initial_states,
 )
 from models.utilities import (
-    STATUS_TO_REASON,
-    OptimizerSettings,
-    long_df,
+    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
-
-SDE_SOLVERS = {
-    "sra1": SRA1(),
-    "milstein": Milstein(),
-    "euler_maruyama": EulerMaruyama(),
-}
 
 
 @struct.dataclass
@@ -199,18 +195,6 @@ def euler_residual_terms(policy, log_states, p):
 
 def euler_residuals(policy, log_states, p):
     return euler_residual_terms(policy, log_states, p)[0]
-
-
-def sample_trajectory_noise(
-    solver, key, num_trajectories, n_steps, dt, dtype, state_size
-):
-    reference_state = jnp.zeros(state_size, dtype=dtype)
-    dt = jnp.asarray(dt, dtype=dtype)
-    return jax.vmap(
-        lambda trajectory_key: solver.sample_noise(
-            reference_state, trajectory_key, n_steps, dt, dtype
-        )
-    )(jax.random.split(key, num_trajectories))
 
 
 # At each interior epoch boundary: redraw the shock realization (and the
@@ -630,14 +614,14 @@ def stochastic_growth_nn_recursive(
         "opt_set": asdict(opt_set),
         "stop_set": asdict(stop_set),
     }
-    problem_key = policy_cache_key(problem_config)
-    run_key = policy_cache_key(run_config)
-    cache_key = f"{problem_key}-{run_key}"
+    problem_key = cache_key(problem_config)
+    run_key = cache_key(run_config)
+    policy_key = f"{problem_key}-{run_key}"
     cache_path = (
         None
         if policy_cache is None
         else pathlib.Path(policy_cache)
-        / f"stochastic_growth_nn_recursive_policy_{cache_key}.npz"
+        / f"stochastic_growth_nn_recursive_policy_{policy_key}.npz"
     )
     cache_hit = cache_path is not None and cache_path.exists()
     if cache_hit:
@@ -858,7 +842,7 @@ def stochastic_growth_nn_recursive(
         "max_train_euler": max_train_euler,
         "max_test_euler": max_test_euler,
         "final_damping": final_damping,
-        "policy_cache_key": cache_key,
+        "policy_cache_key": policy_key,
         "policy_cache_hit": cache_hit,
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_values["euler_residual"]))),
         "test_trajectory_euler_mean_abs_p50": float(
@@ -1067,7 +1051,7 @@ def stochastic_growth_nn_recursive(
         "model": "stochastic_growth_nn_recursive",
         "problem_key": problem_key,
         "run_key": run_key,
-        "cache_key": cache_key,
+        "cache_key": policy_key,
         "config": {"problem": problem_config, "run": run_config},
         "solution_accepted": solver_accepted,
         "train_loss": train_loss,

@@ -12,10 +12,6 @@ import jsonargparse
 import numpy as np
 from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
 
-from models.neoclassical_growth import (
-    InitialConditionSettings,
-    growth_initial_conditions,
-)
 from models.neoclassical_growth_kernel_recursive import (
     KernelInvestmentPolicy,
     StateKernelSettings,
@@ -23,19 +19,14 @@ from models.neoclassical_growth_kernel_recursive import (
     build_residual_args,
     state_lengthscales,
 )
-from models.neoclassical_growth_nn_recursive import (
-    load_investment_policy,
-    policy_cache_key,
-)
+from models.neoclassical_growth_nn_recursive import load_investment_policy
 from models.stochastic_growth_nn_recursive import (
-    SDE_SOLVERS,
     DataSettings,
     StructuralParameters,
     add_fd_path_diagnostics,
     euler_residuals,
     log_tvc_residual,
     problem_cache_config,
-    sample_trajectory_noise,
     simulate,
     simulate_train,
     trajectory_values,
@@ -44,9 +35,14 @@ from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
 from models.utilities import (
+    SDE_SOLVERS,
     STATUS_TO_REASON,
+    InitialConditionSettings,
     OptimizerSettings,
+    cache_key,
+    growth_initial_conditions,
     long_df,
+    sample_trajectory_noise,
 )
 
 
@@ -56,7 +52,7 @@ from models.utilities import (
 # held-out residual. There is deliberately no fallback: solve and cache the
 # NN first via stochastic_growth_nn_recursive --policy_cache <dir>.
 def load_reference_policy(policy_dir, problem_config):
-    problem_key = policy_cache_key(problem_config)
+    problem_key = cache_key(problem_config)
     pattern = f"stochastic_growth_nn_recursive_policy_{problem_key}-*.npz"
     candidates = []
     for path in sorted(pathlib.Path(policy_dir).glob(pattern)):

@@ -18,13 +18,12 @@ from models.kernels import (
     rkhs_norm_squared,
 )
 from models.utilities import (
+    DOMAIN_EPS,
     STATUS_TO_REASON,
     Stopwatch,
     acceptance_fields,
     make_train_t_grid,
 )
-
-DOMAIN_EPS = 1e-8
 
 
 @dataclass(frozen=True)

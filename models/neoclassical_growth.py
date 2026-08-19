@@ -11,6 +11,8 @@ import pandas as pd
 from flax import nnx, struct
 from tinydiffeq import RK4, ConstantStepSize, IController, SaveAt, Tsit5, solve_ode
 
+from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
+
 DOMAIN_EPS = 1e-8
 
 
@@ -483,9 +485,6 @@ def cached_benchmark_solution(
     benchmark_T,
     benchmark_points,
 ):
-    # Deferred: neoclassical_growth_benchmark imports this module's validator.
-    from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
-
     benchmark_grid = np.linspace(0.0, benchmark_T, benchmark_points)
     return neoclassical_growth_benchmark(
         a,

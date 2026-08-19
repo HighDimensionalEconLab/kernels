@@ -1673,7 +1673,7 @@ def multicountry_growth_nn(out):
     return payload
 
 
-def performance_comparisons(out, include_uno=True):
+def performance_comparisons(out):
     def accepted(prefix, experiment="baseline"):
         frame = pd.read_parquet(out / f"{prefix}_{experiment}_results.parquet")
         accepted_frame = frame[frame["solution_accepted"]]
@@ -1687,12 +1687,9 @@ def performance_comparisons(out, include_uno=True):
     asset_nn_time = float(asset_nn["solve_time"].median())
     asset_kernel_error = med(asset_kernel["p_rel_error_mean"])
     asset_nn_error = float(asset_nn["p_rel_error_mean"].median())
-    if include_uno:
-        asset_uno = load(out, "asset_pricing_kernel_uno_baseline")
-        asset_uno_time = med(asset_uno["solve_time"])
-        asset_uno_error = med(asset_uno["p_rel_error_mean"])
-    else:
-        asset_uno_time = asset_uno_error = None
+    asset_uno = load(out, "asset_pricing_kernel_uno_baseline")
+    asset_uno_time = med(asset_uno["solve_time"])
+    asset_uno_error = med(asset_uno["p_rel_error_mean"])
 
     growth_kernel = load(out, "neoclassical_growth_kernel_baseline")
     growth_sequential_nn = accepted("neoclassical_growth_nn")
@@ -1702,15 +1699,12 @@ def performance_comparisons(out, include_uno=True):
         med(growth_kernel["test_k_rel_error_mean"]),
         med(growth_kernel["test_c_rel_error_mean"]),
     )
-    if include_uno:
-        growth_uno = load(out, "neoclassical_growth_kernel_uno_baseline")
-        growth_uno_time = med(growth_uno["solve_time"])
-        growth_uno_error = max(
-            med(growth_uno["test_k_rel_error_mean"]),
-            med(growth_uno["test_c_rel_error_mean"]),
-        )
-    else:
-        growth_uno_time = growth_uno_error = None
+    growth_uno = load(out, "neoclassical_growth_kernel_uno_baseline")
+    growth_uno_time = med(growth_uno["solve_time"])
+    growth_uno_error = max(
+        med(growth_uno["test_k_rel_error_mean"]),
+        med(growth_uno["test_c_rel_error_mean"]),
+    )
 
     # Both NN formulations against the same sequence-space kernel baseline: the
     # sequential MLP shares the kernel's t -> (k, c) ansatz, the recursive one
@@ -1729,12 +1723,9 @@ def performance_comparisons(out, include_uno=True):
     open_recursive_nn = accepted("open_economy_growth_nn_recursive")
     open_kernel_time = med(open_kernel["solve_time"])
     open_kernel_error = med(open_kernel["max_benchmark_error"])
-    if include_uno:
-        open_uno = load(out, "open_economy_growth_kernel_uno_baseline")
-        open_uno_time = med(open_uno["solve_time"])
-        open_uno_error = med(open_uno["max_benchmark_error"])
-    else:
-        open_uno_time = open_uno_error = None
+    open_uno = load(out, "open_economy_growth_kernel_uno_baseline")
+    open_uno_time = med(open_uno["solve_time"])
+    open_uno_error = med(open_uno["max_benchmark_error"])
 
     def open_nn_stats(frame):
         return (
@@ -1798,11 +1789,8 @@ def performance_comparisons(out, include_uno=True):
             "multicountry growth), each seed allowed up to five "
             "multi-start restarts"
         ),
+        "uno": "median of five cached deterministic constrained solves",
     }
-    if include_uno:
-        timing_contract["uno"] = (
-            "median of five cached deterministic constrained solves"
-        )
     return {
         "timing_contract": timing_contract,
         "asset_pricing": comparison(
@@ -1848,7 +1836,7 @@ def performance_comparisons(out, include_uno=True):
     }
 
 
-def validate_replication_contract(out, include_uno=True):
+def validate_replication_contract(out):
     # (headline experiment, expected seed count) per NN prefix; the recursive
     # growth driver's headline experiment is single_ic_g0, not baseline.
     nn_seed_counts = {
@@ -1874,13 +1862,10 @@ def validate_replication_contract(out, include_uno=True):
         "human_capital_kernel",
         "open_economy_growth_kernel",
         "multicountry_growth_kernel",
+        "open_economy_growth_kernel_uno",
+        "asset_pricing_kernel_uno",
+        "neoclassical_growth_kernel_uno",
     )
-    if include_uno:
-        kernel_prefixes += (
-            "open_economy_growth_kernel_uno",
-            "asset_pricing_kernel_uno",
-            "neoclassical_growth_kernel_uno",
-        )
     for prefix in kernel_prefixes:
         timing = pd.read_parquet(out / f"{prefix}_baseline_timing_df.parquet")
         if len(timing) != DETERMINISTIC_TIMING_REPETITIONS:
@@ -1888,65 +1873,52 @@ def validate_replication_contract(out, include_uno=True):
                 f"{prefix} must retain {DETERMINISTIC_TIMING_REPETITIONS} timing runs"
             )
 
-    # The scaling ladder runs only in the float64 pass.
-    residual_dtype = load(out, "neoclassical_growth_kernel_baseline").get(
-        "residual_dtype"
-    )
-    if residual_dtype == "float64":
-        summary = load(out, "multicountry_growth_scaling_summary")
-        expected = {f"cg_N{count}" for count in MULTICOUNTRY_SCALING_COUNTS} | {
-            f"dense_N{count}"
-            for count in MULTICOUNTRY_SCALING_COUNTS
-            if count <= MULTICOUNTRY_SCALING_DENSE_MAX
-        }
-        missing = sorted(expected - set(summary))
-        if missing:
-            raise RuntimeError(
-                f"multicountry_growth_scaling summary lacks rungs {missing}; "
-                "rerun replication.multicountry_growth_scaling"
-            )
-        for name in sorted(expected):
-            if summary[name]["frac_accepted"] != 1.0:
-                raise RuntimeError(
-                    f"multicountry_growth_scaling {name} was not accepted"
-                )
+    summary = load(out, "multicountry_growth_scaling_summary")
+    expected = {f"cg_N{count}" for count in MULTICOUNTRY_SCALING_COUNTS} | {
+        f"dense_N{count}"
+        for count in MULTICOUNTRY_SCALING_COUNTS
+        if count <= MULTICOUNTRY_SCALING_DENSE_MAX
+    }
+    missing = sorted(expected - set(summary))
+    if missing:
+        raise RuntimeError(
+            f"multicountry_growth_scaling summary lacks rungs {missing}; "
+            "rerun replication.multicountry_growth_scaling"
+        )
+    for name in sorted(expected):
+        if summary[name]["frac_accepted"] != 1.0:
+            raise RuntimeError(f"multicountry_growth_scaling {name} was not accepted")
 
 
-def collect(output_dir: str = ".results", include_uno: bool = True):
+def collect(output_dir: str = ".results"):
     out = pathlib.Path(output_dir)
-    validate_replication_contract(out, include_uno)
-    # The collected precision comes from the collected data itself.
-    residual_dtype = load(out, "neoclassical_growth_kernel_baseline").get(
-        "residual_dtype"
-    )
+    validate_replication_contract(out)
     write_nu_rho_table(out)
     write_sequential_comparison_table(out)
     write_neoclassical_growth_comparison_table(out)
-    # The sensitivity experiments run only in the float64 pass.
-    if residual_dtype == "float64":
-        write_neoclassical_sensitivity_table(out)
-        # One table per solver and cross-section width; the kernel and NN
-        # numbers stand on their own rather than being differenced.
-        write_multicountry_sensitivity_table(
-            out,
-            "multicountry_growth_kernel_sensitivity",
-            "multicountry_growth_sensitivity.tex",
-        )
-        write_multicountry_aggregate_table(
-            out,
-            "multicountry_growth_kernel_sensitivity_ten_countries",
-            "multicountry_growth_aggregate_sensitivity.tex",
-        )
-        write_multicountry_sensitivity_table(
-            out,
-            "multicountry_growth_nn_sensitivity",
-            "multicountry_growth_nn_sensitivity.tex",
-        )
-        write_multicountry_aggregate_table(
-            out,
-            "multicountry_growth_nn_sensitivity_ten_countries",
-            "multicountry_growth_nn_aggregate_sensitivity.tex",
-        )
+    write_neoclassical_sensitivity_table(out)
+    # One table per solver and cross-section width; the kernel and NN
+    # numbers stand on their own rather than being differenced.
+    write_multicountry_sensitivity_table(
+        out,
+        "multicountry_growth_kernel_sensitivity",
+        "multicountry_growth_sensitivity.tex",
+    )
+    write_multicountry_aggregate_table(
+        out,
+        "multicountry_growth_kernel_sensitivity_ten_countries",
+        "multicountry_growth_aggregate_sensitivity.tex",
+    )
+    write_multicountry_sensitivity_table(
+        out,
+        "multicountry_growth_nn_sensitivity",
+        "multicountry_growth_nn_sensitivity.tex",
+    )
+    write_multicountry_aggregate_table(
+        out,
+        "multicountry_growth_nn_sensitivity_ten_countries",
+        "multicountry_growth_nn_aggregate_sensitivity.tex",
+    )
     payload = clean(
         {
             "_meta": {
@@ -1967,42 +1939,27 @@ def collect(output_dir: str = ".results", include_uno: bool = True):
                 .isoformat(timespec="seconds"),
                 "machine": machine_info(),
                 "output_dir": output_dir,
-                "residual_dtype": residual_dtype,
-                "include_uno": include_uno,
                 "band_quantiles": [int(100 * QUANTILES[0]), int(100 * QUANTILES[-1])],
             },
             "neoclassical_growth_kernel": neoclassical_growth_kernel(out),
-            **(
-                {
-                    "neoclassical_growth_kernel_uno": neoclassical_growth_kernel_uno(
-                        out
-                    ),
-                    "neoclassical_growth_concave_convex_kernel_uno": (
-                        neoclassical_growth_concave_convex_kernel(
-                            out,
-                            prefix="neoclassical_growth_concave_convex_kernel_uno",
-                            require_all=False,
-                        )
-                    ),
-                    "asset_pricing_kernel_uno": asset_pricing_kernel(
-                        out, prefix="asset_pricing_kernel_uno"
-                    ),
-                    "open_economy_growth_kernel_uno": open_economy_growth_kernel(
-                        out,
-                        prefix="open_economy_growth_kernel_uno",
-                        selection="minimum_rkhs_norm_constrained",
-                    ),
-                }
-                if include_uno
-                else {}
-            ),
-            # The all-70 basin contract is the float64 caption's claim; a
-            # float32 collection reports n_basin_correct as data (platform
-            # rounding moves which knife-edge point misclassifies).
-            "neoclassical_growth_concave_convex_kernel": (
+            "neoclassical_growth_kernel_uno": neoclassical_growth_kernel_uno(out),
+            "neoclassical_growth_concave_convex_kernel_uno": (
                 neoclassical_growth_concave_convex_kernel(
-                    out, require_all=residual_dtype == "float64"
+                    out,
+                    prefix="neoclassical_growth_concave_convex_kernel_uno",
+                    require_all=False,
                 )
+            ),
+            "asset_pricing_kernel_uno": asset_pricing_kernel(
+                out, prefix="asset_pricing_kernel_uno"
+            ),
+            "open_economy_growth_kernel_uno": open_economy_growth_kernel(
+                out,
+                prefix="open_economy_growth_kernel_uno",
+                selection="minimum_rkhs_norm_constrained",
+            ),
+            "neoclassical_growth_concave_convex_kernel": (
+                neoclassical_growth_concave_convex_kernel(out)
             ),
             # require_all=False for both NNs: solver acceptance is scored
             # separately from basin correctness, so a rejected grid point is
@@ -2030,13 +1987,9 @@ def collect(output_dir: str = ".results", include_uno: bool = True):
             ),
             "open_economy_growth_nn_recursive": open_economy_growth_nn_recursive(out),
             "multicountry_growth_kernel": multicountry_growth_kernel(out),
-            **(
-                {"multicountry_growth_scaling": multicountry_growth_scaling(out)}
-                if residual_dtype == "float64"
-                else {}
-            ),
+            "multicountry_growth_scaling": multicountry_growth_scaling(out),
             "multicountry_growth_nn": multicountry_growth_nn(out),
-            "performance_comparisons": performance_comparisons(out, include_uno),
+            "performance_comparisons": performance_comparisons(out),
         }
     )
     # allow_nan=False guarantees the output is strict JSON (any NaN raises here).

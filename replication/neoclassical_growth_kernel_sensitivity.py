@@ -24,18 +24,11 @@ SENSITIVITY_TIMES = [120.0]
 # appendix: train to T = 120 (the transition remnant is ~e^{-|lambda|T}
 # ~ 3e-6) and differentiate k(T), c(T) through a cold re-solve of the
 # returned solve handle; the exact steady-state derivatives ride along as
-# the comparison target. Float64 only: the float32 noise floor swamps that
-# comparison.
+# the comparison target.
 def run(
-    output_dir: str | None = None,
-    use_float64: bool = True,
+    output_dir: str = ".results",
 ):
-    if not use_float64:
-        print(f"{PREFIX} sensitivity is float64-only; skipping")
-        return
     configure_process()
-    if output_dir is None:
-        output_dir = ".results"
     print(f"sensitivity -> {output_dir}/")
     results, extras = run_solver(
         SOLVER,

@@ -19,7 +19,7 @@ from replication.multicountry_growth_kernel import (
     LARGE_COUNTRY_PARAMETERS,
     SENSITIVITY_TIMES,
 )
-from replication.multicountry_growth_nn import PREFIX, solver_overrides
+from replication.multicountry_growth_nn import PREFIX
 from replication.utilities import (
     configure_process,
     run_solver,
@@ -31,22 +31,14 @@ SOLVER = multicountry_growth_nn.multicountry_growth_nn
 
 # Implicit-AD sensitivity experiments on their own seed budget: the tables
 # report one solve, so training the full ensemble through the reverse pass
-# buys nothing. Float64 only -- the float32 noise floor swamps the
-# derivatives. The dates are the kernel driver's, since the two solvers'
+# buys nothing. The dates are the kernel driver's, since the two solvers'
 # tables are compared cell by cell.
 def run(
-    output_dir: str | None = None,
+    output_dir: str = ".results",
     sensitivity_seeds: int = 1,
-    use_float64: bool = True,
     verbose: bool = False,
 ):
-    if not use_float64:
-        print(f"{PREFIX} sensitivity is float64-only; skipping")
-        return
     configure_process()
-    if output_dir is None:
-        output_dir = ".results"
-    stop, tol = solver_overrides(use_float64)
     t_sens = jnp.asarray(SENSITIVITY_TIMES, dtype=jnp.float64)
 
     def go(name, scenario, **options):
@@ -59,8 +51,6 @@ def run(
                 SOLVER,
                 {
                     "verbose": verbose,
-                    "stop_set": stop,
-                    "tolerance_set": tol,
                     "seed": seed,
                     **options,
                 },

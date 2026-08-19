@@ -22,20 +22,13 @@ SENSITIVITY_TIMES = [120.0]
 # Implicit-AD sensitivity experiment for the supplement's sensitivity
 # appendix: train to T = 120 and differentiate k(T), c(T) through a
 # warm-started re-solve of the returned solve handle; the exact steady-state
-# derivatives ride along as the comparison target. Float64 only: the float32
-# noise floor swamps that comparison.
+# derivatives ride along as the comparison target.
 def run(
-    output_dir: str | None = None,
+    output_dir: str = ".results",
     n_seeds: int = 7,
-    use_float64: bool = True,
     verbose: bool = False,
 ):
-    if not use_float64:
-        print(f"{PREFIX} sensitivity is float64-only; skipping")
-        return
     configure_process()
-    if output_dir is None:
-        output_dir = ".results"
     print(f"sensitivity: {n_seeds} seeds -> {output_dir}/")
     t_sens = jnp.asarray(SENSITIVITY_TIMES, dtype=jnp.float64)
     rows = []

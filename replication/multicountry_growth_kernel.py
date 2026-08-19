@@ -42,22 +42,6 @@ LARGE_COUNTRY_PARAMETERS = dict(
 )
 
 
-# Float32 runs pass looser solver thresholds and acceptance gates; the
-# float64 run uses the solver defaults.
-def solver_overrides(use_float64):
-    lm = {} if use_float64 else dict(ridge=1e-7, ridge_init=1e-5, gtol=1e-6)
-    tol = (
-        {}
-        if use_float64
-        else dict(
-            train_residual=1e-3,
-            validation_residual=1e-2,
-            benchmark_match=1e-2,
-        )
-    )
-    return lm, tol
-
-
 def bond_invariance(validation_frames, num_countries, test_T):
     # Reported on two horizons: the test window, where the solution is
     # benchmark-certified, and the full training horizon, whose sparse tail
@@ -102,15 +86,12 @@ def bond_invariance(validation_frames, num_countries, test_T):
     }
 
 
-def run(output_dir: str | None = None, use_float64: bool = True):
+def run(output_dir: str = ".results"):
     configure_process()
-    if output_dir is None:
-        output_dir = ".results" if use_float64 else ".results_float32"
     parameters = MulticountryParameters()
     drawn_k_0, _ = draw_initial_conditions(InitialConditionSettings(), parameters)
     output_scale = float(steady_state(parameters)["output_scale"])
-    lm, tol = solver_overrides(use_float64)
-    meta = dict(n_seeds=1, residual_dtype="float64" if use_float64 else "float32")
+    meta = dict(n_seeds=1, residual_dtype="float64")
     validation_frames = {}
 
     def go(name, **experiment):
@@ -118,12 +99,7 @@ def run(output_dir: str | None = None, use_float64: bool = True):
         results_df, frames, hyperparameters = ensemble(
             SOLVER,
             n_seeds=1,
-            options={
-                "use_float64": use_float64,
-                "lm_set": lm,
-                "tolerance_set": tol,
-                **experiment,
-            },
+            options=experiment,
         )
         save_experiment(
             name,

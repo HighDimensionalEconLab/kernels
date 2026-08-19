@@ -90,19 +90,11 @@ def rung_lm_overrides(num_countries):
 
 
 def run(
-    output_dir: str | None = None,
+    output_dir: str = ".results",
     country_counts: list[int] = COUNTRY_COUNTS,  # noqa: B006
     dense_max_countries: int = DENSE_MAX_COUNTRIES,
-    use_float64: bool = True,
 ):
-    # The ladder certifies the float64 solver's scaling; there is no float32
-    # counterpart experiment.
-    if not use_float64:
-        print(f"{PREFIX} is float64-only; skipping")
-        return
     configure_process()
-    if output_dir is None:
-        output_dir = ".results"
     meta = dict(
         n_seeds=1,
         residual_dtype="float64",

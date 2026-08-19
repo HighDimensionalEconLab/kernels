@@ -40,14 +40,9 @@ GAMMA_COMMON_TIMES = [10.0]
 # the continuation actually reached; both the damped re-solve and the
 # undamped implicit-AD system are preconditioned by the arrow-Woodbury
 # inverse built at the solution, so no dense factorization enters at any
-# width. Float64 only, like the ladder it extends.
-def run(output_dir: str | None = None, use_float64: bool = True):
-    if not use_float64:
-        print(f"{PREFIX} gamma_common is float64-only; skipping")
-        return
+# width.
+def run(output_dir: str = ".results"):
     configure_process()
-    if output_dir is None:
-        output_dir = ".results"
     print(f"gamma_common (N={GAMMA_COMMON_COUNT}, cg) -> {output_dir}/")
     num_countries = GAMMA_COMMON_COUNT
     lm_overrides = rung_lm_overrides(num_countries)

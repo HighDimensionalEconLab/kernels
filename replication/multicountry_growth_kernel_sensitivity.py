@@ -173,15 +173,9 @@ def sensitivity_row(options, mode):
 # structural parameter and initial condition. Two countries carry the
 # per-country levels (reverse mode); ten carry the world aggregates, which
 # is all a cross-section that wide can say (forward mode along the published
-# directions). Float64 only -- the float32 noise floor swamps the
-# derivatives.
-def run(output_dir: str | None = None, use_float64: bool = True):
-    if not use_float64:
-        print(f"{PREFIX} sensitivity is float64-only; skipping")
-        return
+# directions).
+def run(output_dir: str = ".results"):
     configure_process()
-    if output_dir is None:
-        output_dir = ".results"
 
     def go(name, mode, **options):
         print(f"{name} -> {output_dir}/")

@@ -20,28 +20,20 @@ SUMMARY_EXPERIMENTS = {"baseline", "sensitivity"}
 
 
 def run(
-    output_dir: str | None = None,
+    output_dir: str = ".results",
     # Multi-start retries inside each solve keep acceptance high, so a small
     # seed ensemble suffices for the cross-seed medians.
     n_seeds: int = 7,
-    use_float64: bool = True,
     verbose: bool = False,
 ):
     configure_process()
-    if output_dir is None:
-        output_dir = ".results" if use_float64 else ".results_float32"
-    # Float32 runs pass looser solver thresholds and acceptance gates; the
-    # float64 run uses the solver defaults.
-    stop = {} if use_float64 else dict(train_loss_threshold=1e-9)
     print(f"baseline: {n_seeds} seeds -> {output_dir}/")
     results_df, frames, hyperparameters = ensemble(
         SOLVER,
         n_seeds,
         options={
-            "use_float64": use_float64,
             "verbose": verbose,
             "k_0": 1.0,
-            "stop_set": stop,
         },
     )
     save_experiment(
@@ -51,7 +43,7 @@ def run(
         output_dir,
         {
             "n_seeds": n_seeds,
-            "residual_dtype": "float64" if use_float64 else "float32",
+            "residual_dtype": "float64",
         },
         prefix=PREFIX,
         hyperparameters=hyperparameters,

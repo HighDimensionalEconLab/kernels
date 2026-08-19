@@ -60,6 +60,7 @@ python -m replication.multicountry_growth_kernel_figures --output_dir "$output_d
 python -m replication.multicountry_growth_scaling_figures --output_dir "$output_dir"
 python -m replication.stochastic_growth_kernel_recursive_figures --output_dir "$output_dir"
 python -m replication.stochastic_open_economy_growth_kernel_recursive_figures --output_dir "$output_dir"
+python -m replication.neoclassical_growth_phase_diagram --output_dir "$output_dir"
 
 echo "==> paper numbers -> $output_dir/all_results.json"
 python -m replication.collect_json --output_dir "$output_dir"

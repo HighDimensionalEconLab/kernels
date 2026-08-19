@@ -19,6 +19,7 @@ MANIFEST = {
     "neoclassical_growth_model_concave_convex_threshold.pdf": (
         "neoclassical_growth_concave_convex_kernel_figures"
     ),
+    "phase_diagram_mu_k.pdf": "neoclassical_growth_phase_diagram",
     "asset_pricing_contiguous.pdf": "asset_pricing_kernel_figures",
     "open_economy_growth_transitions.pdf": "open_economy_growth_kernel_figures",
     "neoclassical_human_capital.pdf": "human_capital_kernel_figures",

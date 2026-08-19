@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -49,6 +50,24 @@ class ToleranceSettings:
     # not redefine convergence of a finite, feasible numerical solution.
     validation_residual: float = 1e-2
     benchmark_match: float = 1e-3
+
+
+class InitialValues(NamedTuple):
+    c_offset: jax.Array
+    mu_offset: jax.Array
+    q_offset: jax.Array
+
+
+# The alpha blocks must stay first: the solver metric penalizes the leading
+# metric.size flat coordinates, which is exactly the five alpha blocks; the
+# learned offsets sit in the unpenalized free tail.
+class Theta(NamedTuple):
+    alpha_mu: jax.Array
+    alpha_c: jax.Array
+    alpha_k: jax.Array
+    alpha_a: jax.Array
+    alpha_q: jax.Array
+    initial: InitialValues
 
 
 @dataclass(frozen=True)
@@ -151,28 +170,30 @@ def open_economy_growth_kernel(
         train_data, kernel, kernel_set.sigma, kernel_set.ell, repeats=5
     )
 
-    # theta = (alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q,
-    #          (c_offset, mu_offset, q_offset)), matching the metric blocks.
     def path_values(theta, K_eval, K_tilde_eval):
-        alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, initial = theta
-        c_offset, mu_offset, q_offset = initial
         log_mu = (
             -parameters.gamma * jnp.log(consumption_scale)
-            + mu_offset
-            + K_tilde_eval @ alpha_mu
+            + theta.initial.mu_offset
+            + K_tilde_eval @ theta.alpha_mu
         )
-        log_c = jnp.log(consumption_scale) + c_offset + K_tilde_eval @ alpha_c
-        log_k = jnp.log(k_0) + K_tilde_eval @ alpha_k
-        a = a_0 + output_scale * (K_tilde_eval @ alpha_a)
-        log_q = jnp.log(steady["q"]) + q_offset + K_tilde_eval @ alpha_q
+        log_c = (
+            jnp.log(consumption_scale)
+            + theta.initial.c_offset
+            + K_tilde_eval @ theta.alpha_c
+        )
+        log_k = jnp.log(k_0) + K_tilde_eval @ theta.alpha_k
+        a = a_0 + output_scale * (K_tilde_eval @ theta.alpha_a)
+        log_q = (
+            jnp.log(steady["q"]) + theta.initial.q_offset + K_tilde_eval @ theta.alpha_q
+        )
         mu = jnp.exp(log_mu)
         c = jnp.exp(log_c)
         k = jnp.exp(log_k)
         q = jnp.exp(log_q)
-        dlog_mu_dt = K_eval @ alpha_mu
-        dlog_k_dt = K_eval @ alpha_k
-        da_dt = output_scale * (K_eval @ alpha_a)
-        dlog_q_dt = K_eval @ alpha_q
+        dlog_mu_dt = K_eval @ theta.alpha_mu
+        dlog_k_dt = K_eval @ theta.alpha_k
+        da_dt = output_scale * (K_eval @ theta.alpha_a)
+        dlog_q_dt = K_eval @ theta.alpha_q
         return (
             k,
             a,
@@ -225,13 +246,17 @@ def open_economy_growth_kernel(
 
     # The zero coordinate contains no saddle-path or present-value information:
     # it is flat in the derivative RKHS at the model's scale normalizations.
-    theta_0 = (
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(3, dtype=dtype),
+    theta_0 = Theta(
+        alpha_mu=jnp.zeros(n_train, dtype=dtype),
+        alpha_c=jnp.zeros(n_train, dtype=dtype),
+        alpha_k=jnp.zeros(n_train, dtype=dtype),
+        alpha_a=jnp.zeros(n_train, dtype=dtype),
+        alpha_q=jnp.zeros(n_train, dtype=dtype),
+        initial=InitialValues(
+            c_offset=jnp.zeros((), dtype=dtype),
+            mu_offset=jnp.zeros((), dtype=dtype),
+            q_offset=jnp.zeros((), dtype=dtype),
+        ),
     )
 
     if lm_set.ridge_init is None:

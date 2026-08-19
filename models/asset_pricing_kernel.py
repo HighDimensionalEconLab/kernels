@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -24,6 +25,14 @@ from models.utilities import (
     acceptance_fields,
     make_train_t_grid,
 )
+
+
+# The alpha block must stay first: the solver metric penalizes the leading
+# metric.size flat coordinates, which is exactly the alpha block; p_0 sits in
+# the unpenalized free tail.
+class Theta(NamedTuple):
+    alpha: jax.Array
+    p_0: jax.Array
 
 
 @dataclass(frozen=True)
@@ -92,11 +101,8 @@ def asset_pricing_kernel(
 
     x_train = dividends(train_data)
 
-    # theta is the tuple (alpha, p_0), which flattens to [alpha (n_train),
-    # p_0 (1)] -- the block order of the metric below.
     def path_values(theta, K_eval, K_tilde_eval):
-        alpha, p_0 = theta
-        return p_0 + K_tilde_eval @ alpha, K_eval @ alpha
+        return theta.p_0 + K_tilde_eval @ theta.alpha, K_eval @ theta.alpha
 
     # The residual is affine in theta, so each ridge-LM step is an exact
     # kernel ridge solve converging to the minimizer of ||r||^2 + ridge * a'Ka
@@ -122,9 +128,9 @@ def asset_pricing_kernel(
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
     )
-    theta_0 = (
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.asarray(lm_set.p0_init, dtype=dtype),
+    theta_0 = Theta(
+        alpha=jnp.zeros(n_train, dtype=dtype),
+        p_0=jnp.asarray(lm_set.p0_init, dtype=dtype),
     )
 
     solve_options = dict(
@@ -139,7 +145,7 @@ def asset_pricing_kernel(
     elapsed = timer.elapsed(result)
 
     theta = result.x
-    alpha, p_0 = theta
+    alpha, p_0 = theta.alpha, theta.p_0
     steps = int(result.steps)
     status = int(result.status)
     p_train, dp_train = train_path_values(theta)

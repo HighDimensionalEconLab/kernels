@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -24,6 +25,21 @@ from models.utilities import (
     acceptance_fields,
     make_train_t_grid,
 )
+
+
+class InitialValues(NamedTuple):
+    mu_0: jax.Array
+    u_0: jax.Array
+
+
+# The alpha blocks must stay first: the solver metric penalizes the leading
+# metric.size flat coordinates, which is exactly the three alpha blocks;
+# the learned initial values sit in the unpenalized free tail.
+class Theta(NamedTuple):
+    alpha_x: jax.Array
+    alpha_mu: jax.Array
+    alpha_u: jax.Array
+    initial: InitialValues
 
 
 @dataclass(frozen=True)
@@ -104,13 +120,11 @@ def optimal_advertising_kernel(
     control_power = (1.0 - kappa) / kappa
 
     def path_values(theta, K_eval, K_tilde_eval):
-        alpha_x, alpha_mu, alpha_u, initial = theta
-        mu_0, u_0 = initial
-        x = x_0 + K_tilde_eval @ alpha_x
-        mu = mu_0 + K_tilde_eval @ alpha_mu
-        u = u_0 + K_tilde_eval @ alpha_u
-        dx_dt = K_eval @ alpha_x
-        dmu_dt = K_eval @ alpha_mu
+        x = x_0 + K_tilde_eval @ theta.alpha_x
+        mu = theta.initial.mu_0 + K_tilde_eval @ theta.alpha_mu
+        u = theta.initial.u_0 + K_tilde_eval @ theta.alpha_u
+        dx_dt = K_eval @ theta.alpha_x
+        dmu_dt = K_eval @ theta.alpha_mu
         return x, mu, u, dx_dt, dmu_dt
 
     def residuals(values):
@@ -129,11 +143,14 @@ def optimal_advertising_kernel(
 
     u_0_guess = max(beta * x_0 / max(1.0 - x_0, DOMAIN_EPS), DOMAIN_EPS)
     mu_0_guess = max(gamma / (rho_hat + beta + u_0_guess), DOMAIN_EPS)
-    theta_0 = (
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.asarray([mu_0_guess, u_0_guess], dtype=dtype),
+    theta_0 = Theta(
+        alpha_x=jnp.zeros(n_train, dtype=dtype),
+        alpha_mu=jnp.zeros(n_train, dtype=dtype),
+        alpha_u=jnp.zeros(n_train, dtype=dtype),
+        initial=InitialValues(
+            mu_0=jnp.asarray(mu_0_guess, dtype=dtype),
+            u_0=jnp.asarray(u_0_guess, dtype=dtype),
+        ),
     )
     solver = RidgeLevenbergMarquardt(
         residual_fn,
@@ -155,8 +172,8 @@ def optimal_advertising_kernel(
     result = solver.solve(theta_0, **solve_options)
     elapsed = timer.elapsed(result)
     theta = result.x
-    alpha_x, alpha_mu, alpha_u, initial = theta
-    mu_0, u_0 = initial
+    alpha_x, alpha_mu, alpha_u = theta.alpha_x, theta.alpha_mu, theta.alpha_u
+    mu_0, u_0 = theta.initial
 
     def evaluate_grid(points):
         K_eval, K_tilde_eval = integrated_kernel_matrices(

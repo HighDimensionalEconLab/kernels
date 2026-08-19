@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -147,15 +148,34 @@ class SolverSettings:
     cg_damping_floor: float = 1e-10
 
 
-# theta = (alpha_k, alpha_a, alpha_q, alpha_c, alpha_mu, alpha_rate,
-#          (q_offsets, c_offsets, mu_offsets, rate_offset)), matching the
-# solver metric blocks. Module-level so callers can evaluate solved paths on
-# their own kernel matrices.
+class InitialValues(NamedTuple):
+    q_offsets: jax.Array
+    c_offsets: jax.Array
+    mu_offsets: jax.Array
+    rate_offset: jax.Array
+
+
+# The alpha blocks must stay first: the solver metric penalizes the leading
+# metric.size flat coordinates, which is exactly the 5N + 1 alpha blocks (the
+# (N, n_train) arrays ravel country-major inside each family); the learned
+# offsets sit in the unpenalized free tail in the order
+# [q_1..q_N, c_1..c_N, mu_1..mu_N, rate].
+class Theta(NamedTuple):
+    alpha_k: jax.Array
+    alpha_a: jax.Array
+    alpha_q: jax.Array
+    alpha_c: jax.Array
+    alpha_mu: jax.Array
+    alpha_rate: jax.Array
+    initial: InitialValues
+
+
+# Module-level so callers can evaluate solved paths on their own kernel
+# matrices.
 def path_coordinates(theta, K_eval, K_tilde_eval, p):
     parameters_p = p["parameters"]
     populations_p = parameters_p.populations
     k_0_p = p["k_0"]
-    num_countries = k_0_p.shape[0]
     # Population demeaning is a no-op at the primal point (the inputs
     # already clear) and projects AD perturbations of a_0 onto the
     # feasible clearing set, so every direction is meaningful.
@@ -169,11 +189,18 @@ def path_coordinates(theta, K_eval, K_tilde_eval, p):
     # need no such guard.
     output_scale_p = jax.lax.stop_gradient(steady_p["output_scale"])
     log_consumption_scale_p = jnp.log(steady_p["consumption_scale"])
-    alpha_k, alpha_a, alpha_q, alpha_c, alpha_mu, alpha_rate, initial = theta
-    q_offsets = initial[:num_countries]
-    c_offsets = initial[num_countries : 2 * num_countries]
-    mu_offsets = initial[2 * num_countries : 3 * num_countries]
-    rate_offset = initial[-1]
+    alpha_k, alpha_a, alpha_q, alpha_c, alpha_mu, alpha_rate = (
+        theta.alpha_k,
+        theta.alpha_a,
+        theta.alpha_q,
+        theta.alpha_c,
+        theta.alpha_mu,
+        theta.alpha_rate,
+    )
+    q_offsets = theta.initial.q_offsets
+    c_offsets = theta.initial.c_offsets
+    mu_offsets = theta.initial.mu_offsets
+    rate_offset = theta.initial.rate_offset
     log_k = jnp.log(k_0_p) + K_tilde_eval @ alpha_k.T
     a = a_0_p + output_scale_p * (K_tilde_eval @ alpha_a.T)
     log_q = -jnp.log(parameters_p.eta) + q_offsets + K_tilde_eval @ alpha_q.T
@@ -309,14 +336,19 @@ def multicountry_growth_kernel(
     # The zero coordinate contains no saddle-path or present-value
     # information: it is flat in the derivative RKHS at the model's scale
     # normalizations.
-    theta_0 = (
-        jnp.zeros((num_countries, n_train), dtype=dtype),
-        jnp.zeros((num_countries, n_train), dtype=dtype),
-        jnp.zeros((num_countries, n_train), dtype=dtype),
-        jnp.zeros((num_countries, n_train), dtype=dtype),
-        jnp.zeros((num_countries, n_train), dtype=dtype),
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(num_initial_values, dtype=dtype),
+    theta_0 = Theta(
+        alpha_k=jnp.zeros((num_countries, n_train), dtype=dtype),
+        alpha_a=jnp.zeros((num_countries, n_train), dtype=dtype),
+        alpha_q=jnp.zeros((num_countries, n_train), dtype=dtype),
+        alpha_c=jnp.zeros((num_countries, n_train), dtype=dtype),
+        alpha_mu=jnp.zeros((num_countries, n_train), dtype=dtype),
+        alpha_rate=jnp.zeros(n_train, dtype=dtype),
+        initial=InitialValues(
+            q_offsets=jnp.zeros(num_countries, dtype=dtype),
+            c_offsets=jnp.zeros(num_countries, dtype=dtype),
+            mu_offsets=jnp.zeros(num_countries, dtype=dtype),
+            rate_offset=jnp.zeros((), dtype=dtype),
+        ),
     )
 
     if lm_set.ridge_init is None:
@@ -531,18 +563,18 @@ def multicountry_growth_kernel(
     relative_weights = test_eval["relative_welfare_weights"][0]
     log_relative_weights = jnp.log(relative_weights)
     coefficient_groups = {
-        "k": theta[0],
-        "a": theta[1],
-        "q": theta[2],
-        "c": theta[3],
-        "m": theta[4],
+        "k": theta.alpha_k,
+        "a": theta.alpha_a,
+        "q": theta.alpha_q,
+        "c": theta.alpha_c,
+        "m": theta.alpha_mu,
     }
     rkhs_norms = {
         f"{name}_{country + 1}": rkhs_norm_squared(coefficients[country], K)
         for name, coefficients in coefficient_groups.items()
         for country in range(num_countries)
     }
-    rkhs_norm_rate = rkhs_norm_squared(theta[5], K)
+    rkhs_norm_rate = rkhs_norm_squared(theta.alpha_rate, K)
     rkhs_norm_total = sum(rkhs_norms.values()) + rkhs_norm_rate
 
     results = {
@@ -648,7 +680,6 @@ def multicountry_growth_kernel(
                 ],
             }
         )
-    theta_offsets = theta[6]
     for country in range(num_countries):
         suffix = country + 1
         results.update(
@@ -662,11 +693,9 @@ def multicountry_growth_kernel(
                 f"q_0_{suffix}": float(test_eval["q"][0, country]),
                 f"c_0_{suffix}": float(test_eval["c"][0, country]),
                 f"m_0_{suffix}": float(test_eval["mu"][0, country]),
-                f"q_offset_{suffix}": float(theta_offsets[country]),
-                f"c_offset_{suffix}": float(theta_offsets[num_countries + country]),
-                f"mu_offset_{suffix}": float(
-                    theta_offsets[2 * num_countries + country]
-                ),
+                f"q_offset_{suffix}": float(theta.initial.q_offsets[country]),
+                f"c_offset_{suffix}": float(theta.initial.c_offsets[country]),
+                f"mu_offset_{suffix}": float(theta.initial.mu_offsets[country]),
                 f"relative_weight_{suffix}": float(relative_weights[country]),
                 f"log_relative_weight_{suffix}": float(log_relative_weights[country]),
                 f"terminal_a_{suffix}": float(validation_eval["a"][-1, country]),
@@ -682,7 +711,7 @@ def multicountry_growth_kernel(
             results[f"initial_wealth_{suffix}"] = float(
                 long_run["initial_wealth"][country]
             )
-    results["rate_offset"] = float(theta_offsets[-1])
+    results["rate_offset"] = float(theta.initial.rate_offset)
     if benchmark_available:
         results.update(
             {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -74,6 +75,28 @@ def human_capital_initial_conditions(
     c_0 = jnp.exp(result.x["log_c"])
     residual = human_capital_initial_residual(result.x, batch)
     return h_0, c_0, residual, result
+
+
+class InitialValues(NamedTuple):
+    i_k_0: jax.Array
+    i_h_0: jax.Array
+    c_0: jax.Array
+    mu_k_0: jax.Array
+    mu_h_0: jax.Array
+
+
+# The alpha blocks must stay first: the solver metric penalizes the leading
+# metric.size flat coordinates, which is exactly the seven alpha blocks; the
+# learned initial values sit in the unpenalized free tail.
+class Theta(NamedTuple):
+    alpha_k: jax.Array
+    alpha_h: jax.Array
+    alpha_i_k: jax.Array
+    alpha_i_h: jax.Array
+    alpha_c: jax.Array
+    alpha_mu_k: jax.Array
+    alpha_mu_h: jax.Array
+    initial: InitialValues
 
 
 @dataclass(frozen=True)
@@ -152,28 +175,17 @@ def human_capital_kernel(
     c_0_init = float(c_0_init_jax)
 
     def path_values(theta, K_eval, K_tilde_eval):
-        (
-            alpha_k,
-            alpha_h,
-            alpha_i_k,
-            alpha_i_h,
-            alpha_c,
-            alpha_mu_k,
-            alpha_mu_h,
-            initial,
-        ) = theta
-        i_k_0, i_h_0, c_0, mu_k_0, mu_h_0 = initial
-        k = k_0 + K_tilde_eval @ alpha_k
-        h = h_0 + K_tilde_eval @ alpha_h
-        i_k = i_k_0 + K_tilde_eval @ alpha_i_k
-        i_h = i_h_0 + K_tilde_eval @ alpha_i_h
-        c = c_0 + K_tilde_eval @ alpha_c
-        mu_k = mu_k_0 + K_tilde_eval @ alpha_mu_k
-        mu_h = mu_h_0 + K_tilde_eval @ alpha_mu_h
-        dk_dt = K_eval @ alpha_k
-        dh_dt = K_eval @ alpha_h
-        dmu_k_dt = K_eval @ alpha_mu_k
-        dmu_h_dt = K_eval @ alpha_mu_h
+        k = k_0 + K_tilde_eval @ theta.alpha_k
+        h = h_0 + K_tilde_eval @ theta.alpha_h
+        i_k = theta.initial.i_k_0 + K_tilde_eval @ theta.alpha_i_k
+        i_h = theta.initial.i_h_0 + K_tilde_eval @ theta.alpha_i_h
+        c = theta.initial.c_0 + K_tilde_eval @ theta.alpha_c
+        mu_k = theta.initial.mu_k_0 + K_tilde_eval @ theta.alpha_mu_k
+        mu_h = theta.initial.mu_h_0 + K_tilde_eval @ theta.alpha_mu_h
+        dk_dt = K_eval @ theta.alpha_k
+        dh_dt = K_eval @ theta.alpha_h
+        dmu_k_dt = K_eval @ theta.alpha_mu_k
+        dmu_h_dt = K_eval @ theta.alpha_mu_h
         return k, h, i_k, i_h, c, mu_k, mu_h, dk_dt, dh_dt, dmu_k_dt, dmu_h_dt
 
     def production_terms(k, h):
@@ -214,23 +226,20 @@ def human_capital_kernel(
             residuals(path_values(theta, K, K_tilde))
         )
 
-    theta_0 = (
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.zeros(n_train, dtype=dtype),
-        jnp.asarray(
-            [
-                delta_k * k_0,
-                delta_h * h_0,
-                c_0_init,
-                1.0 / c_0_init,
-                1.0 / c_0_init,
-            ],
-            dtype=dtype,
+    theta_0 = Theta(
+        alpha_k=jnp.zeros(n_train, dtype=dtype),
+        alpha_h=jnp.zeros(n_train, dtype=dtype),
+        alpha_i_k=jnp.zeros(n_train, dtype=dtype),
+        alpha_i_h=jnp.zeros(n_train, dtype=dtype),
+        alpha_c=jnp.zeros(n_train, dtype=dtype),
+        alpha_mu_k=jnp.zeros(n_train, dtype=dtype),
+        alpha_mu_h=jnp.zeros(n_train, dtype=dtype),
+        initial=InitialValues(
+            i_k_0=jnp.asarray(delta_k * k_0, dtype=dtype),
+            i_h_0=jnp.asarray(delta_h * h_0, dtype=dtype),
+            c_0=jnp.asarray(c_0_init, dtype=dtype),
+            mu_k_0=jnp.asarray(1.0 / c_0_init, dtype=dtype),
+            mu_h_0=jnp.asarray(1.0 / c_0_init, dtype=dtype),
         ),
     )
     solver = RidgeLevenbergMarquardt(

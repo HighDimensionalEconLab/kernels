@@ -14,6 +14,7 @@ from nlls_gram import (
 )
 
 from models.kernels import (
+    KernelSettings,
     integrated_kernel_matrices,
     integrated_metric_factorization,
     normalize_kernel,
@@ -85,9 +86,7 @@ class InitialValues(NamedTuple):
     mu_h_0: jax.Array
 
 
-# The alpha blocks must stay first: the solver metric penalizes the leading
-# metric.size flat coordinates, which is exactly the seven alpha blocks; the
-# learned initial values sit in the unpenalized free tail.
+# Alpha blocks first (the metric penalizes the leading flat coordinates).
 class Theta(NamedTuple):
     alpha_k: jax.Array
     alpha_h: jax.Array
@@ -97,13 +96,6 @@ class Theta(NamedTuple):
     alpha_mu_k: jax.Array
     alpha_mu_h: jax.Array
     initial: InitialValues
-
-
-@dataclass(frozen=True)
-class KernelSettings:
-    kernel: str = "matern12"
-    ell: float = 10.0
-    sigma: float = 1.0
 
 
 @dataclass(frozen=True)

@@ -17,6 +17,7 @@ from nlls_gram import (
 )
 
 from models.kernels import (
+    KernelSettings,
     integrated_kernel_matrices,
     integrated_metric_factorization,
     normalize_kernel,
@@ -58,9 +59,7 @@ class InitialValues(NamedTuple):
     q_offset: jax.Array
 
 
-# The alpha blocks must stay first: the solver metric penalizes the leading
-# metric.size flat coordinates, which is exactly the five alpha blocks; the
-# learned offsets sit in the unpenalized free tail.
+# Alpha blocks first (the metric penalizes the leading flat coordinates).
 class Theta(NamedTuple):
     alpha_mu: jax.Array
     alpha_c: jax.Array
@@ -68,13 +67,6 @@ class Theta(NamedTuple):
     alpha_a: jax.Array
     alpha_q: jax.Array
     initial: InitialValues
-
-
-@dataclass(frozen=True)
-class KernelSettings:
-    kernel: str = "matern12"
-    ell: float = 20.0
-    sigma: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -140,7 +132,7 @@ def open_economy_growth_kernel(
     a_0: float = 0.0,
     parameters: ModelParameters = ModelParameters(),
     use_float64: bool = True,
-    kernel_set: KernelSettings = KernelSettings(),
+    kernel_set: KernelSettings = KernelSettings(ell=20.0),
     data_set: DataSettings = DataSettings(),
     lm_set: SolverSettings = SolverSettings(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),

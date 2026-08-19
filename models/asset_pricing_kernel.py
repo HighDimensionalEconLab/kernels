@@ -14,6 +14,7 @@ from nlls_gram import (
 
 from models.asset_pricing_benchmark import mu_f_array
 from models.kernels import (
+    KernelSettings,
     integrated_kernel_matrices,
     integrated_metric_factorization,
     normalize_kernel,
@@ -27,19 +28,10 @@ from models.utilities import (
 )
 
 
-# The alpha block must stay first: the solver metric penalizes the leading
-# metric.size flat coordinates, which is exactly the alpha block; p_0 sits in
-# the unpenalized free tail.
+# Alpha first (the metric penalizes the leading flat coordinates).
 class Theta(NamedTuple):
     alpha: jax.Array
     p_0: jax.Array
-
-
-@dataclass(frozen=True)
-class KernelSettings:
-    kernel: str = "matern12"  # matern12 | matern32 | matern52 | rbf
-    ell: float = 10.0
-    sigma: float = 1.0
 
 
 @dataclass(frozen=True)

@@ -19,6 +19,7 @@ from nlls_gram import (
 )
 
 from models.kernels import (
+    KernelSettings,
     integrated_kernel_matrices,
     integrated_metric_factorization,
     normalize_kernel,
@@ -71,13 +72,6 @@ class ToleranceSettings:
     # not redefine convergence of a finite, feasible numerical solution.
     validation_residual: float = 1e-2
     benchmark_match: float = 1e-3
-
-
-@dataclass(frozen=True)
-class KernelSettings:
-    kernel: str = "matern12"
-    ell: float = 20.0
-    sigma: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -155,11 +149,8 @@ class InitialValues(NamedTuple):
     rate_offset: jax.Array
 
 
-# The alpha blocks must stay first: the solver metric penalizes the leading
-# metric.size flat coordinates, which is exactly the 5N + 1 alpha blocks (the
-# (N, n_train) arrays ravel country-major inside each family); the learned
-# offsets sit in the unpenalized free tail in the order
-# [q_1..q_N, c_1..c_N, mu_1..mu_N, rate].
+# Alpha blocks first (the metric penalizes the leading flat coordinates);
+# the (N, n_train) blocks ravel country-major.
 class Theta(NamedTuple):
     alpha_k: jax.Array
     alpha_a: jax.Array
@@ -231,7 +222,7 @@ def multicountry_growth_kernel(
     parameters: MulticountryParameters = MulticountryParameters(),
     use_float64: bool = True,
     initial_set: InitialConditionSettings = InitialConditionSettings(),
-    kernel_set: KernelSettings = KernelSettings(),
+    kernel_set: KernelSettings = KernelSettings(ell=20.0),
     data_set: DataSettings = DataSettings(),
     lm_set: SolverSettings = SolverSettings(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),

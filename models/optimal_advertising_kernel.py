@@ -13,6 +13,7 @@ from nlls_gram import (
 )
 
 from models.kernels import (
+    KernelSettings,
     integrated_kernel_matrices,
     integrated_metric_factorization,
     normalize_kernel,
@@ -32,21 +33,12 @@ class InitialValues(NamedTuple):
     u_0: jax.Array
 
 
-# The alpha blocks must stay first: the solver metric penalizes the leading
-# metric.size flat coordinates, which is exactly the three alpha blocks;
-# the learned initial values sit in the unpenalized free tail.
+# Alpha blocks first (the metric penalizes the leading flat coordinates).
 class Theta(NamedTuple):
     alpha_x: jax.Array
     alpha_mu: jax.Array
     alpha_u: jax.Array
     initial: InitialValues
-
-
-@dataclass(frozen=True)
-class KernelSettings:
-    kernel: str = "matern12"
-    ell: float = 15.0
-    sigma: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -92,7 +84,7 @@ def optimal_advertising_kernel(
     kappa: float = 0.5,
     x_0: float = 0.4,
     use_float64: bool = True,
-    kernel_set: KernelSettings = KernelSettings(),
+    kernel_set: KernelSettings = KernelSettings(ell=15.0),
     data_set: DataSettings = DataSettings(),
     lm_set: SolverSettings = SolverSettings(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),

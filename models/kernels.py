@@ -1,4 +1,5 @@
 import math
+from dataclasses import dataclass
 from functools import partial
 
 import jax
@@ -13,6 +14,14 @@ from nlls_gram import RepeatedFactorMetric
 # representation x(t) = x_0 + K_tilde alpha; all four have closed forms.
 
 KERNEL_NAMES = ("matern12", "matern32", "matern52", "rbf")
+
+
+# Sequential time kernel; drivers override ell in their signature defaults.
+@dataclass(frozen=True)
+class KernelSettings:
+    kernel: str = "matern12"  # matern12 | matern32 | matern52 | rbf
+    ell: float = 10.0
+    sigma: float = 1.0
 
 
 def rkhs_norm_squared(coefficients, gram):

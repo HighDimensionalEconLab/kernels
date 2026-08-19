@@ -37,34 +37,46 @@ from nlls_gram import AnnealRidge, LMAction, Preconditioner, register_pytree_dat
 from models.multicountry_growth import path_residuals, steady_state
 
 
-# Family-major flat layout of the driver's raveled theta: coefficient block
-# (family f, country j) occupies [(f*N + j) n_train, (f*N + j + 1) n_train),
-# families ordered (k, a, q, c, mu, rate), then the free offsets
-# (q_1..q_N, c_1..c_N, mu_1..mu_N, rate).
-def arrow_woodbury_indices(num_countries, n_train):
-    free_start = (5 * num_countries + 1) * n_train
-    country_index = np.stack(
+# Flat position of every theta leaf, derived from the pytree itself, so the
+# arrowhead groups follow the driver's Theta declaration order rather than a
+# hard-coded family stride. Integer indices come from tree_flatten + cumsum,
+# not unravel(arange): ravel_pytree's unravel would cast them back to floats.
+def leaf_index_tree(theta):
+    leaves, structure = jax.tree_util.tree_flatten(theta)
+    offsets = np.cumsum([0, *(leaf.size for leaf in leaves)])
+    return jax.tree_util.tree_unflatten(
+        structure,
         [
-            np.concatenate(
+            jnp.asarray(np.arange(start, stop).reshape(leaf.shape))
+            for start, stop, leaf in zip(offsets[:-1], offsets[1:], leaves)
+        ],
+    )
+
+
+# Per-country groups: the country's five coefficient rows plus its q/c/mu
+# offsets; the border is the rate coefficient block plus the rate offset.
+def arrow_woodbury_indices(theta):
+    index = leaf_index_tree(theta)
+    country_index = jnp.concatenate(
+        [
+            index.alpha_k,
+            index.alpha_a,
+            index.alpha_q,
+            index.alpha_c,
+            index.alpha_mu,
+            jnp.stack(
                 [
-                    np.arange(
-                        (f * num_countries + j) * n_train,
-                        (f * num_countries + j + 1) * n_train,
-                    )
-                    for f in range(5)
-                ]
-                + [free_start + np.array([j, num_countries + j, 2 * num_countries + j])]
-            )
-            for j in range(num_countries)
-        ]
+                    index.initial.q_offsets,
+                    index.initial.c_offsets,
+                    index.initial.mu_offsets,
+                ],
+                axis=1,
+            ),
+        ],
+        axis=1,
     )
-    border_index = np.concatenate(
-        [
-            np.arange(5 * num_countries * n_train, (5 * num_countries + 1) * n_train),
-            [free_start + 3 * num_countries],
-        ]
-    )
-    return jnp.asarray(country_index), jnp.asarray(border_index)
+    border_index = jnp.concatenate([index.alpha_rate, index.initial.rate_offset[None]])
+    return country_index, border_index
 
 
 @dataclass(frozen=True, eq=False)
@@ -154,9 +166,24 @@ def build_arrow_woodbury(theta, kernel_args, p, ridge, damping, num_countries):
     log_consumption_scale_p = jnp.log(steady_p["consumption_scale"])
     log_k_0 = jnp.log(p["k_0"])
 
-    alpha_k, alpha_a, alpha_q, alpha_c, alpha_mu, alpha_rate, initial = theta
     coefficients = jnp.concatenate(
-        [alpha_k, alpha_a, alpha_q, alpha_c, alpha_mu, alpha_rate[None, :]], axis=0
+        [
+            theta.alpha_k,
+            theta.alpha_a,
+            theta.alpha_q,
+            theta.alpha_c,
+            theta.alpha_mu,
+            theta.alpha_rate[None, :],
+        ],
+        axis=0,
+    )
+    offsets_flat = jnp.concatenate(
+        [
+            theta.initial.q_offsets,
+            theta.initial.c_offsets,
+            theta.initial.mu_offsets,
+            theta.initial.rate_offset[None],
+        ]
     )
     levels = K_tilde @ coefficients.T
     derivatives = K @ coefficients.T
@@ -199,7 +226,7 @@ def build_arrow_woodbury(theta, kernel_args, p, ridge, damping, num_countries):
         )
 
     w = jnp.concatenate(
-        [levels, derivatives, jnp.broadcast_to(initial, (n_train, num_offsets))],
+        [levels, derivatives, jnp.broadcast_to(offsets_flat, (n_train, num_offsets))],
         axis=1,
     )
     jacobian = jax.vmap(jax.jacfwd(per_time_rows))(w)
@@ -333,7 +360,7 @@ def build_arrow_woodbury(theta, kernel_args, p, ridge, damping, num_countries):
     )
     U = jnp.concatenate([U_coef.reshape(n_train, num_blocks * n_train), u_clear], 1).T
 
-    country_index, border_index = arrow_woodbury_indices(N, n_train)
+    country_index, border_index = arrow_woodbury_indices(theta)
     return ArrowWoodburyPreconditioner(
         country_index=country_index,
         border_index=border_index,

@@ -721,6 +721,15 @@ def neoclassical_growth_kernel(out):
             **errors(far),
         },
     }
+    for name in ("baseline_g02", "baseline_g02_learned"):
+        j = load(out, f"{prefix}_{name}")
+        experiments[name] = {
+            "g": med(j["g"]),
+            "learn_g_hat": bool(med(j["learn_g_hat"])),
+            "g_hat": sig(med(j["g_hat"]), 4),
+            "g_hat_error": sci(med(j["g_hat_error"]), 3),
+            **errors(j),
+        }
 
     # Robustness table (the nu = 1/2, ell = 10 row aliases baseline).
     robustness_table = {}
@@ -1073,6 +1082,29 @@ def neoclassical_growth_nn(out):
             }
         },
     }
+    for name in ("baseline_g02", "baseline_g02_learned"):
+        j = load(out, f"{prefix}_{name}")
+        df = pd.read_parquet(out / f"{prefix}_{name}_results.parquet")
+        sample = df[df["solution_accepted"]]
+        # The learned-trend runs can be rejected wholesale (the certificate
+        # refuses the c -> 0 root); report over all seeds in that case.
+        if sample.empty:
+            sample = df
+        payload["experiments"][name] = {
+            "g": med(j["g"]),
+            "learn_g_hat": bool(med(j["learn_g_hat"])),
+            "frac_accepted": sig(j["frac_accepted"]),
+            "g_hat_median": sig(float(sample["g_hat"].median()), 4),
+            "test_k_rel_error_mean_median": sci(
+                float(sample["test_k_rel_error_mean"].median())
+            ),
+            "test_c_rel_error_mean_median": sci(
+                float(sample["test_c_rel_error_mean"].median())
+            ),
+            "log_tvc_residual_median": sig(
+                float(sample["log_tvc_residual"].median()), 4
+            ),
+        }
     # The sensitivity experiment exists only in the float64 pass; the kernel
     # sensitivity is its cross-solver reference.
     if (out / f"{prefix}_sensitivity.json").exists():

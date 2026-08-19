@@ -12,34 +12,31 @@ import jsonargparse
 import numpy as np
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
-from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
+from nlls_gram import DrawNNXModule, LevenbergMarquardt, LMAction, LMStatus, MultiStart
 from tinydiffeq import RK4, ConstantStepSize, IController, SaveAt, Tsit5, solve_ode
 
 from models.neoclassical_growth import (
+    InitialConditionSettings,
     RecursiveParameters,
     euler_residuals,
+    growth_initial_conditions,
     log_state_drift_field,
     log_tvc_residual,
     simulate,
     trajectory_values,
 )
 from models.neoclassical_growth_benchmark import benchmark_df
-from models.policies import (
-    DrawInvestmentPolicy,
-    InvestmentPolicyNN,
-    InvestmentPolicySettings,
-    load_growth_policy,
-    save_growth_policy,
-)
 from models.utilities import (
+    ACTIVATIONS,
     DOMAIN_EPS,
     STATUS_TO_REASON,
-    InitialConditionSettings,
     OptimizerSettings,
     cache_key,
-    growth_initial_conditions,
+    load_model,
     long_df,
+    save_model,
     standardized_initial_states,
+    unit_softplus,
 )
 from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
@@ -92,6 +89,106 @@ class StoppingCriteria:
     log_tvc_threshold: float = 0.0
     num_epochs: int = 1
     epoch_early_stopping: bool = True
+
+
+@dataclass(frozen=True)
+class InvestmentPolicySettings:
+    mlp_width: int = 32
+    mlp_depth: int = 3
+    hidden_activation: str = "gelu"
+    head_init_scale: float = 1e-3
+    homothetic_representation: bool = True
+
+
+# i = anchor * U(h), U the unit softplus with near-zero head: homothetic is
+# h(log kappa) with kappa = k / z^{1/(1-a)} the detrended capital, anchored at
+# delta * k; non-homothetic h(centered log z, log k) anchored at the constant
+# delta * k_scale; consumption Y - i stays unclamped.
+class InvestmentPolicyNN(nnx.Module):
+    def __init__(
+        self,
+        settings: InvestmentPolicySettings,
+        *,
+        z_scale=1.0,
+        k_scale=1.0,
+        dtype,
+        rngs: nnx.Rngs,
+    ):
+        self.homothetic = nnx.static(settings.homothetic_representation)
+        self.log_z_scale = nnx.Variable(jnp.asarray(math.log(z_scale), dtype=dtype))
+        self.log_k_scale = nnx.Variable(jnp.asarray(math.log(k_scale), dtype=dtype))
+        self.k_scale = nnx.Variable(jnp.asarray(k_scale, dtype=dtype))
+        self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
+        in_features = 1 if self.homothetic else 2
+        self.layers = nnx.List(
+            [
+                nnx.Linear(
+                    in_features,
+                    settings.mlp_width,
+                    dtype=dtype,
+                    param_dtype=dtype,
+                    rngs=rngs,
+                )
+            ]
+        )
+        for _ in range(settings.mlp_depth - 1):
+            self.layers.append(
+                nnx.Linear(
+                    settings.mlp_width,
+                    settings.mlp_width,
+                    dtype=dtype,
+                    param_dtype=dtype,
+                    rngs=rngs,
+                )
+            )
+        self.head = nnx.Linear(
+            settings.mlp_width,
+            1,
+            kernel_init=nnx.initializers.normal(settings.head_init_scale),
+            bias_init=nnx.initializers.zeros_init(),
+            dtype=dtype,
+            param_dtype=dtype,
+            rngs=rngs,
+        )
+
+    def __call__(self, log_state, p):
+        log_z, log_k = log_state
+        if self.homothetic:
+            h = jnp.atleast_1d(log_k - log_z / (1.0 - p.a))
+            anchor = p.delta * jnp.exp(log_k)
+        else:
+            h = jnp.stack(
+                [log_z - self.log_z_scale[...], log_k - self.log_k_scale[...]]
+            )
+            anchor = p.delta * self.k_scale[...]
+        for layer in self.layers:
+            h = self.hidden_activation(layer(h))
+        return anchor * unit_softplus(self.head(h)[0])
+
+
+# The load template only needs the architecture from meta: the scale
+# Variables ride in the artifact's nondiff block and overwrite the defaults.
+def make_investment_policy(meta, dtype):
+    return InvestmentPolicyNN(
+        InvestmentPolicySettings(**meta["settings"]), dtype=dtype, rngs=nnx.Rngs(0)
+    )
+
+
+def save_investment_policy(path, policy, settings, *, structural=None, extra=None):
+    meta = {"settings": asdict(settings)}
+    if structural is not None:
+        meta["structural"] = {
+            name: float(np.asarray(value))
+            for name, value in structural.items()
+            if np.asarray(value).ndim == 0
+        }
+    if extra:
+        meta.update(extra)
+    save_model(path, policy, meta)
+
+
+def load_investment_policy(path):
+    return load_model(path, make_investment_policy)
 
 
 # At each interior epoch boundary: redraw the training ICs, stop on a
@@ -156,6 +253,35 @@ class EpochCallback:
             status=status,
             args=args,
             lm_state=replace(ctx.lm_state, damping=damping),
+        )
+
+
+# DrawNNXModule redraws theta but passes args through unchanged; multi-start
+# chains each attempt's initial args from the previous draw, so re-chaining
+# restart_key/epoch_key here (and resetting epoch to 0) is what keeps each
+# retry's epoch-boundary resampling independent of the others.
+class DrawInvestmentPolicy:
+    def __init__(self, settings, *, z_scale, k_scale, dtype):
+        self.draw_theta = DrawNNXModule(
+            InvestmentPolicyNN, settings, z_scale=z_scale, k_scale=k_scale, dtype=dtype
+        )
+
+    def __call__(self, key, _, args):
+        theta, _ = self.draw_theta(key, _, args)
+        restart_key, epoch_key = jax.random.split(args.restart_key)
+        return theta, args.replace(
+            epoch_key=epoch_key,
+            restart_key=restart_key,
+            epoch=jnp.asarray(0, dtype=jnp.int32),
+        )
+
+    def __hash__(self):
+        return hash((DrawInvestmentPolicy, self.draw_theta))
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, DrawInvestmentPolicy)
+            and self.draw_theta == other.draw_theta
         )
 
 
@@ -355,7 +481,7 @@ def neoclassical_growth_nn_recursive(
 
     # Multi-start Levenberg-Marquardt training (or a cache load).
     if cache_hit:
-        policy, cached_meta = load_growth_policy(cache_path)
+        policy, cached_meta = load_investment_policy(cache_path)
         _, theta_final, _ = nnx.split(policy, nnx.Param, ...)
         solve_args = residual_args
         steps = 0
@@ -679,11 +805,11 @@ def neoclassical_growth_nn_recursive(
         "test_euler_mean_abs": results["test_euler_mean_abs"],
     }
     if cache_path is not None and not cache_hit:
-        save_growth_policy(
+        save_investment_policy(
             cache_path, policy, hc_set, structural=structural, extra=policy_extra
         )
     if save_policy is not None:
-        save_growth_policy(
+        save_investment_policy(
             save_policy, policy, hc_set, structural=structural, extra=policy_extra
         )
     return results, extras

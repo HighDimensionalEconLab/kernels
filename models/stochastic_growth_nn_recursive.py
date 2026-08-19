@@ -4,7 +4,6 @@ import math
 import pathlib
 import time
 from dataclasses import asdict, dataclass, replace
-from functools import lru_cache, partial
 
 import jax
 import jax.numpy as jnp
@@ -14,29 +13,33 @@ import pandas as pd
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
-from tinydiffeq import SaveAt, solve_sde
 
-from models.neoclassical_growth import (
-    consumption,
-    mpk,
-    production,
-)
-from models.policies import (
+from models.stochastic_growth import (
+    DataSettings,
     DrawInvestmentPolicy,
+    FDInterpolatedPolicy,
+    InitialConditionSettings,
     InvestmentPolicyNN,
     InvestmentPolicySettings,
-    load_growth_policy,
-    save_growth_policy,
+    StructuralParameters,
+    add_fd_path_diagnostics,
+    cached_stochastic_benchmark,
+    euler_residuals,
+    growth_initial_conditions,
+    load_investment_policy,
+    log_tvc_residual,
+    problem_cache_config,
+    save_investment_policy,
+    simulate,
+    simulate_train,
+    trajectory_values,
 )
-from models.stochastic_growth_benchmark import stochastic_growth_benchmark
 from models.utilities import (
     DOMAIN_EPS,
     SDE_SOLVERS,
     STATUS_TO_REASON,
-    InitialConditionSettings,
     OptimizerSettings,
     cache_key,
-    growth_initial_conditions,
     long_df,
     sample_trajectory_noise,
     standardized_initial_states,
@@ -44,47 +47,6 @@ from models.utilities import (
 from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
-
-
-@struct.dataclass
-class StructuralParameters:
-    a: jax.Array
-    delta: jax.Array
-    rho_hat: jax.Array
-    sigma_crra: jax.Array
-    eta: jax.Array
-    sigma_z: jax.Array
-    log_z_bar: jax.Array
-    z_0: jax.Array
-    k_0: jax.Array
-    A: jax.Array
-    b_1: jax.Array
-    b_2: jax.Array
-    k_thr: jax.Array
-
-    @classmethod
-    def create(cls, dtype, **kwargs):
-        return cls(
-            **{key: jnp.asarray(value, dtype=dtype) for key, value in kwargs.items()}
-        )
-
-
-@dataclass(frozen=True)
-class DataSettings:
-    # Fixed-step SDE rollout on the integrator's own states: n points from
-    # n - 1 steps including the initial condition, nothing interpolated.
-    train_points: int = 65
-    test_points: int = 41
-    tvc_steps: int = 256
-    train_T: float = CONSTANTS.train_T
-    train_tvc_T: float = CONSTANTS.transversality_T
-    test_T: float = CONSTANTS.test_T
-    policy_grid_size: int = 100
-    benchmark_z_points: int = 161
-    benchmark_k_points: int = 1201
-    benchmark_z_sd_span: float = 5.0
-    benchmark_k_lo: float = 0.4
-    benchmark_k_hi: float | None = None
 
 
 @dataclass(frozen=True)
@@ -117,84 +79,6 @@ class ResidualArgs:
     total_steps: jax.Array
     solver: object = struct.field(pytree_node=False)
     data_set: DataSettings = struct.field(pytree_node=False)
-
-
-def log_state_drift(policy, log_state, p):
-    log_z, log_k = log_state
-    k = jnp.exp(log_k)
-    investment = policy(log_state, p)
-    return jnp.stack([p.eta * (p.log_z_bar - log_z), investment / k - p.delta])
-
-
-def log_state_diffusion(log_state, p):
-    return jnp.stack([p.sigma_z, jnp.zeros_like(p.sigma_z)])
-
-
-# The problem half of the two-part artifact key, shared verbatim with any
-# consumer that looks up a saved policy for the same problem (e.g. the
-# stochastic kernel-recursive collocation generator).
-def problem_cache_config(
-    a, delta, rho_hat, sigma_crra, eta, sigma_z, z_bar, z_0, k_0, use_float64, ic_set
-):
-    return {
-        "technology": "hicks",
-        "a": a,
-        "delta": delta,
-        "rho_hat": rho_hat,
-        "sigma_crra": sigma_crra,
-        "eta": eta,
-        "sigma_z": sigma_z,
-        "z_bar": z_bar,
-        "z_0": z_0,
-        "k_0": k_0,
-        "use_float64": use_float64,
-        "train_ic": {
-            "num_train_trajectories": ic_set.num_train_trajectories,
-            "train_log_z_variance": ic_set.train_log_z_variance,
-            "train_log_k_variance": ic_set.train_log_k_variance,
-        },
-    }
-
-
-# Stochastic Euler equation (the differentiated HJBE) along d log z =
-# eta (log_z_bar - log z) dt + sigma_z dW, with l = log c:
-#   grad(l) . mu + (sigma_z^2/2)(l_zz - sigma_crra l_z^2)
-#     = (mpk - delta - rho_hat) / sigma_crra
-# The Ito terms come from the drift of u'(c) = exp(-sigma_crra l); sigma_z = 0
-# recovers the deterministic residual exactly.
-def euler_residual_terms(policy, log_states, p):
-    e_z = jnp.asarray([1.0, 0.0], dtype=log_states.dtype)
-
-    def scalar_terms(log_state):
-        state_drift = log_state_drift(policy, log_state, p)
-
-        def log_consumption(state):
-            return jnp.log(consumption(policy, state, p))
-
-        log_c, dlog_c_dt = jax.jvp(log_consumption, (log_state,), (state_drift,))
-        l_z, l_zz = jax.jvp(
-            lambda state: jax.jvp(log_consumption, (state,), (e_z,))[1],
-            (log_state,),
-            (e_z,),
-        )
-        diffusion_term = 0.5 * p.sigma_z**2 * (l_zz - p.sigma_crra * l_z**2)
-        z, k = jnp.exp(log_state)
-        # The zero-scaled primal keeps the residual NaN outside the model's
-        # domain (c <= 0) instead of quietly extending the Euler equation.
-        domain_guard = 0.0 * log_c
-        residual = (
-            dlog_c_dt
-            + diffusion_term
-            + domain_guard
-            - (mpk(z, k, p) - p.delta - p.rho_hat) / p.sigma_crra
-        )
-        return residual, diffusion_term
-
-    return jax.vmap(scalar_terms)(log_states)
-
-
-def euler_residuals(policy, log_states, p):
-    return euler_residual_terms(policy, log_states, p)[0]
 
 
 # At each interior epoch boundary: redraw the shock realization (and the
@@ -279,52 +163,6 @@ class EpochCallback:
         )
 
 
-def log_state_drift_field(log_state, _, args, p):
-    policy, structural = p
-    return log_state_drift(policy, log_state, structural)
-
-
-def log_state_diffusion_field(log_state, _, args, p):
-    _, structural = p
-    return log_state_diffusion(log_state, structural)
-
-
-def batched_sde_rollout(solver, policy, initial_log_states, noise, T, n_steps, p):
-    def solve_one(initial_log_state, trajectory_noise):
-        return solve_sde(
-            log_state_drift_field,
-            log_state_diffusion_field,
-            solver,
-            0.0,
-            T,
-            initial_log_state,
-            noise=trajectory_noise,
-            n_steps=n_steps,
-            save_at=SaveAt(steps=True),
-            p=(policy, p),
-        )
-
-    return jax.vmap(solve_one)(initial_log_states, noise)
-
-
-@partial(jax.jit, static_argnames=("data_set",))
-def simulate_train(solver, policy, initial_log_states, noise, p, data_set):
-    return batched_sde_rollout(
-        solver,
-        policy,
-        initial_log_states,
-        noise,
-        data_set.train_T,
-        data_set.train_points - 1,
-        p,
-    )
-
-
-@partial(jax.jit, static_argnames=("T", "n_steps"))
-def simulate(solver, policy, initial_log_states, noise, T, n_steps, p):
-    return batched_sde_rollout(solver, policy, initial_log_states, noise, T, n_steps, p)
-
-
 def residual_fn(theta, args, p):
     policy = nnx.merge(args.graphdef, theta, args.nondiff)
     solution = simulate_train(
@@ -344,126 +182,6 @@ def residual_fn(theta, args, p):
         euler / jnp.sqrt(count),
         jnp.full_like(euler, jnp.inf),
     ).reshape(-1)
-
-
-# Natural-log transversality certificate at the terminal date T, normalized
-# by the initial-date certificate, per initial state: the saddle path sits
-# far negative, a capital bubble drives it positive. A failed rollout is a
-# loud +inf.
-def log_tvc_residual(solver, policy, initial_log_states, noise, T, n_steps, p):
-    solution = simulate(solver, policy, initial_log_states, noise, T, n_steps, p)
-    terminal_log_states = solution.xs[:, -1, :]
-    c_T = jax.vmap(lambda state: consumption(policy, state, p))(terminal_log_states)
-    k_T = jnp.exp(terminal_log_states[:, 1])
-    c_0 = jax.vmap(lambda state: consumption(policy, state, p))(initial_log_states)
-    k_0 = jnp.exp(initial_log_states[:, 1])
-    log_tvc = -p.rho_hat * T - p.sigma_crra * jnp.log(c_T) + jnp.log(k_T)
-    initial_log_tvc = -p.sigma_crra * jnp.log(c_0) + jnp.log(k_0)
-    return jnp.where(solution.ok, log_tvc - initial_log_tvc, jnp.inf)
-
-
-# The FD consumption policy as a rollout-compatible callable: bilinear
-# interpolation on the benchmark grid, edge-clamped, i = f - c.
-@struct.dataclass
-class FDInterpolatedPolicy:
-    log_z_grid: jax.Array
-    log_k_grid: jax.Array
-    consumption_grid: jax.Array
-
-    def __call__(self, log_state, p):
-        index_z = (log_state[0] - self.log_z_grid[0]) / (
-            self.log_z_grid[1] - self.log_z_grid[0]
-        )
-        index_k = (log_state[1] - self.log_k_grid[0]) / (
-            self.log_k_grid[1] - self.log_k_grid[0]
-        )
-        c = jax.scipy.ndimage.map_coordinates(
-            self.consumption_grid,
-            [index_z[None], index_k[None]],
-            order=1,
-            mode="nearest",
-        )[0]
-        z, k = jnp.exp(log_state)
-        return production(z, k, p) - c
-
-
-@lru_cache(maxsize=None)
-def cached_stochastic_benchmark(
-    a,
-    delta,
-    rho_hat,
-    sigma_crra,
-    eta,
-    sigma_z,
-    log_z_bar,
-    num_z_points,
-    num_k_points,
-    z_sd_span,
-    k_lo,
-    k_hi,
-):
-    return stochastic_growth_benchmark(
-        a,
-        delta,
-        rho_hat,
-        sigma_crra,
-        eta,
-        sigma_z,
-        log_z_bar=log_z_bar,
-        num_z_points=num_z_points,
-        num_k_points=num_k_points,
-        z_sd_span=z_sd_span,
-        k_lo=k_lo,
-        k_hi=k_hi,
-    )
-
-
-# Common-noise pathwise errors against the FD policy: the exogenous z path is
-# identical under both policies, so the comparison isolates the capital and
-# consumption responses.
-def add_fd_path_diagnostics(test_df, test_values, fd_values):
-    k_benchmark = np.asarray(fd_values["k"])
-    c_benchmark = np.asarray(fd_values["c"])
-    k_error = (np.asarray(test_values["k"]) - k_benchmark) / np.abs(k_benchmark).clip(
-        min=DOMAIN_EPS
-    )
-    c_error = (np.asarray(test_values["c"]) - c_benchmark) / np.abs(c_benchmark).clip(
-        min=DOMAIN_EPS
-    )
-    columns = {
-        "k_benchmark": k_benchmark,
-        "c_benchmark": c_benchmark,
-        "k_rel_error": k_error,
-        "c_rel_error": c_error,
-    }
-    for name, value in columns.items():
-        test_df[name] = np.asarray(value).reshape(-1)
-    return k_error, c_error
-
-
-# nnx.jit so one compiled evaluation serves both the nnx policy and the FD
-# interpolated policy pytree.
-@nnx.jit
-def trajectory_values(policy, log_states, p):
-    shape = log_states.shape[:-1]
-    flat_states = log_states.reshape(-1, 2)
-    investment = jax.vmap(lambda state: policy(state, p))(flat_states).reshape(shape)
-    c = jax.vmap(lambda state: consumption(policy, state, p))(flat_states).reshape(
-        shape
-    )
-    euler, diffusion_term = euler_residual_terms(policy, flat_states, p)
-    z, k = jnp.moveaxis(jnp.exp(log_states), -1, 0)
-    return {
-        "z": z,
-        "k": k,
-        "kappa": k / z ** (1.0 / (1.0 - p.a)),
-        "i": investment,
-        "c": c,
-        "dlog_z": p.eta * (p.log_z_bar - jnp.log(z)),
-        "dk": investment - p.delta * k,
-        "euler_residual": euler.reshape(shape),
-        "diffusion_term": diffusion_term.reshape(shape),
-    }
 
 
 # The deterministic model plus its OU log-TFP; the default innovation scale
@@ -540,10 +258,6 @@ def stochastic_growth_nn_recursive(
         log_z_bar=math.log(z_bar),
         z_0=train_initial_conditions[:, 0],
         k_0=train_initial_conditions[:, 1],
-        A=1.0,
-        b_1=1.0,
-        b_2=0.0,
-        k_thr=float("inf"),
     )
 
     fit_start = time.perf_counter()
@@ -625,7 +339,7 @@ def stochastic_growth_nn_recursive(
     )
     cache_hit = cache_path is not None and cache_path.exists()
     if cache_hit:
-        policy, cached_meta = load_growth_policy(cache_path)
+        policy, cached_meta = load_investment_policy(cache_path)
         theta_final, solve_args = nnx.split(policy, nnx.Param, ...)[1], residual_args
         steps = 0
         epochs_run = 0
@@ -1058,11 +772,11 @@ def stochastic_growth_nn_recursive(
         "test_euler_mean_abs": results["test_euler_mean_abs"],
     }
     if cache_path is not None and not cache_hit:
-        save_growth_policy(
+        save_investment_policy(
             cache_path, policy, hc_set, structural=structural, extra=policy_extra
         )
     if save_policy is not None:
-        save_growth_policy(
+        save_investment_policy(
             save_policy, policy, hc_set, structural=structural, extra=policy_extra
         )
     return results, extras

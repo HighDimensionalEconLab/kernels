@@ -12,22 +12,22 @@ import jsonargparse
 import numpy as np
 from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
 
-from models.policies import (
+from models.stochastic_growth import (
+    DataSettings,
+    InitialConditionSettings,
     KernelInvestmentPolicy,
     StateKernelSettings,
-    build_residual_args,
-    load_growth_policy,
-    state_lengthscales,
-)
-from models.stochastic_growth_nn_recursive import (
-    DataSettings,
     StructuralParameters,
     add_fd_path_diagnostics,
+    build_residual_args,
     euler_residuals,
+    growth_initial_conditions,
+    load_investment_policy,
     log_tvc_residual,
     problem_cache_config,
     simulate,
     simulate_train,
+    state_lengthscales,
     trajectory_values,
 )
 from models.utilities import (
@@ -36,10 +36,8 @@ from models.utilities import (
 from models.utilities import (
     SDE_SOLVERS,
     STATUS_TO_REASON,
-    InitialConditionSettings,
     OptimizerSettings,
     cache_key,
-    growth_initial_conditions,
     long_df,
     sample_trajectory_noise,
 )
@@ -74,7 +72,7 @@ def load_reference_policy(policy_dir, problem_config):
             "run stochastic_growth_nn_recursive with --policy_cache first"
         )
     _, best = min(candidates, key=lambda pair: pair[0])
-    policy, meta = load_growth_policy(best)
+    policy, meta = load_investment_policy(best)
     return policy, meta, best
 
 
@@ -163,10 +161,6 @@ def stochastic_growth_kernel_recursive(
         log_z_bar=float(np.log(z_bar)),
         z_0=train_initial_conditions[:, 0],
         k_0=train_initial_conditions[:, 1],
-        A=1.0,
-        b_1=1.0,
-        b_2=0.0,
-        k_thr=float("inf"),
     )
 
     problem_config = problem_cache_config(

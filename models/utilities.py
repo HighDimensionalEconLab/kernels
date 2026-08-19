@@ -186,40 +186,6 @@ NEOCLASSICAL_GROWTH_CONSTANTS = GrowthConstants(
 )
 
 
-@dataclass(frozen=True)
-class InitialConditionSettings:
-    # One data_seed fixes independent train and test draws around (z_0, k_0),
-    # separate from the NN seed; a zero log variance pins its axis at the base.
-    data_seed: int = 0
-    num_train_trajectories: int = 1
-    num_test_trajectories: int = 50
-    train_log_z_variance: float = 0.0
-    train_log_k_variance: float = 0.0
-    # None inherits the training variances; results record the resolved values.
-    test_log_z_variance: float | None = None
-    test_log_k_variance: float | None = None
-    # Recenter the held-out draws when set (out-of-distribution testing).
-    test_z_0: float | None = None
-    test_k_0: float | None = None
-
-
-def draw_initial_conditions(
-    z_0, k_0, num_trajectories, log_z_variance, log_k_variance, key, dtype
-):
-    base = jnp.asarray([z_0, k_0], dtype=dtype)
-    if log_z_variance == 0.0 and log_k_variance == 0.0:
-        return jnp.tile(base, (num_trajectories, 1))
-    if num_trajectories < 2:
-        raise ValueError("positive log variances require at least two trajectories")
-    draws = jax.random.normal(key, (num_trajectories, 2), dtype=dtype)
-    # Center and standardize each column so every axis carries exactly the
-    # requested population variance; a zero variance pins its axis at the base.
-    centered = draws - jnp.mean(draws, axis=0, keepdims=True)
-    standardized = centered / jnp.sqrt(jnp.mean(centered**2, axis=0, keepdims=True))
-    scales = jnp.sqrt(jnp.asarray([log_z_variance, log_k_variance], dtype=dtype))
-    return jnp.exp(jnp.log(base)[None, :] + scales[None, :] * standardized)
-
-
 def standardized_initial_states(key, center, scales, num_trajectories):
     # Additive in the caller's coordinate, unlike the multiplicative
     # draw_initial_conditions: additive spreads keep a level axis
@@ -231,64 +197,6 @@ def standardized_initial_states(key, center, scales, num_trajectories):
     centered = draws - jnp.mean(draws, axis=0, keepdims=True)
     standardized = centered / jnp.sqrt(jnp.mean(centered**2, axis=0, keepdims=True))
     return center[None, :] + scales[None, :] * standardized
-
-
-# Train and test draws from one data_seed; the resolved test design rides
-# along for the results dicts.
-@dataclass(frozen=True)
-class InitialConditionDraw:
-    train_ic_key: jax.Array
-    test_ic_key: jax.Array
-    train_initial_conditions: jax.Array
-    test_initial_conditions: jax.Array
-    test_z_center: float
-    test_k_center: float
-    test_log_z_variance: float
-    test_log_k_variance: float
-
-
-def growth_initial_conditions(z_0, k_0, ic_set, dtype):
-    train_ic_key, test_ic_key = jax.random.split(jax.random.key(ic_set.data_seed))
-    train_initial_conditions = draw_initial_conditions(
-        z_0,
-        k_0,
-        ic_set.num_train_trajectories,
-        ic_set.train_log_z_variance,
-        ic_set.train_log_k_variance,
-        train_ic_key,
-        dtype,
-    )
-    test_z_center = z_0 if ic_set.test_z_0 is None else ic_set.test_z_0
-    test_k_center = k_0 if ic_set.test_k_0 is None else ic_set.test_k_0
-    test_log_z_variance = (
-        ic_set.train_log_z_variance
-        if ic_set.test_log_z_variance is None
-        else ic_set.test_log_z_variance
-    )
-    test_log_k_variance = (
-        ic_set.train_log_k_variance
-        if ic_set.test_log_k_variance is None
-        else ic_set.test_log_k_variance
-    )
-    test_initial_conditions = draw_initial_conditions(
-        test_z_center,
-        test_k_center,
-        ic_set.num_test_trajectories,
-        test_log_z_variance,
-        test_log_k_variance,
-        test_ic_key,
-        dtype,
-    )
-    return InitialConditionDraw(
-        train_ic_key=train_ic_key,
-        test_ic_key=test_ic_key,
-        train_initial_conditions=train_initial_conditions,
-        test_initial_conditions=test_initial_conditions,
-        test_z_center=test_z_center,
-        test_k_center=test_k_center,
-        test_log_z_variance=test_log_z_variance,
-        test_log_k_variance=test_log_k_variance,
-    )
 
 
 # Gram-form Levenberg-Marquardt settings shared across solvers; each solver

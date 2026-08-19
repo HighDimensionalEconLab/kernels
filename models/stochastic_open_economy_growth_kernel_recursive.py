@@ -20,12 +20,12 @@ from nlls_gram import (
 )
 
 from models.kernels import STATE_KERNEL_NAMES, state_features
-from models.open_economy_growth import ModelParameters, production
-from models.stochastic_open_economy_growth_nn_recursive import (
+from models.stochastic_open_economy_growth import (
     WORLD_RATE_KAPPA,
     WORLD_RATE_SIGMA,
     DataSettings,
     InitialConditionSettings,
+    ModelParameters,
     StructuralParameters,
     ToleranceSettings,
     collocation_rollout,
@@ -34,6 +34,7 @@ from models.stochastic_open_economy_growth_nn_recursive import (
     normalize_state,
     policy_outputs,
     problem_cache_config,
+    production,
     rollout_steps,
     trajectory_frame,
     trajectory_values,

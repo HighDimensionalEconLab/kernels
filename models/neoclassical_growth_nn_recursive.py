@@ -12,7 +12,6 @@ import jax
 import jax.numpy as jnp
 import jsonargparse
 import numpy as np
-import pandas as pd
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import DrawNNXModule, LevenbergMarquardt, LMAction, LMStatus, MultiStart
@@ -57,7 +56,6 @@ class DataSettings:
     train_T: float = CONSTANTS.train_T
     train_tvc_T: float = CONSTANTS.transversality_T
     test_T: float = CONSTANTS.test_T
-    policy_grid_size: int = 100
     ode_solver: str = "rk4"
     rtol: float = 1e-6
     atol: float = 1e-8
@@ -710,51 +708,6 @@ def neoclassical_growth_nn_recursive(
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
     test_trajectory_euler = jnp.mean(jnp.abs(test_values["euler_residual"]), axis=1)
 
-    # Learned policy vs benchmark on a kappa grid: z = 1 there, so k = kappa,
-    # and the benchmark support pools the solved detrended test paths.
-    observed_kappa = np.concatenate(
-        [train_df["kappa"].to_numpy(), test_df["kappa"].to_numpy()]
-    )
-    observed_kappa = observed_kappa[np.isfinite(observed_kappa) & (observed_kappa > 0)]
-    log_lo = np.log(observed_kappa.min())
-    log_hi = np.log(observed_kappa.max())
-    log_margin = 0.05 * (log_hi - log_lo) + 1e-6
-    kappa_grid = np.exp(
-        np.linspace(log_lo - log_margin, log_hi + log_margin, data_set.policy_grid_size)
-    )
-    grid_log_states = jnp.stack(
-        [
-            jnp.zeros(data_set.policy_grid_size, dtype=dtype),
-            jnp.log(jnp.asarray(kappa_grid, dtype=dtype)),
-        ],
-        axis=1,
-    )
-    grid_values = trajectory_values(policy, grid_log_states[None, :, :], p)
-    benchmark_by_kappa = benchmark.sort_values("kappa")
-    # NaN outside the solved-path support: the benchmark is unknown there,
-    # and a clamped extrapolation would draw a spurious curve.
-    supported = (kappa_grid >= benchmark_by_kappa["kappa"].min()) & (
-        kappa_grid <= benchmark_by_kappa["kappa"].max()
-    )
-    c_tilde_benchmark = np.where(
-        supported,
-        np.interp(
-            kappa_grid, benchmark_by_kappa["kappa"], benchmark_by_kappa["c_tilde"]
-        ),
-        np.nan,
-    )
-    policy_df = pd.DataFrame(
-        {
-            "kappa": kappa_grid,
-            "c_tilde_nn": np.asarray(grid_values["c"][0]),
-            "dkappa_nn": np.asarray(grid_values["dkappa"][0]),
-            "c_tilde_benchmark": c_tilde_benchmark,
-            "dkappa_benchmark": (
-                kappa_grid**a - c_tilde_benchmark - (delta + g) * kappa_grid
-            ),
-        }
-    )
-
     # Published results.
     results = {
         "variant": "recursive_nn",
@@ -863,7 +816,6 @@ def neoclassical_growth_nn_recursive(
         "test_initial_conditions": test_initial_conditions,
         "train_df": train_df,
         "test_df": test_df,
-        "policy_df": policy_df,
         "hyperparameters": hyperparameters,
     }
     # A cache hit loads the policy from disk instead of solving, so there is

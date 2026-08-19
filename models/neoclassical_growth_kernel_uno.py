@@ -21,7 +21,7 @@ from models.neoclassical_growth import (
     resolve_kink_family,
     steady_flow_consumption_guess,
 )
-from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
+from models.neoclassical_growth_benchmark import benchmark_df
 from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
@@ -105,8 +105,6 @@ class DataSettings:
     train_points_list: list[float] | None = None
     test_T: float = CONSTANTS.sequence_test_T
     test_points: int = 100
-    benchmark_T: float = CONSTANTS.benchmark_T
-    benchmark_points: int = CONSTANTS.benchmark_points
 
 
 # Acceptance gates, CLI-reachable; the mpk bound applies only under kinked
@@ -299,7 +297,8 @@ def neoclassical_growth_kernel_uno(
     test_data = jnp.linspace(
         0, data_set.test_T, data_set.test_points, dtype=jnp.float64
     )
-    validation_points = max(data_set.test_points, data_set.benchmark_points)
+    # Dense off-grid residual check between the training points.
+    validation_points = max(data_set.test_points, 801)
     validation_data = jnp.linspace(
         0, data_set.train_T, validation_points, dtype=jnp.float64
     )
@@ -449,13 +448,11 @@ def neoclassical_growth_kernel_uno(
     )
 
     if not use_kinked_production:
-        benchmark_grid = jnp.linspace(
-            0, data_set.benchmark_T, data_set.benchmark_points, dtype=jnp.float64
+        benchmark = benchmark_df(
+            [[1.0, k_0]], np.asarray(test_data), a, delta, rho_hat, sigma_crra
         )
-        benchmark_solution = neoclassical_growth_benchmark(
-            a, delta, rho_hat, sigma_crra, k_0, benchmark_grid
-        )
-        k_benchmark, c_benchmark = benchmark_solution(test_data)
+        k_benchmark = benchmark["k"].to_numpy()
+        c_benchmark = benchmark["c"].to_numpy()
         k_rel_error = jnp.abs(k_benchmark - test_eval["k"]) / k_benchmark
         c_rel_error = jnp.abs(c_benchmark - test_eval["c"]) / c_benchmark
         test_df["k_benchmark"] = np.asarray(k_benchmark)

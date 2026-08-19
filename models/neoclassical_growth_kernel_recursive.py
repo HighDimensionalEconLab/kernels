@@ -59,8 +59,6 @@ class DataSettings:
     train_tvc_T: float = CONSTANTS.transversality_T
     test_T: float = CONSTANTS.test_T
     policy_grid_size: int = 100
-    benchmark_T: float = CONSTANTS.benchmark_T
-    benchmark_points: int = CONSTANTS.benchmark_points
 
 
 @jax.tree_util.register_static
@@ -155,7 +153,6 @@ def fixed_collocation_data(
         g,
         initial_conditions,
         train_times,
-        data_set,
     )
     log_states = np.stack([np.log(z), np.log(k)], axis=-1)
     return (
@@ -396,7 +393,6 @@ def neoclassical_growth_kernel_recursive(
         g,
         test_initial_conditions,
         np.asarray(test_solution.ts[0]),
-        data_set,
     )
     test_summary_df, error_fields = add_benchmark_path_diagnostics(
         test_df,

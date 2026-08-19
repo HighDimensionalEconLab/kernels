@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from functools import lru_cache, partial
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -11,7 +11,7 @@ import pandas as pd
 from flax import nnx, struct
 from tinydiffeq import RK4, ConstantStepSize, IController, SaveAt, Tsit5, solve_ode
 
-from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
+from models.neoclassical_growth_benchmark import benchmark_df
 
 DOMAIN_EPS = 1e-8
 
@@ -471,94 +471,40 @@ def tvc_certificates(
     }
 
 
-# Keyed on the problem alone; the returned interpolant is cheap to evaluate
-# on any diagnostic grid.
-@lru_cache(maxsize=None)
-def cached_benchmark_solution(
-    a,
-    delta,
-    rho_hat,
-    sigma_crra,
-    g,
-    z_initial,
-    k_initial,
-    benchmark_T,
-    benchmark_points,
-):
-    benchmark_grid = np.linspace(0.0, benchmark_T, benchmark_points)
-    return neoclassical_growth_benchmark(
+def benchmark_trajectories(a, delta, rho_hat, sigma_crra, g, initial_conditions, times):
+    times = np.asarray(times, dtype=float)
+    frame = benchmark_df(initial_conditions, times, a, delta, rho_hat, sigma_crra, g)
+    k_paths = frame["k"].to_numpy().reshape(len(initial_conditions), -1)
+    c_paths = frame["c"].to_numpy().reshape(len(initial_conditions), -1)
+    z_paths = np.asarray(initial_conditions)[:, :1] * np.exp(
+        (1.0 - a) * g * times[None, :]
+    )
+    return z_paths, k_paths, c_paths
+
+
+def benchmark_policy_grid(a, delta, rho_hat, sigma_crra, g, kappa_grid, data_set):
+    # Interpolate c_tilde(kappa) from benchmark transitions started at the
+    # low, middle, and high grid points. The long transitions overlap in the
+    # interior and asymptote toward balanced growth from both sides, so the
+    # interpolation support is dense without ever computing a steady state.
+    # Sampling stops at the training horizon to stay out of the terminal
+    # boundary layer of the truncated BVP.
+    policy_sample_T = max(data_set.train_T, data_set.test_T)
+    benchmark_times = np.linspace(0.0, policy_sample_T, 801)
+    kappa_starts = np.unique(
+        [kappa_grid[0], kappa_grid[len(kappa_grid) // 2], kappa_grid[-1]]
+    )
+    frame = benchmark_df(
+        [[1.0, kappa_start] for kappa_start in kappa_starts],
+        benchmark_times,
         a,
         delta,
         rho_hat,
         sigma_crra,
-        k_initial,
-        benchmark_grid,
-        z_0=z_initial,
-        g=g,
+        g,
     )
-
-
-def benchmark_trajectories(
-    a, delta, rho_hat, sigma_crra, g, initial_conditions, times, data_set
-):
-    k_paths = []
-    c_paths = []
-    for z_initial, k_initial in np.asarray(initial_conditions):
-        benchmark = cached_benchmark_solution(
-            a,
-            delta,
-            rho_hat,
-            sigma_crra,
-            g,
-            float(z_initial),
-            float(k_initial),
-            data_set.benchmark_T,
-            data_set.benchmark_points,
-        )
-        k_path, c_path = benchmark(np.asarray(times, dtype=float))
-        k_paths.append(k_path)
-        c_paths.append(c_path)
-    times = np.asarray(times)
-    z_paths = np.asarray(initial_conditions)[:, :1] * np.exp(
-        (1.0 - a) * g * times[None, :]
-    )
-    return z_paths, np.stack(k_paths), np.stack(c_paths)
-
-
-def benchmark_policy_grid(a, delta, rho_hat, sigma_crra, g, kappa_grid, data_set):
-    # Interpolate c/z from benchmark transitions started at the low, middle,
-    # and high grid points. The long transitions overlap in the interior and
-    # asymptote toward balanced growth from both sides, so the interpolation
-    # support is dense without ever computing a steady state. Sampling stops
-    # at the training horizon to stay out of the terminal boundary layer of
-    # the truncated BVP.
-    policy_sample_T = max(data_set.train_T, data_set.test_T)
-    benchmark_times = np.linspace(0.0, policy_sample_T, data_set.benchmark_points)
-    kappa_samples = []
-    c_tilde_samples = []
-    kappa_starts = [kappa_grid[0], kappa_grid[len(kappa_grid) // 2], kappa_grid[-1]]
-    for kappa_initial in np.unique(kappa_starts):
-        z_path, k_path, c_path = benchmark_trajectories(
-            a,
-            delta,
-            rho_hat,
-            sigma_crra,
-            g,
-            np.asarray([[1.0, kappa_initial]]),
-            benchmark_times,
-            data_set,
-        )
-        scale_path = z_path ** (1.0 / (1.0 - a))
-        kappa_samples.append((k_path / scale_path).reshape(-1))
-        c_tilde_samples.append((c_path / scale_path).reshape(-1))
-
-    kappa_path = np.concatenate(kappa_samples)
-    c_tilde_path = np.concatenate(c_tilde_samples)
-    order = np.argsort(kappa_path)
-    kappa_sorted = kappa_path[order]
-    c_tilde_sorted = c_tilde_path[order]
-    kappa_unique, unique_indices = np.unique(kappa_sorted, return_index=True)
-    return np.interp(kappa_grid, kappa_unique, c_tilde_sorted[unique_indices])
+    by_kappa = frame.sort_values("kappa")
+    return np.interp(kappa_grid, by_kappa["kappa"], by_kappa["c_tilde"])
 
 
 def add_benchmark_path_diagnostics(

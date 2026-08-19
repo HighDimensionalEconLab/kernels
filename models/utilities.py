@@ -111,8 +111,6 @@ class GrowthConstants:
     test_T: float
     sequence_test_T: float
     transversality_T: float
-    benchmark_T: float
-    benchmark_points: int
 
     @property
     def rho_hat(self):
@@ -146,7 +144,7 @@ class GrowthConstants:
 # 1999's 0.025 quarterly). sigma_crra = 2 is their tau and is a free choice
 # rather than a mapped value. train_T = 100 covers ~10 e-foldings of the
 # calibrated saddle path (|lambda_stable| ~ 0.105); the transversality
-# certificate and the benchmark BVP extend to twice that.
+# certificate extends to twice that.
 NEOCLASSICAL_GROWTH_CONSTANTS = GrowthConstants(
     a=1 / 3,
     delta=0.1,
@@ -159,8 +157,6 @@ NEOCLASSICAL_GROWTH_CONSTANTS = GrowthConstants(
     test_T=40.0,
     sequence_test_T=110.0,
     transversality_T=200.0,
-    benchmark_T=200.0,
-    benchmark_points=801,
 )
 
 

@@ -24,7 +24,7 @@ from models.neoclassical_growth import (
     resolve_kink_family,
     steady_flow_consumption_guess,
 )
-from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
+from models.neoclassical_growth_benchmark import benchmark_df
 from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
@@ -46,8 +46,6 @@ class DataSettings:
     test_T: float = CONSTANTS.sequence_test_T
     test_points: int = 101
     test_tvc_T: float = CONSTANTS.transversality_T
-    benchmark_T: float = CONSTANTS.benchmark_T
-    benchmark_points: int = CONSTANTS.benchmark_points
 
 
 @dataclass(frozen=True)
@@ -300,23 +298,21 @@ def neoclassical_growth_nn(
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     test_data = {"t": test_t}
     if not use_kinked_production:
-        benchmark_grid = jnp.linspace(
-            0.0, data_set.benchmark_T, data_set.benchmark_points, dtype=dtype
+        train_benchmark = benchmark_df(
+            [[1.0, k_0]], np.asarray(t_train), a, delta, rho_hat, sigma_crra
         )
-        benchmark_solution = neoclassical_growth_benchmark(
-            a, delta, rho_hat, sigma_crra, k_0, benchmark_grid
+        test_benchmark = benchmark_df(
+            [[1.0, k_0]], np.asarray(test_t), a, delta, rho_hat, sigma_crra
         )
-        k_train_bar, c_train_bar = benchmark_solution(t_train)
-        k_test_bar, c_test_bar = benchmark_solution(test_t)
         train_data = {
             **train_data,
-            "k_benchmark": k_train_bar,
-            "c_benchmark": c_train_bar,
+            "k_benchmark": train_benchmark["k"].to_numpy(),
+            "c_benchmark": train_benchmark["c"].to_numpy(),
         }
         test_data = {
             **test_data,
-            "k_benchmark": k_test_bar,
-            "c_benchmark": c_test_bar,
+            "k_benchmark": test_benchmark["k"].to_numpy(),
+            "c_benchmark": test_benchmark["c"].to_numpy(),
         }
 
     train_df = snapshot(train_data, model, p)

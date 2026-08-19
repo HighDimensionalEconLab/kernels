@@ -59,8 +59,6 @@ class DataSettings:
     train_tvc_T: float = CONSTANTS.transversality_T
     test_T: float = CONSTANTS.test_T
     policy_grid_size: int = 100
-    benchmark_T: float = CONSTANTS.benchmark_T
-    benchmark_points: int = CONSTANTS.benchmark_points
     ode_solver: str = "rk4"
     rtol: float = 1e-6
     atol: float = 1e-8
@@ -721,7 +719,6 @@ def neoclassical_growth_nn_recursive(
         g,
         test_initial_conditions,
         np.asarray(test_solution.ts[0]),
-        data_set,
     )
     test_summary_df, error_fields = add_benchmark_path_diagnostics(
         test_df,

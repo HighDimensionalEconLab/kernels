@@ -43,7 +43,7 @@ def open_economy_growth_kernel_uno(
     k_0: float = 1.0,
     a_0: float = 0.0,
     parameters: ModelParameters = ModelParameters(),
-    kernel_set: KernelSettings = KernelSettings(),
+    kernel_set: KernelSettings = KernelSettings(ell=20.0),
     data_set: DataSettings = DataSettings(),
     solver_set: SolverSettings = SolverSettings(),
     verbose: bool = False,

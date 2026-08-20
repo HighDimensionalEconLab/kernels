@@ -612,7 +612,9 @@ def open_economy_growth_nn_recursive(
         "ex_post_discounted_assets": float(tvc["discounted_assets"]),
         "ex_post_asset_tvc": float(tvc["asset_tvc"]),
         "ex_post_capital_tvc": float(tvc["capital_tvc"]),
-        "benchmark_a_0_gap": abs(float(benchmark_diagnostics["a_0_gap"])),
+        "benchmark_present_value_residual": abs(
+            float(benchmark_diagnostics["present_value_residual"])
+        ),
         "steps": int(result.steps),
         "attempt": attempt,
         "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),

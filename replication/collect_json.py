@@ -1329,7 +1329,9 @@ def open_economy_growth_kernel(
             "q_relative_error_max": sci(med(j["q_relative_error_max"])),
             "c_relative_error_max": sci(med(j["c_relative_error_max"])),
             "a_scaled_error_max": sci(med(j["a_scaled_error_max"])),
-            "benchmark_a_0_gap": sci(med(j["benchmark_a_0_gap"])),
+            "benchmark_present_value_residual": sci(
+                med(j["benchmark_present_value_residual"])
+            ),
             "max_consumption_variation": sci(med(j["max_consumption_variation"])),
             "rkhs_norm_c": sci(med(j["rkhs_norm_c"])),
             "ex_post_present_value_gap": sci(med(j["ex_post_present_value_gap"])),
@@ -1450,14 +1452,6 @@ def multicountry_growth_kernel(out):
             "max_validation_residual": sci(med(j["max_validation_residual"])),
             "max_resource_gap": sci(med(j["max_resource_gap"])),
             "max_asset_clearing": sci(med(j["max_asset_clearing"])),
-            "max_benchmark_error": sci(med(j["max_benchmark_error"])),
-            "k_relative_error_max": sci(med(j["k_relative_error_max"])),
-            "q_relative_error_max": sci(med(j["q_relative_error_max"])),
-            "c_relative_error_max": sci(med(j["c_relative_error_max"])),
-            "a_scaled_error_max": sci(med(j["a_scaled_error_max"])),
-            "interest_rate_scaled_error_max": sci(
-                med(j["interest_rate_scaled_error_max"])
-            ),
             "ex_post_asset_tvc": sci(med(j["ex_post_asset_tvc"])),
             "ex_post_capital_tvc": sci(med(j["ex_post_capital_tvc"])),
             "solve_time_median": sig(med(j["solve_time"])),
@@ -1672,31 +1666,13 @@ def multicountry_growth_nn(out):
         }
         experiment_data[name] = (summary, hp, accepted)
 
-    baseline_summary, baseline_hp, baseline_accepted = experiment_data["baseline"]
-    experiments["baseline"].update(
-        {
-            "max_benchmark_error_median": sci(
-                float(baseline_accepted["max_benchmark_error"].median())
-            ),
-            "log_relative_weight_error_median": sci(
-                float(
-                    (
-                        baseline_accepted["log_relative_weight"]
-                        - baseline_accepted["benchmark_log_relative_weight"]
-                    )
-                    .abs()
-                    .median()
-                )
-            ),
-        }
-    )
+    baseline_summary, baseline_hp, _ = experiment_data["baseline"]
     payload = {
         "parameters": baseline_hp["parameters"],
         "architecture": experiments["baseline"]["architecture"],
         "selection": "minimum_identity_metric_parameter_step",
         "training_information": {
             "terminal_residual_count": 0,
-            "benchmark_training_residual_count": 0,
             "tvc_training_residual_count": 0,
         },
         "n_seeds": int(baseline_summary["n_seeds"]),
@@ -1780,8 +1756,6 @@ def performance_comparisons(out):
     multicountry_nn_frame = accepted("multicountry_growth_nn")
     multicountry_kernel_time = med(multicountry_kernel["solve_time"])
     multicountry_nn_time = float(multicountry_nn_frame["solve_time"].median())
-    multicountry_kernel_error = med(multicountry_kernel["max_benchmark_error"])
-    multicountry_nn_error = float(multicountry_nn_frame["max_benchmark_error"].median())
 
     # nn_variants maps a key prefix to (time, error). A lone "nn" entry keeps the
     # flat nn_* keys; neoclassical growth carries sequential and recursive
@@ -1871,11 +1845,15 @@ def performance_comparisons(out):
             open_uno_time,
             open_uno_error,
         ),
-        "multicountry_growth": comparison(
-            multicountry_kernel_time,
-            multicountry_kernel_error,
-            {"nn": (multicountry_nn_time, multicountry_nn_error)},
-        ),
+        # Timing only: the multicountry model has no benchmark solution, so
+        # no error comparison exists.
+        "multicountry_growth": {
+            "kernel_solve_time_median": sig(multicountry_kernel_time),
+            "nn_solve_time_median": sig(multicountry_nn_time),
+            "nn_to_kernel_time_ratio": sig(
+                multicountry_nn_time / multicountry_kernel_time
+            ),
+        },
     }
 
 

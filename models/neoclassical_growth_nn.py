@@ -63,9 +63,10 @@ class GrowthPolicySettings:
     hidden_bias: bool = True
     output_bias: bool = True
     input_scale: float = 40.0
-    # Trend e^{g_hat t} on both heads: a learned Param (init 0) or fixed at
-    # the constructor's g_hat.
+    # Trend e^{g_hat t} on both heads: a learned Param (init g_hat_init) or
+    # fixed at the constructor's g_hat.
     learn_g_hat: bool = False
+    g_hat_init: float = 0.0
 
 
 @struct.dataclass
@@ -96,7 +97,7 @@ class GrowthPolicyNN(nnx.Module):
         # trend is static so the trendless graph stays exactly the legacy one.
         self.trend = nnx.static(settings.learn_g_hat or g_hat != 0.0)
         if settings.learn_g_hat:
-            self.g_hat = nnx.Param(jnp.zeros((), dtype=dtype))
+            self.g_hat = nnx.Param(jnp.full((), settings.g_hat_init, dtype=dtype))
         else:
             self.g_hat = nnx.Variable(jnp.asarray(g_hat, dtype=dtype))
         self.layers = nnx.List(

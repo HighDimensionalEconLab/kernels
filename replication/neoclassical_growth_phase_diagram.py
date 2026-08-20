@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import pathlib
 
+import jax.numpy as jnp
 import jsonargparse
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.integrate import solve_ivp
+from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 
 from models.neoclassical_growth_benchmark import benchmark_df
-from replication.utilities import style
+from replication.utilities import configure_process, style
 
 
 # Log-utility phase portrait of the appendix system in (x, mu):
@@ -27,6 +28,7 @@ def run(
     fontsize: int = 14,
     ticksize: int = 13,
 ):
+    configure_process()
     out = pathlib.Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -51,31 +53,40 @@ def run(
     curve_values = np.concatenate([mu_nc(x_grid), manifold_mu])
     mu_lo, mu_hi = 0.8 * curve_values.min(), 1.15 * curve_values.max()
 
-    def field(_, state):
+    def field(state, _, args, p):
         x, mu = state
-        return [
-            x**a - 1.0 / mu - delta * x,
-            mu * (rho_hat + delta - a * x ** (a - 1.0)),
-        ]
-
-    # Divergent trajectories: forward paths from small mu perturbations off
-    # the manifold, stopped at the first exit from the plot box.
-    def box_exit(_, state):
-        x, mu = state
-        return min(x - x_lo, x_hi - x, mu - mu_lo, mu_hi - mu)
-
-    box_exit.terminal = True
-
-    def divergent_path(x_0, mu_ratio, T=80.0):
-        solution = solve_ivp(
-            field,
-            (0.0, T),
-            [x_0, mu_ratio * mu_star(x_0)],
-            dense_output=True,
-            max_step=0.25,
-            events=box_exit,
+        return jnp.array(
+            [
+                x**a - 1.0 / mu - delta * x,
+                mu * (rho_hat + delta - a * x ** (a - 1.0)),
+            ]
         )
-        return solution.sol(np.linspace(0.0, solution.t[-1], 600))
+
+    # Divergent trajectories: fixed-step forward paths from small mu
+    # perturbations off the manifold, truncated at the first saved state
+    # outside the plot box (one exterior point is kept so the clipped curve
+    # reaches the box edge; NaN/inf blow-up tails fail the box test too).
+    def divergent_path(x_0, mu_ratio, T=80.0, dt=0.05):
+        solution = solve_ode(
+            field,
+            RK4(),
+            0.0,
+            T,
+            jnp.asarray([x_0, mu_ratio * mu_star(x_0)]),
+            dt_0=dt,
+            controller=ConstantStepSize(),
+            max_steps=int(round(T / dt)),
+            save_at=SaveAt(steps=True),
+        )
+        path = np.asarray(solution.xs).T
+        inside = (
+            (path[0] >= x_lo)
+            & (path[0] <= x_hi)
+            & (path[1] >= mu_lo)
+            & (path[1] <= mu_hi)
+        )
+        exits = np.flatnonzero(~inside)
+        return path[:, : exits[0] + 1] if exits.size else path
 
     style(figsize=(10, 6), fontsize=fontsize, ticksize=ticksize)
     fig, ax = plt.subplots()

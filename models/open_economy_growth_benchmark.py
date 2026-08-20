@@ -150,19 +150,16 @@ def open_economy_growth_benchmark(
             "initial assets and transition resources imply nonpositive c_0"
         )
 
+    # evaluate is pure jnp (jit/grad/vmap-safe); the Hermite spline clamps
+    # flat outside the mesh span, so callers stay inside the horizon.
     def evaluate(points):
-        points = np.asarray(points, dtype=float)
-        # The Hermite spline clamps silently outside the mesh span.
-        if np.any(points < 0.0) or np.any(points > bench_set.T):
-            raise ValueError("evaluation points must lie inside the benchmark horizon")
-        state = solution(jnp.asarray(points))
-        k = np.asarray(state["k"])
-        q = np.asarray(state["q"])
-        a = np.asarray(state["a"])
+        points = jnp.asarray(points)
+        state = solution(points)
+        k, q, a = state["k"], state["q"], state["a"]
         s = (chi * eta * q) ** (1.0 / (1.0 - eta))
         x = k * s
         output = k**alpha
-        c = c_0 * np.exp(consumption_growth * points)
+        c = c_0 * jnp.exp(consumption_growth * points)
         current_account = interest_rate * a + output - c - x
         return {
             "t": points,

@@ -112,9 +112,9 @@ def snapshot(theta, t, p, train_data, kernel_set, g_hat=None, benchmark=None, z=
         }
     )
     if benchmark is not None:
-        k_b, c_b = benchmark(np.asarray(t))
-        df["k_benchmark"] = k_b
-        df["c_benchmark"] = c_b
+        k_b, c_b = benchmark(t)
+        df["k_benchmark"] = np.asarray(k_b)
+        df["c_benchmark"] = np.asarray(c_b)
         df["k_rel_error"] = np.abs(df["k"] - df["k_benchmark"]) / np.maximum(
             np.abs(df["k_benchmark"]), DOMAIN_EPS
         )
@@ -272,11 +272,11 @@ def neoclassical_growth_kernel(
 
     # Diagnostics on the train and test grids.
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
-    test_benchmark = None
-    if not use_kinked_production:
-        test_benchmark = neoclassical_growth_benchmark(
-            a, delta, rho_hat, sigma_crra, g=g, k_0=k_0
-        )
+    test_benchmark = (
+        None
+        if use_kinked_production
+        else neoclassical_growth_benchmark(a, delta, rho_hat, sigma_crra, g=g, k_0=k_0)
+    )
     train_df = snapshot(
         theta,
         train_data,

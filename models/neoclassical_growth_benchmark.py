@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from flax import struct
 from tinydiffeq import solve_bvp
 
@@ -83,7 +82,9 @@ def solve_kappa_bvp(args, bench_set):
 
 
 # Returns paths(t) -> (k, c) level arrays, re-trended from the solver's own C1
-# collocation spline, accurate to tol everywhere between mesh nodes.
+# collocation spline, accurate to tol everywhere between mesh nodes. paths is
+# pure jnp (jit/grad/vmap-safe); the Hermite spline clamps flat past T, so
+# callers stay inside the horizon.
 def neoclassical_growth_benchmark(
     a,
     delta,
@@ -108,14 +109,9 @@ def neoclassical_growth_benchmark(
         raise RuntimeError(f"solve_bvp failed: status {int(solution.status)}")
 
     def paths(t):
-        t = np.asarray(t, dtype=float)
-        # The Hermite spline clamps silently past the last node.
-        if t.max() > bench_set.T:
-            raise ValueError(
-                "extrapolation past the benchmark horizon is not supported"
-            )
-        state = np.asarray(solution(jnp.asarray(t)))
-        scale = scale_0 * np.exp(g * t)
+        t = jnp.asarray(t)
+        state = solution(t)
+        scale = scale_0 * jnp.exp(g * t)
         return scale * state[:, 0], scale * state[:, 1]
 
     return paths

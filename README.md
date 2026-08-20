@@ -16,7 +16,7 @@ uv sync
 ```
 
 The numerical stack requires Python 3.13, `nlls-gram>=2.6.0`, and
-`tinydiffeq>=2.2.0`. Small kernel and NN examples use `nlls-gram`'s automatic
+`tinydiffeq>=2.6.0`. Small kernel and NN examples use `nlls-gram`'s automatic
 linear-solver choice. The reduced one-good multicountry kernel also exposes a
 matrix-free preconditioned-CG path for large country counts.
 

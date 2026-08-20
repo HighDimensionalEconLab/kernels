@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 
-from models.neoclassical_growth_benchmark import benchmark_df
+from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from replication.utilities import configure_process, style
 
 
@@ -41,10 +41,15 @@ def run(
     # Stable manifold from two saddle paths (one from each side of x_ss),
     # merged and sorted in x; mu = 1/c under log utility.
     times = np.linspace(0.0, 120.0, 400)
-    branches = benchmark_df([[1.0, x_lo], [1.0, x_hi]], times, a, delta, rho_hat, 1.0)
-    manifold = branches.assign(mu=1.0 / branches["c"]).sort_values("k")
-    manifold_x = manifold["k"].to_numpy()
-    manifold_mu = manifold["mu"].to_numpy()
+    branches = [
+        neoclassical_growth_benchmark(a, delta, rho_hat, 1.0, k_0=x_0)(times)
+        for x_0 in (x_lo, x_hi)
+    ]
+    branch_k = np.concatenate([k for k, _ in branches])
+    branch_mu = 1.0 / np.concatenate([c for _, c in branches])
+    order = np.argsort(branch_k)
+    manifold_x = branch_k[order]
+    manifold_mu = branch_mu[order]
 
     def mu_star(x):
         return np.interp(x, manifold_x, manifold_mu)

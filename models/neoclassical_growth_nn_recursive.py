@@ -25,7 +25,7 @@ from models.neoclassical_growth import (
     simulate,
     trajectory_values,
 )
-from models.neoclassical_growth_benchmark import benchmark_df
+from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from models.utilities import (
     ACTIVATIONS,
     DOMAIN_EPS,
@@ -602,20 +602,17 @@ def neoclassical_growth_nn_recursive(
         ("trajectory", "step"),
         scalars={"z_0": test_initial[:, 0], "k_0": test_initial[:, 1]},
     )
-    benchmark = benchmark_df(
-        test_initial,
-        np.asarray(test_solution.ts[0]),
-        a,
-        delta,
-        rho_hat,
-        sigma_crra,
-        g,
-    )
-    test_df = test_df.merge(
-        benchmark[["trajectory", "t", "k", "c"]],
-        on=["trajectory", "t"],
-        suffixes=("", "_benchmark"),
-    )
+    # long_df orders rows (trajectory, step) on the shared grid ts[0], so the
+    # per-trajectory benchmark paths concatenate into aligned columns.
+    test_times = np.asarray(test_solution.ts[0])
+    benchmark_paths = [
+        neoclassical_growth_benchmark(
+            a, delta, rho_hat, sigma_crra, g=g, z_0=z_0, k_0=k_0
+        )(test_times)
+        for z_0, k_0 in test_initial
+    ]
+    test_df["k_benchmark"] = np.concatenate([k for k, _ in benchmark_paths])
+    test_df["c_benchmark"] = np.concatenate([c for _, c in benchmark_paths])
     test_df["k_rel_error"] = (test_df["k"] - test_df["k_benchmark"]) / test_df[
         "k_benchmark"
     ].abs().clip(lower=DOMAIN_EPS)

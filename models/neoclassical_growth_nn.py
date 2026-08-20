@@ -22,7 +22,7 @@ from models.neoclassical_growth import (
     production,
     steady_flow_consumption_guess,
 )
-from models.neoclassical_growth_benchmark import benchmark_df
+from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from models.utilities import (
     ACTIVATIONS,
     DOMAIN_EPS,
@@ -183,8 +183,9 @@ def snapshot(model, t, p, benchmark=None, z=1.0):
         }
     )
     if benchmark is not None:
-        df["k_benchmark"] = benchmark["k"].to_numpy()
-        df["c_benchmark"] = benchmark["c"].to_numpy()
+        k_b, c_b = benchmark(np.asarray(t))
+        df["k_benchmark"] = k_b
+        df["c_benchmark"] = c_b
         df["k_rel_error"] = np.abs(df["k"] - df["k_benchmark"]) / np.maximum(
             np.abs(df["k_benchmark"]), DOMAIN_EPS
         )
@@ -314,21 +315,16 @@ def neoclassical_growth_nn(
 
     # Diagnostics against the benchmark.
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
-    train_benchmark = test_benchmark = None
+    benchmark = None
     z_test = jnp.exp((1.0 - a) * g * test_t) if g != 0.0 else None
     if not use_kinked_production:
-        train_benchmark = benchmark_df(
-            [[1.0, k_0]], np.asarray(t_train), a, delta, rho_hat, sigma_crra, g
-        )
-        test_benchmark = benchmark_df(
-            [[1.0, k_0]], np.asarray(test_t), a, delta, rho_hat, sigma_crra, g
+        benchmark = neoclassical_growth_benchmark(
+            a, delta, rho_hat, sigma_crra, g=g, k_0=k_0
         )
     train_df = snapshot(
-        model, t_train, p, train_benchmark, z=1.0 if z_train is None else z_train
+        model, t_train, p, benchmark, z=1.0 if z_train is None else z_train
     )
-    test_df = snapshot(
-        model, test_t, p, test_benchmark, z=1.0 if z_test is None else z_test
-    )
+    test_df = snapshot(model, test_t, p, benchmark, z=1.0 if z_test is None else z_test)
 
     tvc_t = jnp.asarray(data_set.test_tvc_T, dtype=dtype)
     k_T, c_T = model(tvc_t)

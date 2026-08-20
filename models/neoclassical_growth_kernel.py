@@ -22,7 +22,7 @@ from models.neoclassical_growth import (
     production,
     steady_flow_consumption_guess,
 )
-from models.neoclassical_growth_benchmark import benchmark_df
+from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from models.utilities import (
     DOMAIN_EPS,
     STATUS_TO_REASON,
@@ -112,8 +112,9 @@ def snapshot(theta, t, p, train_data, kernel_set, g_hat=None, benchmark=None, z=
         }
     )
     if benchmark is not None:
-        df["k_benchmark"] = benchmark["k"].to_numpy()
-        df["c_benchmark"] = benchmark["c"].to_numpy()
+        k_b, c_b = benchmark(np.asarray(t))
+        df["k_benchmark"] = k_b
+        df["c_benchmark"] = c_b
         df["k_rel_error"] = np.abs(df["k"] - df["k_benchmark"]) / np.maximum(
             np.abs(df["k_benchmark"]), DOMAIN_EPS
         )
@@ -273,8 +274,8 @@ def neoclassical_growth_kernel(
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
     test_benchmark = None
     if not use_kinked_production:
-        test_benchmark = benchmark_df(
-            [[1.0, k_0]], np.asarray(test_data), a, delta, rho_hat, sigma_crra, g
+        test_benchmark = neoclassical_growth_benchmark(
+            a, delta, rho_hat, sigma_crra, g=g, k_0=k_0
         )
     train_df = snapshot(
         theta,

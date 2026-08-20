@@ -152,8 +152,9 @@ def run(
         "benchmark_errors_are_reported_not_gated": True,
     }
 
-    # Compile and populate benchmark caches once, then time every retained NN
-    # seed warm. This keeps n_nn_seeds=1 comparable to the kernel's warm median.
+    # Compile once (the benchmark BVP solve included), then time every retained
+    # NN seed warm. This keeps n_nn_seeds=1 comparable to the kernel's warm
+    # median.
     nn_first_run_results, _, _ = ensemble(
         neoclassical_growth_nn_recursive.neoclassical_growth_nn_recursive,
         1,

@@ -19,7 +19,7 @@ from models.neoclassical_growth import (
     production,
     steady_flow_consumption_guess,
 )
-from models.neoclassical_growth_benchmark import benchmark_df
+from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from models.utilities import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
@@ -448,11 +448,10 @@ def neoclassical_growth_kernel_uno(
     }
 
     if not use_kinked_production:
-        benchmark = benchmark_df(
-            [[1.0, k_0]], np.asarray(test_data), a, delta, rho_hat, sigma_crra
+        benchmark = neoclassical_growth_benchmark(
+            a, delta, rho_hat, sigma_crra, g=0.0, k_0=k_0
         )
-        k_benchmark = benchmark["k"].to_numpy()
-        c_benchmark = benchmark["c"].to_numpy()
+        k_benchmark, c_benchmark = benchmark(np.asarray(test_data))
         k_rel_error = np.abs(k_benchmark - test_df["k"].to_numpy()) / k_benchmark
         c_rel_error = np.abs(c_benchmark - test_df["c"].to_numpy()) / c_benchmark
         test_df["k_benchmark"] = k_benchmark

@@ -64,8 +64,6 @@ class DataSettings:
     test_points: int = 51
     diagnostic_T: float = 160.0
     diagnostic_points: int = 161
-    benchmark_T: float = 200.0
-    benchmark_points: int = 241
     policy_grid_size: int = 100
 
 
@@ -483,16 +481,8 @@ def open_economy_growth_nn_recursive(
     acceptance = acceptance_fields(rejection_reasons)
     solution_accepted = acceptance["solution_accepted"]
 
-    benchmark_grid = np.linspace(
-        0.0,
-        data_set.benchmark_T,
-        data_set.benchmark_points,
-    )
     benchmark, benchmark_diagnostics = open_economy_growth_benchmark(
-        k_0,
-        a_0,
-        benchmark_grid,
-        parameters=parameters,
+        k_0, a_0, parameters=parameters
     )
     benchmark_values = benchmark(np.asarray(test_t))
     benchmark_test_values = {

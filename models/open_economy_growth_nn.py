@@ -67,8 +67,6 @@ class DataSettings:
     test_T: float = 50.0
     test_points: int = 201
     validation_points: int = 401
-    benchmark_T: float = 200.0
-    benchmark_points: int = 241
 
 
 @dataclass(frozen=True)
@@ -264,8 +262,6 @@ def open_economy_growth_nn(
     validation_t = jnp.linspace(
         0.0, float(train_t[-1]), data_set.validation_points, dtype=dtype
     )
-    benchmark_grid = np.linspace(0.0, data_set.benchmark_T, data_set.benchmark_points)
-
     steady = steady_state(parameters)
     output_scale = float(steady["output"])
     scales = PathScales(
@@ -345,10 +341,7 @@ def open_economy_growth_nn(
     )
 
     benchmark, benchmark_diagnostics = open_economy_growth_benchmark(
-        k_0,
-        a_0,
-        benchmark_grid,
-        parameters=parameters,
+        k_0, a_0, parameters=parameters
     )
     benchmark_values = benchmark(np.asarray(test_t))
     k_relative_error = jnp.abs(

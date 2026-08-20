@@ -20,6 +20,17 @@ from replication.utilities import configure_process, style
 # integrated off the manifold. The defaults are the smooth-branch values of
 # the kinked calibration, whose sigma_crra = 1 is the log utility the
 # isocline formula requires (k_ss = 2).
+def field(state, _, args, p):
+    x, mu = state
+    a, delta, rho_hat = p["a"], p["delta"], p["rho_hat"]
+    return jnp.array(
+        [
+            x**a - 1.0 / mu - delta * x,
+            mu * (rho_hat + delta - a * x ** (a - 1.0)),
+        ]
+    )
+
+
 def run(
     output_dir: str = ".results",
     a: float = 1 / 3,
@@ -58,14 +69,7 @@ def run(
     curve_values = np.concatenate([mu_nc(x_grid), manifold_mu])
     mu_lo, mu_hi = 0.8 * curve_values.min(), 1.15 * curve_values.max()
 
-    def field(state, _, args, p):
-        x, mu = state
-        return jnp.array(
-            [
-                x**a - 1.0 / mu - delta * x,
-                mu * (rho_hat + delta - a * x ** (a - 1.0)),
-            ]
-        )
+    p = {"a": a, "delta": delta, "rho_hat": rho_hat}
 
     # Divergent trajectories: fixed-step forward paths from small mu
     # perturbations off the manifold, truncated at the first saved state
@@ -82,6 +86,7 @@ def run(
             controller=ConstantStepSize(),
             max_steps=int(round(T / dt)),
             save_at=SaveAt(steps=True),
+            p=p,
         )
         path = np.asarray(solution.xs).T
         inside = (

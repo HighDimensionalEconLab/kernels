@@ -1172,9 +1172,9 @@ def neoclassical_growth_nn_recursive(out):
         "parameters": hp["parameters"],
         "data": hp["data_set"],
         "architecture": {
-            "width": hp["hc_set"]["mlp_width"],
-            "depth": hp["hc_set"]["mlp_depth"],
-            "hidden_activation": hp["hc_set"]["hidden_activation"],
+            "width": hp["nn_set"]["mlp_width"],
+            "depth": hp["nn_set"]["mlp_depth"],
+            "hidden_activation": hp["nn_set"]["hidden_activation"],
             "total_params": int(med(single_json["total_params"])),
         },
         "stopping": {
@@ -1202,9 +1202,9 @@ def stochastic_growth_nn_recursive(out):
         "initial_conditions": hp["initial_conditions"],
         "data": hp["data_set"],
         "architecture": {
-            "width": hp["hc_set"]["mlp_width"],
-            "depth": hp["hc_set"]["mlp_depth"],
-            "hidden_activation": hp["hc_set"]["hidden_activation"],
+            "width": hp["nn_set"]["mlp_width"],
+            "depth": hp["nn_set"]["mlp_depth"],
+            "hidden_activation": hp["nn_set"]["hidden_activation"],
             "total_params": int(med(j["total_params"])),
         },
         "stopping": hp["tolerance_set"],

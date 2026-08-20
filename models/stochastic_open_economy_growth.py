@@ -442,14 +442,14 @@ def diffusion_field(state, _, args, p):
 
 
 @partial(jax.jit, static_argnames=("T", "n_steps"))
-def simulate(solver, policy, initial_states, noise, T, n_steps, p):
+def simulate(sde, policy, initial_states, noise, T, n_steps, p):
     correlated_noise = correlate_noise(noise, p.corr_zr)
 
     def solve_one(initial_state, trajectory_noise):
         return solve_sde(
             drift_field,
             diffusion_field,
-            solver,
+            sde,
             0.0,
             T,
             initial_state,
@@ -463,9 +463,9 @@ def simulate(solver, policy, initial_states, noise, T, n_steps, p):
 
 
 @partial(jax.jit, static_argnames=("data_set",))
-def simulate_train(solver, policy, initial_states, noise, p, data_set):
+def simulate_train(sde, policy, initial_states, noise, p, data_set):
     return simulate(
-        solver,
+        sde,
         policy,
         initial_states,
         noise,

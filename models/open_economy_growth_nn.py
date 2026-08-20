@@ -495,11 +495,11 @@ def open_economy_growth_nn(
     test_df["a_scaled_error"] = np.asarray(a_scaled_error)
 
     hyperparameters = {
-        "parameters": asdict(parameters),
         "nn_set": asdict(nn_set),
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),
+        "parameters": asdict(parameters),
         "initial_conditions": {"k_0": k_0, "a_0": a_0},
     }
     return results, {

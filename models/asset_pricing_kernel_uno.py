@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from dataclasses import asdict, dataclass
 
 import jax
@@ -12,20 +11,21 @@ import unopy
 
 from models.asset_pricing_benchmark import mu_f_array
 from models.kernels import integrated_kernel_matrices, rkhs_norm_squared
+from models.utilities import Stopwatch, acceptance_fields
 
 ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
 TRAIN_RESIDUAL_TOL = 1e-8
 
 
-def unpack(z):
-    n_train = z.shape[0] - 1
-    alpha = z[:n_train]
-    p_0 = z[n_train]
+def unpack(x):
+    n_train = x.shape[0] - 1
+    alpha = x[:n_train]
+    p_0 = x[n_train]
     return alpha, p_0
 
 
-def path_values(z, K_eval, K_tilde_eval):
-    alpha, p_0 = unpack(z)
+def path_values(x, K_eval, K_tilde_eval):
+    alpha, p_0 = unpack(x)
     price = p_0 + K_tilde_eval @ alpha
     dprice_dt = K_eval @ alpha
     return price, dprice_dt
@@ -36,21 +36,21 @@ def dividends(t, p):
 
 
 @jax.jit
-def objective(z, K):
-    alpha, _ = unpack(z)
+def objective(x, K):
+    alpha, _ = unpack(x)
     return alpha @ K @ alpha
 
 
 # No-arbitrage residual dp/dt = r p - x along the dividend path.
 @jax.jit
-def constraints(z, K, K_tilde, t, p):
-    price, dprice_dt = path_values(z, K, K_tilde)
+def constraints(x, K, K_tilde, t, p):
+    price, dprice_dt = path_values(x, K, K_tilde)
     return dprice_dt - (p["r"] * price - dividends(t, p))
 
 
-def lagrangian(z, objective_multiplier, multipliers, K, K_tilde, t, p):
-    return objective_multiplier * objective(z, K) + jnp.dot(
-        multipliers, constraints(z, K, K_tilde, t, p)
+def lagrangian(x, objective_multiplier, multipliers, K, K_tilde, t, p):
+    return objective_multiplier * objective(x, K) + jnp.dot(
+        multipliers, constraints(x, K, K_tilde, t, p)
     )
 
 
@@ -151,25 +151,25 @@ def asset_pricing_kernel_uno(
         unopy.ZERO_BASED_INDEXING,
     )
 
-    def objective_callback(z):
-        return float(objective(jnp.asarray(z), K_jax))
+    def objective_callback(x):
+        return float(objective(jnp.asarray(x), K_jax))
 
-    def objective_gradient_callback(z, gradient):
-        gradient[:] = np.asarray(objective_gradient(jnp.asarray(z), K_jax))
+    def objective_gradient_callback(x, gradient):
+        gradient[:] = np.asarray(objective_gradient(jnp.asarray(x), K_jax))
 
     model.set_objective(unopy.MINIMIZE, objective_callback, objective_gradient_callback)
 
     jacobian_rows = np.repeat(np.arange(n_constraints, dtype=np.int32), n_variables)
     jacobian_columns = np.tile(np.arange(n_variables, dtype=np.int32), n_constraints)
 
-    def constraints_callback(z, constraint_output):
+    def constraints_callback(x, constraint_output):
         constraint_output[:] = np.asarray(
-            constraints(jnp.asarray(z), K_jax, K_tilde_jax, train_data, p)
+            constraints(jnp.asarray(x), K_jax, K_tilde_jax, train_data, p)
         )
 
-    def jacobian_callback(z, jacobian_output):
+    def jacobian_callback(x, jacobian_output):
         jacobian_output[:] = np.asarray(
-            constraint_jacobian(jnp.asarray(z), K_jax, K_tilde_jax, train_data, p)
+            constraint_jacobian(jnp.asarray(x), K_jax, K_tilde_jax, train_data, p)
         ).reshape(-1)
 
     model.set_constraints(
@@ -187,10 +187,10 @@ def asset_pricing_kernel_uno(
     hessian_rows = hessian_rows.astype(np.int32)
     hessian_columns = hessian_columns.astype(np.int32)
 
-    def hessian_callback(z, objective_multiplier, multipliers, hessian_output):
+    def hessian_callback(x, objective_multiplier, multipliers, hessian_output):
         hessian = np.asarray(
             lagrangian_hessian(
-                jnp.asarray(z),
+                jnp.asarray(x),
                 float(objective_multiplier),
                 jnp.asarray(multipliers),
                 K_jax,
@@ -221,15 +221,15 @@ def asset_pricing_kernel_uno(
     if solver_set.time_limit is not None:
         solver.set_option("time_limit", solver_set.time_limit)
 
-    start = time.perf_counter()
+    timer = Stopwatch()
     result = solver.optimize(model)
-    elapsed = time.perf_counter() - start
+    elapsed = timer.elapsed()
 
     # primal_solution appends solver-internal auxiliaries; only the leading
     # n + 1 block is ours.
-    z = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))[:n_variables]
-    alpha, p_0 = unpack(z)
-    train_residual = constraints(z, K_jax, K_tilde_jax, train_data, p)
+    x = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))[:n_variables]
+    alpha, p_0 = unpack(x)
+    train_residual = constraints(x, K_jax, K_tilde_jax, train_data, p)
     max_train_residual = float(jnp.max(jnp.abs(train_residual)))
 
     @jax.jit
@@ -237,7 +237,7 @@ def asset_pricing_kernel_uno(
         K_test, K_tilde_test = integrated_kernel_matrices(
             test_points_data, train_data, nu, sigma, ell
         )
-        p_test, dp_test = path_values(z, K_test, K_tilde_test)
+        p_test, dp_test = path_values(x, K_test, K_tilde_test)
         return p_test, dp_test
 
     p_test, dp_test = kernel_solution(test_data)
@@ -258,7 +258,6 @@ def asset_pricing_kernel_uno(
         rejection_reasons.append("nonfinite")
     if max_train_residual > TRAIN_RESIDUAL_TOL:
         rejection_reasons.append("train_residual")
-    solution_accepted = not rejection_reasons
 
     results = {
         "r": r,
@@ -283,17 +282,14 @@ def asset_pricing_kernel_uno(
         "solve_time": solve_time,
         "stationarity": result.solution_stationarity,
         "primal_feasibility": result.solution_primal_feasibility,
-        "solution_accepted": solution_accepted,
-        "rejection_reason": "accepted"
-        if solution_accepted
-        else ",".join(rejection_reasons),
+        **acceptance_fields(rejection_reasons),
     }
     print(
         f"solve_time(s) = {solve_time}, "
         f"E(|rel_error(p)|) = {results['p_rel_error_mean']:.3e}"
     )
 
-    p_train, dp_train = path_values(z, K_jax, K_tilde_jax)
+    p_train, dp_train = path_values(x, K_jax, K_tilde_jax)
     train_df = pd.DataFrame(
         {
             "t": np.asarray(train_data),

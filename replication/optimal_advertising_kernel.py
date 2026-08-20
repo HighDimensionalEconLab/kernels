@@ -10,6 +10,7 @@ from replication.utilities import (
     write_summary,
 )
 
+SOLVER = optimal_advertising_kernel.optimal_advertising_kernel
 PREFIX = "optimal_advertising_kernel"
 
 
@@ -20,7 +21,7 @@ def run(
     configure_process()
     print(f"baseline -> {output_dir}/")
     results_df, frames, hyperparameters = ensemble(
-        optimal_advertising_kernel.optimal_advertising_kernel,
+        SOLVER,
         n_seeds=1,
         options={"verbose": verbose},
     )

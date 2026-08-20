@@ -39,10 +39,7 @@ def run(
             results_df,
             frames,
             output_dir,
-            {
-                "n_seeds": experiment_n_seeds,
-                "residual_dtype": "float64",
-            },
+            dict(n_seeds=experiment_n_seeds, residual_dtype="float64"),
             prefix=PREFIX,
             hyperparameters=hyperparameters,
         )

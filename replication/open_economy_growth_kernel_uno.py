@@ -11,6 +11,7 @@ from replication.utilities import (
     write_summary,
 )
 
+SOLVER = open_economy_growth_kernel_uno.open_economy_growth_kernel_uno
 PREFIX = "open_economy_growth_kernel_uno"
 
 
@@ -23,7 +24,7 @@ def run(output_dir: str = ".results", verbose: bool = False):
     def go(name, **experiment):
         print(f"{name} -> {output_dir}/")
         results_df, frames, hyperparameters = ensemble(
-            open_economy_growth_kernel_uno.open_economy_growth_kernel_uno,
+            SOLVER,
             n_seeds=1,
             options={"verbose": verbose, **experiment},
         )

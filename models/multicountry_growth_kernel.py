@@ -61,6 +61,25 @@ RESIDUAL_NAMES = (
 )
 
 
+class InitialValues(NamedTuple):
+    q_offsets: jax.Array
+    c_offsets: jax.Array
+    mu_offsets: jax.Array
+    rate_offset: jax.Array
+
+
+# Alpha blocks first (the metric penalizes the leading flat coordinates);
+# the (N, n_train) blocks ravel country-major.
+class Theta(NamedTuple):
+    alpha_k: jax.Array
+    alpha_a: jax.Array
+    alpha_q: jax.Array
+    alpha_c: jax.Array
+    alpha_mu: jax.Array
+    alpha_rate: jax.Array
+    initial: InitialValues
+
+
 # Numerical acceptance and ex-post quality thresholds, CLI-reachable so a
 # float32 caller can pass its own bars (the float32 replication driver does).
 @dataclass(frozen=True)
@@ -114,46 +133,19 @@ class SolverSettings:
     # looser anneals faster (fewer steps per level), tighter solves each
     # level out more completely before descending.
     ridge_grad_rtol: float = 1e-2
-    # "auto" (whitened cholesky) is the default; "qr" remains valid (all
-    # paths run whitened). "cg" is matrix-free preconditioned CG on the
-    # whitened normal operator with the arrow+Woodbury preconditioner
-    # rebuilt every LM step -- the O(N)-per-step path for large country
-    # counts. Implicit-AD re-solves through the returned solve handle (the
-    # replication sensitivity tables) stay dense-only: the undamped
-    # implicit-AD system sits at the float64 conditioning plateau, where a
-    # CG solve would silently degrade the tangents; the gamma-common
-    # tangent runs on either path.
+    # "auto" (whitened cholesky) and "qr" solve dense whitened systems; "cg"
+    # is matrix-free preconditioned CG on the whitened normal operator with
+    # the arrow+Woodbury preconditioner rebuilt every LM step (derivation in
+    # models/multicountry_growth_preconditioner.py). Implicit-AD re-solves
+    # stay dense-only: the undamped system sits at the float64 conditioning
+    # plateau, where CG would silently degrade the tangents.
     linear_solver: str = "auto"
-    # CG inner-solve budget: cg_tol is unreachable in the endgame (the
-    # operator condition passes 1e13 at the achieved ridge), so cg_maxiter
-    # is the effective stopping rule there and the LM accept/reject guards
-    # step quality. cg_damping_floor floors the shift BAKED INTO the
-    # preconditioner build (the batched block Cholesky must stay PD in
-    # float64, and the preconditioned condition number is bounded by
-    # ~ floor / ridge); the live LM damping anneals freely, exactly as on
-    # the dense path, and the preconditioner ignores it.
+    # cg_tol is unreachable in the endgame, so cg_maxiter is the effective
+    # budget there; cg_damping_floor keeps the preconditioner's block
+    # Cholesky positive definite while the live LM damping anneals freely.
     cg_tol: float = 1e-10
     cg_maxiter: int = 40
     cg_damping_floor: float = 1e-10
-
-
-class InitialValues(NamedTuple):
-    q_offsets: jax.Array
-    c_offsets: jax.Array
-    mu_offsets: jax.Array
-    rate_offset: jax.Array
-
-
-# Alpha blocks first (the metric penalizes the leading flat coordinates);
-# the (N, n_train) blocks ravel country-major.
-class Theta(NamedTuple):
-    alpha_k: jax.Array
-    alpha_a: jax.Array
-    alpha_q: jax.Array
-    alpha_c: jax.Array
-    alpha_mu: jax.Array
-    alpha_rate: jax.Array
-    initial: InitialValues
 
 
 # Module-level so callers can evaluate solved paths on their own kernel
@@ -221,6 +213,7 @@ def multicountry_growth_kernel(
     data_set: DataSettings = DataSettings(),
     lm_set: SolverSettings = SolverSettings(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
+    verbose: bool = False,
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
@@ -661,12 +654,16 @@ def multicountry_growth_kernel(
     validation_df = frame(validation_eval, validation_data)
     test_df = frame(test_eval, test_data)
 
+    if verbose:
+        print(f"solve_time(s) = {solve_time}")
+
     hyperparameters = {
-        "parameters": asdict(parameters),
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
+        "initial_set": asdict(initial_set),
         "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),
+        "parameters": asdict(parameters),
         "initial_conditions": {"k_0": list(k_0), "a_0": list(a_0)},
     }
 

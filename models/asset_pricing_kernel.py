@@ -92,6 +92,7 @@ def asset_pricing_kernel(
     data_set: DataSettings = DataSettings(),
     lm_set: SolverSettings = SolverSettings(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
+    verbose: bool = False,
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
@@ -228,10 +229,11 @@ def asset_pricing_kernel(
         "steps": steps,
         **acceptance_fields(rejection_reasons),
     }
-    print(
-        f"solve_time(s) = {elapsed}, "
-        f"E(|rel_error(p)|) = {results['p_rel_error_mean']:.3e}"
-    )
+    if verbose:
+        print(
+            f"solve_time(s) = {elapsed}, "
+            f"E(|rel_error(p)|) = {results['p_rel_error_mean']:.3e}"
+        )
 
     train_df = pd.DataFrame(
         {
@@ -253,6 +255,7 @@ def asset_pricing_kernel(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
+        "tolerance_set": asdict(tolerance_set),
         "parameters": {"r": r, "c": c, "g": g},
         "initial_conditions": {"x_0": x_0},
     }

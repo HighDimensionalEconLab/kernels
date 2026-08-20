@@ -15,6 +15,7 @@ from replication.utilities import (
     write_summary,
 )
 
+SOLVER = neoclassical_growth_nn.neoclassical_growth_nn
 PREFIX = "neoclassical_growth_concave_convex_nn"
 
 
@@ -27,7 +28,7 @@ def run(
     grid = np.linspace(0.5, 4.0, n_points)
     print(f"threshold sweep: {n_points} initial conditions -> {output_dir}/")
     results_df, frames, hyperparameters = sweep(
-        neoclassical_growth_nn.neoclassical_growth_nn,
+        SOLVER,
         "k_0",
         [float(k_0) for k_0 in grid],
         options={
@@ -91,7 +92,7 @@ def run(
         prefix=PREFIX,
         hyperparameters=hyperparameters,
     )
-    write_summary(output_dir, PREFIX, experiments={"threshold"})
+    write_summary(output_dir, PREFIX)
 
 
 if __name__ == "__main__":

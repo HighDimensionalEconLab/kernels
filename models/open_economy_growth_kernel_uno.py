@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from dataclasses import asdict, dataclass
 
 import jax
@@ -10,7 +9,7 @@ import numpy as np
 import pandas as pd
 import unopy
 
-from models.kernels import integrated_kernel_matrices, normalize_kernel
+from models.kernels import KernelSettings, integrated_kernel_matrices, normalize_kernel
 from models.open_economy_growth import (
     ModelParameters,
     investment_expenditure,
@@ -22,7 +21,8 @@ from models.open_economy_growth import (
     tvc_diagnostics,
 )
 from models.open_economy_growth_benchmark import open_economy_growth_benchmark
-from models.open_economy_growth_kernel import DataSettings, KernelSettings
+from models.open_economy_growth_kernel import DataSettings
+from models.utilities import Stopwatch, acceptance_fields
 
 ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
 TRAIN_RESIDUAL_TOL = 1e-5
@@ -287,9 +287,9 @@ def open_economy_growth_kernel_uno(
     if solver_set.time_limit is not None:
         solver.set_option("time_limit", solver_set.time_limit)
 
-    start = time.perf_counter()
+    timer = Stopwatch()
     result = solver.optimize(model)
-    elapsed = time.perf_counter() - start
+    elapsed = timer.elapsed()
     x = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))
 
     def evaluate_grid(points):
@@ -428,7 +428,6 @@ def open_economy_growth_kernel_uno(
         rejection_reasons.append("train_residual")
     if max_validation_residual > VALIDATION_RESIDUAL_TOL:
         rejection_reasons.append("validation_residual")
-    solution_accepted = not rejection_reasons
 
     alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets = unpack(x)
     c_offset, mu_offset, q_offset = offsets
@@ -460,7 +459,6 @@ def open_economy_growth_kernel_uno(
         "k_0": k_0,
         "a_0": a_0,
         "a_0_over_output_ss": a_0 / float(output_scale),
-        "residual_dtype": "float64",
         "kernel": kernel,
         "ell": kernel_set.ell,
         "sigma": kernel_set.sigma,
@@ -519,10 +517,7 @@ def open_economy_growth_kernel_uno(
         "solve_time": solve_time,
         "stationarity": result.solution_stationarity,
         "primal_feasibility": result.solution_primal_feasibility,
-        "solution_accepted": solution_accepted,
-        "rejection_reason": (
-            "accepted" if solution_accepted else ",".join(rejection_reasons)
-        ),
+        **acceptance_fields(rejection_reasons),
         "c_offset": float(c_offset),
         "mu_offset": float(mu_offset),
         "q_offset": float(q_offset),
@@ -556,10 +551,10 @@ def open_economy_growth_kernel_uno(
     test_df["a_scaled_error"] = np.asarray(a_scaled_error)
 
     hyperparameters = {
-        "parameters": asdict(parameters),
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "solver_set": asdict(solver_set),
+        "parameters": asdict(parameters),
         "initial_conditions": {"k_0": k_0, "a_0": a_0},
     }
     return results, {

@@ -123,8 +123,7 @@ class SolverSettings:
 
 
 # Fail-fast budget for kinked production: near the basin threshold the NLP
-# can wander, and the sweep classifies a slow solve as rejected. Calibrated
-# to the 41-point kinked training design the replication drivers pass.
+# can wander, and the sweep classifies a slow solve as rejected.
 KINKED_SOLVER_SETTINGS = SolverSettings(max_iterations=25, time_limit=0.15)
 
 
@@ -146,8 +145,7 @@ def neoclassical_growth_kernel_uno(
     c_0_guess: float | None = None,  # overrides the flat steady-flow warm start
     verbose: bool = False,
 ):
-    # Model setup. IPOPT works in float64 C arrays, so this solver is
-    # float64-only.
+    # IPOPT works in float64 C arrays, so this solver is float64-only.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     # Kinked production is enabled exactly when all of A, b_1, b_2 are given.
@@ -484,6 +482,7 @@ def neoclassical_growth_kernel_uno(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "solver_set": asdict(solver_set),
+        "tolerance_set": asdict(tolerance_set),
         "parameters": {
             "a": a,
             "delta": delta,

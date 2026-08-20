@@ -41,6 +41,12 @@ DIAGNOSTIC_COLUMNS = [
 ]
 
 
+def report(results_df):
+    accepted = int(results_df["solution_accepted"].sum())
+    print(f"  accepted {accepted}/{len(results_df)}")
+    print(results_df[DIAGNOSTIC_COLUMNS].agg(["median", "max"]).to_string())
+
+
 def run(
     output_dir: str = ".results",
     # Multi-start retries inside each solve keep acceptance high, so a small
@@ -88,9 +94,7 @@ def run(
             prefix=PREFIX,
             hyperparameters=hyperparameters,
         )
-        accepted = int(results_df["solution_accepted"].sum())
-        print(f"  accepted {accepted}/{len(results_df)}")
-        print(results_df[DIAGNOSTIC_COLUMNS].agg(["median", "max"]).to_string())
+        report(results_df)
 
     write_summary(output_dir, PREFIX, experiments=set(all_experiments))
 

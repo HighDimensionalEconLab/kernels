@@ -22,14 +22,14 @@ def run(
 ):
     configure_process()
 
-    def go(name, scenario, **options):
+    def go(name, scenario, **experiment):
         print(f"{name}: {n_seeds} seeds -> {output_dir}/")
         results_df, frames, hyperparameters = ensemble(
             SOLVER,
             n_seeds=n_seeds,
             options={
                 "verbose": verbose,
-                **options,
+                **experiment,
             },
         )
         save_experiment(
@@ -37,11 +37,7 @@ def run(
             results_df,
             frames,
             output_dir,
-            {
-                "n_seeds": n_seeds,
-                "scenario": scenario,
-                "residual_dtype": "float64",
-            },
+            dict(n_seeds=n_seeds, scenario=scenario, residual_dtype="float64"),
             prefix=PREFIX,
             hyperparameters=hyperparameters,
         )

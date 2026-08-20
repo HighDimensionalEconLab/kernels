@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 import pathlib
-import time
 from dataclasses import asdict, dataclass, replace
 
 import jax
@@ -40,6 +39,7 @@ from models.utilities import (
     SDE_SOLVERS,
     STATUS_TO_REASON,
     OptimizerSettings,
+    Stopwatch,
     cache_key,
     load_model,
     long_df,
@@ -77,7 +77,7 @@ class ResidualArgs:
     train_loss_threshold: jax.Array
     epoch_steps: jax.Array
     total_steps: jax.Array
-    solver: object = struct.field(pytree_node=False)
+    sde: object = struct.field(pytree_node=False)
     data_set: DataSettings = struct.field(pytree_node=False)
 
 
@@ -111,7 +111,7 @@ class EpochCallback:
         fresh = ctx.args.replace(
             initial_log_states=initial_log_states,
             noise=sample_trajectory_noise(
-                ctx.args.solver,
+                ctx.args.sde,
                 noise_key,
                 self.num_train_trajectories,
                 self.n_steps,
@@ -166,7 +166,7 @@ class EpochCallback:
 def residual_fn(theta, args, p):
     policy = nnx.merge(args.graphdef, theta, args.nondiff)
     solution = simulate_train(
-        args.solver, policy, args.initial_log_states, args.noise, p, args.data_set
+        args.sde, policy, args.initial_log_states, args.noise, p, args.data_set
     )
     log_states = solution.xs
     euler = euler_residuals(policy, log_states.reshape(-1, 2), p).reshape(
@@ -184,9 +184,7 @@ def residual_fn(theta, args, p):
     ).reshape(-1)
 
 
-# The deterministic model plus its OU log-TFP; the default innovation scale
-# is the high-variance sensitivity column of Aruoba et al., since their
-# benchmark sigma is nearly certainty equivalent.
+# The deterministic model plus its OU log-TFP.
 def stochastic_growth_nn_recursive(
     a: float = CONSTANTS.a,
     delta: float = CONSTANTS.delta,
@@ -207,7 +205,7 @@ def stochastic_growth_nn_recursive(
         train_log_z_variance=CONSTANTS.z_ergodic_variance,
         train_log_k_variance=0.01,
     ),
-    hc_set: InvestmentPolicySettings = InvestmentPolicySettings(
+    nn_set: InvestmentPolicySettings = InvestmentPolicySettings(
         homothetic_representation=False
     ),
     opt_set: OptimizerSettings = OptimizerSettings(
@@ -231,12 +229,12 @@ def stochastic_growth_nn_recursive(
     dtype = jnp.float64 if use_float64 else jnp.float32
     # Mean reversion in z fixes a scale, so the homothetic representation is
     # misspecified by construction for this model.
-    if hc_set.homothetic_representation:
+    if nn_set.homothetic_representation:
         raise ValueError(
             "the stochastic model requires homothetic_representation=False"
         )
 
-    solver = SDE_SOLVERS[sde_solver]
+    sde = SDE_SOLVERS[sde_solver]
     n_train_steps = data_set.train_points - 1
     n_test_steps = data_set.test_points - 1
     train_dt = data_set.train_T / n_train_steps
@@ -260,11 +258,11 @@ def stochastic_growth_nn_recursive(
         k_0=train_initial_conditions[:, 1],
     )
 
-    fit_start = time.perf_counter()
+    fit_timer = Stopwatch()
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     graphdef, _, nondiff = nnx.split(
         InvestmentPolicyNN(
-            hc_set, z_scale=z_bar, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(0)
+            nn_set, z_scale=z_bar, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(0)
         ),
         nnx.Param,
         ...,
@@ -280,7 +278,7 @@ def stochastic_growth_nn_recursive(
         nondiff=nondiff,
         initial_log_states=jnp.log(train_initial_conditions),
         noise=sample_trajectory_noise(
-            solver,
+            sde,
             train_noise_key,
             ic_set.num_train_trajectories,
             n_train_steps,
@@ -298,7 +296,7 @@ def stochastic_growth_nn_recursive(
         total_steps=jnp.asarray(
             tolerance_set.num_epochs * tolerance_set.max_steps, dtype=jnp.int32
         ),
-        solver=solver,
+        sde=sde,
         data_set=data_set,
     )
     # Two-part artifact key <problem>-<run>: the problem hash covers the deep
@@ -326,7 +324,7 @@ def stochastic_growth_nn_recursive(
         "sde_solver": sde_solver,
         "train_points": data_set.train_points,
         "train_T": data_set.train_T,
-        "hc_set": asdict(hc_set),
+        "nn_set": asdict(nn_set),
         "opt_set": asdict(opt_set),
         "tolerance_set": asdict(tolerance_set),
     }
@@ -350,14 +348,14 @@ def stochastic_growth_nn_recursive(
         final_damping = float("nan")
         solver_accepted = bool(cached_meta["solution_accepted"])
         solve_time = 0.0
-        total_fit_time = time.perf_counter() - fit_start
+        total_fit_time = fit_timer.elapsed()
         setup_time = total_fit_time
         r = residual_fn(theta_final, solve_args, p)
         train_loss = float(jnp.sum(r * r))
         if verbose:
             print(f"loaded {cache_path}, train_loss={train_loss:.3e}")
     else:
-        lm_solver = LevenbergMarquardt(
+        solver = LevenbergMarquardt(
             residual_fn,
             init_damping=opt_set.init_damping,
             damping_decrease=opt_set.damping_decrease,
@@ -367,7 +365,7 @@ def stochastic_growth_nn_recursive(
         )
         _, theta_0, _ = nnx.split(
             InvestmentPolicyNN(
-                hc_set, z_scale=z_bar, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(init_key)
+                nn_set, z_scale=z_bar, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(init_key)
             ),
             nnx.Param,
             ...,
@@ -385,7 +383,7 @@ def stochastic_growth_nn_recursive(
             n_steps=n_train_steps,
             dt=train_dt,
         )
-        draw = DrawInvestmentPolicy(hc_set, z_scale=z_bar, k_scale=k_0, dtype=dtype)
+        draw = DrawInvestmentPolicy(nn_set, z_scale=z_bar, k_scale=k_0, dtype=dtype)
         # The per-step tolerance is sound only while the training batch never
         # changes; across epochs, convergence is judged at the boundaries
         # instead.
@@ -406,18 +404,17 @@ def stochastic_growth_nn_recursive(
             max_steps_is_success=not tolerance_set.epoch_early_stopping,
         )
 
-        start_time = time.perf_counter()
-        result = lm_solver.solve(
+        setup_time = fit_timer.elapsed()
+        solve_timer = Stopwatch()
+        result = solver.solve(
             theta_0,
             residual_args,
             p=p,
             multi_start=multi_start,
             **solve_options,
         )
-        jax.block_until_ready(result)
-        solve_time = time.perf_counter() - start_time
-        total_fit_time = time.perf_counter() - fit_start
-        setup_time = start_time - fit_start
+        solve_time = solve_timer.elapsed(result)
+        total_fit_time = fit_timer.elapsed()
         steps = int(result.steps)
         # info.loss can describe the pre-swap batch when an epoch boundary
         # stopped the solve, so the loss is recomputed at the returned
@@ -443,7 +440,7 @@ def stochastic_growth_nn_recursive(
     train_batch_log_states = solve_args.initial_log_states
     train_batch_initial_conditions = jnp.exp(train_batch_log_states)
     train_solution = simulate_train(
-        solver, policy, train_batch_log_states, solve_args.noise, p, data_set
+        sde, policy, train_batch_log_states, solve_args.noise, p, data_set
     )
     train_log_states = train_solution.xs
     train_values = trajectory_values(policy, train_log_states, p)
@@ -457,7 +454,7 @@ def stochastic_growth_nn_recursive(
 
     test_initial_log_states = jnp.log(test_initial_conditions)
     test_noise = sample_trajectory_noise(
-        solver,
+        sde,
         test_noise_key,
         ic_set.num_test_trajectories,
         n_test_steps,
@@ -466,7 +463,7 @@ def stochastic_growth_nn_recursive(
         2,
     )
     test_solution = simulate(
-        solver,
+        sde,
         policy,
         test_initial_log_states,
         test_noise,
@@ -488,7 +485,7 @@ def stochastic_growth_nn_recursive(
 
     # Terminal transversality certificate on the training batch.
     train_tvc_noise = sample_trajectory_noise(
-        solver,
+        sde,
         tvc_noise_key,
         ic_set.num_train_trajectories,
         data_set.tvc_steps,
@@ -497,7 +494,7 @@ def stochastic_growth_nn_recursive(
         2,
     )
     train_tvc = log_tvc_residual(
-        solver,
+        sde,
         policy,
         train_batch_log_states,
         train_tvc_noise,
@@ -620,7 +617,7 @@ def stochastic_growth_nn_recursive(
         consumption_grid=jnp.asarray(fd["c"], dtype=dtype),
     )
     fd_solution = simulate(
-        solver,
+        sde,
         fd_policy,
         test_initial_log_states,
         test_noise,
@@ -692,7 +689,7 @@ def stochastic_growth_nn_recursive(
     )
 
     hyperparameters = {
-        "hc_set": asdict(hc_set),
+        "nn_set": asdict(nn_set),
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
         "opt_set": asdict(opt_set),
@@ -729,7 +726,7 @@ def stochastic_growth_nn_recursive(
     # no primal solve to describe.
     if not cache_hit:
         extras["solve"] = {
-            "solver": lm_solver,
+            "solver": solver,
             "residual_fn": residual_fn,
             "theta_0": theta_0,
             "p": p,
@@ -757,7 +754,7 @@ def stochastic_growth_nn_recursive(
         "train_loss": train_loss,
         "test_euler_mean_abs": results["test_euler_mean_abs"],
     }
-    policy_meta = {"settings": asdict(hc_set), "structural": structural, **policy_extra}
+    policy_meta = {"settings": asdict(nn_set), "structural": structural, **policy_extra}
     if cache_path is not None and not cache_hit:
         save_model(cache_path, policy, policy_meta)
     if save_policy is not None:

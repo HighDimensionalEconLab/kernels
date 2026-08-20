@@ -177,6 +177,7 @@ def neoclassical_growth_kernel(
     lm_set: SolverSettings = SolverSettings(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     c_0_guess: float | None = None,  # overrides the flat steady-flow warm start
+    verbose: bool = False,
 ):
     # Model setup.
     jax.config.update("jax_enable_x64", True)
@@ -383,18 +384,20 @@ def neoclassical_growth_kernel(
             test_k_rel_error_min=float(k_rel_error[1:].min()),
             test_c_rel_error_min=float(c_rel_error[1:].min()),
         )
-        print(
-            f"solve_time(s) = {elapsed}, "
-            f"E(|rel_error(k)|) = {results['test_k_rel_error_mean']:.3e}, "
-            f"E(|rel_error(c)|) = {results['test_c_rel_error_mean']:.3e}"
-        )
-    else:
+        if verbose:
+            print(
+                f"solve_time(s) = {elapsed}, "
+                f"E(|rel_error(k)|) = {results['test_k_rel_error_mean']:.3e}, "
+                f"E(|rel_error(c)|) = {results['test_c_rel_error_mean']:.3e}"
+            )
+    elif verbose:
         print(f"solve_time(s) = {elapsed}")
 
     hyperparameters = {
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
+        "tolerance_set": asdict(tolerance_set),
         "parameters": {
             "a": a,
             "delta": delta,
@@ -409,7 +412,12 @@ def neoclassical_growth_kernel(
         "initial_conditions": {"z_0": z_0, "k_0": k_0},
     }
 
+    @jax.jit
+    def kernel_solution(t_grid):
+        return evaluate_paths(theta, t_grid, train_data, kernel_set, p, g_hat_fixed)
+
     return results, {
+        "model": kernel_solution,
         "train_df": train_df,
         "test_df": test_df,
         "hyperparameters": hyperparameters,

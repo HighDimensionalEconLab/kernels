@@ -9,19 +9,12 @@ import numpy as np
 # script. It runs the target function for several replicable seeds, sorts the
 # successful runs by a criteria key (smaller is better), and logs the median
 # seed's results under plain names plus the best seed's results under a `best_`
-# prefix. Portable: depends only on stdlib + numpy + wandb + jsonargparse.
+# prefix.
 #
 # Target contract: the script contains a jsonargparse-CLI-compatible function
 # that returns either a metrics dict, or a tuple whose first element is the
 # metrics dict (optionally followed by an extras dict), and accepts a seed
 # argument (name set by --sweep_settings.seed_param).
-#
-# Usage:
-#   python extra/sweeps/wandb_sweep_wrapper.py \
-#       --sweep_settings.script=stochastic_growth_rl.py \
-#       --sweep_settings.sort_criteria=test_abs_rel_error \
-#       --sweep_settings.num_seeds=5 \
-#       --mlp_depth=3 --opt_set.max_epochs=20   # passed through to the function
 
 
 def main():

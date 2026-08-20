@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from dataclasses import asdict, dataclass
 
 import jax
@@ -11,10 +10,7 @@ import pandas as pd
 import unopy
 
 from models.kernels import integrated_kernel_matrices, rkhs_norm_squared
-
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_default_matmul_precision", "highest")
+from models.utilities import Stopwatch, acceptance_fields
 
 ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
 TRAIN_RESIDUAL_TOL = 1e-8
@@ -57,6 +53,8 @@ def optimal_advertising_kernel_uno(
     solver_set: SolverSettings = SolverSettings(),
     verbose: bool = False,
 ):
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_default_matmul_precision", "highest")
     nu, ell, sigma = kernel_set.nu, kernel_set.ell, kernel_set.sigma
     if data_set.train_points_list is None:
         train_data = jnp.linspace(0, data_set.train_T, data_set.train_points)
@@ -223,9 +221,9 @@ def optimal_advertising_kernel_uno(
     if solver_set.time_limit is not None:
         solver.set_option("time_limit", solver_set.time_limit)
 
-    start = time.perf_counter()
+    timer = Stopwatch()
     result = solver.optimize(model)
-    elapsed = time.perf_counter() - start
+    elapsed = timer.elapsed()
 
     z = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))
     alpha_x, alpha_mu, alpha_u, mu_0, u_0 = unpack(z)
@@ -269,7 +267,6 @@ def optimal_advertising_kernel_uno(
         rejection_reasons.append("nonfinite_or_nonpositive")
     if max_train_residual > TRAIN_RESIDUAL_TOL:
         rejection_reasons.append("train_residual")
-    solution_accepted = not rejection_reasons
 
     results = {
         "rho_hat": rho_hat,
@@ -287,18 +284,15 @@ def optimal_advertising_kernel_uno(
         "test_points": data_set.test_points,
         "mu_0": float(mu_0),
         "u_0": float(u_0),
-        "rkhs_norm_x": rkhs_norm_squared(alpha_x, K),
-        "rkhs_norm_mu": rkhs_norm_squared(alpha_mu, K),
-        "rkhs_norm_u": rkhs_norm_squared(alpha_u, K),
+        "rkhs_norm_x": float(rkhs_norm_squared(alpha_x, K)),
+        "rkhs_norm_mu": float(rkhs_norm_squared(alpha_mu, K)),
+        "rkhs_norm_u": float(rkhs_norm_squared(alpha_u, K)),
         "max_train_residual": max_train_residual,
         "solve_time": solve_time,
         "wall_time": elapsed,
         "stationarity": result.solution_stationarity,
         "primal_feasibility": result.solution_primal_feasibility,
-        "solution_accepted": solution_accepted,
-        "rejection_reason": "accepted"
-        if solution_accepted
-        else ",".join(rejection_reasons),
+        **acceptance_fields(rejection_reasons),
     }
     print(f"solve_time(s) = {solve_time}")
 

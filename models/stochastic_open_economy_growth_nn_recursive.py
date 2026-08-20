@@ -60,6 +60,26 @@ from models.utilities import (
 SMOOTH_ACTIVATIONS = frozenset(ACTIVATIONS) - {"relu"}
 
 
+# Acceptance gates on the held-out batch (the float32 replication driver
+# passes its own bars) plus the epoch/shock-ladder training budget.
+@dataclass(frozen=True)
+class ToleranceSettings:
+    test_euler_mean_abs: float = 5e-3
+    test_euler_max: float = 5e-2
+    test_diffusion_max_abs: float = 5e-2
+    # max_steps is the per-epoch LM budget; noise (and dispersed ICs) redraw
+    # at epoch boundaries. The shock ladder rises geometrically to 1.0 over
+    # continuation_epochs; convergence is only declared at scale 1.0.
+    max_steps: int = 250
+    train_loss_threshold: float = 1e-10
+    num_attempts: int = 2
+    num_epochs: int = 5
+    epoch_early_stopping: bool = True
+    shock_continuation: bool = True
+    initial_shock_scale: float = 0.238
+    continuation_epochs: int = 2
+
+
 # DrawNNXModule redraws theta but passes args through unchanged; multi-start
 # chains each attempt's initial args from the previous draw, so re-chaining
 # restart_key/epoch_key here (and resetting epoch to 0) is what keeps each
@@ -91,34 +111,14 @@ class DrawSequentialPolicy:
 # 1/sqrt(count); the caller decides how to use the vector. A diverged
 # trajectory surfaces as a nonfinite loss the solver rejects (fixed-step
 # solve_sde never sets ok=False, so there is no mask to apply).
-def collocation_residuals(solver, policy, initial_states, noise, p, data_set):
-    solution = simulate_train(solver, policy, initial_states, noise, p, data_set)
+def collocation_residuals(sde, policy, initial_states, noise, p, data_set):
+    solution = simulate_train(sde, policy, initial_states, noise, p, data_set)
     states = solution.xs
     residuals = euler_residual_terms(policy, states.reshape(-1, 4), p)[0].reshape(
         *states.shape[:2], 2
     )
     count = jnp.asarray(residuals.size, dtype=residuals.dtype)
     return residuals / jnp.sqrt(count)
-
-
-# Acceptance gates on the held-out batch (the float32 replication driver
-# passes its own bars) plus the epoch/shock-ladder training budget.
-@dataclass(frozen=True)
-class ToleranceSettings:
-    test_euler_mean_abs: float = 5e-3
-    test_euler_max: float = 5e-2
-    test_diffusion_max_abs: float = 5e-2
-    # max_steps is the per-epoch LM budget; noise (and dispersed ICs) redraw
-    # at epoch boundaries. The shock ladder rises geometrically to 1.0 over
-    # continuation_epochs; convergence is only declared at scale 1.0.
-    max_steps: int = 250
-    train_loss_threshold: float = 1e-10
-    num_attempts: int = 2
-    num_epochs: int = 5
-    epoch_early_stopping: bool = True
-    shock_continuation: bool = True
-    initial_shock_scale: float = 0.238
-    continuation_epochs: int = 2
 
 
 # ICs, noise, keys, and ladder position live in args, so the implicit
@@ -139,7 +139,7 @@ class ResidualArgs:
     train_loss_threshold: jax.Array
     epoch_steps: jax.Array
     total_steps: jax.Array
-    solver: object = struct.field(pytree_node=False)
+    sde: object = struct.field(pytree_node=False)
     data_set: DataSettings = struct.field(pytree_node=False)
 
 
@@ -174,7 +174,7 @@ class EpochCallback:
         fresh = ctx.args.replace(
             initial_states=initial_states,
             noise=sample_trajectory_noise(
-                ctx.args.solver,
+                ctx.args.sde,
                 noise_key,
                 self.num_train_trajectories,
                 self.n_steps,
@@ -236,7 +236,7 @@ def residual_fn(theta, args, p):
         sigma_r=p.sigma_r * args.shock_scale,
     )
     return collocation_residuals(
-        args.solver,
+        args.sde,
         policy,
         args.initial_states,
         args.noise,
@@ -378,7 +378,7 @@ def stochastic_open_economy_growth_nn_recursive(
         corr_zr=corr_zr,
         output_scale=output_scale,
     )
-    solver = SDE_SOLVERS[sde_solver]
+    sde = SDE_SOLVERS[sde_solver]
     n_train_steps = data_set.train_points - 1
     n_test_steps = data_set.test_points - 1
     n_tvc_steps = data_set.tvc_points - 1
@@ -444,7 +444,7 @@ def stochastic_open_economy_growth_nn_recursive(
         initial_center=initial_center,
         initial_scales=train_scales,
         noise=sample_trajectory_noise(
-            solver,
+            sde,
             train_noise_key,
             ic_set.num_train_trajectories,
             n_train_steps,
@@ -464,7 +464,7 @@ def stochastic_open_economy_growth_nn_recursive(
         total_steps=jnp.asarray(
             tolerance_set.num_epochs * tolerance_set.max_steps, dtype=jnp.int32
         ),
-        solver=solver,
+        sde=sde,
         data_set=data_set,
     )
     # <problem>-<run> key: consumers glob *_policy_<problem>-*.npz; the run
@@ -527,7 +527,7 @@ def stochastic_open_economy_growth_nn_recursive(
         if verbose:
             print(f"loaded {cache_path}, train_loss={train_loss:.3e}")
     else:
-        lm_solver = LevenbergMarquardt(
+        solver = LevenbergMarquardt(
             residual_fn,
             init_damping=opt_set.init_damping,
             damping_decrease=opt_set.damping_decrease,
@@ -550,7 +550,7 @@ def stochastic_open_economy_growth_nn_recursive(
             else 0.0
         )
         solve_timer = Stopwatch()
-        result = lm_solver.solve(
+        result = solver.solve(
             theta_0,
             residual_args,
             p=p,
@@ -592,7 +592,7 @@ def stochastic_open_economy_growth_nn_recursive(
         sigma_r=p.sigma_r * solve_args.shock_scale,
     )
     train_solution = simulate_train(
-        solver,
+        sde,
         policy,
         solve_args.initial_states,
         solve_args.noise,
@@ -601,7 +601,7 @@ def stochastic_open_economy_growth_nn_recursive(
     )
     train_values = trajectory_values(policy, train_solution.xs, train_stage_parameters)
     test_noise = sample_trajectory_noise(
-        solver,
+        sde,
         test_noise_key,
         ic_set.num_test_trajectories,
         n_test_steps,
@@ -610,7 +610,7 @@ def stochastic_open_economy_growth_nn_recursive(
         4,
     )
     test_solution = simulate(
-        solver,
+        sde,
         policy,
         test_initial_states,
         test_noise,
@@ -627,7 +627,7 @@ def stochastic_open_economy_growth_nn_recursive(
         (ic_set.num_tvc_trajectories, initial_center.size),
     )
     tvc_noise = sample_trajectory_noise(
-        solver,
+        sde,
         tvc_noise_key,
         ic_set.num_tvc_trajectories,
         n_tvc_steps,
@@ -636,7 +636,7 @@ def stochastic_open_economy_growth_nn_recursive(
         4,
     )
     tvc_solution = simulate(
-        solver,
+        sde,
         policy,
         tvc_initial_states,
         tvc_noise,
@@ -700,7 +700,7 @@ def stochastic_open_economy_growth_nn_recursive(
     low_states = paired_states.at[:, 2].set((a_0 - asset_shift) / output_scale)
     high_states = paired_states.at[:, 2].set((a_0 + asset_shift) / output_scale)
     low_solution = simulate(
-        solver,
+        sde,
         policy,
         low_states,
         test_noise,
@@ -709,7 +709,7 @@ def stochastic_open_economy_growth_nn_recursive(
         p,
     )
     high_solution = simulate(
-        solver,
+        sde,
         policy,
         high_states,
         test_noise,
@@ -790,7 +790,7 @@ def stochastic_open_economy_growth_nn_recursive(
         "a_0": a_0,
         "z_0": z_0,
         "rate_gap_0": rate_gap_0,
-        "interest_rate_mean": parameters.interest_rate,
+        "interest_rate_mean": parameters.r_star,
         "kappa_z": kappa_z,
         "sigma_z": sigma_z,
         "z_bar": z_bar,
@@ -897,6 +897,11 @@ def stochastic_open_economy_growth_nn_recursive(
     }
 
     hyperparameters = {
+        "nn_set": asdict(nn_set),
+        "data_set": asdict(data_set),
+        "ic_set": asdict(ic_set),
+        "opt_set": asdict(opt_set),
+        "tolerance_set": asdict(tolerance_set),
         "parameters": asdict(parameters),
         "shocks": {
             "kappa_z": kappa_z,
@@ -906,11 +911,6 @@ def stochastic_open_economy_growth_nn_recursive(
             "sigma_r": sigma_r,
             "corr_zr": corr_zr,
         },
-        "data_set": asdict(data_set),
-        "ic_set": asdict(ic_set),
-        "nn_set": asdict(nn_set),
-        "opt_set": asdict(opt_set),
-        "tolerance_set": asdict(tolerance_set),
         "initial_conditions": {
             "k_0": k_0,
             "a_0": a_0,
@@ -964,8 +964,8 @@ def stochastic_open_economy_growth_nn_recursive(
     return results, {
         "model": policy,
         "parameters": p,
-        "train_initial_states": solve_args.initial_states,
-        "test_initial_states": test_initial_states,
+        "train_initial_conditions": solve_args.initial_states,
+        "test_initial_conditions": test_initial_states,
         "train_df": train_df,
         "test_df": test_df,
         "tvc_df": tvc_df,

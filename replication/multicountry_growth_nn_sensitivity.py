@@ -41,7 +41,7 @@ def run(
     configure_process()
     t_sens = jnp.asarray(SENSITIVITY_TIMES, dtype=jnp.float64)
 
-    def go(name, scenario, **options):
+    def go(name, scenario, **experiment):
         print(f"{name}: {sensitivity_seeds} seeds -> {output_dir}/")
         rows = []
         frames: dict[str, list[pd.DataFrame]] = {}
@@ -52,7 +52,7 @@ def run(
                 {
                     "verbose": verbose,
                     "seed": seed,
-                    **options,
+                    **experiment,
                 },
             )
             spec, result = extras["solve"], extras["result"]

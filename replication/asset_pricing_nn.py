@@ -10,6 +10,7 @@ from replication.utilities import (
     write_summary,
 )
 
+SOLVER = asset_pricing_nn.asset_pricing_nn
 PREFIX = "asset_pricing_nn"
 
 
@@ -20,7 +21,7 @@ def run(
 ):
     configure_process()
     results_df, frames, hyperparameters = ensemble(
-        asset_pricing_nn.asset_pricing_nn,
+        SOLVER,
         n_seeds=n_seeds,
         options={"verbose": verbose},
     )
@@ -29,10 +30,7 @@ def run(
         results_df,
         frames,
         output_dir,
-        {
-            "n_seeds": n_seeds,
-            "residual_dtype": "float64",
-        },
+        dict(n_seeds=n_seeds, residual_dtype="float64"),
         prefix=PREFIX,
         hyperparameters=hyperparameters,
     )

@@ -270,6 +270,7 @@ def optimal_advertising_kernel(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
+        "tolerance_set": asdict(tolerance_set),
         "parameters": {
             "rho_hat": rho_hat,
             "c": c,

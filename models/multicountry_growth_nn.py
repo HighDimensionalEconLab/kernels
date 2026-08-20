@@ -549,11 +549,12 @@ def multicountry_growth_nn(
     test_df = frame(test_eval, test_t)
 
     hyperparameters = {
-        "parameters": asdict(parameters),
         "nn_set": asdict(nn_set),
         "data_set": asdict(data_set),
+        "initial_set": asdict(initial_set),
         "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),
+        "parameters": asdict(parameters),
         "initial_conditions": {"k_0": list(k_0), "a_0": list(a_0)},
     }
 

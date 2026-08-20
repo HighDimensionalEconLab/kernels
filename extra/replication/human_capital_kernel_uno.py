@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import jsonargparse
 
-import extra.human_capital_kernel_uno as human_capital_kernel_uno
+from extra import human_capital_kernel_uno
 from replication.utilities import (
     configure_process,
     ensemble,
@@ -10,6 +10,7 @@ from replication.utilities import (
     write_summary,
 )
 
+SOLVER = human_capital_kernel_uno.human_capital_kernel_uno
 PREFIX = "human_capital_kernel_uno"
 
 
@@ -20,7 +21,7 @@ def run(
     configure_process()
     print(f"baseline -> {output_dir}/")
     results_df, frames, hyperparameters = ensemble(
-        human_capital_kernel_uno.human_capital_kernel_uno,
+        SOLVER,
         n_seeds=1,
         options={"verbose": verbose},
     )
@@ -35,7 +36,7 @@ def run(
         results_df,
         frames,
         output_dir,
-        dict(n_seeds=1),
+        dict(n_seeds=1, residual_dtype="float64"),
         prefix=PREFIX,
         hyperparameters=hyperparameters,
     )

@@ -15,20 +15,25 @@ from replication.utilities import (
     write_summary,
 )
 
+SOLVER = neoclassical_growth_kernel.neoclassical_growth_kernel
 PREFIX = "neoclassical_growth_concave_convex_kernel"
 
 
-def run(output_dir: str = ".results"):
+def run(
+    output_dir: str = ".results",
+    verbose: bool = False,
+):
     configure_process()
     n_points = 70
     grid = np.linspace(0.5, 4.0, n_points)
     print(f"threshold sweep: {n_points} initial conditions -> {output_dir}/")
     results_df, frames, hyperparameters = sweep(
-        neoclassical_growth_kernel.neoclassical_growth_kernel,
+        SOLVER,
         "k_0",
         [float(k_0) for k_0 in grid],
         options={
             **asdict(KINKED_CALIBRATION),
+            "verbose": verbose,
             # The kinked basin experiments keep their own calibrated grid:
             # paths settle by T = 40, and the file defaults carry the smooth
             # model's longer horizon.

@@ -10,6 +10,7 @@ from replication.utilities import (
     write_summary,
 )
 
+SOLVER = neoclassical_growth_kernel_uno.neoclassical_growth_kernel_uno
 PREFIX = "neoclassical_growth_kernel_uno"
 
 
@@ -18,12 +19,12 @@ def run(
     verbose: bool = False,
 ):
     configure_process()
-    meta = dict(n_seeds=1)
+    meta = dict(n_seeds=1, residual_dtype="float64")
 
     def go(name, **experiment):
         print(f"{name} -> {output_dir}/")
         results_df, frames, hyperparameters = ensemble(
-            neoclassical_growth_kernel_uno.neoclassical_growth_kernel_uno,
+            SOLVER,
             n_seeds=1,
             options={"verbose": verbose, **experiment},
         )

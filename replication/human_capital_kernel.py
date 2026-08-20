@@ -10,6 +10,7 @@ from replication.utilities import (
     write_summary,
 )
 
+SOLVER = human_capital_kernel.human_capital_kernel
 PREFIX = "human_capital_kernel"
 
 
@@ -20,7 +21,7 @@ def run(
     configure_process()
     print(f"baseline -> {output_dir}/")
     results_df, frames, hyperparameters = ensemble(
-        human_capital_kernel.human_capital_kernel,
+        SOLVER,
         n_seeds=1,
         options={"verbose": verbose},
     )

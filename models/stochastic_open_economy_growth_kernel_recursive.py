@@ -103,16 +103,6 @@ class StateKernelSettings:
     rate_lengthscale: float | None = None
 
 
-def state_lengthscales(kernel_set):
-    per_axis = (
-        kernel_set.log_z_lengthscale,
-        kernel_set.log_k_lengthscale,
-        kernel_set.asset_lengthscale,
-        kernel_set.rate_lengthscale,
-    )
-    return tuple(kernel_set.lengthscale if ell is None else ell for ell in per_axis)
-
-
 @struct.dataclass
 class ResidualArgs:
     centers: jax.Array
@@ -123,6 +113,16 @@ class ResidualArgs:
     investment_anchor: jax.Array
     current_account_anchor: jax.Array
     output_scale: jax.Array
+
+
+def state_lengthscales(kernel_set):
+    per_axis = (
+        kernel_set.log_z_lengthscale,
+        kernel_set.log_k_lengthscale,
+        kernel_set.asset_lengthscale,
+        kernel_set.rate_lengthscale,
+    )
+    return tuple(kernel_set.lengthscale if ell is None else ell for ell in per_axis)
 
 
 def build_residual_args(train_states, kernel_set, reference_policy):
@@ -186,12 +186,8 @@ class KernelSequentialPolicy:
         )
 
 
-def make_policy(theta, args, kernel_set):
-    return KernelSequentialPolicy(theta=theta, args=args, kernel_set=kernel_set)
-
-
 def residual_fn(theta, args, p, kernel_set):
-    policy = make_policy(theta, args, kernel_set)
+    policy = KernelSequentialPolicy(theta=theta, args=args, kernel_set=kernel_set)
     residuals = euler_residual_terms(policy, args.train_states, p)[0]
     count = jnp.asarray(residuals.size, dtype=residuals.dtype)
     return residuals.reshape(-1) / jnp.sqrt(count)
@@ -312,7 +308,7 @@ def stochastic_open_economy_growth_kernel_recursive(
         corr_zr=corr_zr,
         output_scale=output_scale,
     )
-    solver = SDE_SOLVERS[sde_solver]
+    sde = SDE_SOLVERS[sde_solver]
     n_train_steps = data_set.train_points - 1
     n_test_steps = data_set.test_points - 1
     n_tvc_steps = data_set.tvc_points - 1
@@ -378,7 +374,7 @@ def stochastic_open_economy_growth_kernel_recursive(
     # Frozen design at full shock scale on the NN driver's training noise
     # key (fold_in index 1); the discretization is deliberately coarser.
     train_noise = sample_trajectory_noise(
-        solver,
+        sde,
         jax.random.fold_in(train_ic_key, 1),
         ic_set.num_train_trajectories,
         n_train_steps,
@@ -387,7 +383,7 @@ def stochastic_open_economy_growth_kernel_recursive(
         4,
     )
     train_solution = simulate_train(
-        solver,
+        sde,
         reference_policy,
         train_initial_states,
         train_noise,
@@ -427,7 +423,7 @@ def stochastic_open_economy_growth_kernel_recursive(
             "callback": callback,
             "user_state": callback.init_state(dtype),
         }
-    lm_solver = RidgeLevenbergMarquardt(
+    solver = RidgeLevenbergMarquardt(
         partial(residual_fn, kernel_set=kernel_set),
         metric=metric,
         ridge=initial_ridge,
@@ -440,7 +436,7 @@ def stochastic_open_economy_growth_kernel_recursive(
 
     solve_timer = Stopwatch()
     setup_time = fit_timer.elapsed(factor)
-    result = lm_solver.solve(
+    result = solver.solve(
         theta_0,
         args,
         p=p,
@@ -464,13 +460,13 @@ def stochastic_open_economy_growth_kernel_recursive(
         )
 
     theta = result.x
-    policy = make_policy(theta, args, kernel_set)
+    policy = KernelSequentialPolicy(theta=theta, args=args, kernel_set=kernel_set)
     train_values = trajectory_values(policy, train_states, p)
     train_df = trajectory_frame(train_values, train_solution.ts)
     train_df["fixed_reference_center"] = True
 
     test_noise = sample_trajectory_noise(
-        solver,
+        sde,
         jax.random.fold_in(test_ic_key, 1),
         ic_set.num_test_trajectories,
         n_test_steps,
@@ -479,7 +475,7 @@ def stochastic_open_economy_growth_kernel_recursive(
         4,
     )
     test_solution = simulate(
-        solver,
+        sde,
         policy,
         test_initial_states,
         test_noise,
@@ -508,7 +504,7 @@ def stochastic_open_economy_growth_kernel_recursive(
         (ic_set.num_tvc_trajectories, initial_center.size),
     )
     tvc_noise = sample_trajectory_noise(
-        solver,
+        sde,
         jax.random.fold_in(test_ic_key, 3),
         ic_set.num_tvc_trajectories,
         n_tvc_steps,
@@ -517,7 +513,7 @@ def stochastic_open_economy_growth_kernel_recursive(
         4,
     )
     tvc_solution = simulate(
-        solver,
+        sde,
         policy,
         tvc_initial_states,
         tvc_noise,
@@ -538,7 +534,7 @@ def stochastic_open_economy_growth_kernel_recursive(
 
     # Common-noise pathwise comparison against the reference NN policy.
     reference_solution = simulate(
-        solver,
+        sde,
         reference_policy,
         test_initial_states,
         test_noise,
@@ -701,8 +697,8 @@ def stochastic_open_economy_growth_kernel_recursive(
         "theta": theta,
         "residual_args": args,
         "parameters": p,
-        "train_initial_states": train_initial_states,
-        "test_initial_states": test_initial_states,
+        "train_initial_conditions": train_initial_states,
+        "test_initial_conditions": test_initial_states,
         "train_df": train_df,
         "test_df": test_df,
         "tvc_df": tvc_df,

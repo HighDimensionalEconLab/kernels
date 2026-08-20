@@ -416,6 +416,7 @@ def human_capital_kernel(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
+        "tolerance_set": asdict(tolerance_set),
         "parameters": {
             "a_k": a_k,
             "a_h": a_h,

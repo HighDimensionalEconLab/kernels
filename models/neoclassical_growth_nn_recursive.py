@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 import pathlib
-import time
 from dataclasses import asdict, dataclass, replace
 from functools import partial
 
@@ -33,6 +32,7 @@ from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
     OptimizerSettings,
+    Stopwatch,
     cache_key,
     load_model,
     long_df,
@@ -62,22 +62,6 @@ class DataSettings:
     initial_dt: float | None = None
 
 
-# Training ICs and keys live in args (the epoch callback may rewrite args
-# only), so the implicit derivative is conditional on the carried batch.
-@struct.dataclass
-class ResidualArgs:
-    graphdef: nnx.GraphDef
-    nondiff: nnx.State
-    initial_log_states: jax.Array
-    epoch_key: jax.Array
-    restart_key: jax.Array
-    epoch: jax.Array
-    train_loss_threshold: jax.Array
-    epoch_steps: jax.Array
-    total_steps: jax.Array
-    data_set: DataSettings = struct.field(pytree_node=False)
-
-
 @dataclass(frozen=True)
 class ToleranceSettings:
     # max_steps is the LM-update budget per epoch; training ICs are redrawn at
@@ -97,6 +81,22 @@ class InvestmentPolicySettings:
     hidden_activation: str = "gelu"
     head_init_scale: float = 1e-3
     homothetic_representation: bool = True
+
+
+# Training ICs and keys live in args (the epoch callback may rewrite args
+# only), so the implicit derivative is conditional on the carried batch.
+@struct.dataclass
+class ResidualArgs:
+    graphdef: nnx.GraphDef
+    nondiff: nnx.State
+    initial_log_states: jax.Array
+    epoch_key: jax.Array
+    restart_key: jax.Array
+    epoch: jax.Array
+    train_loss_threshold: jax.Array
+    epoch_steps: jax.Array
+    total_steps: jax.Array
+    data_set: DataSettings = struct.field(pytree_node=False)
 
 
 # i = anchor * U(h), U the unit softplus with near-zero head: homothetic is
@@ -342,7 +342,7 @@ def neoclassical_growth_nn_recursive(
     use_float64: bool = True,
     data_set: DataSettings = DataSettings(),
     ic_set: InitialConditionSettings = InitialConditionSettings(),
-    hc_set: InvestmentPolicySettings = InvestmentPolicySettings(),
+    nn_set: InvestmentPolicySettings = InvestmentPolicySettings(),
     opt_set: OptimizerSettings = OptimizerSettings(
         init_damping=3.26e-5,
         damping_decrease=0.482,
@@ -390,11 +390,11 @@ def neoclassical_growth_nn_recursive(
         k_thr=float("inf"),
     )
 
-    fit_start = time.perf_counter()
+    fit_timer = Stopwatch()
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     graphdef, _, nondiff = nnx.split(
         InvestmentPolicyNN(
-            hc_set, z_scale=z_0, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(0)
+            nn_set, z_scale=z_0, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(0)
         ),
         nnx.Param,
         ...,
@@ -447,7 +447,7 @@ def neoclassical_growth_nn_recursive(
         "rtol": data_set.rtol,
         "atol": data_set.atol,
         "initial_dt": data_set.initial_dt,
-        "hc_set": asdict(hc_set),
+        "nn_set": asdict(nn_set),
         "opt_set": asdict(opt_set),
         "tolerance_set": asdict(tolerance_set),
     }
@@ -474,7 +474,7 @@ def neoclassical_growth_nn_recursive(
         final_damping = float("nan")
         solver_accepted = bool(cached_meta["solution_accepted"])
         solve_time = 0.0
-        total_fit_time = time.perf_counter() - fit_start
+        total_fit_time = fit_timer.elapsed()
         setup_time = total_fit_time
         r = residual_fn(theta_final, solve_args, p)
         train_loss = float(jnp.sum(r * r))
@@ -491,7 +491,7 @@ def neoclassical_growth_nn_recursive(
         )
         _, theta_0, _ = nnx.split(
             InvestmentPolicyNN(
-                hc_set, z_scale=z_0, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(init_key)
+                nn_set, z_scale=z_0, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(init_key)
             ),
             nnx.Param,
             ...,
@@ -504,7 +504,7 @@ def neoclassical_growth_nn_recursive(
             log_k_scale=math.sqrt(ic_set.train_log_k_variance),
             epoch_early_stopping=tolerance_set.epoch_early_stopping,
         )
-        draw = DrawInvestmentPolicy(hc_set, z_scale=z_0, k_scale=k_0, dtype=dtype)
+        draw = DrawInvestmentPolicy(nn_set, z_scale=z_0, k_scale=k_0, dtype=dtype)
         # The per-step tolerance is sound only while the training batch never
         # changes; across epochs, convergence is judged at the boundaries
         # instead.
@@ -525,7 +525,8 @@ def neoclassical_growth_nn_recursive(
             max_steps_is_success=not tolerance_set.epoch_early_stopping,
         )
 
-        start_time = time.perf_counter()
+        setup_time = fit_timer.elapsed()
+        solve_timer = Stopwatch()
         result = solver.solve(
             theta_0,
             residual_args,
@@ -533,10 +534,8 @@ def neoclassical_growth_nn_recursive(
             multi_start=multi_start,
             **solve_options,
         )
-        jax.block_until_ready(result)
-        solve_time = time.perf_counter() - start_time
-        total_fit_time = time.perf_counter() - fit_start
-        setup_time = start_time - fit_start
+        solve_time = solve_timer.elapsed(result)
+        total_fit_time = fit_timer.elapsed()
         steps = int(result.steps)
         # info.loss can describe the pre-swap batch when an epoch boundary
         # stopped the solve, so the loss is recomputed at the returned
@@ -699,7 +698,7 @@ def neoclassical_growth_nn_recursive(
     }
 
     hyperparameters = {
-        "hc_set": asdict(hc_set),
+        "nn_set": asdict(nn_set),
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
         "opt_set": asdict(opt_set),
@@ -759,7 +758,7 @@ def neoclassical_growth_nn_recursive(
         "train_loss": train_loss,
         "test_euler_mean_abs": results["test_euler_mean_abs"],
     }
-    policy_meta = {"settings": asdict(hc_set), "structural": structural, **policy_extra}
+    policy_meta = {"settings": asdict(nn_set), "structural": structural, **policy_extra}
     if cache_path is not None and not cache_hit:
         save_model(cache_path, policy, policy_meta)
     if save_policy is not None:

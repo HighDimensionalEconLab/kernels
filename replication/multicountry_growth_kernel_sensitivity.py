@@ -99,13 +99,7 @@ def sensitivity_row(options, mode):
     else:
         # One linearization at the solved point, then a tangent map applied
         # to each reported direction: (1, ..., 1) in gamma and one bond
-        # direction per country. The number of applications follows the
-        # directions published rather than the 2N + 4 observables, and only
-        # those directions exist afterwards -- there is no Jacobian left
-        # over to answer a different question from. Wall time tracks
-        # reverse mode either way: the re-solve inside the differentiated
-        # function dominates both, so switching modes buys accuracy of
-        # intent, not speed.
+        # direction per country.
         primal, tangent_at_p, status = jax.linearize(
             observables_at_sensitivity_times, spec["p"], has_aux=True
         )
@@ -177,9 +171,9 @@ def sensitivity_row(options, mode):
 def run(output_dir: str = ".results"):
     configure_process()
 
-    def go(name, mode, **options):
+    def go(name, mode, **experiment):
         print(f"{name} -> {output_dir}/")
-        row, extras = sensitivity_row(options, mode)
+        row, extras = sensitivity_row(experiment, mode)
         save_experiment(
             name,
             pd.DataFrame([row]),

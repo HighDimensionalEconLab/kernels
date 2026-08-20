@@ -105,7 +105,8 @@ class PricePolicyNN(nnx.Module):
         return self.head(h)[0]
 
 
-def policy_values(model, t, r, c, g, x_0):
+def policy_values(model, t, p):
+    r, c, g, x_0 = p["r"], p["c"], p["g"], p["x_0"]
     price, price_derivative = jax.vmap(
         lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),))
     )(t)
@@ -122,19 +123,13 @@ def policy_values(model, t, r, c, g, x_0):
 
 def residual_fn(theta, args, p):
     model = nnx.merge(args.graphdef, theta, args.nondiff)
-    residual = policy_values(
-        model,
-        args.train_t,
-        p["r"],
-        p["c"],
-        p["g"],
-        p["x_0"],
-    )["residual"]
+    residual = policy_values(model, args.train_t, p)["residual"]
     return residual / jnp.sqrt(residual.size)
 
 
-def snapshot(model, t, r, c, g, x_0):
-    values = jax.device_get(policy_values(model, t, r, c, g, x_0))
+def snapshot(model, t, p):
+    r, c, g, x_0 = (float(p[name]) for name in ("r", "c", "g", "x_0"))
+    values = jax.device_get(policy_values(model, t, p))
     frame = pd.DataFrame({key: np.asarray(value) for key, value in values.items()})
     benchmark = np.asarray(jax.device_get(mu_f_array(t, c, g, r, x_0)))
     frame["p_benchmark"] = benchmark
@@ -214,8 +209,8 @@ def asset_pricing_nn(
     solve_time = timer.elapsed(result)
     model = nnx.merge(graphdef, result.x, nondiff)
 
-    train_df = snapshot(model, train_t, r, c, g, x_0)
-    test_df = snapshot(model, test_t, r, c, g, x_0)
+    train_df = snapshot(model, train_t, p)
+    test_df = snapshot(model, test_t, p)
     max_train_residual = float(train_df["residual"].abs().max())
     solution_accepted = bool(result.multi_start.accepted)
 
@@ -248,7 +243,10 @@ def asset_pricing_nn(
         "steps": int(result.steps),
         "attempt": int(result.multi_start.attempt) + 1,
         "solve_time": solve_time,
+        "solve_time_success": solve_time if solution_accepted else np.nan,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
+        "nn_width": nn_set.width,
+        "nn_depth": nn_set.depth,
         "solution_accepted": solution_accepted,
         "rejection_reason": (
             "accepted"

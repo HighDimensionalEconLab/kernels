@@ -41,17 +41,6 @@ from models.utilities import (
 )
 
 
-# Numerical acceptance and ex-post quality thresholds, CLI-reachable so a
-# float32 caller can pass its own bars (the float32 replication driver does).
-@dataclass(frozen=True)
-class ToleranceSettings:
-    train_residual: float = 1e-5
-    # Validation and benchmark thresholds are HPO/quality diagnostics; they do
-    # not redefine convergence of a finite, feasible numerical solution.
-    validation_residual: float = 1e-2
-    benchmark_match: float = 1e-3
-
-
 class InitialValues(NamedTuple):
     c_offset: jax.Array
     mu_offset: jax.Array
@@ -81,6 +70,17 @@ class DataSettings:
     validation_points: int = 401
 
 
+# Numerical acceptance and ex-post quality thresholds, CLI-reachable so a
+# float32 caller can pass its own bars (the float32 replication driver does).
+@dataclass(frozen=True)
+class ToleranceSettings:
+    train_residual: float = 1e-5
+    # Validation and benchmark thresholds are HPO/quality diagnostics; they do
+    # not redefine convergence of a finite, feasible numerical solution.
+    validation_residual: float = 1e-2
+    benchmark_match: float = 1e-3
+
+
 @dataclass(frozen=True)
 class SolverSettings:
     init_damping: float = 1e-8
@@ -94,15 +94,6 @@ class SolverSettings:
     # O(ridge * ||dual||), so residual_atol sits above it). The ridge keeps
     # the minimizer O(ridge) from the pure RKHS-seminorm interpolant with
     # the free offsets unpenalized (no epsilon shift anywhere).
-    # The whitened calibration recipe reads
-    # gtol ~ 1e-3 * ridge * sqrt(rkhs_norm_total) ~ 1e-14 at ridge 3e-12
-    # (sqrt(q) ~ 3.7); the retained 5e-8 is a much looser MEASURED value
-    # carried over from the unwhitened noise-floor calibration -- the
-    # whitened runs converge with it in 8-38 steps across the parameter
-    # variants with every quality gate intact, and residual_atol (sitting
-    # BETWEEN the ridge-floor residual ~1.3-2.9e-7 and the last
-    # intermediate continuation level's ~9e-7) is what pins the solve to
-    # the floor.
     residual_atol: float = 5e-7
     ridge: float = 3e-12
     gtol: float = 5e-8
@@ -133,6 +124,7 @@ def open_economy_growth_kernel(
     data_set: DataSettings = DataSettings(),
     lm_set: SolverSettings = SolverSettings(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
+    verbose: bool = False,
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
@@ -516,6 +508,11 @@ def open_economy_growth_kernel(
         "c_offset": float(c_offset),
         "mu_offset": float(mu_offset),
     }
+    if verbose:
+        print(
+            f"solve_time(s) = {solve_time}, "
+            f"max_benchmark_error = {max_benchmark_error:.3e}"
+        )
 
     frame_names = (
         "t",
@@ -545,10 +542,11 @@ def open_economy_growth_kernel(
     test_df["a_scaled_error"] = np.asarray(a_scaled_error)
 
     hyperparameters = {
-        "parameters": asdict(parameters),
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
+        "tolerance_set": asdict(tolerance_set),
+        "parameters": asdict(parameters),
         "initial_conditions": {"k_0": k_0, "a_0": a_0},
     }
     return results, {

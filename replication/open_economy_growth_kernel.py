@@ -15,6 +15,7 @@ from replication.utilities import (
     write_summary,
 )
 
+SOLVER = open_economy_growth_kernel.open_economy_growth_kernel
 PREFIX = "open_economy_growth_kernel"
 ASSET_CONFIGURATIONS = ("initial_debt", "baseline", "initial_assets")
 
@@ -31,7 +32,7 @@ def run(output_dir: str = ".results"):
     def go(name, **experiment):
         print(f"{name} -> {output_dir}/")
         results_df, frames, hyperparameters = ensemble(
-            open_economy_growth_kernel.open_economy_growth_kernel,
+            SOLVER,
             n_seeds=1,
             options=experiment,
         )

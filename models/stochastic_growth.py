@@ -213,12 +213,12 @@ def log_state_diffusion_field(log_state, _, args, p):
 
 
 @partial(jax.jit, static_argnames=("T", "n_steps"))
-def simulate(solver, policy, initial_log_states, noise, T, n_steps, p):
+def simulate(sde, policy, initial_log_states, noise, T, n_steps, p):
     def solve_one(initial_log_state, trajectory_noise):
         return solve_sde(
             log_state_drift_field,
             log_state_diffusion_field,
-            solver,
+            sde,
             0.0,
             T,
             initial_log_state,
@@ -232,9 +232,9 @@ def simulate(solver, policy, initial_log_states, noise, T, n_steps, p):
 
 
 @partial(jax.jit, static_argnames=("data_set",))
-def simulate_train(solver, policy, initial_log_states, noise, p, data_set):
+def simulate_train(sde, policy, initial_log_states, noise, p, data_set):
     return simulate(
-        solver,
+        sde,
         policy,
         initial_log_states,
         noise,
@@ -248,8 +248,8 @@ def simulate_train(solver, policy, initial_log_states, noise, p, data_set):
 # by the initial-date certificate, per initial state: the saddle path sits
 # far negative, a capital bubble drives it positive. A failed simulation is a
 # loud +inf.
-def log_tvc_residual(solver, policy, initial_log_states, noise, T, n_steps, p):
-    solution = simulate(solver, policy, initial_log_states, noise, T, n_steps, p)
+def log_tvc_residual(sde, policy, initial_log_states, noise, T, n_steps, p):
+    solution = simulate(sde, policy, initial_log_states, noise, T, n_steps, p)
     terminal_log_states = solution.xs[:, -1, :]
     c_T = jax.vmap(lambda state: consumption(policy, state, p))(terminal_log_states)
     k_T = jnp.exp(terminal_log_states[:, 1])

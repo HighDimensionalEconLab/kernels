@@ -27,6 +27,12 @@ DIAGNOSTIC_COLUMNS = [
 ]
 
 
+def report(results_df):
+    accepted = int(results_df["solution_accepted"].sum())
+    print(f"  accepted {accepted}/{len(results_df)}")
+    print(results_df[DIAGNOSTIC_COLUMNS].agg(["median", "max"]).to_string())
+
+
 # High-variance TFP (Aruoba et al.'s sigma = 0.035 column) where the
 # precautionary correction is visible against the FD benchmark.
 def run(
@@ -53,16 +59,11 @@ def run(
         results_df,
         frames,
         output_dir,
-        {
-            "n_seeds": n_seeds,
-            "residual_dtype": "float64",
-        },
+        dict(n_seeds=n_seeds, residual_dtype="float64"),
         prefix=PREFIX,
         hyperparameters=hyperparameters,
     )
-    accepted = int(results_df["solution_accepted"].sum())
-    print(f"  accepted {accepted}/{len(results_df)}")
-    print(results_df[DIAGNOSTIC_COLUMNS].agg(["median", "max"]).to_string())
+    report(results_df)
 
     write_summary(output_dir, PREFIX, experiments={"baseline"})
 

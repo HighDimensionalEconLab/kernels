@@ -45,7 +45,7 @@ DIAGNOSTIC_COLUMNS = [
 ]
 
 
-def report(name, results_df):
+def report(results_df):
     accepted = int(results_df["solution_accepted"].sum())
     print(f"  accepted {accepted}/{len(results_df)}")
     print(results_df[DIAGNOSTIC_COLUMNS].agg(["median", "max"]).to_string())
@@ -95,7 +95,7 @@ def run(
             prefix=PREFIX,
             hyperparameters=hyperparameters,
         )
-        report("single_ic_g0", results_df)
+        report(results_df)
 
     for name, (g, ic_set) in all_experiments.items():
         print(f"{name}: {n_data_seeds} data seeds -> {output_dir}/")
@@ -120,7 +120,7 @@ def run(
             prefix=PREFIX,
             hyperparameters=hyperparameters,
         )
-        report(name, results_df)
+        report(results_df)
 
     write_summary(
         output_dir,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import jsonargparse
 
-import extra.optimal_advertising_kernel_uno as optimal_advertising_kernel_uno
+from extra import optimal_advertising_kernel_uno
 from replication.utilities import (
     configure_process,
     ensemble,
@@ -10,6 +10,7 @@ from replication.utilities import (
     write_summary,
 )
 
+SOLVER = optimal_advertising_kernel_uno.optimal_advertising_kernel_uno
 PREFIX = "optimal_advertising_kernel_uno"
 
 
@@ -20,7 +21,7 @@ def run(
     configure_process()
     print(f"baseline -> {output_dir}/")
     results_df, frames, hyperparameters = ensemble(
-        optimal_advertising_kernel_uno.optimal_advertising_kernel_uno,
+        SOLVER,
         n_seeds=1,
         options={"verbose": verbose},
     )
@@ -29,7 +30,7 @@ def run(
         results_df,
         frames,
         output_dir,
-        dict(n_seeds=1),
+        dict(n_seeds=1, residual_dtype="float64"),
         prefix=PREFIX,
         hyperparameters=hyperparameters,
     )

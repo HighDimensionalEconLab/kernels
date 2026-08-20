@@ -92,7 +92,7 @@ class GrowthPolicyNN(nnx.Module):
         # when they change) but sit outside the differentiated Param state.
         self.k_scale = nnx.Variable(jnp.asarray(k_scale, dtype=dtype))
         self.c_scale = nnx.Variable(jnp.asarray(c_scale, dtype=dtype))
-        # trend is static so the trendless graph stays exactly the legacy one.
+        # trend is static: the trendless graph contains no trend factor at all.
         self.trend = nnx.static(settings.learn_g_hat or g_hat != 0.0)
         if settings.learn_g_hat:
             self.g_hat = nnx.Param(jnp.full((), settings.g_hat_init, dtype=dtype))

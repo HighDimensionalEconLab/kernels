@@ -10,6 +10,7 @@ from replication.utilities import (
     write_summary,
 )
 
+SOLVER = asset_pricing_kernel.asset_pricing_kernel
 PREFIX = "asset_pricing_kernel"
 
 
@@ -19,7 +20,7 @@ def run(
     configure_process()
     print(f"baseline -> {output_dir}/")
     results_df, frames, hyperparameters = ensemble(
-        asset_pricing_kernel.asset_pricing_kernel,
+        SOLVER,
         n_seeds=1,
     )
     save_experiment(

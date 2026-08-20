@@ -33,12 +33,10 @@ from models.utilities import (
 )
 
 # Sequential/state-space formulation. The neural policy supplies positive
-# investment expenditure x(k) and the signed current account CA(k). Capital and
-# assets are rolled forward, while q and c are recovered algebraically. This is
-# deliberate: a free consumption head has no useful bias toward the annuity
-# root, whereas a smooth bounded CA(k) cannot represent the singular explosive
-# asset branch as capital converges. No terminal, TVC, no-Ponzi, steady-state,
-# or benchmark information enters the residual or initialization.
+# investment expenditure x(k) and the signed current account CA(k); capital and
+# assets are rolled forward, while q and c are recovered algebraically. No
+# terminal, TVC, no-Ponzi, steady-state, or benchmark information enters the
+# residual or initialization.
 
 
 # Acceptance gates (CLI-reachable so a float32 caller can pass its own bar;
@@ -217,7 +215,7 @@ def drift_field(state, _, args, p):
     )
 
 
-def simulate(policy, T, budget, k_0, args, data_set, *, save_at):
+def simulate(policy, T, budget, k_0, args, *, save_at):
     return solve_ode(
         drift_field,
         RK4(),
@@ -249,7 +247,6 @@ def simulate_train(policy, initial_k, p, data_set):
             data_set.train_points - 1,
             k_0,
             p,
-            data_set,
             save_at=SaveAt(steps=True),
         )
 
@@ -636,11 +633,11 @@ def open_economy_growth_nn_recursive(
         }
     )
     hyperparameters = {
-        "parameters": asdict(parameters),
         "nn_set": asdict(nn_set),
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),
+        "parameters": asdict(parameters),
         "initial_conditions": {"k_0": k_0, "a_0": a_0},
     }
     jax.block_until_ready(nnx.state(policy))

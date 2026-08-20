@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from dataclasses import asdict, dataclass
 from functools import partial
 from typing import Literal
@@ -35,6 +34,7 @@ from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
+    Stopwatch,
     long_df,
     unit_softplus,
 )
@@ -77,6 +77,16 @@ class StateKernelSettings:
     log_z_lengthscale: float | None = None
     log_k_lengthscale: float | None = None
     linear_mean: bool = False
+
+
+@dataclass(frozen=True)
+class ToleranceSettings:
+    max_steps: int = 100
+    # Float32 callers pass looser tolerances explicitly.
+    residual_atol: float = 1e-5
+    gtol: float = 1e-7
+    ridge: float = 1e-12
+    log_tvc_threshold: float = 0.0
 
 
 @struct.dataclass
@@ -181,16 +191,6 @@ class KernelInvestmentPolicy:
         return investment(self.theta, self.args, log_state, p, self.kernel_set)
 
 
-@dataclass(frozen=True)
-class ToleranceSettings:
-    max_steps: int = 100
-    # float64-tuned; float32 callers pass looser values explicitly.
-    residual_atol: float = 1e-5
-    gtol: float = 1e-7
-    ridge: float = 1e-12
-    log_tvc_threshold: float = 0.0
-
-
 # Frozen collocation design: the exact benchmark paths of the training
 # initial conditions on the training date grid.
 def fixed_collocation_data(
@@ -270,7 +270,7 @@ def neoclassical_growth_kernel_recursive(
         k_thr=float("inf"),
     )
 
-    fit_start = time.perf_counter()
+    fit_timer = Stopwatch()
     train_times, train_log_states = fixed_collocation_data(
         a,
         delta,
@@ -308,8 +308,8 @@ def neoclassical_growth_kernel_recursive(
         geodesic_acceptance_ratio=opt_set.geodesic_acceptance_ratio,
     )
 
-    solve_start = time.perf_counter()
-    setup_time = solve_start - fit_start
+    solve_timer = Stopwatch()
+    setup_time = fit_timer.elapsed()
     result = solver.solve(
         theta_0,
         args,
@@ -319,9 +319,8 @@ def neoclassical_growth_kernel_recursive(
         gtol=tolerance_set.gtol,
         max_steps_is_success=False,
     )
-    jax.block_until_ready(result)
-    solve_time = time.perf_counter() - solve_start
-    total_fit_time = time.perf_counter() - fit_start
+    solve_time = solve_timer.elapsed(result)
+    total_fit_time = fit_timer.elapsed()
     steps = int(result.steps)
     train_loss = float(result.info.resid_loss)
     status = int(result.status)

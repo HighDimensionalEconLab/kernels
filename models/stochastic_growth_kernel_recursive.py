@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import pathlib
-import time
 from dataclasses import asdict, dataclass
 from functools import partial
 from typing import Literal
@@ -36,6 +35,7 @@ from models.utilities import (
     SDE_SOLVERS,
     STATUS_TO_REASON,
     OptimizerSettings,
+    Stopwatch,
     cache_key,
     load_model,
     long_df,
@@ -70,8 +70,18 @@ class StateKernelSettings:
     linear_mean: bool = False
 
 
+@dataclass(frozen=True)
+class ToleranceSettings:
+    max_steps: int = 100
+    # Float32 callers pass looser tolerances explicitly.
+    residual_atol: float = 1e-5
+    gtol: float = 1e-7
+    ridge: float = 1e-12
+    log_tvc_threshold: float = 0.0
+
+
 @struct.dataclass
-class KernelResidualArgs:
+class ResidualArgs:
     centers: jax.Array
     train_log_states: jax.Array
     gram: jax.Array
@@ -112,7 +122,7 @@ def build_residual_args(train_log_states, kernel_set, a, z_0=1.0, k_0=1.0):
             state_lengthscales(kernel_set),
         )
     gram = (gram + gram.T) / 2.0
-    return KernelResidualArgs(
+    return ResidualArgs(
         centers=centers,
         train_log_states=flat_states,
         gram=gram,
@@ -165,21 +175,11 @@ def investment(theta, args, log_state, p, kernel_set):
 @struct.dataclass
 class KernelInvestmentPolicy:
     theta: tuple
-    args: KernelResidualArgs
+    args: ResidualArgs
     kernel_set: StateKernelSettings = struct.field(pytree_node=False)
 
     def __call__(self, log_state, p):
         return investment(self.theta, self.args, log_state, p, self.kernel_set)
-
-
-@dataclass(frozen=True)
-class ToleranceSettings:
-    max_steps: int = 100
-    # float64-tuned; float32 callers pass looser values explicitly.
-    residual_atol: float = 1e-5
-    gtol: float = 1e-7
-    ridge: float = 1e-12
-    log_tvc_threshold: float = 0.0
 
 
 # Locate the reference NN policy for this exact problem (structural
@@ -270,7 +270,7 @@ def stochastic_growth_kernel_recursive(
             "the stochastic model requires homothetic_representation=False"
         )
 
-    solver = SDE_SOLVERS[sde_solver]
+    sde = SDE_SOLVERS[sde_solver]
     n_train_steps = data_set.train_points - 1
     n_test_steps = data_set.test_points - 1
     train_dt = data_set.train_T / n_train_steps
@@ -316,11 +316,11 @@ def stochastic_growth_kernel_recursive(
             f"(test_euler_mean_abs {reference_meta['test_euler_mean_abs']:.3e})"
         )
 
-    fit_start = time.perf_counter()
+    fit_timer = Stopwatch()
     # Frozen collocation design: the reference NN policy's own simulation on the
     # training noise stream; the kernel never differentiates trajectories.
     train_noise = sample_trajectory_noise(
-        solver,
+        sde,
         jax.random.fold_in(train_ic_key, 3),
         ic_set.num_train_trajectories,
         n_train_steps,
@@ -329,7 +329,7 @@ def stochastic_growth_kernel_recursive(
         2,
     )
     train_solution = simulate_train(
-        solver,
+        sde,
         reference_policy,
         jnp.log(train_initial_conditions),
         train_noise,
@@ -351,7 +351,7 @@ def stochastic_growth_kernel_recursive(
         theta_0 = theta_0 + (jnp.zeros((), dtype=dtype),)
     if kernel_set.linear_mean:
         theta_0 = theta_0 + (jnp.zeros(2, dtype=dtype),)
-    lm_solver = RidgeLevenbergMarquardt(
+    solver = RidgeLevenbergMarquardt(
         partial(residual_fn, kernel_set=kernel_set),
         metric=metric,
         ridge=tolerance_set.ridge,
@@ -362,9 +362,9 @@ def stochastic_growth_kernel_recursive(
         geodesic_acceptance_ratio=opt_set.geodesic_acceptance_ratio,
     )
 
-    solve_start = time.perf_counter()
-    setup_time = solve_start - fit_start
-    result = lm_solver.solve(
+    solve_timer = Stopwatch()
+    setup_time = fit_timer.elapsed()
+    result = solver.solve(
         theta_0,
         args,
         p=p,
@@ -373,9 +373,8 @@ def stochastic_growth_kernel_recursive(
         gtol=tolerance_set.gtol,
         max_steps_is_success=False,
     )
-    jax.block_until_ready(result)
-    solve_time = time.perf_counter() - solve_start
-    total_fit_time = time.perf_counter() - fit_start
+    solve_time = solve_timer.elapsed(result)
+    total_fit_time = fit_timer.elapsed()
     steps = int(result.steps)
     train_loss = float(result.info.resid_loss)
     status = int(result.status)
@@ -399,7 +398,7 @@ def stochastic_growth_kernel_recursive(
 
     test_initial_log_states = jnp.log(test_initial_conditions)
     test_noise = sample_trajectory_noise(
-        solver,
+        sde,
         jax.random.fold_in(test_ic_key, 1),
         ic_set.num_test_trajectories,
         n_test_steps,
@@ -408,7 +407,7 @@ def stochastic_growth_kernel_recursive(
         2,
     )
     test_solution = simulate(
-        solver,
+        sde,
         policy,
         test_initial_log_states,
         test_noise,
@@ -438,7 +437,7 @@ def stochastic_growth_kernel_recursive(
     # NN's held-out residuals are orders of magnitude below the FD reference,
     # so it is the tighter yardstick for the kernel solution.
     reference_solution = simulate(
-        solver,
+        sde,
         reference_policy,
         test_initial_log_states,
         test_noise,
@@ -451,7 +450,7 @@ def stochastic_growth_kernel_recursive(
 
     # Terminal transversality certificate on the training initial conditions.
     tvc_noise = sample_trajectory_noise(
-        solver,
+        sde,
         jax.random.fold_in(train_ic_key, 4),
         ic_set.num_train_trajectories,
         data_set.tvc_steps,
@@ -460,7 +459,7 @@ def stochastic_growth_kernel_recursive(
         2,
     )
     train_tvc = log_tvc_residual(
-        solver,
+        sde,
         policy,
         jnp.log(train_initial_conditions),
         tvc_noise,
@@ -591,6 +590,8 @@ def stochastic_growth_kernel_recursive(
             print(f"  {name}: {value}")
     extras = {
         "model": policy,
+        "theta": theta,
+        "residual_args": args,
         "parameters": p,
         "train_initial_conditions": train_initial_conditions,
         "test_initial_conditions": test_initial_conditions,

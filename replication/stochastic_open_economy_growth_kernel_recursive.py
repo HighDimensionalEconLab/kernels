@@ -24,6 +24,12 @@ DIAGNOSTIC_COLUMNS = [
 ]
 
 
+def report(results_df):
+    accepted = int(results_df["solution_accepted"].sum())
+    print(f"  accepted {accepted}/{len(results_df)}")
+    print(results_df[DIAGNOSTIC_COLUMNS].agg(["median", "max"]).to_string())
+
+
 # Deterministic distillation of the cached stochastic NN reference policy;
 # run replication.stochastic_open_economy_growth_nn_recursive first to
 # populate the cache.
@@ -46,13 +52,11 @@ def run(
         results_df,
         frames,
         output_dir,
-        {"residual_dtype": "float64"},
+        dict(n_seeds=1, residual_dtype="float64"),
         prefix=PREFIX,
         hyperparameters=hyperparameters,
     )
-    accepted = int(results_df["solution_accepted"].sum())
-    print(f"  accepted {accepted}/{len(results_df)}")
-    print(results_df[DIAGNOSTIC_COLUMNS].agg(["median", "max"]).to_string())
+    report(results_df)
 
     write_summary(output_dir, PREFIX, experiments={"baseline"})
 

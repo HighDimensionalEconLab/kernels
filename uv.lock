@@ -426,7 +426,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.3.2" },
     { name = "pyarrow", specifier = ">=24.0.0" },
     { name = "scipy", specifier = ">=1.18.0" },
-    { name = "tinydiffeq", editable = "../tinydiffeq" },
+    { name = "tinydiffeq", specifier = ">=2.6.1" },
     { name = "unopy", specifier = ">=0.4.10" },
 ]
 
@@ -1471,30 +1471,15 @@ wheels = [
 [[package]]
 name = "tinydiffeq"
 version = "2.6.1"
-source = { editable = "../tinydiffeq" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jax" },
     { name = "nlls-gram" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.7.0" },
-    { name = "nlls-gram", specifier = ">=2.7.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/7f/f6/eb2ffade16153f543db1df8df60865bc17ccfe7a46d3dcd960d43d4ef448/tinydiffeq-2.6.1.tar.gz", hash = "sha256:be459432178a8363a050b93a1360a8fe2c569e1f5294249838090e34ba1b4128", size = 713451, upload-time = "2026-08-20T22:28:35.606Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c7/4a/040d07664d4fc1a2da54ee59ad4d7b6fb28d6a5f841995d6bafecfe47855/tinydiffeq-2.6.1-py3-none-any.whl", hash = "sha256:fa518e478e4c92b2b5b564d910e0c9da607234d501f55ae8e042033d700d7b2a", size = 81028, upload-time = "2026-08-20T22:28:34.325Z" },
 ]
-
-[package.metadata.requires-dev]
-benchmark = [{ name = "pytest-benchmark", specifier = ">=5.2.3" }]
-dev = [
-    { name = "pytest", specifier = ">=8" },
-    { name = "ruff", specifier = ">=0.15.17" },
-    { name = "scipy", specifier = ">=1.13" },
-]
-docs = [
-    { name = "mkdocs-material", specifier = ">=9.5" },
-    { name = "mkdocstrings", extras = ["python"], specifier = ">=0.26" },
-]
-gpu = [{ name = "jax", extras = ["cuda13"], marker = "sys_platform == 'linux'", specifier = ">=0.7.0" }]
 
 [[package]]
 name = "treescope"

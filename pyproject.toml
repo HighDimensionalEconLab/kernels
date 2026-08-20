@@ -37,6 +37,3 @@ target-version = "py313"
 select = ["E", "F", "I", "W"]
 ignore = ["E501"]
 
-[tool.uv.sources]
-tinydiffeq = { path = "../tinydiffeq", editable = true }
-

@@ -43,10 +43,9 @@ LARGE_COUNTRY_PARAMETERS = dict(
 
 
 def bond_invariance(validation_frames, num_countries, test_T):
-    # Reported on two horizons: the test window, where the solution is
-    # benchmark-certified, and the full training horizon, whose sparse tail
-    # collocation lets the configurations drift apart by orders of
-    # magnitude more.
+    # Reported on two horizons: the densely collocated test window, and the
+    # full training horizon, whose sparse tail collocation lets the
+    # configurations drift apart by orders of magnitude more.
     reference = validation_frames[BOND_CONFIGURATIONS[0]]
     columns = ["interest_rate"] + [
         f"{quantity}_{country}"

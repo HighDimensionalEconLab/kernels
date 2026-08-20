@@ -38,13 +38,6 @@ def run(output_dir: str = ".results"):
             frame = frames[name]
             if column == "interest_rate":
                 axis.plot(frame["t"], frame[column], color=color, label=label)
-                axis.plot(
-                    frame["t"],
-                    frame[f"{column}_benchmark"],
-                    color=color,
-                    linestyle=":",
-                    label="_nolegend_",
-                )
                 continue
             for country, linestyle in ((1, "-"), (2, "--")):
                 axis.plot(
@@ -54,20 +47,11 @@ def run(output_dir: str = ".results"):
                     linestyle=linestyle,
                     label=label if country == 1 else "_nolegend_",
                 )
-                axis.plot(
-                    frame["t"],
-                    frame[f"{column}_{country}_benchmark"],
-                    color=color,
-                    linestyle=":",
-                    linewidth=1.0,
-                    label="_nolegend_",
-                )
         axis.set_xlabel("Time")
         axis.set_ylabel(ylabel)
         axis.grid(alpha=0.2)
     axes.flat[0].plot([], [], color="black", linestyle="-", label="Country 1")
     axes.flat[0].plot([], [], color="black", linestyle="--", label="Country 2")
-    axes.flat[0].plot([], [], color="black", linestyle=":", label="BVP benchmark")
     axes.flat[0].legend()
     figure.tight_layout()
     path = out / "multicountry_growth_transitions.pdf"

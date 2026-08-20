@@ -1,10 +1,10 @@
 # Local grid HPO for the multicountry growth solvers. Kernel: lengthscale x
 # kernel family x grid size, each scored over the three bond configurations
-# (baseline + mirror debt/asset positions) on acceptance, residuals, the N=2
-# benchmark error, the common-gamma bond-invariance gap, and solve time.
-# NN: width x depth x damping schedule over the seed ensemble, scored on
-# accepted fraction, benchmark error, and train time. Winners are promoted to
-# the solver dataclass defaults by hand.
+# (baseline + mirror debt/asset positions) on acceptance, residuals, the
+# common-gamma bond-invariance gap, and solve time. NN: width x depth x
+# damping schedule over the seed ensemble, scored on accepted fraction,
+# residuals, and train time. Winners are promoted to the solver dataclass
+# defaults by hand.
 #
 #   JAX_PLATFORMS=cpu uv run python -m extra.sweeps.multicountry_growth_hpo
 from __future__ import annotations
@@ -97,9 +97,6 @@ def kernel_sweep(output):
             max_validation_residual=max(
                 results["max_validation_residual"] for results, _ in runs.values()
             ),
-            max_benchmark_error=max(
-                results["max_benchmark_error"] for results, _ in runs.values()
-            ),
             invariance_gap=invariance,
             mean_solve_time=float(
                 np.mean([results["solve_time"] for results, _ in runs.values()])
@@ -109,12 +106,12 @@ def kernel_sweep(output):
         print(row)
     frame = pd.DataFrame(rows)
     frame.to_parquet(output / "multicountry_growth_kernel_hpo.parquet")
-    if "max_benchmark_error" not in frame:
+    if "max_validation_residual" not in frame:
         print("\nno kernel configuration completed:")
         print(frame.to_string(index=False))
         return frame
     ranked = frame[frame["accepted"].fillna(False)].sort_values(
-        ["max_benchmark_error", "max_validation_residual"]
+        ["max_validation_residual", "invariance_gap"]
     )
     print("\nkernel ranking (accepted only):")
     print(ranked.to_string(index=False))
@@ -142,11 +139,6 @@ def nn_sweep(output, n_seeds):
         accepted = [r for r in seed_results if r["solution_accepted"]]
         row.update(
             accepted_fraction=len(accepted) / n_seeds,
-            max_benchmark_error_median=(
-                float(np.median([r["max_benchmark_error"] for r in accepted]))
-                if accepted
-                else np.nan
-            ),
             max_train_residual_median=(
                 float(np.median([r["max_train_residual"] for r in accepted]))
                 if accepted
@@ -162,12 +154,12 @@ def nn_sweep(output, n_seeds):
         print(row)
     frame = pd.DataFrame(rows)
     frame.to_parquet(output / "multicountry_growth_nn_hpo.parquet")
-    if "max_benchmark_error_median" not in frame:
+    if "max_train_residual_median" not in frame:
         print("\nno nn configuration completed:")
         print(frame.to_string(index=False))
         return frame
     ranked = frame.sort_values(
-        ["accepted_fraction", "max_benchmark_error_median"],
+        ["accepted_fraction", "max_train_residual_median"],
         ascending=[False, True],
     )
     print("\nnn ranking:")

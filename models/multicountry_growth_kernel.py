@@ -41,7 +41,6 @@ from models.multicountry_growth import (
     tvc_diagnostics,
     validate_initial_conditions,
 )
-from models.multicountry_growth_benchmark import multicountry_growth_benchmark
 from models.multicountry_growth_preconditioner import (
     ArrowWoodburyCallback,
     build_arrow_woodbury,
@@ -68,10 +67,9 @@ RESIDUAL_NAMES = (
 @dataclass(frozen=True)
 class ToleranceSettings:
     train_residual: float = 1e-5
-    # Validation and benchmark thresholds are HPO/quality diagnostics; they do
-    # not redefine convergence of a finite, feasible numerical solution.
+    # The validation threshold is an HPO/quality diagnostic; it does not
+    # redefine convergence of a finite, feasible numerical solution.
     validation_residual: float = 1e-2
-    benchmark_match: float = 1e-3
 
 
 @dataclass(frozen=True)
@@ -85,8 +83,6 @@ class DataSettings:
     test_T: float = 50.0
     test_points: int = 201
     validation_points: int = 401
-    benchmark_T: float = 200.0
-    benchmark_points: int = 241
     # Long-run validity checks are evaluated at t ~ long_run_check_T (flat
     # consumption/capital/debt, capital at the theory steady state, interest
     # rate ~ r), with flatness measured against
@@ -248,7 +244,6 @@ def multicountry_growth_kernel(
     validation_data = jnp.linspace(
         0.0, float(train_data[-1]), data_set.validation_points, dtype=dtype
     )
-    benchmark_grid = np.linspace(0.0, data_set.benchmark_T, data_set.benchmark_points)
     n_train = len(train_data)
     populations = jnp.asarray(parameters.populations, dtype=dtype)
     total_population = jnp.sum(populations)
@@ -491,55 +486,6 @@ def multicountry_growth_kernel(
         rejection_reasons.append("train_residual")
     validation_pass = max_validation_residual <= tolerance_set.validation_residual
 
-    # The BVP benchmark integrates the common-gamma Negishi sharing rule, so
-    # it exists only for two countries with equal curvatures.
-    benchmark_available = num_countries == 2 and len(set(parameters.gammas)) == 1
-    benchmark_values = None
-    benchmark_diagnostics = None
-    if benchmark_available:
-        benchmark, benchmark_diagnostics = multicountry_growth_benchmark(
-            k_0,
-            (a_0[0],),
-            benchmark_grid,
-            parameters=parameters,
-        )
-        benchmark_values = benchmark(np.asarray(test_data))
-        k_relative_error = jnp.abs(
-            test_eval["k"] - jnp.asarray(benchmark_values["k"])
-        ) / jnp.asarray(benchmark_values["k"])
-        q_relative_error = jnp.abs(
-            test_eval["q"] - jnp.asarray(benchmark_values["q"])
-        ) / jnp.asarray(benchmark_values["q"])
-        c_relative_error = jnp.abs(
-            test_eval["c"] - jnp.asarray(benchmark_values["c"])
-        ) / jnp.asarray(benchmark_values["c"])
-        a_scaled_error = (
-            jnp.abs(test_eval["a"] - jnp.asarray(benchmark_values["a"])) / output_scale
-        )
-        interest_rate_scaled_error = (
-            jnp.abs(
-                test_eval["interest_rate"]
-                - jnp.asarray(benchmark_values["interest_rate"])
-            )
-            / parameters.r
-        )
-        max_benchmark_error = max(
-            float(jnp.max(k_relative_error)),
-            float(jnp.max(q_relative_error)),
-            float(jnp.max(c_relative_error)),
-            float(jnp.max(a_scaled_error)),
-            float(jnp.max(interest_rate_scaled_error)),
-        )
-        benchmark_match = max_benchmark_error <= tolerance_set.benchmark_match
-    else:
-        k_relative_error = jnp.asarray(jnp.nan)
-        q_relative_error = jnp.asarray(jnp.nan)
-        c_relative_error = jnp.asarray(jnp.nan)
-        a_scaled_error = jnp.asarray(jnp.nan)
-        interest_rate_scaled_error = jnp.asarray(jnp.nan)
-        max_benchmark_error = float("nan")
-        benchmark_match = False
-
     resolved_steady = resolved_steady_state(validation_eval["mu"][-1], parameters)
     tail = tail_diagnostics(validation_eval, parameters)
     tvc = tvc_diagnostics(validation_data, validation_eval, parameters)
@@ -591,14 +537,6 @@ def multicountry_growth_kernel(
         "validation_pass": validation_pass,
         "max_resource_gap": max_resource_gap,
         "max_asset_clearing": max_asset_clearing,
-        "max_benchmark_error": max_benchmark_error,
-        "benchmark_available": benchmark_available,
-        "benchmark_match": benchmark_match,
-        "k_relative_error_max": float(jnp.max(k_relative_error)),
-        "q_relative_error_max": float(jnp.max(q_relative_error)),
-        "c_relative_error_max": float(jnp.max(c_relative_error)),
-        "a_scaled_error_max": float(jnp.max(a_scaled_error)),
-        "interest_rate_scaled_error_max": float(jnp.max(interest_rate_scaled_error)),
         "terminal_residual_count": 0,
         "differential_residual_count": 4 * num_countries * n_train,
         "algebraic_residual_count": (num_countries + 1) * n_train,
@@ -703,25 +641,6 @@ def multicountry_growth_kernel(
                 long_run["initial_wealth"][country]
             )
     results["rate_offset"] = float(theta.initial.rate_offset)
-    if benchmark_available:
-        results.update(
-            {
-                "log_relative_weight": float(log_relative_weights[1]),
-                "relative_weight": float(relative_weights[1]),
-                "benchmark_log_relative_weight": benchmark_diagnostics[
-                    "log_relative_weight"
-                ],
-                "benchmark_boundary_residual": benchmark_diagnostics[
-                    "boundary_residual_max"
-                ],
-                "stable_roots": benchmark_diagnostics["stable_roots"],
-                "unstable_roots": benchmark_diagnostics["unstable_roots"],
-                "center_roots": benchmark_diagnostics["center_roots"],
-                "minimum_rate_denominator": benchmark_diagnostics[
-                    "minimum_rate_denominator"
-                ],
-            }
-        )
 
     def frame(values, points):
         data = {
@@ -755,14 +674,6 @@ def multicountry_growth_kernel(
     train_df = frame(train_eval, train_data)
     validation_df = frame(validation_eval, validation_data)
     test_df = frame(test_eval, test_data)
-    if benchmark_available:
-        for country in range(num_countries):
-            suffix = country + 1
-            for name in ("k", "a", "q", "c", "x", "output", "current_account"):
-                test_df[f"{name}_{suffix}_benchmark"] = benchmark_values[name][
-                    :, country
-                ]
-        test_df["interest_rate_benchmark"] = benchmark_values["interest_rate"]
 
     hyperparameters = {
         "parameters": asdict(parameters),

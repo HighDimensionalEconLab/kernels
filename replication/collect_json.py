@@ -1845,13 +1845,25 @@ def performance_comparisons(out):
             open_uno_time,
             open_uno_error,
         ),
-        # Timing only: the multicountry model has no benchmark solution, so
-        # no error comparison exists.
+        # No benchmark solution exists for the multicountry model, so the
+        # accuracy columns are the held-out DAE residuals (Euler-type FOCs,
+        # budgets, and market clearing on the dense validation grid) rather
+        # than errors against a reference path.
         "multicountry_growth": {
             "kernel_solve_time_median": sig(multicountry_kernel_time),
+            "kernel_validation_residual": sci(
+                med(multicountry_kernel["max_validation_residual"])
+            ),
             "nn_solve_time_median": sig(multicountry_nn_time),
             "nn_to_kernel_time_ratio": sig(
                 multicountry_nn_time / multicountry_kernel_time
+            ),
+            "nn_validation_residual_median": sci(
+                float(multicountry_nn_frame["max_validation_residual"].median())
+            ),
+            "nn_to_kernel_residual_ratio": sig(
+                float(multicountry_nn_frame["max_validation_residual"].median())
+                / med(multicountry_kernel["max_validation_residual"])
             ),
         },
     }

@@ -45,7 +45,7 @@ from models.utilities import (
 class DataSettings:
     train_T: float = CONSTANTS.train_T
     # Fixed RKHS centers on the exact path: a representation size, not a
-    # rollout grid (nothing is integrated during training).
+    # simulation grid (nothing is integrated during training).
     train_points: int = 65
     # Held-out paths are fixed-step RK4 on the integrator's own states.
     test_points: int = 41
@@ -336,7 +336,7 @@ def neoclassical_growth_kernel_recursive(
     h_const = float(theta[1]) if kernel_set.free_constant else 0.0
     policy = KernelInvestmentPolicy(theta, args, kernel_set)
 
-    # Diagnostics on the frozen centers and held-out rollouts.
+    # Diagnostics on the frozen centers and held-out simulations.
     train_values = trajectory_values(policy, train_log_states, p)
     train_initial = np.asarray(train_initial_conditions)
     train_df = long_df(

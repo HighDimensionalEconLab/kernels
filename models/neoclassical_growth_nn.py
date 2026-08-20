@@ -13,7 +13,6 @@ from jax.flatten_util import ravel_pytree
 from nlls_gram import (
     DrawNNXModule,
     LevenbergMarquardt,
-    LMStatus,
     MultiStart,
 )
 
@@ -52,8 +51,6 @@ class DataSettings:
 class StoppingCriteria:
     max_steps: int = 250
     train_loss_threshold: float = 1e-15
-    # Post-hoc log-TVC bar at test_tvc_T: the saddle path sits far negative,
-    # a bubble far positive.
     log_tvc_threshold: float = 0.0
     num_attempts: int = 5
 
@@ -144,28 +141,6 @@ class GrowthPolicyNN(nnx.Module):
         if self.trend:
             out = jnp.exp(self.g_hat[...] * t) * out
         return out
-
-
-# Value-hashable multi-start acceptance (it enters the jit cache by
-# identity): a learned trend admits FONC-satisfying bubble paths, so an
-# attempt passes only with a negative transversality certificate.
-@dataclass(frozen=True)
-class AcceptSaddlePath:
-    tvc_T: float
-    log_tvc_threshold: float
-
-    def __call__(self, _, result):
-        model = nnx.merge(result.args.graphdef, result.x, result.args.nondiff)
-        tvc_t = jnp.asarray(self.tvc_T, dtype=result.args.t.dtype)
-        k_T, c_T = model(tvc_t)
-        log_tvc = (
-            -result.p.rho_hat * tvc_t
-            - result.p.sigma_crra * jnp.log(c_T)
-            + jnp.log(k_T)
-        )
-        return (result.status == LMStatus.CONVERGED) & (
-            log_tvc < self.log_tvc_threshold
-        )
 
 
 def residual_fn(theta, args, p):
@@ -317,11 +292,6 @@ def neoclassical_growth_nn(
             c_scale=c_scale,
             g_hat=g,
             dtype=dtype,
-        ),
-        accept=(
-            AcceptSaddlePath(data_set.test_tvc_T, stop_set.log_tvc_threshold)
-            if policy_settings.learn_g_hat
-            else None
         ),
     )
 

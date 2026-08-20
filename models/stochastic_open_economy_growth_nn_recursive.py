@@ -24,11 +24,11 @@ from models.stochastic_open_economy_growth import (
     StructuralParameters,
     ToleranceSettings,
     collocation_residuals,
-    collocation_rollout,
     make_sequential_policy,
     problem_cache_config,
     production,
-    rollout_steps,
+    simulate,
+    simulate_train,
     trajectory_frame,
     trajectory_values,
     transversality_expectation_frame,
@@ -182,7 +182,7 @@ class EpochCallback:
 
 def residual_fn(theta, args, p):
     policy = nnx.merge(args.graphdef, theta, args.nondiff)
-    # The ladder scales both sigmas through p (rollout and residual agree);
+    # The ladder scales both sigmas through p (simulation and residual agree);
     # corr_zr is scale-free.
     stage_parameters = p.replace(
         sigma_z=p.sigma_z * args.shock_scale,
@@ -544,7 +544,7 @@ def stochastic_open_economy_growth_nn_recursive(
         sigma_z=p.sigma_z * solve_args.shock_scale,
         sigma_r=p.sigma_r * solve_args.shock_scale,
     )
-    train_solution = collocation_rollout(
+    train_solution = simulate_train(
         solver,
         policy,
         solve_args.initial_states,
@@ -562,7 +562,7 @@ def stochastic_open_economy_growth_nn_recursive(
         dtype,
         4,
     )
-    test_solution = rollout_steps(
+    test_solution = simulate(
         solver,
         policy,
         test_initial_states,
@@ -588,7 +588,7 @@ def stochastic_open_economy_growth_nn_recursive(
         dtype,
         4,
     )
-    tvc_solution = rollout_steps(
+    tvc_solution = simulate(
         solver,
         policy,
         tvc_initial_states,
@@ -657,7 +657,7 @@ def stochastic_open_economy_growth_nn_recursive(
         and jnp.all(tvc_feasible_observations)
     )
 
-    # Paired common-noise rollouts from shifted NFA positions exercise the
+    # Paired common-noise simulations from shifted NFA positions exercise the
     # asset axis even at zero IC spread.
     paired_states = jnp.broadcast_to(
         initial_center,
@@ -666,7 +666,7 @@ def stochastic_open_economy_growth_nn_recursive(
     asset_shift = asset_shift_scale * output_scale
     low_states = paired_states.at[:, 2].set((a_0 - asset_shift) / output_scale)
     high_states = paired_states.at[:, 2].set((a_0 + asset_shift) / output_scale)
-    low_solution = rollout_steps(
+    low_solution = simulate(
         solver,
         policy,
         low_states,
@@ -675,7 +675,7 @@ def stochastic_open_economy_growth_nn_recursive(
         n_test_steps,
         p,
     )
-    high_solution = rollout_steps(
+    high_solution = simulate(
         solver,
         policy,
         high_states,

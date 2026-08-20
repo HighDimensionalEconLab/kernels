@@ -28,16 +28,19 @@ from models.stochastic_open_economy_growth import (
     ModelParameters,
     StructuralParameters,
     ToleranceSettings,
-    collocation_rollout,
     euler_residual_terms,
     make_sequential_policy,
     normalize_state,
     policy_outputs,
     problem_cache_config,
     production,
-    rollout_steps,
+    simulate,
+    simulate_train,
     trajectory_frame,
     trajectory_values,
+    transversality_expectation_frame,
+    transversality_statistics,
+    transversality_trajectory_values,
 )
 from models.utilities import (
     DOMAIN_EPS,
@@ -71,7 +74,6 @@ class StoppingCriteria:
     # looser anneals faster (fewer steps per level), tighter solves each
     # level out more completely before descending.
     ridge_grad_rtol: float = 1e-2
-    log_tvc_threshold: float = 0.0
 
 
 # Kernel geometry lives in the NN's normalized coordinates, so one
@@ -258,7 +260,7 @@ def stochastic_open_economy_growth_kernel_recursive(
         ridge=5.4e-11,
     ),
     # The frozen-design kernel is coarser than the NN it consumes; its
-    # held-out max bar guards against rollout divergence, not NN accuracy
+    # held-out max bar guards against simulation divergence, not NN accuracy
     # (blow-ups land at 1e3+).
     tolerance_set: ToleranceSettings = ToleranceSettings(test_euler_max=3e-1),
     verbose: bool = True,
@@ -315,8 +317,10 @@ def stochastic_open_economy_growth_kernel_recursive(
     solver = SDE_SOLVERS[sde_solver]
     n_train_steps = data_set.train_points - 1
     n_test_steps = data_set.test_points - 1
+    n_tvc_steps = data_set.tvc_points - 1
     train_dt = data_set.train_T / n_train_steps
     test_dt = data_set.test_T / n_test_steps
+    tvc_dt = data_set.tvc_T / n_tvc_steps
 
     data_key = jax.random.key(ic_set.data_seed)
     train_ic_key, test_ic_key = jax.random.split(data_key)
@@ -384,7 +388,7 @@ def stochastic_open_economy_growth_kernel_recursive(
         dtype,
         4,
     )
-    train_solution = collocation_rollout(
+    train_solution = simulate_train(
         solver,
         reference_policy,
         train_initial_states,
@@ -394,7 +398,7 @@ def stochastic_open_economy_growth_kernel_recursive(
     )
     # Fixed-step solve_sde reports ok even on divergence: gate on finiteness.
     if not bool(jnp.all(jnp.isfinite(train_solution.xs))):
-        raise RuntimeError("reference-policy collocation rollout failed")
+        raise RuntimeError("reference-policy collocation simulation failed")
     train_states = train_solution.xs
     args = build_residual_args(train_states, kernel_set, reference_policy)
     n_train = args.centers.shape[0]
@@ -476,7 +480,7 @@ def stochastic_open_economy_growth_kernel_recursive(
         dtype,
         4,
     )
-    test_solution = rollout_steps(
+    test_solution = simulate(
         solver,
         policy,
         test_initial_states,
@@ -500,8 +504,56 @@ def stochastic_open_economy_growth_kernel_recursive(
     )
     test_df = trajectory_frame(test_values, test_solution.ts)
 
+    # Same TVC noise stream (fold_in index 3) as the NN driver.
+    tvc_initial_states = jnp.broadcast_to(
+        initial_center,
+        (ic_set.num_tvc_trajectories, initial_center.size),
+    )
+    tvc_noise = sample_trajectory_noise(
+        solver,
+        jax.random.fold_in(test_ic_key, 3),
+        ic_set.num_tvc_trajectories,
+        n_tvc_steps,
+        tvc_dt,
+        dtype,
+        4,
+    )
+    tvc_solution = simulate(
+        solver,
+        policy,
+        tvc_initial_states,
+        tvc_noise,
+        data_set.tvc_T,
+        n_tvc_steps,
+        p,
+    )
+    tvc_states = jnp.where(tvc_solution.ok[:, None, None], tvc_solution.xs, jnp.nan)
+    tvc_values = transversality_trajectory_values(
+        policy,
+        tvc_states,
+        tvc_solution.ts,
+        p,
+    )
+    tvc_statistics = transversality_statistics(tvc_values)
+    tvc_feasible_observations = (
+        jnp.isfinite(tvc_values["discounted_marginal_utility"])
+        & jnp.isfinite(tvc_values["absolute_asset_tvc"])
+        & jnp.isfinite(tvc_values["capital_tvc"])
+        & (tvc_values["k"] > 0.0)
+        & (tvc_values["q"] > 0.0)
+        & (tvc_values["c"] > 0.0)
+        & (tvc_values["x"] > 0.0)
+    )
+    tvc_paths_ok = bool(
+        jnp.all(tvc_solution.ok)
+        and jnp.all(jnp.isfinite(tvc_states))
+        and jnp.all(tvc_feasible_observations)
+    )
+    tvc_df = trajectory_frame(tvc_values, tvc_solution.ts)
+    expected_tvc_df = transversality_expectation_frame(tvc_values, tvc_solution.ts)
+
     # Common-noise pathwise comparison against the reference NN policy.
-    reference_solution = rollout_steps(
+    reference_solution = simulate(
         solver,
         reference_policy,
         test_initial_states,
@@ -552,7 +604,7 @@ def stochastic_open_economy_growth_kernel_recursive(
     )
     results = {
         "variant": "fixed_recursive_kernel_stochastic_open_economy",
-        "collocation_design": "frozen_reference_nn_rollout",
+        "collocation_design": "frozen_reference_nn_simulation",
         "parameter_derivative": "conditional_on_fixed_collocation_design",
         "reference_policy": str(reference_path),
         "reference_test_euler_mean_abs": float(reference_meta["test_euler_mean_abs"]),
@@ -627,6 +679,24 @@ def stochastic_open_economy_growth_kernel_recursive(
         "train_T": data_set.train_T,
         "test_points": data_set.test_points,
         "test_T": data_set.test_T,
+        "tvc_T": data_set.tvc_T,
+        "tvc_points": data_set.tvc_points,
+        "num_tvc_trajectories": ic_set.num_tvc_trajectories,
+        "tvc_paths_ok": tvc_paths_ok,
+        "ex_post_expected_absolute_asset_tvc": float(
+            tvc_statistics["expected_absolute_asset_tvc"]
+        ),
+        "ex_post_expected_capital_tvc": float(tvc_statistics["expected_capital_tvc"]),
+        "ex_post_signed_expected_asset_tvc": float(
+            tvc_statistics["signed_expected_asset_tvc"]
+        ),
+        "ex_post_absolute_asset_tvc_mc_se": float(
+            tvc_statistics["absolute_asset_tvc_mc_se"]
+        ),
+        "ex_post_signed_asset_tvc_mc_se": float(
+            tvc_statistics["signed_asset_tvc_mc_se"]
+        ),
+        "ex_post_capital_tvc_mc_se": float(tvc_statistics["capital_tvc_mc_se"]),
         **acceptance,
     }
 
@@ -666,6 +736,8 @@ def stochastic_open_economy_growth_kernel_recursive(
         "test_initial_states": test_initial_states,
         "train_df": train_df,
         "test_df": test_df,
+        "tvc_df": tvc_df,
+        "expected_tvc_df": expected_tvc_df,
         "hyperparameters": hyperparameters,
     }
 

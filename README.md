@@ -157,7 +157,7 @@ The main NN modules are deliberately limited:
   `i = delta * k * unit_softplus(h)` with the head reading `log(k) - log(z)`
   (the only homothetic ingredient), so the zero-initialized policy holds
   capital at rest in levels and no steady state or production structure enters
-  the map. Every rollout is fixed-step RK4 and training collocation is the
+  the map. Every simulation is fixed-step RK4 and training collocation is the
   integrator's own states: `train_points` knots from `train_points - 1` steps,
   with nothing interpolated inside the differentiated residual. Train and
   test initial conditions are independent draws around the scalar
@@ -295,7 +295,7 @@ existing artifact for the identical configuration is loaded instead of
 retraining (`--save_policy <path>` writes one explicit extra copy). The
 kernel-recursive consumers glob the problem half of that key under
 `--policy_dir` and freeze the best accepted NN policy's own collocation
-rollout as their design, so the workflow is two-stage:
+simulation as their design, so the workflow is two-stage:
 
 ```bash
 uv run python -m models.stochastic_growth_nn_recursive --policy_cache .results

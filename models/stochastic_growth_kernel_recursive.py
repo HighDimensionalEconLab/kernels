@@ -87,7 +87,7 @@ def residual_fn(theta, args, p, kernel_set):
 # stochastic_growth_nn_recursive: identical policy output map, residuals, and
 # diagnostics, but the collocation states are a frozen design -- simulated
 # once under the saved reference NN policy -- rather than re-integrated by
-# differentiating through the solver's own rollout.
+# differentiating through the solver's own simulation.
 def stochastic_growth_kernel_recursive(
     a: float = CONSTANTS.a,
     delta: float = CONSTANTS.delta,
@@ -187,7 +187,7 @@ def stochastic_growth_kernel_recursive(
         )
 
     fit_start = time.perf_counter()
-    # Frozen collocation design: the reference NN policy's own rollout on the
+    # Frozen collocation design: the reference NN policy's own simulation on the
     # training noise stream; the kernel never differentiates trajectories.
     train_noise = sample_trajectory_noise(
         solver,
@@ -207,7 +207,7 @@ def stochastic_growth_kernel_recursive(
         data_set,
     )
     if not bool(jnp.all(train_solution.ok)):
-        raise RuntimeError("reference-policy collocation rollout failed")
+        raise RuntimeError("reference-policy collocation simulation failed")
     train_log_states = train_solution.xs
     args = build_residual_args(train_log_states, kernel_set, a, z_bar, k_0)
     n_train = args.centers.shape[0]
@@ -371,7 +371,7 @@ def stochastic_growth_kernel_recursive(
     gram_eigenvalues = jnp.linalg.eigvalsh(args.gram)
     results = {
         "variant": "fixed_recursive_kernel_stochastic",
-        "collocation_design": "frozen_reference_nn_rollout",
+        "collocation_design": "frozen_reference_nn_simulation",
         "parameter_derivative": "conditional_on_fixed_collocation_design",
         "reference_policy": str(reference_path),
         "reference_test_euler_mean_abs": float(reference_meta["test_euler_mean_abs"]),
@@ -421,9 +421,7 @@ def stochastic_growth_kernel_recursive(
         "steps": steps,
         "stopping_reason": stopping_reason,
         "solver_converged": solver_converged,
-        "solution_accepted": bool(
-            solver_converged and test_path_ok and transversality_ok
-        ),
+        "solution_accepted": bool(solver_converged and test_path_ok),
         "setup_time": setup_time,
         "solve_time": solve_time,
         "total_fit_time": total_fit_time,

@@ -269,7 +269,7 @@ def log_state_drift_field(log_state, _, args, p):
     return log_state_drift(policy, log_state, structural)
 
 
-# Fixed-step RK4 rollout of the policy from a batch of initial log states,
+# Fixed-step RK4 simulation of the policy from a batch of initial log states,
 # saving the integrator's own steps.
 @partial(jax.jit, static_argnames=("T", "n_steps"))
 def simulate(policy, initial_log_states, T, n_steps, p):
@@ -292,7 +292,7 @@ def simulate(policy, initial_log_states, T, n_steps, p):
 
 # Natural-log transversality certificate at the terminal date T, normalized
 # by the initial-date certificate, per initial state: the saddle path sits
-# far negative, a capital bubble drives it positive. A failed rollout is a
+# far negative, a capital bubble drives it positive. A failed simulation is a
 # loud +inf.
 def log_tvc_residual(policy, initial_log_states, T, n_steps, p):
     solution = simulate(policy, initial_log_states, T, n_steps, p)

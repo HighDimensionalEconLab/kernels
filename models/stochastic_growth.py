@@ -49,7 +49,7 @@ class StructuralParameters:
 
 @dataclass(frozen=True)
 class DataSettings:
-    # Fixed-step SDE rollout on the integrator's own states: n points from
+    # Fixed-step SDE simulation on the integrator's own states: n points from
     # n - 1 steps including the initial condition, nothing interpolated.
     train_points: int = 65
     test_points: int = 41
@@ -166,7 +166,8 @@ def log_state_diffusion_field(log_state, _, args, p):
     return log_state_diffusion(log_state, structural)
 
 
-def batched_sde_rollout(solver, policy, initial_log_states, noise, T, n_steps, p):
+@partial(jax.jit, static_argnames=("T", "n_steps"))
+def simulate(solver, policy, initial_log_states, noise, T, n_steps, p):
     def solve_one(initial_log_state, trajectory_noise):
         return solve_sde(
             log_state_drift_field,
@@ -186,7 +187,7 @@ def batched_sde_rollout(solver, policy, initial_log_states, noise, T, n_steps, p
 
 @partial(jax.jit, static_argnames=("data_set",))
 def simulate_train(solver, policy, initial_log_states, noise, p, data_set):
-    return batched_sde_rollout(
+    return simulate(
         solver,
         policy,
         initial_log_states,
@@ -197,14 +198,9 @@ def simulate_train(solver, policy, initial_log_states, noise, p, data_set):
     )
 
 
-@partial(jax.jit, static_argnames=("T", "n_steps"))
-def simulate(solver, policy, initial_log_states, noise, T, n_steps, p):
-    return batched_sde_rollout(solver, policy, initial_log_states, noise, T, n_steps, p)
-
-
 # Natural-log transversality certificate at the terminal date T, normalized
 # by the initial-date certificate, per initial state: the saddle path sits
-# far negative, a capital bubble drives it positive. A failed rollout is a
+# far negative, a capital bubble drives it positive. A failed simulation is a
 # loud +inf.
 def log_tvc_residual(solver, policy, initial_log_states, noise, T, n_steps, p):
     solution = simulate(solver, policy, initial_log_states, noise, T, n_steps, p)
@@ -218,7 +214,7 @@ def log_tvc_residual(solver, policy, initial_log_states, noise, T, n_steps, p):
     return jnp.where(solution.ok, log_tvc - initial_log_tvc, jnp.inf)
 
 
-# The FD consumption policy as a rollout-compatible callable: bilinear
+# The FD consumption policy as a simulation-compatible callable: bilinear
 # interpolation on the benchmark grid, edge-clamped, i = f - c.
 @struct.dataclass
 class FDInterpolatedPolicy:

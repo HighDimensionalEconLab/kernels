@@ -130,12 +130,14 @@ class DataSettings:
     train_points_list: list[float] | None = None
     test_T: float = CONSTANTS.sequence_test_T
     test_points: int = 100
+    test_tvc_T: float = CONSTANTS.transversality_T
 
 
-# Acceptance gate, CLI-reachable so a float32 caller can pass its own bar.
+# CLI-reachable bars; only train_residual gates acceptance.
 @dataclass(frozen=True)
 class ToleranceSettings:
     train_residual: float = 1e-5
+    log_tvc_threshold: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -294,6 +296,15 @@ def neoclassical_growth_kernel(
         z=technology(test_data),
     )
 
+    tvc_t = jnp.asarray([data_set.test_tvc_T], dtype=dtype)
+    k_T, c_T, _, _, _ = evaluate_paths(
+        theta, tvc_t, train_data, kernel_set, p, g_hat_fixed
+    )
+    log_tvc = float(
+        -rho_hat * data_set.test_tvc_T - sigma_crra * jnp.log(c_T[0]) + jnp.log(k_T[0])
+    )
+    transversality_ok = bool(log_tvc < tolerance_set.log_tvc_threshold)
+
     finite_positive = bool(
         all(
             np.isfinite(df[name]).all() and (df[name] > 0.0).all()
@@ -345,6 +356,9 @@ def neoclassical_growth_kernel(
         "max_train_residual": max_train_residual,
         "train_residual_tolerance": tolerance_set.train_residual,
         "test_euler_mean_abs": float(test_df["euler"].abs().mean()),
+        "test_tvc_T": data_set.test_tvc_T,
+        "log_tvc_residual": log_tvc,
+        "transversality_ok": transversality_ok,
         "solve_time": elapsed,
         "solver": "nlls-gram",
         "linear_solver": "cholesky",

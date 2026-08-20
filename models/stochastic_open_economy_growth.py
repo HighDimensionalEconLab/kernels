@@ -93,7 +93,7 @@ class StructuralParameters:
 
 @dataclass(frozen=True)
 class DataSettings:
-    # Fixed-step SDE rollout on the integrator's own states; train_T covers
+    # Fixed-step SDE simulation on the integrator's own states; train_T covers
     # ~8 half-lives of the capital transition. Test/tvc dt is 1.0.
     train_points: int = 97
     test_points: int = 71
@@ -341,7 +341,7 @@ def state_drift(policy, state, p):
 
 
 # One covariance, written twice: diagonal diffusion + pre-mixed noise
-# (correlate_noise) in the rollout, explicit direction rows
+# (correlate_noise) in the simulation, explicit direction rows
 # (diffusion_directions) in the residual. Edit them together only; the
 # directional-generator test guards the pairing.
 def state_diffusion(state, p):
@@ -350,7 +350,7 @@ def state_diffusion(state, p):
 
 
 # Residual half of the pairing: directions.T @ directions reproduces the
-# rollout's mixed-noise covariance exactly.
+# simulation's mixed-noise covariance exactly.
 def diffusion_directions(p):
     zero = jnp.zeros_like(p.sigma_z)
     second_loading = p.sigma_r * jnp.sqrt(1.0 - p.corr_zr**2)
@@ -451,7 +451,8 @@ def diffusion_field(state, _, args, p):
     return state_diffusion(state, structural)
 
 
-def batched_sde_rollout(solver, policy, initial_states, noise, T, n_steps, p):
+@partial(jax.jit, static_argnames=("T", "n_steps"))
+def simulate(solver, policy, initial_states, noise, T, n_steps, p):
     correlated_noise = correlate_noise(noise, p.corr_zr)
 
     def solve_one(initial_state, trajectory_noise):
@@ -472,8 +473,8 @@ def batched_sde_rollout(solver, policy, initial_states, noise, T, n_steps, p):
 
 
 @partial(jax.jit, static_argnames=("data_set",))
-def collocation_rollout(solver, policy, initial_states, noise, p, data_set):
-    return batched_sde_rollout(
+def simulate_train(solver, policy, initial_states, noise, p, data_set):
+    return simulate(
         solver,
         policy,
         initial_states,
@@ -484,13 +485,8 @@ def collocation_rollout(solver, policy, initial_states, noise, p, data_set):
     )
 
 
-@partial(jax.jit, static_argnames=("T", "n_steps"))
-def rollout_steps(solver, policy, initial_states, noise, T, n_steps, p):
-    return batched_sde_rollout(solver, policy, initial_states, noise, T, n_steps, p)
-
-
 def collocation_residuals(solver, policy, initial_states, noise, p, data_set):
-    solution = collocation_rollout(solver, policy, initial_states, noise, p, data_set)
+    solution = simulate_train(solver, policy, initial_states, noise, p, data_set)
     states = solution.xs
     residuals = euler_residual_terms(policy, states.reshape(-1, 4), p)[0].reshape(
         *states.shape[:2], 2

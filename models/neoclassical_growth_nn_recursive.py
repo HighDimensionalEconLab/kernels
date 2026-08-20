@@ -50,7 +50,7 @@ class DataSettings:
     # "rk4" spends the budget on a fixed grid; "tsit5" spends it adaptively
     # and enforces residuals on the accepted steps only. rtol/atol/initial_dt
     # configure the adaptive controller and are ignored under rk4; test/tvc
-    # rollouts stay fixed-step.
+    # simulations stay fixed-step.
     train_points: int = 65
     test_points: int = 41
     tvc_steps: int = 256
@@ -268,7 +268,7 @@ class DrawInvestmentPolicy:
         )
 
 
-# Training rollout on the integrator's own states.
+# Training simulation on the integrator's own states.
 @partial(jax.jit, static_argnames=("data_set",))
 def simulate_train(policy, initial_log_states, p, data_set):
     budget = data_set.train_points - 1
@@ -310,7 +310,7 @@ def residual_fn(theta, args, p):
         log_states.shape[:2]
     )
     # Mean squared residual, so the loss threshold means the same thing at any
-    # number of trajectories or steps. An adaptive rollout only fills the
+    # number of trajectories or steps. An adaptive simulation only fills the
     # accepted prefix of the step buffer, so both the residuals and the count
     # are restricted to that prefix.
     if args.data_set.ode_solver == "rk4":
@@ -571,7 +571,7 @@ def neoclassical_growth_nn_recursive(
         ("trajectory", "step"),
         scalars={"z_0": train_initial[:, 0], "k_0": train_initial[:, 1]},
     )
-    # Adaptive rollouts pad the step buffer past the accepted prefix; those
+    # Adaptive simulations pad the step buffer past the accepted prefix; those
     # rows are not training states and leave the frame here.
     train_accepted = (
         None if data_set.ode_solver == "rk4" else np.asarray(train_solution.accepted)
@@ -582,7 +582,7 @@ def neoclassical_growth_nn_recursive(
         train_solution.ts.size if train_accepted is None else train_accepted.sum()
     )
 
-    # Held-out rollouts and benchmark errors.
+    # Held-out simulations and benchmark errors.
     test_initial_log_states = jnp.log(test_initial_conditions)
     test_solution = simulate(policy, test_initial_log_states, test_T, n_test_steps, p)
     jax.block_until_ready(test_solution)

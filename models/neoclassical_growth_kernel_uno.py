@@ -101,15 +101,17 @@ class DataSettings:
     train_points_list: list[float] | None = None
     test_T: float = CONSTANTS.sequence_test_T
     test_points: int = 100
+    test_tvc_T: float = CONSTANTS.transversality_T
 
 
-# Acceptance gates, CLI-reachable; the mpk bound applies only under kinked
-# production.
+# CLI-reachable bars; all but log_tvc_threshold gate acceptance, and the mpk
+# bound applies only under kinked production.
 @dataclass(frozen=True)
 class ToleranceSettings:
     train_residual: float = 1e-5
     validation_residual: float = 5e-3
     mpk_bound: float = 1e-3
+    log_tvc_threshold: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -367,6 +369,19 @@ def neoclassical_growth_kernel_uno(
         k_test, c_test, _, _, _ = path_values(x, K_test, K_tilde_test, k_0)
         return k_test, c_test
 
+    K_tvc, K_tilde_tvc = integrated_kernel_matrices(
+        jnp.asarray([data_set.test_tvc_T], dtype=jnp.float64),
+        train_data,
+        kernel,
+        sigma,
+        ell,
+    )
+    k_T, c_T, _, _, _ = path_values(x, K_tvc, K_tilde_tvc, k_0)
+    log_tvc = float(
+        -rho_hat * data_set.test_tvc_T - sigma_crra * jnp.log(c_T[0]) + jnp.log(k_T[0])
+    )
+    transversality_ok = bool(log_tvc < tolerance_set.log_tvc_threshold)
+
     finite_positive = bool(
         all(
             np.isfinite(df[name]).all() and (df[name] > 0.0).all()
@@ -423,6 +438,9 @@ def neoclassical_growth_kernel_uno(
         "p_lower_violation": p_lower_violation,
         "p_upper_violation": p_upper_violation,
         "test_euler_mean_abs": float(test_df["euler"].abs().mean()),
+        "test_tvc_T": data_set.test_tvc_T,
+        "log_tvc_residual": log_tvc,
+        "transversality_ok": transversality_ok,
         "solve_time": solve_time,
         "solver_status": solver_status,
         "solution_status": solution_status,

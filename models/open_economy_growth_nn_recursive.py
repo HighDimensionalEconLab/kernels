@@ -54,7 +54,7 @@ class ToleranceSettings:
 
 @dataclass(frozen=True)
 class DataSettings:
-    # Every rollout is fixed-step RK4 evaluated on the integrator's own states:
+    # Every simulation is fixed-step RK4 evaluated on the integrator's own states:
     # ``n`` points come from ``n - 1`` steps of ``T / (n - 1)``, including the
     # initial condition. Training places a residual on every knot; the held-out
     # and diagnostic paths read the same states, so nothing is interpolated.
@@ -216,7 +216,7 @@ def path_values(policy, states, parameters):
     )(states)
 
 
-def rollout_field(state, _, parameters, p):
+def drift_field(state, _, parameters, p):
     policy, k_0 = p
     k = k_0 * jnp.exp(state[0])
     investment, current_account = policy(k)
@@ -232,9 +232,9 @@ def rollout_field(state, _, parameters, p):
     )
 
 
-def rollout(policy, T, budget, k_0, parameters, data_set, *, save_at):
+def simulate(policy, T, budget, k_0, parameters, data_set, *, save_at):
     return solve_ode(
-        rollout_field,
+        drift_field,
         RK4(),
         0.0,
         T,
@@ -256,9 +256,9 @@ def states_from_solution(solution, k_0, a_0, flow_scale):
 
 
 @partial(jax.jit, static_argnames=("data_set",))
-def collocation_rollout(policy, initial_k, parameters, data_set):
+def simulate_train(policy, initial_k, parameters, data_set):
     def solve_one(k_0):
-        return rollout(
+        return simulate(
             policy,
             data_set.train_T,
             data_set.train_points - 1,
@@ -279,7 +279,7 @@ def collocation_states(policy, k_0, a_0, parameters, data_set):
     """
     initial_k = jnp.reshape(k_0, (1,))
     initial_a = jnp.reshape(a_0, (1,))
-    solution = collocation_rollout(policy, initial_k, parameters, data_set)
+    solution = simulate_train(policy, initial_k, parameters, data_set)
     states = jax.vmap(states_from_solution, in_axes=(0, 0, 0, None))(
         solution,
         initial_k,
@@ -320,7 +320,7 @@ def residual_fn(theta, args, p):
 @partial(jax.jit, static_argnames=("budget",))
 def evaluate_path_jit(policy, T, budget, k_0, a_0, parameters):
     solution = solve_ode(
-        rollout_field,
+        drift_field,
         RK4(),
         0.0,
         T,

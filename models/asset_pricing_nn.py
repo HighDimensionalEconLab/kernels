@@ -121,9 +121,9 @@ def policy_values(model, t, r, c, g, x_0):
 
 
 def residual_fn(theta, args, p):
-    candidate = nnx.merge(args.graphdef, theta, args.nondiff)
+    model = nnx.merge(args.graphdef, theta, args.nondiff)
     residual = policy_values(
-        candidate,
+        model,
         args.train_t,
         p["r"],
         p["c"],

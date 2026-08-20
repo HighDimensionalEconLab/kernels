@@ -17,6 +17,50 @@ ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
 TRAIN_RESIDUAL_TOL = 1e-8
 
 
+def unpack(z):
+    n_train = z.shape[0] - 1
+    alpha = z[:n_train]
+    p_0 = z[n_train]
+    return alpha, p_0
+
+
+def path_values(z, K_eval, K_tilde_eval):
+    alpha, p_0 = unpack(z)
+    price = p_0 + K_tilde_eval @ alpha
+    dprice_dt = K_eval @ alpha
+    return price, dprice_dt
+
+
+def dividends(t, p):
+    return (p["x_0"] + p["c"] / p["g"]) * jnp.exp(p["g"] * t) - p["c"] / p["g"]
+
+
+@jax.jit
+def objective(z, K):
+    alpha, _ = unpack(z)
+    return alpha @ K @ alpha
+
+
+# No-arbitrage residual dp/dt = r p - x along the dividend path.
+@jax.jit
+def constraints(z, K, K_tilde, t, p):
+    price, dprice_dt = path_values(z, K, K_tilde)
+    return dprice_dt - (p["r"] * price - dividends(t, p))
+
+
+def lagrangian(z, objective_multiplier, multipliers, K, K_tilde, t, p):
+    return objective_multiplier * objective(z, K) + jnp.dot(
+        multipliers, constraints(z, K, K_tilde, t, p)
+    )
+
+
+# Module level: per-call grad/jacfwd/hessian closures would retrace on
+# every solve.
+objective_gradient = jax.jit(jax.grad(objective))
+constraint_jacobian = jax.jit(jax.jacfwd(constraints))
+lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
+
+
 @dataclass(frozen=True)
 class KernelSettings:
     nu: float = 0.5  # math.inf selects the Gaussian/RBF kernel
@@ -71,10 +115,7 @@ def asset_pricing_kernel_uno(
     K_jax = jnp.asarray(K)
     K_tilde_jax = jnp.asarray(K_tilde)
 
-    def dividends(t):
-        return (x_0 + c / g) * jnp.exp(g * t) - c / g
-
-    x_train = dividends(train_data)
+    p = {"r": r, "c": c, "g": g, "x_0": x_0}
 
     n_variables = n_train + 1
     n_constraints = n_train
@@ -82,43 +123,19 @@ def asset_pricing_kernel_uno(
     x_initial = np.zeros(n_variables, dtype=np.float64)
     x_initial[n_train] = max(p_0_guess, 0.0)
 
-    def unpack(z):
-        alpha = z[:n_train]
-        p_0 = z[n_train]
-        return alpha, p_0
-
-    def path_values(z, K_eval, K_tilde_eval):
-        alpha, p_0 = unpack(z)
-        p = p_0 + K_tilde_eval @ alpha
-        dp_dt = K_eval @ alpha
-        return p, dp_dt
-
-    def objective(z):
-        alpha, _ = unpack(z)
-        return alpha @ K_jax @ alpha
-
-    def constraints(z):
-        p, dp_dt = path_values(z, K_jax, K_tilde_jax)
-        return dp_dt - (r * p - x_train)
-
-    def lagrangian(z, objective_multiplier, multipliers):
-        return objective_multiplier * objective(z) + jnp.dot(
-            multipliers, constraints(z)
-        )
-
-    objective_value = jax.jit(objective)
-    objective_gradient = jax.jit(jax.grad(objective))
-    constraint_values = jax.jit(constraints)
-    constraint_jacobian = jax.jit(jax.jacfwd(constraints))
-    lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
-
     x_initial_jax = jnp.asarray(x_initial)
     zero_multipliers = jnp.zeros(n_constraints, dtype=jnp.float64)
-    jax.block_until_ready(objective_value(x_initial_jax))
-    jax.block_until_ready(objective_gradient(x_initial_jax))
-    jax.block_until_ready(constraint_values(x_initial_jax))
-    jax.block_until_ready(constraint_jacobian(x_initial_jax))
-    jax.block_until_ready(lagrangian_hessian(x_initial_jax, 1.0, zero_multipliers))
+    jax.block_until_ready(objective(x_initial_jax, K_jax))
+    jax.block_until_ready(objective_gradient(x_initial_jax, K_jax))
+    jax.block_until_ready(constraints(x_initial_jax, K_jax, K_tilde_jax, train_data, p))
+    jax.block_until_ready(
+        constraint_jacobian(x_initial_jax, K_jax, K_tilde_jax, train_data, p)
+    )
+    jax.block_until_ready(
+        lagrangian_hessian(
+            x_initial_jax, 1.0, zero_multipliers, K_jax, K_tilde_jax, train_data, p
+        )
+    )
 
     variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
     variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
@@ -135,10 +152,10 @@ def asset_pricing_kernel_uno(
     )
 
     def objective_callback(z):
-        return float(objective_value(jnp.asarray(z)))
+        return float(objective(jnp.asarray(z), K_jax))
 
     def objective_gradient_callback(z, gradient):
-        gradient[:] = np.asarray(objective_gradient(jnp.asarray(z)))
+        gradient[:] = np.asarray(objective_gradient(jnp.asarray(z), K_jax))
 
     model.set_objective(unopy.MINIMIZE, objective_callback, objective_gradient_callback)
 
@@ -146,10 +163,14 @@ def asset_pricing_kernel_uno(
     jacobian_columns = np.tile(np.arange(n_variables, dtype=np.int32), n_constraints)
 
     def constraints_callback(z, constraint_output):
-        constraint_output[:] = np.asarray(constraint_values(jnp.asarray(z)))
+        constraint_output[:] = np.asarray(
+            constraints(jnp.asarray(z), K_jax, K_tilde_jax, train_data, p)
+        )
 
     def jacobian_callback(z, jacobian_output):
-        jacobian_output[:] = np.asarray(constraint_jacobian(jnp.asarray(z))).reshape(-1)
+        jacobian_output[:] = np.asarray(
+            constraint_jacobian(jnp.asarray(z), K_jax, K_tilde_jax, train_data, p)
+        ).reshape(-1)
 
     model.set_constraints(
         n_constraints,
@@ -172,6 +193,10 @@ def asset_pricing_kernel_uno(
                 jnp.asarray(z),
                 float(objective_multiplier),
                 jnp.asarray(multipliers),
+                K_jax,
+                K_tilde_jax,
+                train_data,
+                p,
             )
         )
         hessian_output[:] = hessian[hessian_rows, hessian_columns]
@@ -200,9 +225,11 @@ def asset_pricing_kernel_uno(
     result = solver.optimize(model)
     elapsed = time.perf_counter() - start
 
-    z = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))
+    # primal_solution appends solver-internal auxiliaries; only the leading
+    # n + 1 block is ours.
+    z = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))[:n_variables]
     alpha, p_0 = unpack(z)
-    train_residual = constraints(z)
+    train_residual = constraints(z, K_jax, K_tilde_jax, train_data, p)
     max_train_residual = float(jnp.max(jnp.abs(train_residual)))
 
     @jax.jit
@@ -214,7 +241,7 @@ def asset_pricing_kernel_uno(
         return p_test, dp_test
 
     p_test, dp_test = kernel_solution(test_data)
-    test_residual = dp_test - (r * p_test - dividends(test_data))
+    test_residual = dp_test - (r * p_test - dividends(test_data, p))
     p_benchmark = mu_f_array(test_data, c, g, r, x_0)
     p_rel_error = jnp.abs(p_benchmark - p_test) / p_benchmark
 

@@ -34,6 +34,21 @@ class Theta(NamedTuple):
     p_0: jax.Array
 
 
+# Anchored price path and its time-derivative.
+def path_values(theta, K_eval, K_tilde_eval):
+    return theta.p_0 + K_tilde_eval @ theta.alpha, K_eval @ theta.alpha
+
+
+def dividends(t, p):
+    return (p["x_0"] + p["c"] / p["g"]) * jnp.exp(p["g"] * t) - p["c"] / p["g"]
+
+
+# No-arbitrage residual dp/dt = r p - x along the dividend path.
+def residual_fn(theta, args, p):
+    price, dprice_dt = path_values(theta, args["K"], args["K_tilde"])
+    return dprice_dt - (p["r"] * price - dividends(args["t"], p))
+
+
 @dataclass(frozen=True)
 class DataSettings:
     train_T: float = 40.0
@@ -87,14 +102,7 @@ def asset_pricing_kernel(
     train_data = make_train_t_grid(data_set, dtype)
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
     n_train = len(train_data)
-
-    def dividends(t):
-        return (x_0 + c / g) * jnp.exp(g * t) - c / g
-
-    x_train = dividends(train_data)
-
-    def path_values(theta, K_eval, K_tilde_eval):
-        return theta.p_0 + K_tilde_eval @ theta.alpha, K_eval @ theta.alpha
+    p = {"r": r, "c": c, "g": g, "x_0": x_0}
 
     # The residual is affine in theta, so each ridge-LM step is an exact
     # kernel ridge solve converging to the minimizer of ||r||^2 + ridge * a'Ka
@@ -104,13 +112,7 @@ def asset_pricing_kernel(
         train_data, kernel, sigma, ell, repeats=1
     )
     K_jax = K_metric
-
-    def train_path_values(theta):
-        return path_values(theta, K_jax, K_tilde_jax)
-
-    def residual_fn(theta):
-        p, dp_dt = train_path_values(theta)
-        return dp_dt - (r * p - x_train)
+    residual_args = {"K": K_jax, "K_tilde": K_tilde_jax, "t": train_data}
 
     solver = RidgeLevenbergMarquardt(
         residual_fn,
@@ -133,15 +135,15 @@ def asset_pricing_kernel(
     )
 
     timer = Stopwatch()
-    result = solver.solve(theta_0, **solve_options)
+    result = solver.solve(theta_0, residual_args, p=p, **solve_options)
     elapsed = timer.elapsed(result)
 
     theta = result.x
     alpha, p_0 = theta.alpha, theta.p_0
     steps = int(result.steps)
     status = int(result.status)
-    p_train, dp_train = train_path_values(theta)
-    train_residual = dp_train - (r * p_train - x_train)
+    p_train, dp_train = path_values(theta, K_jax, K_tilde_jax)
+    train_residual = dp_train - (r * p_train - dividends(train_data, p))
     max_train_residual = float(jnp.max(jnp.abs(train_residual)))
 
     @jax.jit
@@ -152,7 +154,7 @@ def asset_pricing_kernel(
         return path_values(theta, K_test, K_tilde_test)
 
     p_test, dp_test = kernel_solution(test_data)
-    test_residual = dp_test - (r * p_test - dividends(test_data))
+    test_residual = dp_test - (r * p_test - dividends(test_data, p))
     p_benchmark = mu_f_array(test_data, c, g, r, x_0)
     p_rel_error = jnp.abs(p_benchmark - p_test) / p_benchmark
 
@@ -268,8 +270,8 @@ def asset_pricing_kernel(
             "solver": solver,
             "residual_fn": residual_fn,
             "theta_0": theta_0,
-            "p": None,
-            "residual_args": None,
+            "p": p,
+            "residual_args": residual_args,
             "multi_start": None,
             "options": solve_options,
         },

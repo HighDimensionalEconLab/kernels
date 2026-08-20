@@ -45,7 +45,7 @@ from models.utilities import (
 
 
 @dataclass(frozen=True)
-class StoppingCriteria:
+class ToleranceSettings:
     max_steps: int = 100
     # float64-tuned; float32 callers pass looser values explicitly.
     residual_atol: float = 1e-5
@@ -127,7 +127,9 @@ def stochastic_growth_kernel_recursive(
     ),
     # residual_atol sits just above this representation's float64 residual
     # floor.
-    stop_set: StoppingCriteria = StoppingCriteria(max_steps=150, residual_atol=7e-5),
+    tolerance_set: ToleranceSettings = ToleranceSettings(
+        max_steps=150, residual_atol=7e-5
+    ),
     verbose: bool = True,
 ):
     jax.config.update("jax_enable_x64", True)
@@ -224,7 +226,7 @@ def stochastic_growth_kernel_recursive(
     lm_solver = RidgeLevenbergMarquardt(
         partial(residual_fn, kernel_set=kernel_set),
         metric=metric,
-        ridge=stop_set.ridge,
+        ridge=tolerance_set.ridge,
         init_damping=opt_set.init_damping,
         damping_decrease=opt_set.damping_decrease,
         damping_increase=opt_set.damping_increase,
@@ -238,9 +240,9 @@ def stochastic_growth_kernel_recursive(
         theta_0,
         args,
         p=p,
-        max_steps=stop_set.max_steps,
-        atol=stop_set.residual_atol,
-        gtol=stop_set.gtol,
+        max_steps=tolerance_set.max_steps,
+        atol=tolerance_set.residual_atol,
+        gtol=tolerance_set.gtol,
         max_steps_is_success=False,
     )
     jax.block_until_ready(result)
@@ -339,7 +341,7 @@ def stochastic_growth_kernel_recursive(
         p,
     )
     max_log_tvc = float(jnp.max(train_tvc))
-    transversality_ok = bool(max_log_tvc < stop_set.log_tvc_threshold)
+    transversality_ok = bool(max_log_tvc < tolerance_set.log_tvc_threshold)
 
     max_train_euler = float(jnp.max(jnp.abs(train_values["euler_residual"])))
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
@@ -398,7 +400,7 @@ def stochastic_growth_kernel_recursive(
         "log_k_lengthscale": state_lengthscales(kernel_set)[1],
         "metric_epsilon": kernel_set.metric_epsilon,
         "metric": "shifted_rkhs_gram",
-        "ridge": stop_set.ridge,
+        "ridge": tolerance_set.ridge,
         "free_constant": kernel_set.free_constant,
         "linear_mean": kernel_set.linear_mean,
         "train_loss": train_loss,
@@ -452,7 +454,7 @@ def stochastic_growth_kernel_recursive(
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
         "opt_set": asdict(opt_set),
-        "stop_set": asdict(stop_set),
+        "tolerance_set": asdict(tolerance_set),
         "parameters": {
             "a": a,
             "delta": delta,

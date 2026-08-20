@@ -28,7 +28,6 @@ from models.neoclassical_growth import (
 from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from models.utilities import (
     ACTIVATIONS,
-    DOMAIN_EPS,
     STATUS_TO_REASON,
     OptimizerSettings,
     cache_key,
@@ -80,7 +79,7 @@ class ResidualArgs:
 
 
 @dataclass(frozen=True)
-class StoppingCriteria:
+class ToleranceSettings:
     # max_steps is the LM-update budget per epoch; training ICs are redrawn at
     # each interior epoch boundary, so num_epochs = 1 never resamples.
     max_steps: int = 250
@@ -351,7 +350,7 @@ def neoclassical_growth_nn_recursive(
         geodesic_acceleration=True,
         geodesic_acceptance_ratio=0.541,
     ),
-    stop_set: StoppingCriteria = StoppingCriteria(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
     # Directory for content-addressed policy artifacts (e.g. ".results"): an
     # existing artifact for this exact configuration is loaded instead of
     # training, and a fresh solve is saved there. save_policy writes one
@@ -369,7 +368,7 @@ def neoclassical_growth_nn_recursive(
     n_test_steps = data_set.test_points - 1
     test_T = data_set.test_T
     # Without a positive variance every epoch redraw returns the same batch.
-    if stop_set.num_epochs > 1 and (
+    if tolerance_set.num_epochs > 1 and (
         ic_set.train_log_z_variance <= 0.0 and ic_set.train_log_k_variance <= 0.0
     ):
         raise ValueError("epoch resampling requires a positive training log variance")
@@ -409,10 +408,12 @@ def neoclassical_growth_nn_recursive(
         epoch_key=jax.random.fold_in(train_ic_key, 1),
         restart_key=jax.random.fold_in(train_ic_key, 2),
         epoch=jnp.asarray(0, dtype=jnp.int32),
-        train_loss_threshold=jnp.asarray(stop_set.train_loss_threshold, dtype=dtype),
-        epoch_steps=jnp.asarray(stop_set.max_steps, dtype=jnp.int32),
+        train_loss_threshold=jnp.asarray(
+            tolerance_set.train_loss_threshold, dtype=dtype
+        ),
+        epoch_steps=jnp.asarray(tolerance_set.max_steps, dtype=jnp.int32),
         total_steps=jnp.asarray(
-            stop_set.num_epochs * stop_set.max_steps, dtype=jnp.int32
+            tolerance_set.num_epochs * tolerance_set.max_steps, dtype=jnp.int32
         ),
         data_set=data_set,
     )
@@ -449,7 +450,7 @@ def neoclassical_growth_nn_recursive(
         "initial_dt": data_set.initial_dt,
         "hc_set": asdict(hc_set),
         "opt_set": asdict(opt_set),
-        "stop_set": asdict(stop_set),
+        "tolerance_set": asdict(tolerance_set),
     }
     problem_key = cache_key(problem_config)
     run_key = cache_key(run_config)
@@ -502,27 +503,27 @@ def neoclassical_growth_nn_recursive(
             log_k_0=math.log(k_0),
             log_z_scale=math.sqrt(ic_set.train_log_z_variance),
             log_k_scale=math.sqrt(ic_set.train_log_k_variance),
-            epoch_early_stopping=stop_set.epoch_early_stopping,
+            epoch_early_stopping=tolerance_set.epoch_early_stopping,
         )
         draw = DrawInvestmentPolicy(hc_set, z_scale=z_0, k_scale=k_0, dtype=dtype)
         # The per-step tolerance is sound only while the training batch never
         # changes; across epochs, convergence is judged at the boundaries
         # instead.
         atol = (
-            math.sqrt(stop_set.train_loss_threshold)
-            if stop_set.num_epochs == 1
+            math.sqrt(tolerance_set.train_loss_threshold)
+            if tolerance_set.num_epochs == 1
             else 0.0
         )
         multi_start = MultiStart(
             key=multi_start_key,
-            num_starts=stop_set.num_attempts,
+            num_starts=tolerance_set.num_attempts,
             draw=draw,
         )
         solve_options = dict(
-            max_steps=stop_set.num_epochs * stop_set.max_steps,
+            max_steps=tolerance_set.num_epochs * tolerance_set.max_steps,
             atol=atol,
             callback=callback,
-            max_steps_is_success=not stop_set.epoch_early_stopping,
+            max_steps_is_success=not tolerance_set.epoch_early_stopping,
         )
 
         start_time = time.perf_counter()
@@ -544,7 +545,7 @@ def neoclassical_growth_nn_recursive(
         theta_final, solve_args = result.x, result.args
         r = residual_fn(theta_final, solve_args, p)
         train_loss = float(jnp.sum(r * r))
-        epochs_run = -(-steps // stop_set.max_steps)
+        epochs_run = -(-steps // tolerance_set.max_steps)
         stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
         attempt = int(result.multi_start.attempt) + 1
         final_damping = float(result.lm_state.damping)
@@ -552,7 +553,7 @@ def neoclassical_growth_nn_recursive(
         if verbose:
             print(
                 f"attempt {attempt}: {stopping_reason} after {steps} steps "
-                f"(epoch {epochs_run}/{stop_set.num_epochs}), "
+                f"(epoch {epochs_run}/{tolerance_set.num_epochs}), "
                 f"train_loss={train_loss:.3e} ({solve_time:.2f}s)"
             )
         policy = nnx.merge(graphdef, theta_final, nondiff)
@@ -615,10 +616,10 @@ def neoclassical_growth_nn_recursive(
     test_df["c_benchmark"] = np.concatenate([c for _, c in benchmark_paths])
     test_df["k_rel_error"] = (test_df["k"] - test_df["k_benchmark"]) / test_df[
         "k_benchmark"
-    ].abs().clip(lower=DOMAIN_EPS)
+    ].abs()
     test_df["c_rel_error"] = (test_df["c"] - test_df["c_benchmark"]) / test_df[
         "c_benchmark"
-    ].abs().clip(lower=DOMAIN_EPS)
+    ].abs()
     abs_errors = test_df[["k_rel_error", "c_rel_error"]].abs()
     trajectory_mean = abs_errors.groupby(test_df["trajectory"]).mean()
     error_fields = {
@@ -638,7 +639,7 @@ def neoclassical_growth_nn_recursive(
         policy, train_batch_log_states, data_set.train_tvc_T, data_set.tvc_steps, p
     )
     max_log_tvc_residual = float(jnp.max(train_tvc))
-    transversality_ok = bool(max_log_tvc_residual < stop_set.log_tvc_threshold)
+    transversality_ok = bool(max_log_tvc_residual < tolerance_set.log_tvc_threshold)
 
     max_train_euler = float(train_df["euler_residual"].abs().max())
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
@@ -691,7 +692,7 @@ def neoclassical_growth_nn_recursive(
         "min_test_c": float(jnp.min(test_values["c"])),
         "test_path_ok": test_path_ok,
         "steps": steps,
-        "num_epochs": stop_set.num_epochs,
+        "num_epochs": tolerance_set.num_epochs,
         "epochs_run": epochs_run,
         "parameter_derivative": "conditional_on_carried_training_batch",
         "attempt": attempt,
@@ -728,7 +729,7 @@ def neoclassical_growth_nn_recursive(
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
         "opt_set": asdict(opt_set),
-        "stop_set": asdict(stop_set),
+        "tolerance_set": asdict(tolerance_set),
         "parameters": {
             "a": a,
             "delta": delta,

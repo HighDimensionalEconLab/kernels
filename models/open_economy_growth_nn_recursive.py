@@ -26,7 +26,6 @@ from models.open_economy_growth import (
 from models.open_economy_growth_benchmark import open_economy_growth_benchmark
 from models.utilities import (
     ACTIVATIONS,
-    DOMAIN_EPS,
     STATUS_TO_REASON,
     OptimizerSettings,
     Stopwatch,
@@ -43,13 +42,18 @@ from models.utilities import (
 # or benchmark information enters the residual or initialization.
 
 
-# Acceptance gates, CLI-reachable so a float32 caller can pass its own bar
-# (the float32 replication driver does).
+# Acceptance gates (CLI-reachable so a float32 caller can pass its own bar;
+# the float32 replication driver does) plus the solve budget.
 @dataclass(frozen=True)
 class ToleranceSettings:
     train_residual: float = 1e-5
     validation_residual: float = 5e-3
     benchmark_match: float = 1e-3
+    max_steps: int = 250
+    train_loss_threshold: float = 1e-14
+    # frac_accepted measures acceptance within the restart budget, not first-try
+    # robustness: a seed that stalls short of the loss threshold is redrawn.
+    num_attempts: int = 5
 
 
 @dataclass(frozen=True)
@@ -65,15 +69,6 @@ class DataSettings:
     diagnostic_T: float = 160.0
     diagnostic_points: int = 161
     policy_grid_size: int = 100
-
-
-@dataclass(frozen=True)
-class StoppingCriteria:
-    max_steps: int = 250
-    train_loss_threshold: float = 1e-14
-    # frac_accepted measures acceptance within the restart budget, not first-try
-    # robustness: a seed that stalls short of the loss threshold is redrawn.
-    num_attempts: int = 5
 
 
 @dataclass(frozen=True)
@@ -361,7 +356,6 @@ def open_economy_growth_nn_recursive(
         damping_increase=2.71,
         geodesic_acceptance_ratio=0.541,
     ),
-    stop_set: StoppingCriteria = StoppingCriteria(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
 ):
@@ -372,11 +366,10 @@ def open_economy_growth_nn_recursive(
     a_0_jax = jnp.asarray(a_0, dtype=dtype)
     dynamic_parameters = DynamicModelParameters.from_model(parameters, dtype)
     initial_output = float(production(k_0_jax, 1.0, parameters))
-    flow_scale = max(initial_output, DOMAIN_EPS)
     nn_set = replace(
         nn_set,
-        flow_scale=flow_scale,
-        investment_anchor=max(parameters.delta * k_0, DOMAIN_EPS),
+        flow_scale=initial_output,
+        investment_anchor=parameters.delta * k_0,
         k_0_ref=k_0,
     )
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
@@ -401,14 +394,14 @@ def open_economy_growth_nn_recursive(
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
-    atol = math.sqrt(stop_set.train_loss_threshold)
+    atol = math.sqrt(tolerance_set.train_loss_threshold)
     multi_start = MultiStart(
         key=multi_start_key,
-        num_starts=stop_set.num_attempts,
+        num_starts=tolerance_set.num_attempts,
         draw=DrawNNXModule(SequentialPolicyNN, nn_set, dtype=dtype),
     )
     solve_options = dict(
-        max_steps=stop_set.max_steps,
+        max_steps=tolerance_set.max_steps,
         atol=atol,
         max_steps_is_success=False,
     )
@@ -549,8 +542,9 @@ def open_economy_growth_nn_recursive(
     grid_lo = min(k_0, float(steady["k"]))
     grid_hi = max(k_0, float(steady["k"]))
     margin = 0.05 * (grid_hi - grid_lo) + 1e-6
+    # Floor at a positive value: the policy evaluates log k.
     policy_k = jnp.linspace(
-        max(grid_lo - margin, DOMAIN_EPS),
+        max(grid_lo - margin, 1e-8),
         grid_hi + margin,
         data_set.policy_grid_size,
         dtype=dtype,
@@ -670,7 +664,6 @@ def open_economy_growth_nn_recursive(
         "nn_set": asdict(nn_set),
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
-        "stop_set": asdict(stop_set),
         "tolerance_set": asdict(tolerance_set),
         "initial_conditions": {"k_0": k_0, "a_0": a_0},
     }

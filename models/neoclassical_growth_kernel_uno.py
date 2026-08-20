@@ -30,10 +30,6 @@ from models.utilities import (
 )
 
 ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
-# IPOPT's interior point evaluates infeasible trial iterates: the model
-# functions clamp k at this floor and the primal bounds keep (c, mu, k) above
-# it.
-DOMAIN_EPS = 1e-6
 
 
 def unpack(x):
@@ -63,20 +59,21 @@ def objective(x, K):
 
 
 # CRRA first-order condition u'(c) = mu, i.e. mu c^sigma_crra = 1; the
-# costate and resource residuals are utility-free.
+# costate and resource residuals are utility-free. IPOPT's interior point
+# evaluates infeasible trial iterates, so k clamps at domain_eps.
 @jax.jit
-def constraints(x, K, K_tilde, p):
+def constraints(x, K, K_tilde, p, domain_eps):
     k, c, mu, dk_dt, dmu_dt = path_values(x, K, K_tilde, p.k_0)
-    k_positive = jnp.maximum(k, DOMAIN_EPS)
+    k_positive = jnp.maximum(k, domain_eps)
     resource = dk_dt - (production(p.z_0, k_positive, p) - p.delta * k - c)
     euler = dmu_dt + mu * (mpk(p.z_0, k_positive, p) - p.delta - p.rho_hat)
     shadow_price = mu * c**p.sigma_crra - 1.0
     return jnp.concatenate([resource, euler, shadow_price, k, c, mu])
 
 
-def lagrangian(x, objective_multiplier, multipliers, K, K_tilde, p):
+def lagrangian(x, objective_multiplier, multipliers, K, K_tilde, p, domain_eps):
     return objective_multiplier * objective(x, K) + jnp.dot(
-        multipliers, constraints(x, K, K_tilde, p)
+        multipliers, constraints(x, K, K_tilde, p, domain_eps)
     )
 
 
@@ -119,6 +116,10 @@ class SolverSettings:
     preset: str = "ipopt"
     max_iterations: int | None = None
     time_limit: float | None = None
+    # Domain floor for the interior point's infeasible trial iterates: the
+    # model functions clamp k here and the primal bounds keep (c, mu, k)
+    # above it.
+    domain_eps: float = 1e-6
 
 
 # Fail-fast budget for kinked production: near the basin threshold the NLP
@@ -160,6 +161,7 @@ def neoclassical_growth_kernel_uno(
         solver_set = (
             KINKED_SOLVER_SETTINGS if use_kinked_production else SolverSettings()
         )
+    domain_eps = solver_set.domain_eps
 
     kernel = normalize_kernel(kernel_set.kernel)
     ell, sigma = kernel_set.ell, kernel_set.sigma
@@ -192,18 +194,18 @@ def neoclassical_growth_kernel_uno(
 
     c_flow_guess = steady_flow_consumption_guess(z_0, k_0, a, delta, A, b_1, b_2)
     if c_0_guess is not None:
-        c_flow_guess = max(float(c_0_guess), DOMAIN_EPS)
+        c_flow_guess = float(c_0_guess)
     x_initial = np.zeros(n_variables, dtype=np.float64)
     x_initial[3 * n_train] = c_flow_guess
     x_initial[3 * n_train + 1] = c_flow_guess**-sigma_crra
 
     variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
     variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
-    variable_lower_bounds[3 * n_train :] = DOMAIN_EPS
+    variable_lower_bounds[3 * n_train :] = domain_eps
     constraint_lower_bounds = np.concatenate(
         [
             np.zeros(3 * n_train, dtype=np.float64),
-            np.full(3 * n_train, DOMAIN_EPS, dtype=np.float64),
+            np.full(3 * n_train, domain_eps, dtype=np.float64),
         ]
     )
     constraint_upper_bounds = np.concatenate(
@@ -235,12 +237,12 @@ def neoclassical_growth_kernel_uno(
 
     def constraints_callback(x, constraint_output):
         constraint_output[:] = np.asarray(
-            constraints(jnp.asarray(x), K_jax, K_tilde_jax, p)
+            constraints(jnp.asarray(x), K_jax, K_tilde_jax, p, domain_eps)
         )
 
     def jacobian_callback(x, jacobian_output):
         jacobian_output[:] = np.asarray(
-            constraint_jacobian(jnp.asarray(x), K_jax, K_tilde_jax, p)
+            constraint_jacobian(jnp.asarray(x), K_jax, K_tilde_jax, p, domain_eps)
         ).reshape(-1)
 
     model.set_constraints(
@@ -267,6 +269,7 @@ def neoclassical_growth_kernel_uno(
                 K_jax,
                 K_tilde_jax,
                 p,
+                domain_eps,
             )
         )
         hessian_output[:] = hessian[hessian_rows, hessian_columns]
@@ -307,7 +310,7 @@ def neoclassical_growth_kernel_uno(
             t_grid, train_data, kernel, sigma, ell
         )
         k, c, mu, dk_dt, dmu_dt = path_values(x, K_eval, K_tilde_eval, k_0)
-        k_positive = jnp.maximum(k, DOMAIN_EPS)
+        k_positive = jnp.maximum(k, domain_eps)
         return pd.DataFrame(
             {
                 "t": np.asarray(t_grid),
@@ -346,7 +349,7 @@ def neoclassical_growth_kernel_uno(
     # The costate-implied MPK must sit between the two branch slopes up to
     # kink slack; violations gate acceptance under kinked production.
     def mpk_violations(df):
-        k = np.maximum(df["k"].to_numpy(), DOMAIN_EPS)
+        k = np.maximum(df["k"].to_numpy(), domain_eps)
         m1 = z_0 * A * a * k ** (a - 1.0)
         m2 = b_1 * m1
         implied = (

@@ -24,14 +24,13 @@ from models.neoclassical_growth import (
 )
 from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from models.utilities import (
-    DOMAIN_EPS,
+    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
+)
+from models.utilities import (
     STATUS_TO_REASON,
     Stopwatch,
     acceptance_fields,
     make_train_t_grid,
-)
-from models.utilities import (
-    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
 
 
@@ -116,11 +115,11 @@ def snapshot(theta, t, p, train_data, kernel_set, g_hat=None, benchmark=None, z=
         k_b, c_b = benchmark(t)
         df["k_benchmark"] = np.asarray(k_b)
         df["c_benchmark"] = np.asarray(c_b)
-        df["k_rel_error"] = np.abs(df["k"] - df["k_benchmark"]) / np.maximum(
-            np.abs(df["k_benchmark"]), DOMAIN_EPS
+        df["k_rel_error"] = np.abs(df["k"] - df["k_benchmark"]) / np.abs(
+            df["k_benchmark"]
         )
-        df["c_rel_error"] = np.abs(df["c"] - df["c_benchmark"]) / np.maximum(
-            np.abs(df["c_benchmark"]), DOMAIN_EPS
+        df["c_rel_error"] = np.abs(df["c"] - df["c_benchmark"]) / np.abs(
+            df["c_benchmark"]
         )
     return df
 
@@ -236,7 +235,7 @@ def neoclassical_growth_kernel(
 
     c_flow_guess = steady_flow_consumption_guess(z_0, k_0, a, delta, A, b_1, b_2)
     if c_0_guess is not None:
-        c_flow_guess = max(float(c_0_guess), DOMAIN_EPS)
+        c_flow_guess = float(c_0_guess)
     theta_0 = Theta(
         alpha_mu=jnp.zeros(n_train, dtype=dtype),
         alpha_c=jnp.zeros(n_train, dtype=dtype),

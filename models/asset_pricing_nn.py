@@ -42,7 +42,7 @@ class PricePolicySettings:
 
 
 @dataclass(frozen=True)
-class StoppingCriteria:
+class ToleranceSettings:
     max_steps: int = 400
     train_loss_threshold: float = 1e-15
     num_attempts: int = 5
@@ -160,7 +160,7 @@ def asset_pricing_nn(
         damping_increase=4.0,
         geodesic_acceptance_ratio=0.75,
     ),
-    stop_set: StoppingCriteria = StoppingCriteria(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
 ):
     jax.config.update("jax_enable_x64", True)
@@ -191,15 +191,15 @@ def asset_pricing_nn(
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
-    atol = math.sqrt(stop_set.train_loss_threshold)
+    atol = math.sqrt(tolerance_set.train_loss_threshold)
     solve_options = dict(
-        max_steps=stop_set.max_steps,
+        max_steps=tolerance_set.max_steps,
         atol=atol,
         max_steps_is_success=False,
     )
     multi_start = MultiStart(
         key=multi_start_key,
-        num_starts=stop_set.num_attempts,
+        num_starts=tolerance_set.num_attempts,
         draw=DrawNNXModule(PricePolicyNN, nn_set, dtype=dtype),
     )
 
@@ -274,7 +274,7 @@ def asset_pricing_nn(
             "nn_set": asdict(nn_set),
             "data_set": asdict(data_set),
             "lm_set": asdict(lm_set),
-            "stop_set": asdict(stop_set),
+            "tolerance_set": asdict(tolerance_set),
             "parameters": {"r": r, "c": c, "g": g},
             "initial_conditions": {"x_0": x_0},
         },

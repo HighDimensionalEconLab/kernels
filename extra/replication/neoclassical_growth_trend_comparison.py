@@ -54,7 +54,7 @@ def run(
                 test_T=test_T, test_points=test_points
             ),
             nn_set=neoclassical_growth_nn.GrowthPolicySettings(learn_g_hat=True),
-            stop_set=neoclassical_growth_nn.StoppingCriteria(
+            tolerance_set=neoclassical_growth_nn.ToleranceSettings(
                 train_loss_threshold=1e-14
             ),
             verbose=verbose,

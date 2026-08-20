@@ -20,7 +20,6 @@ from models.kernels import (
     rkhs_norm_squared,
 )
 from models.utilities import (
-    DOMAIN_EPS,
     STATUS_TO_REASON,
     Stopwatch,
     acceptance_fields,
@@ -133,8 +132,8 @@ def optimal_advertising_kernel(
             residuals(path_values(theta, K, K_tilde))
         )
 
-    u_0_guess = max(beta * x_0 / max(1.0 - x_0, DOMAIN_EPS), DOMAIN_EPS)
-    mu_0_guess = max(gamma / (rho_hat + beta + u_0_guess), DOMAIN_EPS)
+    u_0_guess = beta * x_0 / (1.0 - x_0)
+    mu_0_guess = gamma / (rho_hat + beta + u_0_guess)
     theta_0 = Theta(
         alpha_x=jnp.zeros(n_train, dtype=dtype),
         alpha_mu=jnp.zeros(n_train, dtype=dtype),

@@ -19,7 +19,6 @@ if __name__ == "__main__":
 
 ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
 TRAIN_RESIDUAL_TOL = 1e-5
-DOMAIN_EPS = 1e-8
 
 
 @dataclass(frozen=True)
@@ -46,6 +45,9 @@ class SolverSettings:
     # Acceptance is wall-clock gated: filtersqp stops (and the solve is rejected)
     # when the limit is hit, so the budget must comfortably cover the NLP size.
     time_limit: float | None = 10.0
+    # Domain floor for infeasible trial iterates: production clamps (k, h)
+    # here and the primal bounds keep the paths above it.
+    domain_eps: float = 1e-8
 
 
 def human_capital_initial_residual(params, batch):
@@ -114,6 +116,7 @@ def human_capital_kernel_uno(
     verbose: bool = False,
 ):
     nu, ell, sigma = kernel_set.nu, kernel_set.ell, kernel_set.sigma
+    domain_eps = solver_set.domain_eps
     if data_set.train_points_list is None:
         train_data = jnp.linspace(0, data_set.train_T, data_set.train_points)
     else:
@@ -205,8 +208,8 @@ def human_capital_kernel_uno(
         return k, h, i_k, i_h, c, mu_k, mu_h, dk_dt, dh_dt, dmu_k_dt, dmu_h_dt
 
     def production_terms(k, h):
-        k_positive = jnp.maximum(k, DOMAIN_EPS)
-        h_positive = jnp.maximum(h, DOMAIN_EPS)
+        k_positive = jnp.maximum(k, domain_eps)
+        h_positive = jnp.maximum(h, domain_eps)
         f = (k_positive**a_k) * (h_positive**a_h)
         f_k = a_k * (k_positive ** (a_k - 1.0)) * (h_positive**a_h)
         f_h = a_h * (k_positive**a_k) * (h_positive ** (a_h - 1.0))
@@ -283,11 +286,11 @@ def human_capital_kernel_uno(
 
     variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
     variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
-    variable_lower_bounds[scalar_start:] = DOMAIN_EPS
+    variable_lower_bounds[scalar_start:] = domain_eps
     constraint_lower_bounds = np.concatenate(
         [
             np.zeros(n_equalities, dtype=np.float64),
-            np.full(7 * n_train, DOMAIN_EPS, dtype=np.float64),
+            np.full(7 * n_train, domain_eps, dtype=np.float64),
         ]
     )
     constraint_upper_bounds = np.concatenate(

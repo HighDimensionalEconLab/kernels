@@ -22,7 +22,6 @@ from models.stochastic_open_economy_growth import (
     SequentialPolicyNN,
     SequentialPolicySettings,
     StructuralParameters,
-    ToleranceSettings,
     collocation_residuals,
     make_sequential_policy,
     problem_cache_config,
@@ -37,7 +36,6 @@ from models.stochastic_open_economy_growth import (
 )
 from models.utilities import (
     ACTIVATIONS,
-    DOMAIN_EPS,
     NEOCLASSICAL_GROWTH_CONSTANTS,
     SDE_SOLVERS,
     STATUS_TO_REASON,
@@ -59,8 +57,13 @@ from models.utilities import (
 SMOOTH_ACTIVATIONS = frozenset(ACTIVATIONS) - {"relu"}
 
 
+# Acceptance gates on the held-out batch (the float32 replication driver
+# passes its own bars) plus the epoch/shock-ladder training budget.
 @dataclass(frozen=True)
-class StoppingCriteria:
+class ToleranceSettings:
+    test_euler_mean_abs: float = 5e-3
+    test_euler_max: float = 5e-2
+    test_diffusion_max_abs: float = 5e-2
     # max_steps is the per-epoch LM budget; noise (and dispersed ICs) redraw
     # at epoch boundaries. The shock ladder rises geometrically to 1.0 over
     # continuation_epochs; convergence is only declared at scale 1.0.
@@ -237,7 +240,6 @@ def stochastic_open_economy_growth_nn_recursive(
         geodesic_acceleration=True,
         geodesic_acceptance_ratio=0.782,
     ),
-    stop_set: StoppingCriteria = StoppingCriteria(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     asset_shift_scale: float = 0.5,
     # Content-addressed artifact dir: an existing artifact for this exact
@@ -293,7 +295,7 @@ def stochastic_open_economy_growth_nn_recursive(
     )
     train_scales = jnp.sqrt(jnp.asarray(train_variances, dtype=dtype))
     test_scales = jnp.sqrt(jnp.asarray(test_variances, dtype=dtype))
-    investment_anchor = max(parameters.delta * k_0, DOMAIN_EPS)
+    investment_anchor = parameters.delta * k_0
     current_account_anchor = 0.0
     nn_set = replace(
         nn_set,
@@ -301,7 +303,6 @@ def stochastic_open_economy_growth_nn_recursive(
         log_z_scale=max(
             math.sqrt(z_ergodic_variance),
             math.sqrt(train_variances[0]),
-            DOMAIN_EPS,
         ),
         log_k_center=math.log(k_0),
         asset_center=a_0 / output_scale,
@@ -311,7 +312,6 @@ def stochastic_open_economy_growth_nn_recursive(
         rate_scale=max(
             math.sqrt(rate_ergodic_variance),
             math.sqrt(train_variances[3]),
-            DOMAIN_EPS,
         ),
         output_scale=output_scale,
         investment_anchor=investment_anchor,
@@ -342,27 +342,29 @@ def stochastic_open_economy_growth_nn_recursive(
     test_dt = data_set.test_T / n_test_steps
     tvc_dt = data_set.tvc_T / n_tvc_steps
 
-    if stop_set.shock_continuation:
+    if tolerance_set.shock_continuation:
         continuation_scales = (
             np.ones(1)
-            if stop_set.continuation_epochs == 1
+            if tolerance_set.continuation_epochs == 1
             else np.geomspace(
-                stop_set.initial_shock_scale,
+                tolerance_set.initial_shock_scale,
                 1.0,
-                stop_set.continuation_epochs,
+                tolerance_set.continuation_epochs,
             )
         )
         shock_scales = jnp.asarray(
             np.concatenate(
                 [
                     continuation_scales,
-                    np.ones(stop_set.num_epochs - stop_set.continuation_epochs),
+                    np.ones(
+                        tolerance_set.num_epochs - tolerance_set.continuation_epochs
+                    ),
                 ]
             ),
             dtype=dtype,
         )
     else:
-        shock_scales = jnp.ones(stop_set.num_epochs, dtype=dtype)
+        shock_scales = jnp.ones(tolerance_set.num_epochs, dtype=dtype)
     initial_scale_mask = jnp.asarray(
         [shock_scales[0], 1.0, 1.0, shock_scales[0]], dtype=dtype
     )
@@ -411,10 +413,12 @@ def stochastic_open_economy_growth_nn_recursive(
         epoch=jnp.asarray(0, dtype=jnp.int32),
         shock_scales=shock_scales,
         shock_scale=shock_scales[0],
-        train_loss_threshold=jnp.asarray(stop_set.train_loss_threshold, dtype=dtype),
-        epoch_steps=jnp.asarray(stop_set.max_steps, dtype=jnp.int32),
+        train_loss_threshold=jnp.asarray(
+            tolerance_set.train_loss_threshold, dtype=dtype
+        ),
+        epoch_steps=jnp.asarray(tolerance_set.max_steps, dtype=jnp.int32),
         total_steps=jnp.asarray(
-            stop_set.num_epochs * stop_set.max_steps, dtype=jnp.int32
+            tolerance_set.num_epochs * tolerance_set.max_steps, dtype=jnp.int32
         ),
         solver=solver,
         data_set=data_set,
@@ -445,7 +449,6 @@ def stochastic_open_economy_growth_nn_recursive(
         "train_T": data_set.train_T,
         "nn_set": asdict(nn_set),
         "opt_set": asdict(opt_set),
-        "stop_set": asdict(stop_set),
     }
     problem_key = cache_key(problem_config)
     run_key = cache_key(run_config)
@@ -464,7 +467,7 @@ def stochastic_open_economy_growth_nn_recursive(
         # full shock scale, never the fresh args' fractional scale.
         solve_args = residual_args.replace(
             shock_scale=jnp.asarray(1.0, dtype=dtype),
-            epoch=jnp.asarray(stop_set.num_epochs - 1, dtype=jnp.int32),
+            epoch=jnp.asarray(tolerance_set.num_epochs - 1, dtype=jnp.int32),
         )
         steps = 0
         epochs_run = 0
@@ -492,14 +495,14 @@ def stochastic_open_economy_growth_nn_recursive(
             num_train_trajectories=ic_set.num_train_trajectories,
             n_steps=n_train_steps,
             dt=train_dt,
-            epoch_early_stopping=stop_set.epoch_early_stopping,
+            epoch_early_stopping=tolerance_set.epoch_early_stopping,
             resample_initial_states=any(value > 0.0 for value in train_variances),
         )
         # Per-step atol is sound only for a never-changing batch; epochs are
         # judged at the boundaries and by the acceptance test.
         atol = (
-            math.sqrt(stop_set.train_loss_threshold)
-            if stop_set.num_epochs == 1
+            math.sqrt(tolerance_set.train_loss_threshold)
+            if tolerance_set.num_epochs == 1
             else 0.0
         )
         solve_timer = Stopwatch()
@@ -507,12 +510,12 @@ def stochastic_open_economy_growth_nn_recursive(
             theta_0,
             residual_args,
             p=p,
-            max_steps=stop_set.num_epochs * stop_set.max_steps,
+            max_steps=tolerance_set.num_epochs * tolerance_set.max_steps,
             atol=atol,
             callback=callback,
             multi_start=MultiStart(
                 key=multi_start_key,
-                num_starts=stop_set.num_attempts,
+                num_starts=tolerance_set.num_attempts,
                 draw=DrawSequentialPolicy(nn_set, dtype),
                 accept=accept_training,
             ),
@@ -533,7 +536,7 @@ def stochastic_open_economy_growth_nn_recursive(
         if verbose:
             print(
                 f"attempt {attempt}: {stopping_reason} after {steps} steps "
-                f"(epoch {epochs_run}/{stop_set.num_epochs}, shock scale "
+                f"(epoch {epochs_run}/{tolerance_set.num_epochs}, shock scale "
                 f"{float(solve_args.shock_scale):.3f}), "
                 f"train_loss={train_loss:.3e} ({solve_time:.2f}s)"
             )
@@ -725,7 +728,7 @@ def stochastic_open_economy_growth_nn_recursive(
     # A cached policy trained on other batches: only its saved solver
     # acceptance applies, never the fresh-batch loss.
     if not solver_accepted or (
-        not cache_hit and not train_loss <= stop_set.train_loss_threshold
+        not cache_hit and not train_loss <= tolerance_set.train_loss_threshold
     ):
         rejection_reasons.append("train_loss")
     if not train_path_ok:
@@ -845,7 +848,7 @@ def stochastic_open_economy_growth_nn_recursive(
         "hysteresis_euler_mean_abs": hysteresis_euler_mean_abs,
         "hysteresis_euler_max_abs": hysteresis_euler_max_abs,
         "steps": steps,
-        "num_epochs": stop_set.num_epochs,
+        "num_epochs": tolerance_set.num_epochs,
         "epochs_run": epochs_run,
         "shock_continuation_scales": tuple(
             float(value) for value in np.asarray(shock_scales)
@@ -900,7 +903,6 @@ def stochastic_open_economy_growth_nn_recursive(
         "ic_set": asdict(ic_set),
         "nn_set": asdict(nn_set),
         "opt_set": asdict(opt_set),
-        "stop_set": asdict(stop_set),
         "tolerance_set": asdict(tolerance_set),
         "initial_conditions": {
             "k_0": k_0,

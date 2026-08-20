@@ -123,14 +123,6 @@ class InitialConditionSettings:
     test_rate_variance: float | None = None
 
 
-# Acceptance gates; the float32 replication driver passes its own bar.
-@dataclass(frozen=True)
-class ToleranceSettings:
-    test_euler_mean_abs: float = 5e-3
-    test_euler_max: float = 5e-2
-    test_diffusion_max_abs: float = 5e-2
-
-
 @dataclass(frozen=True)
 class SequentialPolicySettings:
     width: int = 16

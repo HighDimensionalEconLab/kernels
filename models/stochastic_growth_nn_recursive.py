@@ -34,7 +34,9 @@ from models.stochastic_growth import (
     trajectory_values,
 )
 from models.utilities import (
-    DOMAIN_EPS,
+    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
+)
+from models.utilities import (
     SDE_SOLVERS,
     STATUS_TO_REASON,
     OptimizerSettings,
@@ -45,13 +47,10 @@ from models.utilities import (
     save_model,
     standardized_initial_states,
 )
-from models.utilities import (
-    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
-)
 
 
 @dataclass(frozen=True)
-class StoppingCriteria:
+class ToleranceSettings:
     # max_steps is the LM-update budget per epoch; the noise realization (and
     # the training ICs when their variance is positive) is redrawn at each
     # interior epoch boundary.
@@ -218,7 +217,7 @@ def stochastic_growth_nn_recursive(
         geodesic_acceleration=True,
         geodesic_acceptance_ratio=0.541,
     ),
-    stop_set: StoppingCriteria = StoppingCriteria(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
     # Directory for content-addressed policy artifacts (e.g. ".results"): an
     # existing artifact for this exact configuration is loaded instead of
     # training, and a fresh solve is saved there. save_policy writes one
@@ -292,10 +291,12 @@ def stochastic_growth_nn_recursive(
         epoch_key=jax.random.fold_in(train_ic_key, 1),
         restart_key=jax.random.fold_in(train_ic_key, 2),
         epoch=jnp.asarray(0, dtype=jnp.int32),
-        train_loss_threshold=jnp.asarray(stop_set.train_loss_threshold, dtype=dtype),
-        epoch_steps=jnp.asarray(stop_set.max_steps, dtype=jnp.int32),
+        train_loss_threshold=jnp.asarray(
+            tolerance_set.train_loss_threshold, dtype=dtype
+        ),
+        epoch_steps=jnp.asarray(tolerance_set.max_steps, dtype=jnp.int32),
         total_steps=jnp.asarray(
-            stop_set.num_epochs * stop_set.max_steps, dtype=jnp.int32
+            tolerance_set.num_epochs * tolerance_set.max_steps, dtype=jnp.int32
         ),
         solver=solver,
         data_set=data_set,
@@ -327,7 +328,7 @@ def stochastic_growth_nn_recursive(
         "train_T": data_set.train_T,
         "hc_set": asdict(hc_set),
         "opt_set": asdict(opt_set),
-        "stop_set": asdict(stop_set),
+        "tolerance_set": asdict(tolerance_set),
     }
     problem_key = cache_key(problem_config)
     run_key = cache_key(run_config)
@@ -377,7 +378,7 @@ def stochastic_growth_nn_recursive(
             log_k_0=math.log(k_0),
             log_z_scale=math.sqrt(ic_set.train_log_z_variance),
             log_k_scale=math.sqrt(ic_set.train_log_k_variance),
-            epoch_early_stopping=stop_set.epoch_early_stopping,
+            epoch_early_stopping=tolerance_set.epoch_early_stopping,
             resample_initial_states=(
                 ic_set.train_log_z_variance > 0.0 or ic_set.train_log_k_variance > 0.0
             ),
@@ -389,20 +390,20 @@ def stochastic_growth_nn_recursive(
         # changes; across epochs, convergence is judged at the boundaries
         # instead.
         atol = (
-            math.sqrt(stop_set.train_loss_threshold)
-            if stop_set.num_epochs == 1
+            math.sqrt(tolerance_set.train_loss_threshold)
+            if tolerance_set.num_epochs == 1
             else 0.0
         )
         multi_start = MultiStart(
             key=multi_start_key,
-            num_starts=stop_set.num_attempts,
+            num_starts=tolerance_set.num_attempts,
             draw=draw,
         )
         solve_options = dict(
-            max_steps=stop_set.num_epochs * stop_set.max_steps,
+            max_steps=tolerance_set.num_epochs * tolerance_set.max_steps,
             atol=atol,
             callback=callback,
-            max_steps_is_success=not stop_set.epoch_early_stopping,
+            max_steps_is_success=not tolerance_set.epoch_early_stopping,
         )
 
         start_time = time.perf_counter()
@@ -424,7 +425,7 @@ def stochastic_growth_nn_recursive(
         theta_final, solve_args = result.x, result.args
         r = residual_fn(theta_final, solve_args, p)
         train_loss = float(jnp.sum(r * r))
-        epochs_run = -(-steps // stop_set.max_steps)
+        epochs_run = -(-steps // tolerance_set.max_steps)
         stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
         attempt = int(result.multi_start.attempt) + 1
         final_damping = float(result.lm_state.damping)
@@ -432,7 +433,7 @@ def stochastic_growth_nn_recursive(
         if verbose:
             print(
                 f"attempt {attempt}: {stopping_reason} after {steps} steps "
-                f"(epoch {epochs_run}/{stop_set.num_epochs}), "
+                f"(epoch {epochs_run}/{tolerance_set.num_epochs}), "
                 f"train_loss={train_loss:.3e} ({solve_time:.2f}s)"
             )
         policy = nnx.merge(graphdef, theta_final, nondiff)
@@ -511,7 +512,7 @@ def stochastic_growth_nn_recursive(
         p,
     )
     max_log_tvc = float(jnp.max(train_tvc))
-    transversality_ok = bool(max_log_tvc < stop_set.log_tvc_threshold)
+    transversality_ok = bool(max_log_tvc < tolerance_set.log_tvc_threshold)
     max_train_euler = float(train_df["euler_residual"].abs().max())
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
     test_trajectory_euler = jnp.mean(jnp.abs(test_values["euler_residual"]), axis=1)
@@ -578,7 +579,7 @@ def stochastic_growth_nn_recursive(
         "min_test_c": float(jnp.min(test_values["c"])),
         "test_path_ok": test_path_ok,
         "steps": steps,
-        "num_epochs": stop_set.num_epochs,
+        "num_epochs": tolerance_set.num_epochs,
         "epochs_run": epochs_run,
         "parameter_derivative": "conditional_on_carried_training_batch",
         "attempt": attempt,
@@ -680,9 +681,7 @@ def stochastic_growth_nn_recursive(
     c_fd_grid = fd["interpolate_consumption"](
         np.asarray(grid_log_states[..., 0]), np.asarray(grid_log_states[..., 1])
     )
-    c_grid_error = (np.asarray(grid_values["c"]) - c_fd_grid) / np.abs(c_fd_grid).clip(
-        min=DOMAIN_EPS
-    )
+    c_grid_error = (np.asarray(grid_values["c"]) - c_fd_grid) / np.abs(c_fd_grid)
     policy_rows = []
     for row, (tag, z_row) in enumerate(zip(("lo", "mid", "hi"), z_rows, strict=True)):
         policy_rows.append(
@@ -711,7 +710,7 @@ def stochastic_growth_nn_recursive(
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
         "opt_set": asdict(opt_set),
-        "stop_set": asdict(stop_set),
+        "tolerance_set": asdict(tolerance_set),
         "parameters": {
             "a": a,
             "delta": delta,

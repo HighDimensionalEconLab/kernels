@@ -25,7 +25,6 @@ from models.neoclassical_growth import (
 from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from models.utilities import (
     ACTIVATIONS,
-    DOMAIN_EPS,
     STATUS_TO_REASON,
     OptimizerSettings,
     Stopwatch,
@@ -48,7 +47,7 @@ class DataSettings:
 
 
 @dataclass(frozen=True)
-class StoppingCriteria:
+class ToleranceSettings:
     max_steps: int = 250
     train_loss_threshold: float = 1e-15
     log_tvc_threshold: float = 0.0
@@ -186,11 +185,11 @@ def snapshot(model, t, p, benchmark=None, z=1.0):
         k_b, c_b = benchmark(t)
         df["k_benchmark"] = np.asarray(k_b)
         df["c_benchmark"] = np.asarray(c_b)
-        df["k_rel_error"] = np.abs(df["k"] - df["k_benchmark"]) / np.maximum(
-            np.abs(df["k_benchmark"]), DOMAIN_EPS
+        df["k_rel_error"] = np.abs(df["k"] - df["k_benchmark"]) / np.abs(
+            df["k_benchmark"]
         )
-        df["c_rel_error"] = np.abs(df["c"] - df["c_benchmark"]) / np.maximum(
-            np.abs(df["c_benchmark"]), DOMAIN_EPS
+        df["c_rel_error"] = np.abs(df["c"] - df["c_benchmark"]) / np.abs(
+            df["c_benchmark"]
         )
     return df
 
@@ -220,7 +219,7 @@ def neoclassical_growth_nn(
         damping_decrease=0.5,
         damping_increase=2.0,
     ),
-    stop_set: StoppingCriteria = StoppingCriteria(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
 ):
     # Model setup.
@@ -253,7 +252,7 @@ def neoclassical_growth_nn(
     z_trend_train = jnp.exp((1.0 - a) * g * t_train) if g != 0.0 else None
     c_flow_guess = steady_flow_consumption_guess(z_0, k_0, a, delta, A, b_1, b_2)
     policy_settings = replace(nn_set, input_scale=max(float(data_set.train_T), 1.0))
-    k_scale = max(float(k_0), DOMAIN_EPS)
+    k_scale = float(k_0)
     c_scale = c_flow_guess
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     model = GrowthPolicyNN(
@@ -281,15 +280,15 @@ def neoclassical_growth_nn(
 
     # solve()'s atol is on the residual norm; the settings threshold is on
     # the sum of squared residuals.
-    atol = math.sqrt(stop_set.train_loss_threshold)
+    atol = math.sqrt(tolerance_set.train_loss_threshold)
     solve_options = dict(
-        max_steps=stop_set.max_steps,
+        max_steps=tolerance_set.max_steps,
         atol=atol,
         max_steps_is_success=False,
     )
     multi_start = MultiStart(
         key=multi_start_key,
-        num_starts=stop_set.num_attempts,
+        num_starts=tolerance_set.num_attempts,
         draw=DrawNNXModule(
             GrowthPolicyNN,
             policy_settings,
@@ -344,7 +343,7 @@ def neoclassical_growth_nn(
     tvc_t = jnp.asarray(data_set.test_tvc_T, dtype=dtype)
     k_T, c_T = model(tvc_t)
     log_tvc = float(-p.rho_hat * tvc_t - p.sigma_crra * jnp.log(c_T) + jnp.log(k_T))
-    transversality_ok = bool(log_tvc < stop_set.log_tvc_threshold)
+    transversality_ok = bool(log_tvc < tolerance_set.log_tvc_threshold)
 
     # Published results.
     g_hat_value = float(model.g_hat[...])
@@ -408,7 +407,7 @@ def neoclassical_growth_nn(
         "nn_set": asdict(policy_settings),
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
-        "stop_set": asdict(stop_set),
+        "tolerance_set": asdict(tolerance_set),
         "parameters": {
             "a": a,
             "delta": delta,

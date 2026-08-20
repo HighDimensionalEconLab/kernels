@@ -18,7 +18,6 @@ if __name__ == "__main__":
 
 ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
 TRAIN_RESIDUAL_TOL = 1e-8
-DOMAIN_EPS = 1e-8
 
 
 @dataclass(frozen=True)
@@ -42,6 +41,9 @@ class SolverSettings:
     preset: str = "ipopt"
     max_iterations: int | None = None
     time_limit: float | None = None
+    # Domain floor for the interior point's infeasible trial iterates: the
+    # primal bounds keep u and the goodwill gap above it.
+    domain_eps: float = 1e-8
 
 
 def optimal_advertising_kernel_uno(
@@ -73,8 +75,8 @@ def optimal_advertising_kernel_uno(
     n_constraints = 4 * n_train
     gamma = (beta + rho_hat) / c
     control_power = (1.0 - kappa) / kappa
-    u_0_guess = max(beta * x_0 / max(1.0 - x_0, DOMAIN_EPS), DOMAIN_EPS)
-    mu_0_guess = max(gamma / (rho_hat + beta + u_0_guess), DOMAIN_EPS)
+    u_0_guess = beta * x_0 / (1.0 - x_0)
+    mu_0_guess = gamma / (rho_hat + beta + u_0_guess)
     x_initial = np.zeros(n_variables, dtype=np.float64)
     x_initial[3 * n_train] = mu_0_guess
     x_initial[3 * n_train + 1] = u_0_guess
@@ -137,11 +139,11 @@ def optimal_advertising_kernel_uno(
     variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
     variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
     variable_lower_bounds[3 * n_train] = 0.0
-    variable_lower_bounds[3 * n_train + 1] = DOMAIN_EPS
+    variable_lower_bounds[3 * n_train + 1] = solver_set.domain_eps
     constraint_lower_bounds = np.concatenate(
         [
             np.zeros(3 * n_train, dtype=np.float64),
-            np.full(n_train, DOMAIN_EPS, dtype=np.float64),
+            np.full(n_train, solver_set.domain_eps, dtype=np.float64),
         ]
     )
     constraint_upper_bounds = np.concatenate(

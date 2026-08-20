@@ -9,8 +9,6 @@ import jax.numpy as jnp
 from flax import nnx, struct
 from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 
-from models.utilities import DOMAIN_EPS
-
 
 # The concave-convex (kinked) production calibration.
 @dataclass(frozen=True)
@@ -118,11 +116,10 @@ def euler_residuals(policy, log_states, p):
     return jax.vmap(residual_scalar)(log_states)
 
 
-# Flat steady-flow warm start c(0) = f(z_0, k_0) - delta k_0, floored away
-# from zero.
+# Flat steady-flow warm start c(0) = f(z_0, k_0) - delta k_0.
 def steady_flow_consumption_guess(z_0, k_0, a, delta, A, b_1, b_2):
     base = k_0**a
-    return max(z_0 * A * max(base, b_1 * base - b_2) - delta * k_0, DOMAIN_EPS)
+    return z_0 * A * max(base, b_1 * base - b_2) - delta * k_0
 
 
 # Closed-form steady state of the static smooth model (z = 1, g = 0):

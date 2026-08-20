@@ -16,7 +16,6 @@ from models.kernels import rbf_state_features, rbf_state_gram, state_features
 from models.stochastic_growth_benchmark import stochastic_growth_benchmark
 from models.utilities import (
     ACTIVATIONS,
-    DOMAIN_EPS,
     unit_softplus,
 )
 from models.utilities import (
@@ -276,12 +275,8 @@ def cached_stochastic_benchmark(
 def add_fd_path_diagnostics(test_df, test_values, fd_values):
     k_benchmark = np.asarray(fd_values["k"])
     c_benchmark = np.asarray(fd_values["c"])
-    k_error = (np.asarray(test_values["k"]) - k_benchmark) / np.abs(k_benchmark).clip(
-        min=DOMAIN_EPS
-    )
-    c_error = (np.asarray(test_values["c"]) - c_benchmark) / np.abs(c_benchmark).clip(
-        min=DOMAIN_EPS
-    )
+    k_error = (np.asarray(test_values["k"]) - k_benchmark) / np.abs(k_benchmark)
+    c_error = (np.asarray(test_values["c"]) - c_benchmark) / np.abs(c_benchmark)
     columns = {
         "k_benchmark": k_benchmark,
         "c_benchmark": c_benchmark,

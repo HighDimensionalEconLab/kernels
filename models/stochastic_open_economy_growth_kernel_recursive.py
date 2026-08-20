@@ -27,7 +27,6 @@ from models.stochastic_open_economy_growth import (
     InitialConditionSettings,
     ModelParameters,
     StructuralParameters,
-    ToleranceSettings,
     euler_residual_terms,
     make_sequential_policy,
     normalize_state,
@@ -43,7 +42,6 @@ from models.stochastic_open_economy_growth import (
     transversality_trajectory_values,
 )
 from models.utilities import (
-    DOMAIN_EPS,
     NEOCLASSICAL_GROWTH_CONSTANTS,
     SDE_SOLVERS,
     STATUS_TO_REASON,
@@ -57,8 +55,12 @@ from models.utilities import (
 )
 
 
+# Acceptance gates on the held-out batch, plus the ridge LM budget; the
+# float32 replication driver passes its own bars.
 @dataclass(frozen=True)
-class StoppingCriteria:
+class ToleranceSettings:
+    test_euler_mean_abs: float = 5e-3
+    test_euler_max: float = 3e-1
     max_steps: int = 100
     residual_atol: float = 1e-5
     gtol: float = 1e-7
@@ -252,17 +254,16 @@ def stochastic_open_economy_growth_kernel_recursive(
         geodesic_acceptance_ratio=0.75,
     ),
     # residual_atol must clear the seed-dependent ridge-floor residual
-    # (conjunctive stopping; observed floors reach ~5e-5).
-    stop_set: StoppingCriteria = StoppingCriteria(
+    # (conjunctive stopping; observed floors reach ~5e-5). The held-out max
+    # bar guards against simulation divergence, not NN accuracy: the
+    # frozen-design kernel is coarser than the NN it consumes and blow-ups
+    # land at 1e3+.
+    tolerance_set: ToleranceSettings = ToleranceSettings(
         max_steps=300,
         residual_atol=1e-4,
         gtol=7.4e-7,
         ridge=5.4e-11,
     ),
-    # The frozen-design kernel is coarser than the NN it consumes; its
-    # held-out max bar guards against simulation divergence, not NN accuracy
-    # (blow-ups land at 1e3+).
-    tolerance_set: ToleranceSettings = ToleranceSettings(test_euler_max=3e-1),
     verbose: bool = True,
 ):
     jax.config.update("jax_enable_x64", True)
@@ -358,7 +359,7 @@ def stochastic_open_economy_growth_kernel_recursive(
     )
     # A scale mismatch means the artifact's problem differs from its hash.
     saved_settings = reference_meta["settings"]
-    investment_anchor = max(parameters.delta * k_0, DOMAIN_EPS)
+    investment_anchor = parameters.delta * k_0
     if not (
         math.isclose(saved_settings["output_scale"], output_scale)
         and math.isclose(saved_settings["investment_anchor"], investment_anchor)
@@ -415,15 +416,15 @@ def stochastic_open_economy_growth_kernel_recursive(
         theta_0 = theta_0 + (jnp.zeros(2, dtype=dtype),)
     if kernel_set.linear_mean:
         theta_0 = theta_0 + (jnp.zeros((4, 2), dtype=dtype),)
-    if stop_set.ridge_init is None:
-        initial_ridge = stop_set.ridge
+    if tolerance_set.ridge_init is None:
+        initial_ridge = tolerance_set.ridge
         continuation_options = {}
     else:
-        initial_ridge = stop_set.ridge_init
+        initial_ridge = tolerance_set.ridge_init
         callback = AnnealRidge(
-            ridge_floor=stop_set.ridge,
-            decrease=stop_set.ridge_decrease,
-            grad_rtol=stop_set.ridge_grad_rtol,
+            ridge_floor=tolerance_set.ridge,
+            decrease=tolerance_set.ridge_decrease,
+            grad_rtol=tolerance_set.ridge_grad_rtol,
         )
         continuation_options = {
             "callback": callback,
@@ -446,9 +447,9 @@ def stochastic_open_economy_growth_kernel_recursive(
         theta_0,
         args,
         p=p,
-        max_steps=stop_set.max_steps,
-        atol=stop_set.residual_atol,
-        gtol=stop_set.gtol,
+        max_steps=tolerance_set.max_steps,
+        atol=tolerance_set.residual_atol,
+        gtol=tolerance_set.gtol,
         max_steps_is_success=False,
         **continuation_options,
     )
@@ -568,10 +569,10 @@ def stochastic_open_economy_growth_kernel_recursive(
     reference_values = trajectory_values(reference_policy, reference_solution.xs, p)
     k_error = (test_values["k"] - reference_values["k"]) / jnp.abs(
         reference_values["k"]
-    ).clip(min=DOMAIN_EPS)
+    )
     c_error = (test_values["c"] - reference_values["c"]) / jnp.abs(
         reference_values["c"]
-    ).clip(min=DOMAIN_EPS)
+    )
     asset_error = (test_values["a"] - reference_values["a"]) / output_scale
     test_df["k_benchmark"] = np.asarray(reference_values["k"]).reshape(-1)
     test_df["c_benchmark"] = np.asarray(reference_values["c"]).reshape(-1)
@@ -633,10 +634,10 @@ def stochastic_open_economy_growth_kernel_recursive(
         "rate_lengthscale": lengthscales[3],
         "metric_epsilon": kernel_set.metric_epsilon,
         "metric": "shifted_rkhs_gram",
-        "ridge": stop_set.ridge,
-        "ridge_init": stop_set.ridge_init,
-        "ridge_decrease": stop_set.ridge_decrease,
-        "ridge_grad_rtol": stop_set.ridge_grad_rtol,
+        "ridge": tolerance_set.ridge,
+        "ridge_init": tolerance_set.ridge_init,
+        "ridge_decrease": tolerance_set.ridge_decrease,
+        "ridge_grad_rtol": tolerance_set.ridge_grad_rtol,
         "free_constant": kernel_set.free_constant,
         "linear_mean": kernel_set.linear_mean,
         "train_loss": train_loss,
@@ -705,7 +706,6 @@ def stochastic_open_economy_growth_kernel_recursive(
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
         "opt_set": asdict(opt_set),
-        "stop_set": asdict(stop_set),
         "tolerance_set": asdict(tolerance_set),
         "parameters": asdict(parameters),
         "shocks": {

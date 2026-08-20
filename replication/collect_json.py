@@ -1044,10 +1044,10 @@ def neoclassical_growth_nn(out):
             "total_params": int(med(baseline_json["total_params"])),
         },
         "stopping": {
-            "train_loss_threshold": hp["stop_set"]["train_loss_threshold"],
-            "max_steps": hp["stop_set"]["max_steps"],
-            "num_attempts": hp["stop_set"]["num_attempts"],
-            "log_tvc_threshold": hp["stop_set"]["log_tvc_threshold"],
+            "train_loss_threshold": hp["tolerance_set"]["train_loss_threshold"],
+            "max_steps": hp["tolerance_set"]["max_steps"],
+            "num_attempts": hp["tolerance_set"]["num_attempts"],
+            "log_tvc_threshold": hp["tolerance_set"]["log_tvc_threshold"],
         },
         "n_seeds": int(baseline_json["n_seeds"]),
         "experiments": {
@@ -1178,10 +1178,10 @@ def neoclassical_growth_nn_recursive(out):
             "total_params": int(med(single_json["total_params"])),
         },
         "stopping": {
-            "train_loss_threshold": hp["stop_set"]["train_loss_threshold"],
-            "max_steps": hp["stop_set"]["max_steps"],
-            "num_attempts": hp["stop_set"]["num_attempts"],
-            "log_tvc_threshold": hp["stop_set"]["log_tvc_threshold"],
+            "train_loss_threshold": hp["tolerance_set"]["train_loss_threshold"],
+            "max_steps": hp["tolerance_set"]["max_steps"],
+            "num_attempts": hp["tolerance_set"]["num_attempts"],
+            "log_tvc_threshold": hp["tolerance_set"]["log_tvc_threshold"],
         },
         "n_seeds": int(single_json["n_seeds"]),
         "experiments": {name: experiment(name) for name in RECURSIVE_EXPERIMENTS},
@@ -1207,7 +1207,7 @@ def stochastic_growth_nn_recursive(out):
             "hidden_activation": hp["hc_set"]["hidden_activation"],
             "total_params": int(med(j["total_params"])),
         },
-        "stopping": hp["stop_set"],
+        "stopping": hp["tolerance_set"],
         "n_seeds": int(j["n_seeds"]),
         "experiments": {
             "baseline": {
@@ -1272,7 +1272,7 @@ def neoclassical_growth_kernel_recursive(out):
         "parameters": hp["parameters"],
         "data": hp["data_set"],
         "kernel": hp["kernel_set"],
-        "solver": {"ridge": hp["stop_set"]["ridge"]},
+        "solver": {"ridge": hp["tolerance_set"]["ridge"]},
         "experiments": {name: experiment(name) for name in RECURSIVE_EXPERIMENTS},
     }
 

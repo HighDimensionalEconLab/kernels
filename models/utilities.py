@@ -13,8 +13,6 @@ from flax import nnx
 from nlls_gram import LMStatus
 from tinydiffeq import SRA1, EulerMaruyama, Milstein
 
-DOMAIN_EPS = 1e-8
-
 STATUS_TO_REASON = {
     LMStatus.CONVERGED: "converged",
     LMStatus.NONFINITE: "nonfinite",

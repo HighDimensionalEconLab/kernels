@@ -52,12 +52,18 @@ RESIDUAL_NAMES = (
 )
 
 
-# Acceptance gates, CLI-reachable so a float32 caller can pass its own bar
-# (the float32 replication driver does).
+# Acceptance gates (CLI-reachable so a float32 caller can pass its own bar;
+# the float32 replication driver does) plus the solve budget.
 @dataclass(frozen=True)
 class ToleranceSettings:
     train_residual: float = 1e-5
     validation_residual: float = 1e-2
+    max_steps: int = 400
+    train_loss_threshold: float = 1e-14
+    # frac_accepted measures acceptance within the restart budget, not
+    # first-try robustness: a seed that stalls short of the loss threshold
+    # is redrawn.
+    num_attempts: int = 5
 
 
 @dataclass(frozen=True)
@@ -75,16 +81,6 @@ class DataSettings:
     # flatness measured against t = long_run_check_T - long_run_window.
     long_run_check_T: float = 100.0
     long_run_window: float = 10.0
-
-
-@dataclass(frozen=True)
-class StoppingCriteria:
-    max_steps: int = 400
-    train_loss_threshold: float = 1e-14
-    # frac_accepted measures acceptance within the restart budget, not
-    # first-try robustness: a seed that stalls short of the loss threshold
-    # is redrawn.
-    num_attempts: int = 5
 
 
 @dataclass(frozen=True)
@@ -260,7 +256,6 @@ def multicountry_growth_nn(
         damping_decrease=0.5,
         damping_increase=2.0,
     ),
-    stop_set: StoppingCriteria = StoppingCriteria(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
 ):
@@ -326,15 +321,15 @@ def multicountry_growth_nn(
     )
     # solve()'s atol is on the residual norm; the settings threshold is on
     # the sum of squared residuals.
-    atol = math.sqrt(stop_set.train_loss_threshold)
+    atol = math.sqrt(tolerance_set.train_loss_threshold)
     solve_options = dict(
-        max_steps=stop_set.max_steps,
+        max_steps=tolerance_set.max_steps,
         atol=atol,
         max_steps_is_success=False,
     )
     multi_start = MultiStart(
         key=multi_start_key,
-        num_starts=stop_set.num_attempts,
+        num_starts=tolerance_set.num_attempts,
         draw=DrawNNXModule(SequencePathNN, num_countries, nn_set, dtype=dtype),
     )
 
@@ -569,7 +564,6 @@ def multicountry_growth_nn(
         "nn_set": asdict(nn_set),
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
-        "stop_set": asdict(stop_set),
         "tolerance_set": asdict(tolerance_set),
         "initial_conditions": {"k_0": list(k_0), "a_0": list(a_0)},
     }

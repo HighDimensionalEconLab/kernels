@@ -17,6 +17,9 @@ from nlls_gram import (
 )
 
 from models.neoclassical_growth import (
+    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
+)
+from models.neoclassical_growth import (
     mpk,
     production,
 )
@@ -28,9 +31,6 @@ from models.utilities import (
     Stopwatch,
     make_train_t_grid,
     unit_softplus,
-)
-from models.utilities import (
-    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
 
 

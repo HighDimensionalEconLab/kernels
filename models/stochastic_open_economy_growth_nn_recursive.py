@@ -13,8 +13,7 @@ from jax.flatten_util import ravel_pytree
 from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
 
 from models.stochastic_open_economy_growth import (
-    WORLD_RATE_KAPPA,
-    WORLD_RATE_SIGMA,
+    PROCESS_CONSTANTS,
     DataSettings,
     DrawSequentialPolicy,
     InitialConditionSettings,
@@ -36,7 +35,6 @@ from models.stochastic_open_economy_growth import (
 )
 from models.utilities import (
     ACTIVATIONS,
-    NEOCLASSICAL_GROWTH_CONSTANTS,
     SDE_SOLVERS,
     STATUS_TO_REASON,
     OptimizerSettings,
@@ -221,11 +219,11 @@ def stochastic_open_economy_growth_nn_recursive(
     z_0: float = 1.0,
     rate_gap_0: float = 0.0,
     parameters: ModelParameters = ModelParameters(),
-    kappa_z: float = NEOCLASSICAL_GROWTH_CONSTANTS.eta,
-    sigma_z: float = NEOCLASSICAL_GROWTH_CONSTANTS.sigma_z_high,
+    kappa_z: float = PROCESS_CONSTANTS.kappa_z,
+    sigma_z: float = PROCESS_CONSTANTS.sigma_z,
     z_bar: float = 1.0,
-    kappa_r: float = WORLD_RATE_KAPPA,
-    sigma_r: float = WORLD_RATE_SIGMA,
+    kappa_r: float = PROCESS_CONSTANTS.kappa_r,
+    sigma_r: float = PROCESS_CONSTANTS.sigma_r,
     corr_zr: float = 0.0,
     seed: int = 0,
     use_float64: bool = True,

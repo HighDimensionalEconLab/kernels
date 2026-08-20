@@ -18,13 +18,63 @@ from models.utilities import (
     ACTIVATIONS,
     unit_softplus,
 )
-from models.utilities import (
-    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
-)
 
 # Stochastic neoclassical growth on the state (log z, log k): OU log-TFP
 # deviation around log z_bar with smooth Cobb-Douglas technology, exactly the
 # paper's F(k, z) = e^z k^a written here with z in levels.
+
+
+# Shared calibration: both stochastic recursive solver variants default to
+# the instance below so they solve the identical model on the same windows.
+# Quarterly anchors map exactly: e^(-rho_hat/4) = beta, e^(-eta/4) = rho, and
+# the OU innovation scale matches the AR(1) stationary variance,
+# sigma_z^2/(2 eta) = sigma^2/(1 - rho^2).
+@dataclass(frozen=True)
+class StochasticGrowthConstants:
+    a: float
+    delta: float
+    sigma_crra: float
+    quarterly_beta: float
+    quarterly_tfp_rho: float
+    quarterly_tfp_sigma: float
+    train_T: float
+    test_T: float
+    transversality_T: float
+
+    @property
+    def rho_hat(self):
+        return -4.0 * math.log(self.quarterly_beta)
+
+    @property
+    def eta(self):
+        return -4.0 * math.log(self.quarterly_tfp_rho)
+
+    @property
+    def z_ergodic_variance(self):
+        return self.quarterly_tfp_sigma**2 / (1.0 - self.quarterly_tfp_rho**2)
+
+    @property
+    def sigma_z(self):
+        return math.sqrt(2.0 * self.eta * self.z_ergodic_variance)
+
+
+# From Aruoba, Fernandez-Villaverde & Rubio-Ramirez (2006 JEDC, Tables 1-2):
+# beta = 0.9896, log-TFP AR(1) rho = 0.95 with their high-variance
+# sensitivity column's innovation sd 0.035, capital share 1/3, annual
+# depreciation 0.1. sigma_crra = 2 is their tau and is a free choice rather
+# than a mapped value. The values duplicate the deterministic family's
+# calibration deliberately: the two model files stay independent.
+STOCHASTIC_GROWTH_CONSTANTS = StochasticGrowthConstants(
+    a=1 / 3,
+    delta=0.1,
+    sigma_crra=2.0,
+    quarterly_beta=0.9896,
+    quarterly_tfp_rho=0.95,
+    quarterly_tfp_sigma=0.035,
+    train_T=100.0,
+    test_T=40.0,
+    transversality_T=200.0,
+)
 
 
 @struct.dataclass
@@ -53,9 +103,9 @@ class DataSettings:
     train_points: int = 65
     test_points: int = 41
     tvc_steps: int = 256
-    train_T: float = CONSTANTS.train_T
-    train_tvc_T: float = CONSTANTS.transversality_T
-    test_T: float = CONSTANTS.test_T
+    train_T: float = STOCHASTIC_GROWTH_CONSTANTS.train_T
+    train_tvc_T: float = STOCHASTIC_GROWTH_CONSTANTS.transversality_T
+    test_T: float = STOCHASTIC_GROWTH_CONSTANTS.test_T
     policy_grid_size: int = 100
     benchmark_z_points: int = 161
     benchmark_k_points: int = 1201
@@ -95,7 +145,6 @@ def problem_cache_config(
     a, delta, rho_hat, sigma_crra, eta, sigma_z, z_bar, z_0, k_0, use_float64, ic_set
 ):
     return {
-        "technology": "hicks",
         "a": a,
         "delta": delta,
         "rho_hat": rho_hat,
@@ -517,7 +566,6 @@ def make_investment_policy(meta, dtype):
     )
 
 
-@jax.tree_util.register_static
 @dataclass(frozen=True)
 class StateKernelSettings:
     amplitude: float = 1.0

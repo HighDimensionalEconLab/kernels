@@ -20,6 +20,9 @@ from models.kernels import (
     state_features,
 )
 from models.neoclassical_growth import (
+    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
+)
+from models.neoclassical_growth import (
     InitialConditionSettings,
     RecursiveParameters,
     euler_residuals,
@@ -29,9 +32,6 @@ from models.neoclassical_growth import (
     trajectory_values,
 )
 from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
-from models.utilities import (
-    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
-)
 from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
@@ -53,7 +53,6 @@ class DataSettings:
     test_T: float = CONSTANTS.test_T
 
 
-@jax.tree_util.register_static
 @dataclass(frozen=True)
 class StateKernelSettings:
     amplitude: float = 1.0

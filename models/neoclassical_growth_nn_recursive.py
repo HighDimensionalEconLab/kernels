@@ -16,6 +16,9 @@ from nlls_gram import DrawNNXModule, LevenbergMarquardt, LMAction, LMStatus, Mul
 from tinydiffeq import RK4, ConstantStepSize, IController, SaveAt, Tsit5, solve_ode
 
 from models.neoclassical_growth import (
+    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
+)
+from models.neoclassical_growth import (
     InitialConditionSettings,
     RecursiveParameters,
     euler_residuals,
@@ -36,9 +39,6 @@ from models.utilities import (
     save_model,
     standardized_initial_states,
     unit_softplus,
-)
-from models.utilities import (
-    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
 
 
@@ -424,7 +424,6 @@ def neoclassical_growth_nn_recursive(
     # the training minutiae. Test/benchmark settings enter neither, so
     # changing them still reuses a cached policy.
     problem_config = {
-        "technology": "hicks",
         "a": a,
         "delta": delta,
         "rho_hat": rho_hat,

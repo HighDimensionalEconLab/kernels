@@ -14,15 +14,15 @@ from models.kernels import (
     normalize_kernel,
 )
 from models.neoclassical_growth import (
+    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
+)
+from models.neoclassical_growth import (
     StructuralParameters,
     mpk,
     production,
     steady_flow_consumption_guess,
 )
 from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
-from models.utilities import (
-    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
-)
 from models.utilities import (
     Stopwatch,
     acceptance_fields,

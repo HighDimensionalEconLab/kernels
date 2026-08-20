@@ -13,6 +13,9 @@ import numpy as np
 from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
 
 from models.stochastic_growth import (
+    STOCHASTIC_GROWTH_CONSTANTS as CONSTANTS,
+)
+from models.stochastic_growth import (
     DataSettings,
     InitialConditionSettings,
     KernelInvestmentPolicy,
@@ -29,9 +32,6 @@ from models.stochastic_growth import (
     simulate_train,
     state_lengthscales,
     trajectory_values,
-)
-from models.utilities import (
-    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
 from models.utilities import (
     SDE_SOLVERS,
@@ -94,7 +94,7 @@ def stochastic_growth_kernel_recursive(
     rho_hat: float = CONSTANTS.rho_hat,
     sigma_crra: float = CONSTANTS.sigma_crra,
     eta: float = CONSTANTS.eta,
-    sigma_z: float = CONSTANTS.sigma_z_high,
+    sigma_z: float = CONSTANTS.sigma_z,
     z_bar: float = 1.0,
     z_0: float = 1.0,
     k_0: float = 1.0,
@@ -105,7 +105,7 @@ def stochastic_growth_kernel_recursive(
     data_set: DataSettings = DataSettings(train_points=33),
     ic_set: InitialConditionSettings = InitialConditionSettings(
         num_train_trajectories=16,
-        train_log_z_variance=CONSTANTS.z_ergodic_variance_high,
+        train_log_z_variance=CONSTANTS.z_ergodic_variance,
         train_log_k_variance=0.01,
     ),
     # Lengthscales sized to the Hicks-neutral state cloud: output moves

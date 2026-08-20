@@ -21,8 +21,7 @@ from nlls_gram import (
 
 from models.kernels import STATE_KERNEL_NAMES, state_features
 from models.stochastic_open_economy_growth import (
-    WORLD_RATE_KAPPA,
-    WORLD_RATE_SIGMA,
+    PROCESS_CONSTANTS,
     DataSettings,
     InitialConditionSettings,
     ModelParameters,
@@ -42,7 +41,6 @@ from models.stochastic_open_economy_growth import (
     transversality_trajectory_values,
 )
 from models.utilities import (
-    NEOCLASSICAL_GROWTH_CONSTANTS,
     SDE_SOLVERS,
     STATUS_TO_REASON,
     OptimizerSettings,
@@ -82,7 +80,6 @@ class ToleranceSettings:
 # lengthscale is meaningful on every axis and the bounded asset squash never
 # forces a retune when dispersion widens. Per-axis overrides default to
 # `lengthscale`.
-@jax.tree_util.register_static
 @dataclass(frozen=True)
 class StateKernelSettings:
     # At this lengthscale the kernel carries levels and tilts, so the affine
@@ -229,11 +226,11 @@ def stochastic_open_economy_growth_kernel_recursive(
     z_0: float = 1.0,
     rate_gap_0: float = 0.0,
     parameters: ModelParameters = ModelParameters(),
-    kappa_z: float = NEOCLASSICAL_GROWTH_CONSTANTS.eta,
-    sigma_z: float = NEOCLASSICAL_GROWTH_CONSTANTS.sigma_z_high,
+    kappa_z: float = PROCESS_CONSTANTS.kappa_z,
+    sigma_z: float = PROCESS_CONSTANTS.sigma_z,
     z_bar: float = 1.0,
-    kappa_r: float = WORLD_RATE_KAPPA,
-    sigma_r: float = WORLD_RATE_SIGMA,
+    kappa_r: float = PROCESS_CONSTANTS.kappa_r,
+    sigma_r: float = PROCESS_CONSTANTS.sigma_r,
     corr_zr: float = 0.0,
     use_float64: bool = True,
     sde_solver: str = "sra1",

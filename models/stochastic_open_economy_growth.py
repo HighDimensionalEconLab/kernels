@@ -21,19 +21,55 @@ from models.utilities import (
 # rate_gap). No benchmark or steady-state information enters the residual or
 # initialization.
 
-# Annual AR(1) -> OU: e^(-kappa_r) = rho, sigma_r^2/(2 kappa_r) = sd^2/(1-rho^2).
-# World-rate process from Uribe & Yue (2006, eq. 15): quarterly rho = 0.83 on
-# log-devs of the annualized gross rate with innovation sd 0.007, so annual
-# rho = 0.83^4 and stationary sd ~1.04 * 0.007/sqrt(1-0.83^2) ~ 1.3 percentage
-# points in the rate level (kappa ~ 0.75/yr, half-life ~0.9y). Corroborated by
-# the international risk-free real rate in Fernandez-Villaverde et al. (2011
-# AER "Risk Matters"): monthly rho = 0.95 (kappa ~ 0.62/yr) with a 38bp
-# annualized innovation sd, stationary sd ~1.2pp.
-WORLD_RATE_AR1_RHO = 0.83**4
-WORLD_RATE_AR1_INNOVATION_SD = 0.0115
-WORLD_RATE_KAPPA = -math.log(WORLD_RATE_AR1_RHO)
-WORLD_RATE_SIGMA = WORLD_RATE_AR1_INNOVATION_SD * math.sqrt(
-    2.0 * WORLD_RATE_KAPPA / (1.0 - WORLD_RATE_AR1_RHO**2)
+
+# Exogenous driving processes, AR(1) anchors mapped exactly to OU rates:
+# e^(-kappa) = rho over the anchor period and the OU innovation scale matches
+# the AR(1) stationary variance, sigma^2/(2 kappa) = sd^2/(1 - rho^2). Both
+# stochastic recursive solver variants default to the instance below.
+@dataclass(frozen=True)
+class ProcessConstants:
+    quarterly_tfp_rho: float
+    quarterly_tfp_sigma: float
+    annual_rate_rho: float
+    annual_rate_innovation_sd: float
+
+    @property
+    def kappa_z(self):
+        return -4.0 * math.log(self.quarterly_tfp_rho)
+
+    @property
+    def sigma_z(self):
+        variance = self.quarterly_tfp_sigma**2 / (1.0 - self.quarterly_tfp_rho**2)
+        return math.sqrt(2.0 * self.kappa_z * variance)
+
+    @property
+    def kappa_r(self):
+        return -math.log(self.annual_rate_rho)
+
+    @property
+    def sigma_r(self):
+        return self.annual_rate_innovation_sd * math.sqrt(
+            2.0 * self.kappa_r / (1.0 - self.annual_rate_rho**2)
+        )
+
+
+# Productivity duplicates the neoclassical family's quarterly TFP anchors
+# deliberately (log-TFP AR(1) rho = 0.95, the high-variance sensitivity
+# column's innovation sd 0.035, from Aruoba, Fernandez-Villaverde &
+# Rubio-Ramirez 2006 JEDC) so every stochastic recursive variant faces the
+# identical z process. World-rate process from Uribe & Yue (2006, eq. 15):
+# quarterly rho = 0.83 on log-devs of the annualized gross rate with
+# innovation sd 0.007, so annual rho = 0.83^4 and stationary sd
+# ~1.04 * 0.007/sqrt(1-0.83^2) ~ 1.3 percentage points in the rate level
+# (kappa ~ 0.75/yr, half-life ~0.9y). Corroborated by the international
+# risk-free real rate in Fernandez-Villaverde et al. (2011 AER "Risk
+# Matters"): monthly rho = 0.95 (kappa ~ 0.62/yr) with a 38bp annualized
+# innovation sd, stationary sd ~1.2pp.
+PROCESS_CONSTANTS = ProcessConstants(
+    quarterly_tfp_rho=0.95,
+    quarterly_tfp_sigma=0.035,
+    annual_rate_rho=0.83**4,
+    annual_rate_innovation_sd=0.0115,
 )
 
 

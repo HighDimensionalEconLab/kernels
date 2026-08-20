@@ -10,6 +10,47 @@ from flax import nnx, struct
 from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 
 
+# Shared calibration: every deterministic solver variant defaults to the
+# instance below so all solve the identical model on the same windows. The
+# discount rate maps exactly from the quarterly anchor e^(-rho_hat/4) = beta.
+# Sequential drivers evaluate their path solution on a grid extending past
+# train_T to test extrapolation; recursive drivers roll held-out initial
+# conditions for test_T.
+@dataclass(frozen=True)
+class GrowthConstants:
+    a: float
+    delta: float
+    sigma_crra: float
+    quarterly_beta: float
+    train_T: float
+    test_T: float
+    sequence_test_T: float
+    transversality_T: float
+
+    @property
+    def rho_hat(self):
+        return -4.0 * math.log(self.quarterly_beta)
+
+
+# Neoclassical growth, from Aruoba, Fernandez-Villaverde & Rubio-Ramirez
+# (2006 JEDC, Tables 1-2): beta = 0.9896 (a 4% annual interest rate), capital
+# share 1/3, annual depreciation 0.1 (King-Rebelo 1999's 0.025 quarterly).
+# sigma_crra = 2 is their tau and is a free choice rather than a mapped
+# value. train_T = 100 covers ~10 e-foldings of the calibrated saddle path
+# (|lambda_stable| ~ 0.105); the transversality certificate extends to twice
+# that.
+NEOCLASSICAL_GROWTH_CONSTANTS = GrowthConstants(
+    a=1 / 3,
+    delta=0.1,
+    sigma_crra=2.0,
+    quarterly_beta=0.9896,
+    train_T=100.0,
+    test_T=40.0,
+    sequence_test_T=110.0,
+    transversality_T=200.0,
+)
+
+
 # The concave-convex (kinked) production calibration.
 @dataclass(frozen=True)
 class KinkedCalibration:

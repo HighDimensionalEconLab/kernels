@@ -430,7 +430,6 @@ def neoclassical_growth_kernel_uno(
         "A": A,
         "b_1": b_1,
         "b_2": b_2,
-        "use_kinked_production": use_kinked_production,
         "kernel": kernel,
         "ell": ell,
         "sigma": sigma,
@@ -449,8 +448,6 @@ def neoclassical_growth_kernel_uno(
         "log_tvc_residual": log_tvc,
         "transversality_ok": transversality_ok,
         "solve_time": solve_time,
-        "solver_status": solver_status,
-        "solution_status": solution_status,
         **acceptance_fields(rejection_reasons),
     }
 

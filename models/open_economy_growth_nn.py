@@ -29,7 +29,6 @@ from models.open_economy_growth import (
 from models.open_economy_growth_benchmark import open_economy_growth_benchmark
 from models.utilities import (
     ACTIVATIONS,
-    STATUS_TO_REASON,
     OptimizerSettings,
     Stopwatch,
     acceptance_fields,
@@ -415,9 +414,6 @@ def open_economy_growth_nn(
         "seed": seed,
         # Measured, not requested: a float64 leak upstream shows up here.
         "residual_dtype": str(train_eval["capital"].dtype),
-        "solver": "nlls-gram",
-        "selection": "minimum_identity_metric_parameter_step",
-        "initialization": "near_zero_head",
         "train_T": float(train_t[-1]),
         "num_train_points": n_train,
         "test_T": data_set.test_T,
@@ -431,7 +427,6 @@ def open_economy_growth_nn(
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
         "max_benchmark_error": max_benchmark_error,
-        "benchmark_match": max_benchmark_error <= tolerance_set.benchmark_match,
         "terminal_residual_count": 0,
         "differential_residual_count": 4 * n_train,
         "algebraic_residual_count": n_train,
@@ -461,7 +456,6 @@ def open_economy_growth_nn(
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         "attempt": attempt,
-        "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
         "solve_time": solve_time,
         "solve_time_success": solve_time if solution_accepted else np.nan,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),

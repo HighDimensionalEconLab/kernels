@@ -35,7 +35,6 @@ from models.multicountry_growth import (
 )
 from models.utilities import (
     ACTIVATIONS,
-    STATUS_TO_REASON,
     OptimizerSettings,
     Stopwatch,
     acceptance_fields,
@@ -426,13 +425,9 @@ def multicountry_growth_nn(
         "r": parameters.r,
         "eta": parameters.eta,
         "num_countries": num_countries,
-        "common_gamma": bool(long_run["common_gamma"]),
         "seed": seed,
         # Measured, not requested: a float64 leak upstream shows up here.
         "residual_dtype": str(train_eval["capital"].dtype),
-        "solver": "nlls-gram",
-        "selection": "minimum_identity_metric_parameter_step",
-        "initialization": "near_zero_head",
         "train_T": float(train_t[-1]),
         "num_train_points": n_train,
         "test_T": data_set.test_T,
@@ -466,7 +461,6 @@ def multicountry_growth_nn(
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         "attempt": attempt,
-        "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
         "solve_time": solve_time,
         "solve_time_success": solve_time if solution_accepted else np.nan,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
@@ -489,11 +483,6 @@ def multicountry_growth_nn(
                 "long_run_wealth_rank_violation": float(
                     long_run["wealth_rank_violation"]
                 ),
-                "long_run_c_rank_matches_wealth": long_run["c_rank_matches_wealth"],
-                "long_run_c_rank_matches_a_0": long_run["c_rank_matches_a_0"],
-                "long_run_terminal_a_rank_matches_a_0": long_run[
-                    "terminal_a_rank_matches_a_0"
-                ],
             }
         )
     for country in range(num_countries):

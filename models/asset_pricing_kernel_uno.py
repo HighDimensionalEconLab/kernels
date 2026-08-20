@@ -281,8 +281,6 @@ def asset_pricing_kernel_uno(
         "p_rel_error_max": float(p_rel_error[1:].max()),
         "p_rel_error_min": float(p_rel_error[1:].min()),
         "solve_time": solve_time,
-        "solver_status": solver_status,
-        "solution_status": solution_status,
         "stationarity": result.solution_stationarity,
         "primal_feasibility": result.solution_primal_feasibility,
         "solution_accepted": solution_accepted,

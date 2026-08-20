@@ -479,12 +479,6 @@ def stochastic_growth_nn_recursive(
         test_solution.ok[:, None, None], test_solution.xs, jnp.nan
     )
     test_values = trajectory_values(policy, test_log_states, p)
-    test_path_ok = bool(
-        jnp.all(test_solution.ok)
-        and jnp.all(jnp.isfinite(test_log_states))
-        and jnp.all(jnp.isfinite(test_values["c"]))
-        and jnp.min(test_values["c"]) > 0.0
-    )
     test_initial = np.asarray(test_initial_conditions)
     test_df = long_df(
         {"t": test_solution.ts, **test_values},
@@ -534,9 +528,6 @@ def stochastic_growth_nn_recursive(
     observed_log_k = observed_log_k[np.isfinite(observed_log_k)]
 
     results = {
-        "variant": "recursive_nn_stochastic",
-        "policy": "delta_k0_unit_softplus",
-        "state_coordinate": "(log z, log k)",
         "a": a,
         "delta": delta,
         "rho_hat": rho_hat,
@@ -558,8 +549,6 @@ def stochastic_growth_nn_recursive(
         "max_train_euler": max_train_euler,
         "max_test_euler": max_test_euler,
         "final_damping": final_damping,
-        "policy_cache_key": policy_key,
-        "policy_cache_hit": cache_hit,
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_values["euler_residual"]))),
         "test_trajectory_euler_mean_abs_p50": float(
             jnp.quantile(test_trajectory_euler, 0.5)
@@ -577,13 +566,10 @@ def stochastic_growth_nn_recursive(
         "max_log_tvc_residual": max_log_tvc,
         "transversality_ok": transversality_ok,
         "min_test_c": float(jnp.min(test_values["c"])),
-        "test_path_ok": test_path_ok,
         "steps": steps,
         "num_epochs": tolerance_set.num_epochs,
         "epochs_run": epochs_run,
-        "parameter_derivative": "conditional_on_carried_training_batch",
         "attempt": attempt,
-        "stopping_reason": stopping_reason,
         "solve_time": solve_time,
         "setup_time": setup_time,
         "total_fit_time": total_fit_time,

@@ -27,7 +27,6 @@ from models.open_economy_growth_kernel import DataSettings, KernelSettings
 ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
 TRAIN_RESIDUAL_TOL = 1e-5
 VALIDATION_RESIDUAL_TOL = 1e-2
-BENCHMARK_MATCH_TOL = 1e-3
 
 
 @dataclass(frozen=True)
@@ -430,7 +429,6 @@ def open_economy_growth_kernel_uno(
     if max_validation_residual > VALIDATION_RESIDUAL_TOL:
         rejection_reasons.append("validation_residual")
     solution_accepted = not rejection_reasons
-    benchmark_match = max_benchmark_error <= BENCHMARK_MATCH_TOL
 
     alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets = unpack(x)
     c_offset, mu_offset, q_offset = offsets
@@ -463,7 +461,6 @@ def open_economy_growth_kernel_uno(
         "a_0": a_0,
         "a_0_over_output_ss": a_0 / float(output_scale),
         "residual_dtype": "float64",
-        "metric_dtype": "float64",
         "kernel": kernel,
         "ell": kernel_set.ell,
         "sigma": kernel_set.sigma,
@@ -480,7 +477,6 @@ def open_economy_growth_kernel_uno(
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
         "max_benchmark_error": max_benchmark_error,
-        "benchmark_match": benchmark_match,
         "terminal_residual_count": 0,
         "differential_residual_count": 4 * n_train,
         "algebraic_residual_count": n_train,
@@ -490,8 +486,6 @@ def open_economy_growth_kernel_uno(
         "algebraic_rkhs_function_count": 1,
         "free_initial_value_count": 3,
         "metric_selection_dimension": 3,
-        "selection": "minimum_rkhs_norm_constrained",
-        "initialization": "zero_coordinate",
         "k_relative_error_max": float(jnp.max(k_relative_error)),
         "q_relative_error_max": float(jnp.max(q_relative_error)),
         "c_relative_error_max": float(jnp.max(c_relative_error)),
@@ -523,9 +517,6 @@ def open_economy_growth_kernel_uno(
         "rkhs_norm_total": float(rkhs_norm_total),
         "objective_value": float(objective_norm_squared),
         "solve_time": solve_time,
-        "solver": "uno",
-        "solver_status": solver_status,
-        "solution_status": solution_status,
         "stationarity": result.solution_stationarity,
         "primal_feasibility": result.solution_primal_feasibility,
         "solution_accepted": solution_accepted,

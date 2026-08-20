@@ -149,7 +149,6 @@ def run(
         "n_nn_seeds": n_nn_seeds,
         "data_seed": data_seed,
         "residual_dtype": "float64" if use_float64 else "float32",
-        "benchmark_errors_are_reported_not_gated": True,
     }
 
     # Compile once (the benchmark BVP solve included), then time every retained
@@ -220,7 +219,6 @@ def run(
             "common_validation": {
                 "requires_solver_converged": True,
                 "requires_train_path_ok": True,
-                "benchmark_errors_are_reported_not_gated": True,
             },
         },
     )

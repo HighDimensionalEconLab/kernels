@@ -46,7 +46,6 @@ from models.multicountry_growth_preconditioner import (
     build_arrow_woodbury,
 )
 from models.utilities import (
-    STATUS_TO_REASON,
     Stopwatch,
     acceptance_fields,
     make_sampled_train_grid,
@@ -520,7 +519,6 @@ def multicountry_growth_kernel(
         "r": parameters.r,
         "eta": parameters.eta,
         "num_countries": num_countries,
-        "common_gamma": bool(long_run["common_gamma"]),
         # Measured, not requested: a float64 leak upstream shows up here.
         "residual_dtype": str(train_eval["capital"].dtype),
         "kernel": kernel,
@@ -546,9 +544,6 @@ def multicountry_growth_kernel(
         "algebraic_rkhs_function_count": num_countries + 1,
         "free_initial_value_count": num_initial_values,
         "metric_selection_dimension": num_initial_values,
-        "selection": "minimum_rkhs_norm_ridge",
-        "initialization": "zero_coordinate",
-        "global_closure": "explicit_assets_and_algebraic_clearing",
         "long_run_check_T": data_set.long_run_check_T,
         "long_run_window": data_set.long_run_window,
         "long_run_c_flatness": float(long_run["c_flatness"]),
@@ -567,9 +562,6 @@ def multicountry_growth_kernel(
         "rkhs_norm_total": float(rkhs_norm_total),
         "rkhs_norm_interest_rate": float(rkhs_norm_rate),
         "solve_time": solve_time,
-        "solver": "nlls-gram",
-        "linear_solver": lm_set.linear_solver,
-        "preconditioner": "arrow_woodbury" if lm_set.linear_solver == "cg" else "none",
         "cg_tol": lm_set.cg_tol,
         "cg_maxiter": lm_set.cg_maxiter,
         "cg_damping_floor": lm_set.cg_damping_floor,
@@ -587,7 +579,6 @@ def multicountry_growth_kernel(
         "final_grad_norm": float(result.info.grad_norm),
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
-        "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
         **acceptance_fields(rejection_reasons),
     }
     if long_run["common_gamma"]:
@@ -602,11 +593,6 @@ def multicountry_growth_kernel(
                 "long_run_wealth_rank_violation": float(
                     long_run["wealth_rank_violation"]
                 ),
-                "long_run_c_rank_matches_wealth": long_run["c_rank_matches_wealth"],
-                "long_run_c_rank_matches_a_0": long_run["c_rank_matches_a_0"],
-                "long_run_terminal_a_rank_matches_a_0": long_run[
-                    "terminal_a_rank_matches_a_0"
-                ],
             }
         )
     for country in range(num_countries):

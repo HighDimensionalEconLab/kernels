@@ -21,7 +21,6 @@ from models.kernels import (
     rkhs_norm_squared,
 )
 from models.utilities import (
-    STATUS_TO_REASON,
     Stopwatch,
     acceptance_fields,
     make_train_t_grid,
@@ -141,7 +140,6 @@ def asset_pricing_kernel(
     theta = result.x
     alpha, p_0 = theta.alpha, theta.p_0
     steps = int(result.steps)
-    status = int(result.status)
     p_train, dp_train = path_values(theta, K_jax, K_tilde_jax)
     train_residual = dp_train - (r * p_train - dividends(train_data, p))
     max_train_residual = float(jnp.max(jnp.abs(train_residual)))
@@ -223,14 +221,11 @@ def asset_pricing_kernel(
         "p_rel_error_max": float(p_rel_error[1:].max()),
         "p_rel_error_min": float(p_rel_error[1:].min()),
         "solve_time": elapsed,
-        "solver": "nlls-gram",
-        "linear_solver": "cholesky",
         "ridge": lm_set.ridge,
         "gtol": lm_set.gtol,
         "train_loss": float(result.info.resid_loss),
         "final_damping": float(result.lm_state.damping),
         "steps": steps,
-        "stopping_reason": STATUS_TO_REASON.get(status, "unknown"),
         **acceptance_fields(rejection_reasons),
     }
     print(

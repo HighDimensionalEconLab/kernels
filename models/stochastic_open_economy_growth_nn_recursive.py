@@ -689,20 +689,6 @@ def stochastic_open_economy_growth_nn_recursive(
         and jnp.min(test_values["c"]) > 0.0
         and jnp.min(test_values["x"]) > 0.0
     )
-    tvc_feasible_observations = (
-        jnp.isfinite(tvc_values["discounted_marginal_utility"])
-        & jnp.isfinite(tvc_values["absolute_asset_tvc"])
-        & jnp.isfinite(tvc_values["capital_tvc"])
-        & (tvc_values["k"] > 0.0)
-        & (tvc_values["q"] > 0.0)
-        & (tvc_values["c"] > 0.0)
-        & (tvc_values["x"] > 0.0)
-    )
-    tvc_paths_ok = bool(
-        jnp.all(tvc_solution.ok)
-        and jnp.all(jnp.isfinite(tvc_states))
-        and jnp.all(tvc_feasible_observations)
-    )
 
     # Paired common-noise simulations from shifted NFA positions exercise the
     # asset axis even at zero IC spread.
@@ -798,19 +784,8 @@ def stochastic_open_economy_growth_nn_recursive(
     observed_assets = np.asarray(test_values["a"]).reshape(-1)
     observed_rates = np.asarray(test_values["interest_rate"]).reshape(-1)
     test_asset_change = test_values["a"][:, -1] - test_values["a"][:, 0]
-    # Near one, the squash saturates and the heads lose asset sensitivity.
-    test_normalized_asset = (
-        test_states[..., 2] - nn_set.asset_center
-    ) / nn_set.asset_scale
-    test_asset_squash_saturation = float(
-        jnp.nanmax(jnp.abs(jnp.tanh(test_normalized_asset / 2.0)))
-    )
     results = {
         **asdict(parameters),
-        "variant": "stochastic_recursive_open_economy_nn",
-        "state_coordinate": "(log z, log k, a/output_scale, rate_gap)",
-        "policy": "investment_current_account",
-        "initialization": "replacement_investment_zero_current_account",
         "k_0": k_0,
         "a_0": a_0,
         "z_0": z_0,
@@ -851,7 +826,6 @@ def stochastic_open_economy_growth_nn_recursive(
         "test_asset_p025": float(np.quantile(observed_assets, 0.025)),
         "test_asset_p50": float(np.quantile(observed_assets, 0.5)),
         "test_asset_p975": float(np.quantile(observed_assets, 0.975)),
-        "test_asset_squash_saturation": test_asset_squash_saturation,
         "test_terminal_asset_mean": float(jnp.mean(test_values["a"][:, -1])),
         "test_terminal_asset_sd": float(jnp.std(test_values["a"][:, -1])),
         "test_terminal_capital_mean": test_terminal_capital_mean,
@@ -866,7 +840,6 @@ def stochastic_open_economy_growth_nn_recursive(
         "tvc_T": data_set.tvc_T,
         "tvc_points": data_set.tvc_points,
         "num_tvc_trajectories": ic_set.num_tvc_trajectories,
-        "tvc_paths_ok": tvc_paths_ok,
         "ex_post_expected_absolute_asset_tvc": float(
             tvc_statistics["expected_absolute_asset_tvc"]
         ),
@@ -888,7 +861,6 @@ def stochastic_open_economy_growth_nn_recursive(
         "hysteresis_asset_persistence_ratio": (
             hysteresis_terminal_asset_difference / (2.0 * asset_shift)
         ),
-        "hysteresis_paths_ok": hysteresis_paths_ok,
         "hysteresis_euler_mean_abs": hysteresis_euler_mean_abs,
         "hysteresis_euler_max_abs": hysteresis_euler_max_abs,
         "steps": steps,
@@ -899,10 +871,7 @@ def stochastic_open_economy_growth_nn_recursive(
         ),
         "final_training_shock_scale": float(solve_args.shock_scale),
         "attempt": attempt,
-        "stopping_reason": stopping_reason,
         "final_damping": final_damping,
-        "policy_cache_key": policy_key,
-        "policy_cache_hit": cache_hit,
         "solve_time": solve_time,
         "setup_time": setup_time,
         "total_fit_time": total_fit_time,
@@ -923,14 +892,8 @@ def stochastic_open_economy_growth_nn_recursive(
         "train_T": data_set.train_T,
         "test_T": data_set.test_T,
         "train_path_ok": train_path_ok,
-        "test_path_ok": test_path_ok,
         "solver_accepted": solver_accepted,
-        "solver_converged": solver_accepted,
         **acceptance,
-        "lm_linear_system": "default_auto_dual_gram_when_overparameterized",
-        "parameter_derivative": (
-            "minimum_euclidean_norm_svd_conditional_on_carried_training_batch"
-        ),
     }
 
     hyperparameters = {

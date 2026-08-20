@@ -355,12 +355,6 @@ def neoclassical_growth_kernel_recursive(
         test_solution.ok[:, None, None], test_solution.xs, jnp.nan
     )
     test_values = trajectory_values(policy, test_log_states, p)
-    test_path_ok = bool(
-        jnp.all(test_solution.ok)
-        and jnp.all(jnp.isfinite(test_log_states))
-        and jnp.all(jnp.isfinite(test_values["c"]))
-        and jnp.min(test_values["c"]) > 0.0
-    )
     test_initial = np.asarray(test_initial_conditions)
     test_df = long_df(
         {"t": test_solution.ts, **test_values},
@@ -416,9 +410,6 @@ def neoclassical_growth_kernel_recursive(
 
     # Published results.
     results = {
-        "variant": "fixed_recursive_kernel",
-        "collocation_design": "frozen_exact_benchmark_states",
-        "parameter_derivative": "conditional_on_fixed_collocation_design",
         "a": a,
         "delta": delta,
         "rho_hat": rho_hat,
@@ -431,32 +422,13 @@ def neoclassical_growth_kernel_recursive(
         "data_seed": ic_set.data_seed,
         # Measured, not requested: a float64 leak upstream shows up here.
         "residual_dtype": str(train_values["euler_residual"].dtype),
-        "homothetic_representation": kernel_set.homothetic_representation,
-        "policy": (
-            "delta_k_unit_softplus"
-            if kernel_set.homothetic_representation
-            else "delta_k0_unit_softplus"
-        ),
-        "state_coordinate": (
-            "log(k / z^(1/(1-a)))"
-            if kernel_set.homothetic_representation
-            else "(log z, log k)"
-        ),
         "kernel": (
             "rbf" if kernel_set.homothetic_representation else kernel_set.state_kernel
         ),
         "amplitude": kernel_set.amplitude,
         "lengthscale": kernel_set.lengthscale,
         "metric_epsilon": kernel_set.metric_epsilon,
-        "metric": "shifted_rkhs_gram",
-        "selection": (
-            "ridge_rkhs_coefficients_with_free_constant"
-            if kernel_set.free_constant
-            else "ridge_rkhs_coefficients"
-        ),
         "ridge": tolerance_set.ridge,
-        "free_constant": kernel_set.free_constant,
-        "linear_mean": kernel_set.linear_mean,
         "h_const": h_const,
         "rkhs_norm": float(rkhs_norm_squared(alpha, args.gram)),
         "shifted_metric_norm": float(rkhs_norm_squared(alpha, shifted_gram)),
@@ -480,10 +452,8 @@ def neoclassical_growth_kernel_recursive(
         "max_log_tvc_residual": max_log_tvc_residual,
         "transversality_ok": transversality_ok,
         "min_test_c": float(jnp.min(test_values["c"])),
-        "test_path_ok": test_path_ok,
         **error_fields,
         "steps": steps,
-        "stopping_reason": stopping_reason,
         "solve_time": solve_time,
         "setup_time": setup_time,
         "total_fit_time": total_fit_time,

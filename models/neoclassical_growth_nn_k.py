@@ -26,7 +26,6 @@ from models.neoclassical_growth import (
 from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from models.utilities import (
     ACTIVATIONS,
-    STATUS_TO_REASON,
     OptimizerSettings,
     Stopwatch,
     make_train_t_grid,
@@ -337,7 +336,6 @@ def neoclassical_growth_nn_k(
     model = nnx.merge(graphdef, result.x, nondiff)
     steps = int(result.steps)
     attempt = int(result.multi_start.attempt) + 1
-    stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
     train_loss = float(result.info.loss)
     accepted = bool(result.multi_start.accepted)
 
@@ -370,17 +368,14 @@ def neoclassical_growth_nn_k(
         "z_0": z_0,
         "k_0": k_0,
         "g": g,
-        "learn_g_hat": policy_settings.learn_g_hat,
         "g_hat": g_hat_value,
         "g_hat_error": g_hat_value - g,
         "A": A,
         "b_1": b_1,
         "b_2": b_2,
-        "use_kinked_production": use_kinked_production,
         "seed": seed,
         # Measured, not requested: a float64 leak upstream shows up here.
         "residual_dtype": str(k_T.dtype),
-        "solver": "nlls-gram",
         "train_loss": train_loss,
         "final_damping": float(result.lm_state.damping),
         "test_euler_mean_abs": float(test_df["euler"].abs().mean()),
@@ -389,7 +384,6 @@ def neoclassical_growth_nn_k(
         "transversality_ok": transversality_ok,
         "steps": steps,
         "attempt": attempt,
-        "stopping_reason": stopping_reason,
         "solve_time": solve_time,
         "solve_time_success": solve_time if accepted else np.nan,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),

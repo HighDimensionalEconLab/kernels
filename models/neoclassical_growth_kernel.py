@@ -27,7 +27,6 @@ from models.neoclassical_growth import (
 )
 from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from models.utilities import (
-    STATUS_TO_REASON,
     Stopwatch,
     acceptance_fields,
     make_train_t_grid,
@@ -271,7 +270,6 @@ def neoclassical_growth_kernel(
     theta = result.x
     c_0, mu_0 = theta.initial
     steps = int(result.steps)
-    status = int(result.status)
 
     # Diagnostics on the train and test grids.
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
@@ -342,13 +340,11 @@ def neoclassical_growth_kernel(
         "z_0": z_0,
         "k_0": k_0,
         "g": g,
-        "learn_g_hat": learn_g_hat,
         "g_hat": g_hat_value,
         "g_hat_error": g_hat_value - g,
         "A": A,
         "b_1": b_1,
         "b_2": b_2,
-        "use_kinked_production": use_kinked_production,
         # Measured, not requested: a float64 leak upstream shows up here.
         "residual_dtype": str(result.x.alpha_mu.dtype),
         "kernel": kernel,
@@ -367,14 +363,11 @@ def neoclassical_growth_kernel(
         "log_tvc_residual": log_tvc,
         "transversality_ok": transversality_ok,
         "solve_time": elapsed,
-        "solver": "nlls-gram",
-        "linear_solver": "cholesky",
         "ridge": lm_set.ridge,
         "gtol": lm_set.gtol,
         "train_loss": float(result.info.resid_loss),
         "final_damping": float(result.lm_state.damping),
         "steps": steps,
-        "stopping_reason": STATUS_TO_REASON.get(status, "unknown"),
         **acceptance_fields(rejection_reasons),
     }
     if not use_kinked_production:

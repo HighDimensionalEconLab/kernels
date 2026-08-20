@@ -533,20 +533,6 @@ def stochastic_open_economy_growth_kernel_recursive(
         p,
     )
     tvc_statistics = transversality_statistics(tvc_values)
-    tvc_feasible_observations = (
-        jnp.isfinite(tvc_values["discounted_marginal_utility"])
-        & jnp.isfinite(tvc_values["absolute_asset_tvc"])
-        & jnp.isfinite(tvc_values["capital_tvc"])
-        & (tvc_values["k"] > 0.0)
-        & (tvc_values["q"] > 0.0)
-        & (tvc_values["c"] > 0.0)
-        & (tvc_values["x"] > 0.0)
-    )
-    tvc_paths_ok = bool(
-        jnp.all(tvc_solution.ok)
-        and jnp.all(jnp.isfinite(tvc_states))
-        and jnp.all(tvc_feasible_observations)
-    )
     tvc_df = trajectory_frame(tvc_values, tvc_solution.ts)
     expected_tvc_df = transversality_expectation_frame(tvc_values, tvc_solution.ts)
 
@@ -601,10 +587,6 @@ def stochastic_open_economy_growth_kernel_recursive(
         8 if kernel_set.linear_mean else 0
     )
     results = {
-        "variant": "fixed_recursive_kernel_stochastic_open_economy",
-        "collocation_design": "frozen_reference_nn_simulation",
-        "parameter_derivative": "conditional_on_fixed_collocation_design",
-        "reference_policy": str(reference_path),
         "reference_test_euler_mean_abs": float(reference_meta["test_euler_mean_abs"]),
         **asdict(parameters),
         "k_0": k_0,
@@ -621,8 +603,6 @@ def stochastic_open_economy_growth_kernel_recursive(
         # Measured, not requested: a float64 leak upstream shows up here.
         "residual_dtype": str(train_values["c_euler"].dtype),
         "sde_solver": sde_solver,
-        "state_coordinate": "(log z, log k, a/output_scale, rate_gap)",
-        "policy": "investment_current_account",
         "kernel": kernel_set.state_kernel,
         "amplitude": kernel_set.amplitude,
         "log_z_lengthscale": lengthscales[0],
@@ -630,13 +610,10 @@ def stochastic_open_economy_growth_kernel_recursive(
         "asset_lengthscale": lengthscales[2],
         "rate_lengthscale": lengthscales[3],
         "metric_epsilon": kernel_set.metric_epsilon,
-        "metric": "shifted_rkhs_gram",
         "ridge": tolerance_set.ridge,
         "ridge_init": tolerance_set.ridge_init,
         "ridge_decrease": tolerance_set.ridge_decrease,
         "ridge_grad_rtol": tolerance_set.ridge_grad_rtol,
-        "free_constant": kernel_set.free_constant,
-        "linear_mean": kernel_set.linear_mean,
         "train_loss": train_loss,
         "train_euler_mean_abs": float(jnp.mean(jnp.abs(train_euler))),
         "train_euler_max_abs": float(jnp.max(jnp.abs(train_euler))),
@@ -651,8 +628,6 @@ def stochastic_open_economy_growth_kernel_recursive(
         "test_c_euler_mean_abs": float(test_mean_abs[0]),
         "test_q_euler_mean_abs": float(test_mean_abs[1]),
         "min_test_consumption": float(jnp.min(test_values["c"])),
-        "test_path_ok": test_path_ok,
-        "reference_path_ok": reference_path_ok,
         "test_mean_abs_k_rel_error": float(jnp.mean(jnp.abs(k_error))),
         "test_max_abs_k_rel_error": float(jnp.max(jnp.abs(k_error))),
         "test_mean_abs_c_rel_error": float(jnp.mean(jnp.abs(c_error))),
@@ -660,8 +635,6 @@ def stochastic_open_economy_growth_kernel_recursive(
         "test_mean_abs_asset_scaled_error": float(jnp.mean(jnp.abs(asset_error))),
         "test_max_abs_asset_scaled_error": float(jnp.max(jnp.abs(asset_error))),
         "steps": steps,
-        "stopping_reason": stopping_reason,
-        "solver_converged": solver_converged,
         "setup_time": setup_time,
         "solve_time": solve_time,
         "total_fit_time": total_fit_time,
@@ -680,7 +653,6 @@ def stochastic_open_economy_growth_kernel_recursive(
         "tvc_T": data_set.tvc_T,
         "tvc_points": data_set.tvc_points,
         "num_tvc_trajectories": ic_set.num_tvc_trajectories,
-        "tvc_paths_ok": tvc_paths_ok,
         "ex_post_expected_absolute_asset_tvc": float(
             tvc_statistics["expected_absolute_asset_tvc"]
         ),

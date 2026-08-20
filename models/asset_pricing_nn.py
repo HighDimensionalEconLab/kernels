@@ -228,10 +228,6 @@ def asset_pricing_nn(
         # Measured from the trained parameters, not requested: a float64 leak
         # in the solve promotes them.
         "residual_dtype": str(ravel_pytree(nnx.state(model, nnx.Param))[0].dtype),
-        "solver": "nlls-gram",
-        "ansatz": "sequential_time_level_nn",
-        "metric": "identity_parameter_metric",
-        "selection": "minimum_identity_metric_parameter_step",
         "terminal_residual_count": 0,
         "tvc_training_residual_count": 0,
         "benchmark_training_residual_count": 0,
@@ -251,7 +247,6 @@ def asset_pricing_nn(
         "max_abs_bubble_coefficient": float(test_df["bubble_coefficient"].abs().max()),
         "steps": int(result.steps),
         "attempt": int(result.multi_start.attempt) + 1,
-        "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
         "solve_time": solve_time,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
         "solution_accepted": solution_accepted,

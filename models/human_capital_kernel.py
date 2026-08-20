@@ -20,7 +20,6 @@ from models.kernels import (
     normalize_kernel,
 )
 from models.utilities import (
-    STATUS_TO_REASON,
     Stopwatch,
     acceptance_fields,
     make_train_t_grid,
@@ -384,15 +383,12 @@ def human_capital_kernel(
             jnp.max(jnp.abs(test_eval["hidden_dae_residual"]))
         ),
         "solve_time": elapsed,
-        "solver": "nlls-gram",
-        "linear_solver": "cholesky",
         "ridge": lm_set.ridge,
         "gtol": lm_set.gtol,
         "train_loss": float(result.info.resid_loss),
         "final_grad_norm": float(result.info.grad_norm),
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
-        "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
         **acceptance_fields(rejection_reasons),
     }
     if verbose:

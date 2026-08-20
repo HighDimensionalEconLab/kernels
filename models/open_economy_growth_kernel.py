@@ -35,7 +35,6 @@ from models.open_economy_growth import (
 )
 from models.open_economy_growth_benchmark import open_economy_growth_benchmark
 from models.utilities import (
-    STATUS_TO_REASON,
     Stopwatch,
     acceptance_fields,
     make_sampled_train_grid,
@@ -419,7 +418,6 @@ def open_economy_growth_kernel(
     if max_train_residual > tolerance_set.train_residual:
         rejection_reasons.append("train_residual")
     validation_pass = max_validation_residual <= tolerance_set.validation_residual
-    benchmark_match = max_benchmark_error <= tolerance_set.benchmark_match
 
     alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, initial = theta
     c_offset, mu_offset, q_offset = initial
@@ -469,7 +467,6 @@ def open_economy_growth_kernel(
         "max_validation_residual": max_validation_residual,
         "validation_pass": validation_pass,
         "max_benchmark_error": max_benchmark_error,
-        "benchmark_match": benchmark_match,
         "terminal_residual_count": 0,
         "differential_residual_count": 4 * n_train,
         "algebraic_residual_count": n_train,
@@ -479,8 +476,6 @@ def open_economy_growth_kernel(
         "algebraic_rkhs_function_count": 1,
         "free_initial_value_count": 3,
         "metric_selection_dimension": 3,
-        "selection": "minimum_rkhs_norm_ridge",
-        "initialization": "zero_coordinate",
         "k_relative_error_max": float(jnp.max(k_relative_error)),
         "q_relative_error_max": float(jnp.max(q_relative_error)),
         "c_relative_error_max": float(jnp.max(c_relative_error)),
@@ -511,15 +506,12 @@ def open_economy_growth_kernel(
         "rkhs_norm_q": float(rkhs_norm_q),
         "rkhs_norm_total": float(rkhs_norm_total),
         "solve_time": solve_time,
-        "solver": "nlls-gram",
-        "linear_solver": lm_set.linear_solver,
         "ridge": lm_set.ridge,
         "gtol": lm_set.gtol,
         "train_loss": float(result.info.resid_loss),
         "final_grad_norm": float(result.info.grad_norm),
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
-        "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
         **acceptance_fields(rejection_reasons),
         "c_offset": float(c_offset),
         "mu_offset": float(mu_offset),

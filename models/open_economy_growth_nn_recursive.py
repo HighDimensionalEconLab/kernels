@@ -26,7 +26,6 @@ from models.open_economy_growth import (
 from models.open_economy_growth_benchmark import open_economy_growth_benchmark
 from models.utilities import (
     ACTIVATIONS,
-    STATUS_TO_REASON,
     OptimizerSettings,
     Stopwatch,
     acceptance_fields,
@@ -489,20 +488,12 @@ def open_economy_growth_nn_recursive(
         / benchmark_test_values["c"]
     )
     a_scaled_error = jnp.abs(test_eval["a"] - benchmark_test_values["a"]) / output_scale
-    benchmark_error_arrays = (
-        k_relative_error,
-        q_relative_error,
-        c_relative_error,
-        a_scaled_error,
-    )
     max_benchmark_error = max(
         float(jnp.max(k_relative_error)),
         float(jnp.max(q_relative_error)),
         float(jnp.max(c_relative_error)),
         float(jnp.max(a_scaled_error)),
     )
-    benchmark_match_tolerance = tolerance_set.benchmark_match
-    benchmark_match = max_benchmark_error <= benchmark_match_tolerance
 
     terminal = {name: diagnostic_eval[name][-1] for name in diagnostic_eval}
     tail = tail_diagnostics(
@@ -558,11 +549,6 @@ def open_economy_growth_nn_recursive(
         "seed": seed,
         # Measured, not requested: a float64 leak upstream shows up here.
         "residual_dtype": str(train_eval["q_euler"].dtype),
-        "solver": "nlls-gram",
-        "ansatz": "sequential_investment_current_account_levels",
-        "selection": "minimum_identity_metric_parameter_step",
-        "metric": "identity_parameter_metric",
-        "initialization": "replacement_investment_near_zero_current_account",
         "terminal_residual_count": 0,
         "dae_residual_count": 2 * int(train_t.size),
         "domain_residual_count": int(train_t.size),
@@ -572,10 +558,7 @@ def open_economy_growth_nn_recursive(
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
         "max_benchmark_error": max_benchmark_error,
-        "benchmark_error_dtype": str(jnp.result_type(*benchmark_error_arrays)),
-        "benchmark_error_device": k_relative_error.device.platform,
-        "benchmark_match_tolerance": benchmark_match_tolerance,
-        "benchmark_match": benchmark_match,
+        "benchmark_match_tolerance": tolerance_set.benchmark_match,
         "k_relative_error_max": float(jnp.max(k_relative_error)),
         "q_relative_error_max": float(jnp.max(q_relative_error)),
         "c_relative_error_max": float(jnp.max(c_relative_error)),
@@ -595,7 +578,6 @@ def open_economy_growth_nn_recursive(
         ),
         "steps": int(result.steps),
         "attempt": attempt,
-        "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
         "solve_time": solve_time,
         "solve_time_success": solve_time if solution_accepted else np.nan,
         "total_params": int(theta_final.size),

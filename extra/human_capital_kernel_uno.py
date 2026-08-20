@@ -533,8 +533,6 @@ def human_capital_kernel_uno(
         ),
         "solve_time": solve_time,
         "wall_time": elapsed,
-        "solver_status": solver_status,
-        "solution_status": solution_status,
         "stationarity": result.solution_stationarity,
         "primal_feasibility": result.solution_primal_feasibility,
         "solution_accepted": solution_accepted,

@@ -20,7 +20,6 @@ from models.kernels import (
     rkhs_norm_squared,
 )
 from models.utilities import (
-    STATUS_TO_REASON,
     Stopwatch,
     acceptance_fields,
     make_train_t_grid,
@@ -250,14 +249,11 @@ def optimal_advertising_kernel(
         "train_residual_tolerance": train_residual_tolerance,
         "max_validation_residual": max_validation_residual,
         "solve_time": elapsed,
-        "solver": "nlls-gram",
-        "linear_solver": "cholesky",
         "ridge": lm_set.ridge,
         "gtol": lm_set.gtol,
         "train_loss": float(result.info.resid_loss),
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
-        "stopping_reason": STATUS_TO_REASON.get(int(result.status), "unknown"),
         **acceptance_fields(rejection_reasons),
     }
     if verbose:

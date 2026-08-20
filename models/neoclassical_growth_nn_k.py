@@ -45,6 +45,7 @@ class StructuralParameters:
     delta: jax.Array
     rho_hat: jax.Array
     sigma_crra: jax.Array
+    z_0: jax.Array
     k_0: jax.Array
     g: jax.Array
     A: jax.Array
@@ -169,7 +170,7 @@ class CapitalPathNN(nnx.Module):
 # identically, leaving only the Euler equation and the initial condition.
 def substituted_consumption(model, t, p):
     k, dk_dt = jax.jvp(model, (t,), (jnp.ones_like(t),))
-    z = jnp.exp((1.0 - p.a) * p.g * t)
+    z = p.z_0 * jnp.exp((1.0 - p.a) * p.g * t)
     return production(z, k, p) - p.delta * k - dk_dt
 
 
@@ -181,7 +182,7 @@ def euler_residual(model, t, p):
         (t,),
         (jnp.ones_like(t),),
     )
-    z = jnp.exp((1.0 - p.a) * p.g * t)
+    z = p.z_0 * jnp.exp((1.0 - p.a) * p.g * t)
     # Zero on the feasible domain; keeps the residual NaN when c <= 0, where
     # the tangent alone would stay finite.
     domain_guard = 0.0 * log_c
@@ -233,9 +234,10 @@ def neoclassical_growth_nn_k(
     delta: float = CONSTANTS.delta,
     rho_hat: float = CONSTANTS.rho_hat,
     k_0: float = 1.0,
-    # Hicks-neutral trend z(t) = e^{(1-a) g t} enters the residual
+    # Hicks-neutral technology z(t) = z_0 e^{(1-a) g t} enters the residual
     # analytically; nn_set.learn_g_hat frees the trend rate instead of fixing
     # it at g.
+    z_0: float = 1.0,
     g: float = 0.0,
     A: float | None = None,
     b_1: float | None = None,
@@ -271,6 +273,7 @@ def neoclassical_growth_nn_k(
         delta=delta,
         rho_hat=rho_hat,
         sigma_crra=sigma_crra,
+        z_0=z_0,
         k_0=k_0,
         g=g,
         A=A,
@@ -344,7 +347,9 @@ def neoclassical_growth_nn_k(
     benchmark = (
         None
         if use_kinked_production
-        else neoclassical_growth_benchmark(a, delta, rho_hat, sigma_crra, g=g, k_0=k_0)
+        else neoclassical_growth_benchmark(
+            a, delta, rho_hat, sigma_crra, g=g, z_0=z_0, k_0=k_0
+        )
     )
     train_df = snapshot(model, t_train, p, benchmark)
     test_df = snapshot(model, test_t, p, benchmark)
@@ -363,6 +368,7 @@ def neoclassical_growth_nn_k(
         "delta": delta,
         "rho_hat": rho_hat,
         "sigma_crra": sigma_crra,
+        "z_0": z_0,
         "k_0": k_0,
         "g": g,
         "learn_g_hat": policy_settings.learn_g_hat,
@@ -424,7 +430,7 @@ def neoclassical_growth_nn_k(
             "b_1": b_1,
             "b_2": b_2,
         },
-        "initial_conditions": {"k_0": k_0},
+        "initial_conditions": {"z_0": z_0, "k_0": k_0},
     }
 
     return results, {

@@ -74,7 +74,7 @@ class ResidualArgs:
     graphdef: nnx.GraphDef
     nondiff: nnx.State
     t: jax.Array
-    z: jax.Array
+    z_trend: jax.Array
 
 
 class GrowthPolicyNN(nnx.Module):
@@ -153,7 +153,7 @@ def residual_fn(theta, args, p):
     c = values[:, 1]
     dk_dt = derivatives[:, 0]
     dc_dt = derivatives[:, 1]
-    z = 1.0 if args.z is None else args.z
+    z = p.z_0 * (1.0 if args.z_trend is None else args.z_trend)
     resource = dk_dt - (production(z, k, p) - p.delta * k - c)
     euler = dc_dt - c * (mpk(z, k, p) - p.delta - p.rho_hat) / p.sigma_crra
     ic = model(jnp.asarray(0.0, dtype=args.t.dtype))[0] - p.k_0
@@ -200,8 +200,10 @@ def neoclassical_growth_nn(
     delta: float = CONSTANTS.delta,
     rho_hat: float = CONSTANTS.rho_hat,
     k_0: float = 1.0,
-    # Hicks-neutral trend Z(t) = e^{(1-a) g t} enters the residuals as data;
-    # nn_set.learn_g_hat frees the trend rate instead of fixing it at g.
+    # Hicks-neutral technology z(t) = z_0 e^{(1-a) g t}: the unit trend enters
+    # the residuals as data, z_0 rides in p; nn_set.learn_g_hat frees the
+    # trend rate instead of fixing it at g.
+    z_0: float = 1.0,
     g: float = 0.0,
     A: float | None = None,
     b_1: float | None = None,
@@ -239,6 +241,7 @@ def neoclassical_growth_nn(
         delta=delta,
         rho_hat=rho_hat,
         sigma_crra=sigma_crra,
+        z_0=z_0,
         k_0=k_0,
         A=A,
         b_1=b_1,
@@ -247,8 +250,8 @@ def neoclassical_growth_nn(
     )
 
     t_train = make_train_t_grid(data_set, dtype)
-    z_train = jnp.exp((1.0 - a) * g * t_train) if g != 0.0 else None
-    c_flow_guess = steady_flow_consumption_guess(k_0, a, delta, A, b_1, b_2)
+    z_trend_train = jnp.exp((1.0 - a) * g * t_train) if g != 0.0 else None
+    c_flow_guess = steady_flow_consumption_guess(z_0, k_0, a, delta, A, b_1, b_2)
     policy_settings = replace(nn_set, input_scale=max(float(data_set.train_T), 1.0))
     k_scale = max(float(k_0), DOMAIN_EPS)
     c_scale = c_flow_guess
@@ -263,7 +266,7 @@ def neoclassical_growth_nn(
     )
     graphdef, theta_0, nondiff = nnx.split(model, nnx.Param, ...)
     residual_args = ResidualArgs(
-        graphdef=graphdef, nondiff=nondiff, t=t_train, z=z_train
+        graphdef=graphdef, nondiff=nondiff, t=t_train, z_trend=z_trend_train
     )
 
     # Multi-start Levenberg-Marquardt solve.
@@ -315,16 +318,28 @@ def neoclassical_growth_nn(
 
     # Diagnostics against the benchmark.
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
-    z_test = jnp.exp((1.0 - a) * g * test_t) if g != 0.0 else None
+    z_trend_test = jnp.exp((1.0 - a) * g * test_t) if g != 0.0 else None
     benchmark = (
         None
         if use_kinked_production
-        else neoclassical_growth_benchmark(a, delta, rho_hat, sigma_crra, g=g, k_0=k_0)
+        else neoclassical_growth_benchmark(
+            a, delta, rho_hat, sigma_crra, g=g, z_0=z_0, k_0=k_0
+        )
     )
     train_df = snapshot(
-        model, t_train, p, benchmark, z=1.0 if z_train is None else z_train
+        model,
+        t_train,
+        p,
+        benchmark,
+        z=z_0 if z_trend_train is None else z_0 * z_trend_train,
     )
-    test_df = snapshot(model, test_t, p, benchmark, z=1.0 if z_test is None else z_test)
+    test_df = snapshot(
+        model,
+        test_t,
+        p,
+        benchmark,
+        z=z_0 if z_trend_test is None else z_0 * z_trend_test,
+    )
 
     tvc_t = jnp.asarray(data_set.test_tvc_T, dtype=dtype)
     k_T, c_T = model(tvc_t)
@@ -339,6 +354,7 @@ def neoclassical_growth_nn(
         "delta": delta,
         "rho_hat": rho_hat,
         "sigma_crra": sigma_crra,
+        "z_0": z_0,
         "k_0": k_0,
         "g": g,
         "learn_g_hat": policy_settings.learn_g_hat,
@@ -403,7 +419,7 @@ def neoclassical_growth_nn(
             "b_1": b_1,
             "b_2": b_2,
         },
-        "initial_conditions": {"k_0": k_0},
+        "initial_conditions": {"z_0": z_0, "k_0": k_0},
     }
 
     return results, {

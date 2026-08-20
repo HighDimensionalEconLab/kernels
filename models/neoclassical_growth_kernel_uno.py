@@ -68,8 +68,8 @@ def objective(x, K):
 def constraints(x, K, K_tilde, p):
     k, c, mu, dk_dt, dmu_dt = path_values(x, K, K_tilde, p.k_0)
     k_positive = jnp.maximum(k, DOMAIN_EPS)
-    resource = dk_dt - (production(1.0, k_positive, p) - p.delta * k - c)
-    euler = dmu_dt + mu * (mpk(1.0, k_positive, p) - p.delta - p.rho_hat)
+    resource = dk_dt - (production(p.z_0, k_positive, p) - p.delta * k - c)
+    euler = dmu_dt + mu * (mpk(p.z_0, k_positive, p) - p.delta - p.rho_hat)
     shadow_price = mu * c**p.sigma_crra - 1.0
     return jnp.concatenate([resource, euler, shadow_price, k, c, mu])
 
@@ -133,6 +133,8 @@ def neoclassical_growth_kernel_uno(
     rho_hat: float = CONSTANTS.rho_hat,
     sigma_crra: float = CONSTANTS.sigma_crra,
     k_0: float = 1.0,
+    # No trend machinery in this driver: technology is the constant z_0.
+    z_0: float = 1.0,
     A: float | None = None,
     b_1: float | None = None,
     b_2: float | None = None,
@@ -180,6 +182,7 @@ def neoclassical_growth_kernel_uno(
         delta=delta,
         rho_hat=rho_hat,
         sigma_crra=sigma_crra,
+        z_0=z_0,
         k_0=k_0,
         A=A,
         b_1=b_1,
@@ -187,7 +190,7 @@ def neoclassical_growth_kernel_uno(
         k_thr=k_thr,
     )
 
-    c_flow_guess = steady_flow_consumption_guess(k_0, a, delta, A, b_1, b_2)
+    c_flow_guess = steady_flow_consumption_guess(z_0, k_0, a, delta, A, b_1, b_2)
     if c_0_guess is not None:
         c_flow_guess = max(float(c_0_guess), DOMAIN_EPS)
     x_initial = np.zeros(n_variables, dtype=np.float64)
@@ -312,10 +315,10 @@ def neoclassical_growth_kernel_uno(
                 "c": np.asarray(c),
                 "mu": np.asarray(mu),
                 "resource": np.asarray(
-                    dk_dt - (production(1.0, k_positive, p) - delta * k - c)
+                    dk_dt - (production(z_0, k_positive, p) - delta * k - c)
                 ),
                 "euler": np.asarray(
-                    dmu_dt + mu * (mpk(1.0, k_positive, p) - delta - rho_hat)
+                    dmu_dt + mu * (mpk(z_0, k_positive, p) - delta - rho_hat)
                 ),
                 "shadow_price": np.asarray(mu * c**sigma_crra - 1.0),
             }
@@ -344,7 +347,7 @@ def neoclassical_growth_kernel_uno(
     # kink slack; violations gate acceptance under kinked production.
     def mpk_violations(df):
         k = np.maximum(df["k"].to_numpy(), DOMAIN_EPS)
-        m1 = A * a * k ** (a - 1.0)
+        m1 = z_0 * A * a * k ** (a - 1.0)
         m2 = b_1 * m1
         implied = (
             np.where(k > k_thr, m2, m1) - df["euler"].to_numpy() / df["mu"].to_numpy()
@@ -419,6 +422,7 @@ def neoclassical_growth_kernel_uno(
         "delta": delta,
         "rho_hat": rho_hat,
         "sigma_crra": sigma_crra,
+        "z_0": z_0,
         "k_0": k_0,
         "A": A,
         "b_1": b_1,
@@ -449,7 +453,7 @@ def neoclassical_growth_kernel_uno(
 
     if not use_kinked_production:
         benchmark = neoclassical_growth_benchmark(
-            a, delta, rho_hat, sigma_crra, g=0.0, k_0=k_0
+            a, delta, rho_hat, sigma_crra, g=0.0, z_0=z_0, k_0=k_0
         )
         k_benchmark, c_benchmark = (np.asarray(v) for v in benchmark(test_data))
         k_rel_error = np.abs(k_benchmark - test_df["k"].to_numpy()) / k_benchmark
@@ -489,7 +493,7 @@ def neoclassical_growth_kernel_uno(
             "b_1": b_1,
             "b_2": b_2,
         },
-        "initial_conditions": {"k_0": k_0},
+        "initial_conditions": {"z_0": z_0, "k_0": k_0},
     }
     return results, {
         "model": kernel_solution,

@@ -78,8 +78,9 @@ def residual_fn(theta, args, p):
     k, c, mu, dk_dt, dmu_dt = path_values(
         theta, args["K"], args["K_tilde"], p, t_grid=args["t"], g_hat=args["g_hat"]
     )
-    resource = dk_dt - (production(args["z"], k, p) - p.delta * k - c)
-    euler = dmu_dt + mu * (mpk(args["z"], k, p) - p.delta - p.rho_hat)
+    z = p.z_0 * args["z_trend"]
+    resource = dk_dt - (production(z, k, p) - p.delta * k - c)
+    euler = dmu_dt + mu * (mpk(z, k, p) - p.delta - p.rho_hat)
     shadow_price = mu * c**p.sigma_crra - 1.0
     residual = jnp.concatenate([resource, euler, shadow_price])
     return residual / jnp.sqrt(residual.size)
@@ -163,8 +164,10 @@ def neoclassical_growth_kernel(
     rho_hat: float = CONSTANTS.rho_hat,
     sigma_crra: float = CONSTANTS.sigma_crra,
     k_0: float = 1.0,
-    # Hicks-neutral trend Z(t) = e^{(1-a) g t} enters the residuals as data;
-    # learn_g_hat frees the trend rate (init 0) instead of fixing it at g.
+    # Hicks-neutral technology z(t) = z_0 e^{(1-a) g t}: the unit trend enters
+    # the residuals as data, z_0 rides in p; learn_g_hat frees the trend rate
+    # (init 0) instead of fixing it at g.
+    z_0: float = 1.0,
     g: float = 0.0,
     learn_g_hat: bool = False,
     A: float | None = None,
@@ -203,6 +206,7 @@ def neoclassical_growth_kernel(
         delta=delta,
         rho_hat=rho_hat,
         sigma_crra=sigma_crra,
+        z_0=z_0,
         k_0=k_0,
         A=A,
         b_1=b_1,
@@ -218,19 +222,19 @@ def neoclassical_growth_kernel(
         train_data, kernel, sigma, ell, repeats=3
     )
 
-    def technology(t_grid):
-        return jnp.exp((1.0 - a) * g * t_grid) if g != 0.0 else 1.0
+    def z_path(t_grid):
+        return z_0 * jnp.exp((1.0 - a) * g * t_grid) if g != 0.0 else z_0
 
     g_hat_fixed = jnp.asarray(g, dtype=dtype) if g != 0.0 and not learn_g_hat else None
     residual_args = {
         "K": K_jax,
         "K_tilde": K_tilde_jax,
         "t": train_data,
-        "z": technology(train_data),
+        "z_trend": jnp.exp((1.0 - a) * g * train_data) if g != 0.0 else 1.0,
         "g_hat": g_hat_fixed,
     }
 
-    c_flow_guess = steady_flow_consumption_guess(k_0, a, delta, A, b_1, b_2)
+    c_flow_guess = steady_flow_consumption_guess(z_0, k_0, a, delta, A, b_1, b_2)
     if c_0_guess is not None:
         c_flow_guess = max(float(c_0_guess), DOMAIN_EPS)
     theta_0 = Theta(
@@ -275,7 +279,9 @@ def neoclassical_growth_kernel(
     test_benchmark = (
         None
         if use_kinked_production
-        else neoclassical_growth_benchmark(a, delta, rho_hat, sigma_crra, g=g, k_0=k_0)
+        else neoclassical_growth_benchmark(
+            a, delta, rho_hat, sigma_crra, g=g, z_0=z_0, k_0=k_0
+        )
     )
     train_df = snapshot(
         theta,
@@ -284,7 +290,7 @@ def neoclassical_growth_kernel(
         train_data,
         kernel_set,
         g_hat_fixed,
-        z=technology(train_data),
+        z=z_path(train_data),
     )
     test_df = snapshot(
         theta,
@@ -294,7 +300,7 @@ def neoclassical_growth_kernel(
         kernel_set,
         g_hat_fixed,
         benchmark=test_benchmark,
-        z=technology(test_data),
+        z=z_path(test_data),
     )
 
     tvc_t = jnp.asarray([data_set.test_tvc_T], dtype=dtype)
@@ -334,6 +340,7 @@ def neoclassical_growth_kernel(
         "delta": delta,
         "rho_hat": rho_hat,
         "sigma_crra": sigma_crra,
+        "z_0": z_0,
         "k_0": k_0,
         "g": g,
         "learn_g_hat": learn_g_hat,
@@ -407,7 +414,7 @@ def neoclassical_growth_kernel(
             "b_1": b_1,
             "b_2": b_2,
         },
-        "initial_conditions": {"k_0": k_0},
+        "initial_conditions": {"z_0": z_0, "k_0": k_0},
     }
 
     return results, {

@@ -36,6 +36,7 @@ class StructuralParameters:
     delta: jax.Array
     rho_hat: jax.Array
     sigma_crra: jax.Array
+    z_0: jax.Array
     k_0: jax.Array
     A: jax.Array
     b_1: jax.Array
@@ -117,11 +118,11 @@ def euler_residuals(policy, log_states, p):
     return jax.vmap(residual_scalar)(log_states)
 
 
-# Flat steady-flow warm start c(0) = f(k_0) - delta k_0, floored away from
-# zero.
-def steady_flow_consumption_guess(k_0, a, delta, A, b_1, b_2):
+# Flat steady-flow warm start c(0) = f(z_0, k_0) - delta k_0, floored away
+# from zero.
+def steady_flow_consumption_guess(z_0, k_0, a, delta, A, b_1, b_2):
     base = k_0**a
-    return max(A * max(base, b_1 * base - b_2) - delta * k_0, DOMAIN_EPS)
+    return max(z_0 * A * max(base, b_1 * base - b_2) - delta * k_0, DOMAIN_EPS)
 
 
 # Closed-form steady state of the static smooth model (z = 1, g = 0):

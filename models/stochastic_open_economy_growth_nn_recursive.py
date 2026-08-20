@@ -10,18 +10,23 @@ import jsonargparse
 import numpy as np
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
-from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
+from nlls_gram import (
+    DrawNNXModule,
+    LevenbergMarquardt,
+    LMAction,
+    LMStatus,
+    MultiStart,
+)
 
 from models.stochastic_open_economy_growth import (
     PROCESS_CONSTANTS,
     DataSettings,
-    DrawSequentialPolicy,
     InitialConditionSettings,
     ModelParameters,
     SequentialPolicyNN,
     SequentialPolicySettings,
     StructuralParameters,
-    collocation_residuals,
+    euler_residual_terms,
     make_sequential_policy,
     problem_cache_config,
     production,
@@ -53,6 +58,47 @@ from models.utilities import (
 
 # The residual differentiates the policy twice, so no kinked activation.
 SMOOTH_ACTIVATIONS = frozenset(ACTIVATIONS) - {"relu"}
+
+
+# DrawNNXModule redraws theta but passes args through unchanged; multi-start
+# chains each attempt's initial args from the previous draw, so re-chaining
+# restart_key/epoch_key here (and resetting epoch to 0) is what keeps each
+# retry's epoch-boundary resampling independent of the others.
+class DrawSequentialPolicy:
+    def __init__(self, settings, dtype):
+        self.draw_theta = DrawNNXModule(SequentialPolicyNN, settings, dtype=dtype)
+
+    def __call__(self, key, _, args):
+        theta, _ = self.draw_theta(key, _, args)
+        restart_key, epoch_key = jax.random.split(args.restart_key)
+        return theta, args.replace(
+            epoch_key=epoch_key,
+            restart_key=restart_key,
+            epoch=jnp.asarray(0, dtype=jnp.int32),
+        )
+
+    def __hash__(self):
+        return hash((DrawSequentialPolicy, self.draw_theta))
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, DrawSequentialPolicy)
+            and self.draw_theta == other.draw_theta
+        )
+
+
+# Per-knot Euler residuals over the simulated batch, flattened and scaled by
+# 1/sqrt(count); the caller decides how to use the vector. A diverged
+# trajectory surfaces as a nonfinite loss the solver rejects (fixed-step
+# solve_sde never sets ok=False, so there is no mask to apply).
+def collocation_residuals(solver, policy, initial_states, noise, p, data_set):
+    solution = simulate_train(solver, policy, initial_states, noise, p, data_set)
+    states = solution.xs
+    residuals = euler_residual_terms(policy, states.reshape(-1, 4), p)[0].reshape(
+        *states.shape[:2], 2
+    )
+    count = jnp.asarray(residuals.size, dtype=residuals.dtype)
+    return residuals / jnp.sqrt(count)
 
 
 # Acceptance gates on the held-out batch (the float32 replication driver
@@ -322,8 +368,8 @@ def stochastic_open_economy_growth_nn_recursive(
         delta=parameters.delta,
         preference_rate=parameters.r,
         investment_eta=parameters.eta,
-        interest_rate_mean=parameters.interest_rate,
-        chi=parameters.chi,
+        interest_rate_mean=parameters.r_star,
+        chi=parameters.delta ** (1.0 - parameters.eta),
         kappa_z=kappa_z,
         sigma_z=sigma_z,
         log_z_bar=math.log(z_bar),
@@ -920,8 +966,8 @@ def stochastic_open_economy_growth_nn_recursive(
         "delta": parameters.delta,
         "preference_rate": parameters.r,
         "investment_eta": parameters.eta,
-        "interest_rate_mean": parameters.interest_rate,
-        "chi": parameters.chi,
+        "interest_rate_mean": parameters.r_star,
+        "chi": parameters.delta ** (1.0 - parameters.eta),
         "kappa_z": kappa_z,
         "sigma_z": sigma_z,
         "log_z_bar": math.log(z_bar),

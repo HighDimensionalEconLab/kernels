@@ -9,7 +9,6 @@ import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 from flax import nnx, struct
-from nlls_gram import DrawNNXModule
 from tinydiffeq import SaveAt, solve_sde
 
 from models.utilities import (
@@ -82,25 +81,15 @@ class ModelParameters:
     delta: float = -math.log(0.94)
     r: float = -math.log(0.96)
     eta: float = 0.76
-    r_star: float | None = None
-
-    @property
-    def interest_rate(self):
-        if self.r_star is None:
-            return self.r
-        return self.r_star
-
-    @property
-    def chi(self):
-        return self.delta ** (1.0 - self.eta)
+    r_star: float = -math.log(0.96)
 
 
-def production(k, z, parameters):
-    return z * k**parameters.alpha
+def production(k, z, p):
+    return z * k**p.alpha
 
 
-def marginal_product(k, z, parameters):
-    return parameters.alpha * z * k ** (parameters.alpha - 1.0)
+def marginal_product(k, z, p):
+    return p.alpha * z * k ** (p.alpha - 1.0)
 
 
 @struct.dataclass
@@ -295,33 +284,6 @@ class SequentialPolicyNN(nnx.Module):
         )
 
 
-# DrawNNXModule redraws theta but passes args through unchanged; multi-start
-# chains each attempt's initial args from the previous draw, so re-chaining
-# restart_key/epoch_key here (and resetting epoch to 0) is what keeps each
-# retry's epoch-boundary resampling independent of the others.
-class DrawSequentialPolicy:
-    def __init__(self, settings, dtype):
-        self.draw_theta = DrawNNXModule(SequentialPolicyNN, settings, dtype=dtype)
-
-    def __call__(self, key, _, args):
-        theta, _ = self.draw_theta(key, _, args)
-        restart_key, epoch_key = jax.random.split(args.restart_key)
-        return theta, args.replace(
-            epoch_key=epoch_key,
-            restart_key=restart_key,
-            epoch=jnp.asarray(0, dtype=jnp.int32),
-        )
-
-    def __hash__(self):
-        return hash((DrawSequentialPolicy, self.draw_theta))
-
-    def __eq__(self, other):
-        return (
-            isinstance(other, DrawSequentialPolicy)
-            and self.draw_theta == other.draw_theta
-        )
-
-
 def state_levels(state, p):
     log_z, log_k, asset_scaled, rate_gap = state
     return {
@@ -511,19 +473,6 @@ def simulate_train(solver, policy, initial_states, noise, p, data_set):
         data_set.train_points - 1,
         p,
     )
-
-
-def collocation_residuals(solver, policy, initial_states, noise, p, data_set):
-    solution = simulate_train(solver, policy, initial_states, noise, p, data_set)
-    states = solution.xs
-    residuals = euler_residual_terms(policy, states.reshape(-1, 4), p)[0].reshape(
-        *states.shape[:2], 2
-    )
-    # Mean-squared normalization; a diverged trajectory surfaces as a
-    # nonfinite loss the solver rejects (fixed-step solve_sde never sets
-    # ok=False, so there is no mask to apply).
-    count = jnp.asarray(residuals.size, dtype=residuals.dtype)
-    return residuals / jnp.sqrt(count)
 
 
 @nnx.jit

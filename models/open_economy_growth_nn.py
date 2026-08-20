@@ -98,19 +98,19 @@ class DynamicModelParameters:
     delta: jax.Array
     r: jax.Array
     eta: jax.Array
-    interest_rate: jax.Array
+    r_star: jax.Array
     chi: jax.Array
 
     @classmethod
-    def from_model(cls, parameters, dtype):
+    def from_model(cls, p, dtype):
         return cls(
-            alpha=jnp.asarray(parameters.alpha, dtype=dtype),
-            gamma=jnp.asarray(parameters.gamma, dtype=dtype),
-            delta=jnp.asarray(parameters.delta, dtype=dtype),
-            r=jnp.asarray(parameters.r, dtype=dtype),
-            eta=jnp.asarray(parameters.eta, dtype=dtype),
-            interest_rate=jnp.asarray(parameters.interest_rate, dtype=dtype),
-            chi=jnp.asarray(parameters.chi, dtype=dtype),
+            alpha=jnp.asarray(p.alpha, dtype=dtype),
+            gamma=jnp.asarray(p.gamma, dtype=dtype),
+            delta=jnp.asarray(p.delta, dtype=dtype),
+            r=jnp.asarray(p.r, dtype=dtype),
+            eta=jnp.asarray(p.eta, dtype=dtype),
+            r_star=jnp.asarray(p.r_star, dtype=dtype),
+            chi=jnp.asarray(p.delta ** (1.0 - p.eta), dtype=dtype),
         )
 
 
@@ -206,7 +206,7 @@ def path_values(model, t, p, scales):
     }
 
 
-def dae_residuals(values, parameters):
+def dae_residuals(values, p):
     return path_residuals(
         values["k"],
         values["a"],
@@ -218,7 +218,7 @@ def dae_residuals(values, parameters):
         values["da_dt"],
         values["dlog_q_dt"],
         values["dlog_marginal_wealth_dt"],
-        parameters,
+        p,
     )
 
 
@@ -408,7 +408,7 @@ def open_economy_growth_nn(
     n_train = len(train_t)
     results = {
         **asdict(parameters),
-        "r_star_resolved": parameters.interest_rate,
+        "r_star_resolved": parameters.r_star,
         "k_0": k_0,
         "a_0": a_0,
         "a_0_over_output_ss": a_0 / output_scale,

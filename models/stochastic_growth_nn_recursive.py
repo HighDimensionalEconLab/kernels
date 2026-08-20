@@ -172,8 +172,8 @@ def residual_fn(theta, args, p):
     euler = euler_residuals(policy, log_states.reshape(-1, 2), p).reshape(
         log_states.shape[:2]
     )
-    # Mean squared residual, so the loss threshold means the same thing at any
-    # number of trajectories or steps.
+    # Residual vector scaled by 1/sqrt(count); the caller decides how to use
+    # it.
     count = jnp.asarray(euler.size, dtype=euler.dtype)
     # A nonfinite trajectory did not cover the requested economic horizon. Make
     # that a loud optimizer failure instead of fitting a prefix.

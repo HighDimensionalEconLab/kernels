@@ -207,20 +207,20 @@ def path_values(model, t, p, scales):
     }
 
 
-def dae_residuals(values, parameters):
+def dae_residuals(values, p):
     return path_residuals(
         values["k"],
         values["a"],
         values["q"],
         values["c"],
         values["mu"],
-        parameters.productivities,
+        p.productivities,
         values["interest_rate"],
         values["dlog_k_dt"],
         values["da_dt"],
         values["dlog_q_dt"],
         values["dlog_mu_dt"],
-        parameters,
+        p,
     )
 
 

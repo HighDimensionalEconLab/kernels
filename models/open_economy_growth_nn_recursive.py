@@ -95,19 +95,19 @@ class DynamicModelParameters:
     delta: jax.Array
     r: jax.Array
     eta: jax.Array
-    interest_rate: jax.Array
+    r_star: jax.Array
     chi: jax.Array
 
     @classmethod
-    def from_model(cls, parameters, dtype):
+    def from_model(cls, p, dtype):
         return cls(
-            alpha=jnp.asarray(parameters.alpha, dtype=dtype),
-            gamma=jnp.asarray(parameters.gamma, dtype=dtype),
-            delta=jnp.asarray(parameters.delta, dtype=dtype),
-            r=jnp.asarray(parameters.r, dtype=dtype),
-            eta=jnp.asarray(parameters.eta, dtype=dtype),
-            interest_rate=jnp.asarray(parameters.interest_rate, dtype=dtype),
-            chi=jnp.asarray(parameters.chi, dtype=dtype),
+            alpha=jnp.asarray(p.alpha, dtype=dtype),
+            gamma=jnp.asarray(p.gamma, dtype=dtype),
+            delta=jnp.asarray(p.delta, dtype=dtype),
+            r=jnp.asarray(p.r, dtype=dtype),
+            eta=jnp.asarray(p.eta, dtype=dtype),
+            r_star=jnp.asarray(p.r_star, dtype=dtype),
+            chi=jnp.asarray(p.delta ** (1.0 - p.eta), dtype=dtype),
         )
 
 
@@ -166,29 +166,26 @@ class SequentialPolicyNN(nnx.Module):
         return jnp.stack([investment, current_account])
 
 
-def policy_values(policy, k, a, parameters):
+def policy_values(policy, k, a, p):
     flows, flow_derivatives = jax.jvp(policy, (k,), (jnp.ones_like(k),))
     investment, current_account = flows
     investment_derivative, current_account_derivative = flow_derivatives
     investment_rate = investment / k
-    eta = parameters.eta
-    q = investment_rate ** (1.0 - eta) / (parameters.chi * eta)
-    output = production(k, 1.0, parameters)
-    mpk = marginal_product(k, 1.0, parameters)
-    capital_drift = k * (parameters.chi * investment_rate**eta - parameters.delta)
+    eta = p.eta
+    q = investment_rate ** (1.0 - eta) / (p.chi * eta)
+    output = production(k, 1.0, p)
+    mpk = marginal_product(k, 1.0, p)
+    capital_drift = k * (p.chi * investment_rate**eta - p.delta)
     log_q_derivative = (1.0 - eta) * (investment_derivative / investment - 1.0 / k)
     log_q_drift = log_q_derivative * capital_drift
     q_equation = (
-        parameters.interest_rate
-        + parameters.delta
-        - (1.0 - eta) * parameters.chi * investment_rate**eta
-        - mpk / q
+        p.r_star + p.delta - (1.0 - eta) * p.chi * investment_rate**eta - mpk / q
     )
-    consumption = parameters.interest_rate * a + output - investment - current_account
+    consumption = p.r_star * a + output - investment - current_account
     consumption_drift = (
         mpk - investment_derivative - current_account_derivative
-    ) * capital_drift + parameters.interest_rate * current_account
-    consumption_growth = (parameters.interest_rate - parameters.r) / parameters.gamma
+    ) * capital_drift + p.r_star * current_account
+    consumption_growth = (p.r_star - p.r) / p.gamma
     return {
         "k": k,
         "a": a,
@@ -203,20 +200,16 @@ def policy_values(policy, k, a, parameters):
     }
 
 
-def path_values(policy, states, parameters):
-    return jax.vmap(
-        lambda state: policy_values(policy, state[0], state[1], parameters)
-    )(states)
+def path_values(policy, states, p):
+    return jax.vmap(lambda state: policy_values(policy, state[0], state[1], p))(states)
 
 
-def drift_field(state, _, parameters, p):
+def drift_field(state, _, args, p):
     policy, k_0 = p
     k = k_0 * jnp.exp(state[0])
     investment, current_account = policy(k)
     investment_rate = investment / k
-    capital_drift = k * (
-        parameters.chi * investment_rate**parameters.eta - parameters.delta
-    )
+    capital_drift = k * (args.chi * investment_rate**args.eta - args.delta)
     return jnp.stack(
         [
             capital_drift / k,
@@ -225,7 +218,7 @@ def drift_field(state, _, parameters, p):
     )
 
 
-def simulate(policy, T, budget, k_0, parameters, data_set, *, save_at):
+def simulate(policy, T, budget, k_0, args, data_set, *, save_at):
     return solve_ode(
         drift_field,
         RK4(),
@@ -236,7 +229,7 @@ def simulate(policy, T, budget, k_0, parameters, data_set, *, save_at):
         controller=ConstantStepSize(),
         max_steps=budget,
         save_at=save_at,
-        args=parameters,
+        args=args,
         p=(policy, k_0),
     )
 
@@ -249,14 +242,14 @@ def states_from_solution(solution, k_0, a_0, flow_scale):
 
 
 @partial(jax.jit, static_argnames=("data_set",))
-def simulate_train(policy, initial_k, parameters, data_set):
+def simulate_train(policy, initial_k, p, data_set):
     def solve_one(k_0):
         return simulate(
             policy,
             data_set.train_T,
             data_set.train_points - 1,
             k_0,
-            parameters,
+            p,
             data_set,
             save_at=SaveAt(steps=True),
         )
@@ -264,7 +257,7 @@ def simulate_train(policy, initial_k, parameters, data_set):
     return jax.vmap(solve_one)(initial_k)
 
 
-def collocation_states(policy, k_0, a_0, parameters, data_set):
+def collocation_states(policy, k_0, a_0, p, data_set):
     """Return collocation states, the active-state mask, and the raw solution.
 
     Every step of the fixed-step mesh is a collocation point, so the returned
@@ -272,7 +265,7 @@ def collocation_states(policy, k_0, a_0, parameters, data_set):
     """
     initial_k = jnp.reshape(k_0, (1,))
     initial_a = jnp.reshape(a_0, (1,))
-    solution = simulate_train(policy, initial_k, parameters, data_set)
+    solution = simulate_train(policy, initial_k, p, data_set)
     states = jax.vmap(states_from_solution, in_axes=(0, 0, 0, None))(
         solution,
         initial_k,
@@ -311,7 +304,7 @@ def residual_fn(theta, args, p):
 
 
 @partial(jax.jit, static_argnames=("budget",))
-def evaluate_path_jit(policy, T, budget, k_0, a_0, parameters):
+def evaluate_path_jit(policy, T, budget, k_0, a_0, args):
     solution = solve_ode(
         drift_field,
         RK4(),
@@ -321,17 +314,17 @@ def evaluate_path_jit(policy, T, budget, k_0, a_0, parameters):
         dt_0=T / budget,
         max_steps=budget,
         save_at=SaveAt(steps=True),
-        args=parameters,
+        args=args,
         p=(policy, k_0),
     )
     states = states_from_solution(solution, k_0, a_0, policy.flow_scale[...])
-    return {"t": solution.ts, **path_values(policy, states, parameters)}
+    return {"t": solution.ts, **path_values(policy, states, args)}
 
 
-def evaluate_path(policy, T, n_points, k_0, a_0, parameters):
+def evaluate_path(policy, T, n_points, k_0, a_0, p):
     """Evaluate along the integrator's own states: ``n_points`` from n-1 steps."""
     dtype = jnp.asarray(k_0).dtype
-    dynamic_parameters = DynamicModelParameters.from_model(parameters, dtype)
+    dynamic_parameters = DynamicModelParameters.from_model(p, dtype)
     return evaluate_path_jit(
         policy,
         T,
@@ -554,11 +547,12 @@ def open_economy_growth_nn_recursive(
     policy_x = policy_flows[:, 0]
     policy_ca = policy_flows[:, 1]
     policy_s = policy_x / policy_k
-    policy_q = policy_s ** (1.0 - parameters.eta) / (parameters.chi * parameters.eta)
+    policy_chi = parameters.delta ** (1.0 - parameters.eta)
+    policy_q = policy_s ** (1.0 - parameters.eta) / (policy_chi * parameters.eta)
 
     results = {
         **asdict(parameters),
-        "r_star_resolved": parameters.interest_rate,
+        "r_star_resolved": parameters.r_star,
         "k_0": k_0,
         "a_0": a_0,
         "seed": seed,

@@ -458,7 +458,7 @@ def open_economy_growth_kernel_uno(
 
     results = {
         **asdict(parameters),
-        "r_star_resolved": parameters.interest_rate,
+        "r_star_resolved": parameters.r_star,
         "k_0": k_0,
         "a_0": a_0,
         "a_0_over_output_ss": a_0 / float(output_scale),

@@ -60,15 +60,15 @@ class MulticountryParameterValues:
         return self.delta ** (1.0 - self.eta)
 
 
-def multicountry_parameter_values(parameters, dtype=jnp.float64):
+def multicountry_parameter_values(p, dtype=jnp.float64):
     return MulticountryParameterValues(
-        alpha=jnp.asarray(parameters.alpha, dtype=dtype),
-        gammas=jnp.asarray(parameters.gammas, dtype=dtype),
-        delta=jnp.asarray(parameters.delta, dtype=dtype),
-        r=jnp.asarray(parameters.r, dtype=dtype),
-        eta=jnp.asarray(parameters.eta, dtype=dtype),
-        populations=jnp.asarray(parameters.populations, dtype=dtype),
-        productivities=jnp.asarray(parameters.productivities, dtype=dtype),
+        alpha=jnp.asarray(p.alpha, dtype=dtype),
+        gammas=jnp.asarray(p.gammas, dtype=dtype),
+        delta=jnp.asarray(p.delta, dtype=dtype),
+        r=jnp.asarray(p.r, dtype=dtype),
+        eta=jnp.asarray(p.eta, dtype=dtype),
+        populations=jnp.asarray(p.populations, dtype=dtype),
+        productivities=jnp.asarray(p.productivities, dtype=dtype),
     )
 
 
@@ -92,14 +92,14 @@ class InitialConditionSettings:
     a_0_sigma: float = 0.6
 
 
-def draw_initial_conditions(initial_set, parameters, dtype=jnp.float64):
+def draw_initial_conditions(initial_set, p, dtype=jnp.float64):
     key_k, key_a = jax.random.split(jax.random.key(initial_set.seed))
-    num_countries = parameters.num_countries
+    num_countries = p.num_countries
     k_0 = jnp.exp(
         initial_set.k_0_log_sigma
         * jax.random.normal(key_k, (num_countries,), dtype=dtype)
     )
-    populations = jnp.asarray(parameters.populations, dtype=dtype)
+    populations = jnp.asarray(p.populations, dtype=dtype)
     raw = initial_set.a_0_sigma * jax.random.normal(
         key_a, (num_countries,), dtype=dtype
     )
@@ -107,72 +107,67 @@ def draw_initial_conditions(initial_set, parameters, dtype=jnp.float64):
     return tuple(float(value) for value in k_0), tuple(float(value) for value in a_0)
 
 
-def validate_initial_conditions(k_0, a_0, parameters):
-    populations = np.asarray(parameters.populations, dtype=np.float64)
+def validate_initial_conditions(k_0, a_0, p):
+    populations = np.asarray(p.populations, dtype=np.float64)
     a_0_np = np.asarray(a_0, dtype=np.float64)
-    scale = float(steady_state(parameters, jnp.float64)["output_scale"])
+    scale = float(steady_state(p, jnp.float64)["output_scale"])
     clearing_gap = float(np.sum(populations * a_0_np)) / scale
     if abs(clearing_gap) > INITIAL_CLEARING_TOL:
         raise ValueError("population-weighted initial NFA positions must sum to zero")
-    productivities = np.asarray(parameters.productivities, dtype=np.float64)
-    output_0 = productivities * np.asarray(k_0, dtype=np.float64) ** parameters.alpha
-    margin = output_0 + parameters.r * a_0_np - DEBT_SERVICE_MARGIN * output_0
+    productivities = np.asarray(p.productivities, dtype=np.float64)
+    output_0 = productivities * np.asarray(k_0, dtype=np.float64) ** p.alpha
+    margin = output_0 + p.r * a_0_np - DEBT_SERVICE_MARGIN * output_0
     if np.any(margin <= 0.0):
         worst = int(np.argmin(margin))
         raise ValueError(
             f"country {worst + 1} initial debt service exceeds output: "
-            f"z f(k_0) + r a_0 = {output_0[worst] + parameters.r * a_0_np[worst]:.4f} "
+            f"z f(k_0) + r a_0 = {output_0[worst] + p.r * a_0_np[worst]:.4f} "
             f"must exceed {DEBT_SERVICE_MARGIN:.0%} of its initial output "
             f"{output_0[worst]:.4f}"
         )
 
 
-def production(k, z, parameters):
-    return z * k**parameters.alpha
+def production(k, z, p):
+    return z * k**p.alpha
 
 
-def marginal_product(k, z, parameters):
-    return parameters.alpha * z * k ** (parameters.alpha - 1.0)
+def marginal_product(k, z, p):
+    return p.alpha * z * k ** (p.alpha - 1.0)
 
 
-def investment_rate_from_q(q, parameters):
-    eta = parameters.eta
-    return (parameters.chi * eta * q) ** (1.0 / (1.0 - eta))
+def investment_rate_from_q(q, p):
+    eta = p.eta
+    return (p.chi * eta * q) ** (1.0 / (1.0 - eta))
 
 
-def investment_expenditure(k, q, parameters):
-    return k * investment_rate_from_q(q, parameters)
+def investment_expenditure(k, q, p):
+    return k * investment_rate_from_q(q, p)
 
 
-def consumption_from_mu(mu, parameters):
-    gammas = jnp.asarray(parameters.gammas, dtype=mu.dtype)
+def consumption_from_mu(mu, p):
+    gammas = jnp.asarray(p.gammas, dtype=mu.dtype)
     return mu ** (-1.0 / gammas)
 
 
-def capital_drift(k, q, parameters):
-    investment_rate = investment_rate_from_q(q, parameters)
-    return k * (parameters.chi * investment_rate**parameters.eta - parameters.delta)
+def capital_drift(k, q, p):
+    investment_rate = investment_rate_from_q(q, p)
+    return k * (p.chi * investment_rate**p.eta - p.delta)
 
 
-def current_account(k, a, q, c, z, rate, parameters):
+def current_account(k, a, q, c, z, rate, p):
+    return rate * a + production(k, z, p) - c - investment_expenditure(k, q, p)
+
+
+def q_drift(k, q, z, rate, p):
+    eta = p.eta
+    investment_rate = investment_rate_from_q(q, p)
     return (
-        rate * a
-        + production(k, z, parameters)
-        - c
-        - investment_expenditure(k, q, parameters)
-    )
+        rate + p.delta - (1.0 - eta) * p.chi * investment_rate**eta
+    ) * q - marginal_product(k, z, p)
 
 
-def q_drift(k, q, z, rate, parameters):
-    eta = parameters.eta
-    investment_rate = investment_rate_from_q(q, parameters)
-    return (
-        rate + parameters.delta - (1.0 - eta) * parameters.chi * investment_rate**eta
-    ) * q - marginal_product(k, z, parameters)
-
-
-def mu_drift(mu, rate, parameters):
-    return (parameters.r - rate) * mu
+def mu_drift(mu, rate, p):
+    return (p.r - rate) * mu
 
 
 def relative_welfare_weights(mu):
@@ -197,21 +192,19 @@ def weighted_gini(values, populations):
     return dispersion / (2.0 * mean)
 
 
-def steady_state(parameters, dtype=jnp.float64):
+def steady_state(p, dtype=jnp.float64):
     # Capital block of the steady state at r* = r, shared by the whole
     # continuum; the asset distribution stays undetermined up to clearing.
     # The world per-capita aggregates are the parameter-only path scales:
     # output for the asset paths, resources ("g") for consumption.
-    productivities = jnp.asarray(parameters.productivities, dtype=dtype)
-    populations = jnp.asarray(parameters.populations, dtype=dtype)
-    eta = parameters.eta
-    q = jnp.full(parameters.num_countries, 1.0 / eta, dtype=dtype)
-    marginal_product_ss = parameters.delta + parameters.r / eta
-    k = (parameters.alpha * productivities / marginal_product_ss) ** (
-        1.0 / (1.0 - parameters.alpha)
-    )
-    output = production(k, productivities, parameters)
-    investment = parameters.delta * k
+    productivities = jnp.asarray(p.productivities, dtype=dtype)
+    populations = jnp.asarray(p.populations, dtype=dtype)
+    eta = p.eta
+    q = jnp.full(p.num_countries, 1.0 / eta, dtype=dtype)
+    marginal_product_ss = p.delta + p.r / eta
+    k = (p.alpha * productivities / marginal_product_ss) ** (1.0 / (1.0 - p.alpha))
+    output = production(k, productivities, p)
+    investment = p.delta * k
     domestic_resources = output - investment
     total_population = jnp.sum(populations)
     return {
@@ -227,16 +220,16 @@ def steady_state(parameters, dtype=jnp.float64):
     }
 
 
-def resolved_steady_state(mu, parameters):
+def resolved_steady_state(mu, p):
     # The member of the steady-state continuum selected by the terminal
     # marginal-wealth levels: consumption from the FOC, assets from the
     # stationary budgets.
     mu = jnp.atleast_1d(mu)
     dtype = mu.dtype
-    populations = jnp.asarray(parameters.populations, dtype=dtype)
-    steady = steady_state(parameters, dtype)
-    consumption = consumption_from_mu(mu, parameters)
-    assets = (consumption - steady["g"]) / parameters.r
+    populations = jnp.asarray(p.populations, dtype=dtype)
+    steady = steady_state(p, dtype)
+    consumption = consumption_from_mu(mu, p)
+    assets = (consumption - steady["g"]) / p.r
     return {
         "k": steady["k"],
         "q": steady["q"],
@@ -264,18 +257,17 @@ def path_residuals(
     da_dt,
     dlog_q_dt,
     dlog_mu_dt,
-    parameters,
+    p,
 ):
-    gammas = jnp.asarray(parameters.gammas, dtype=c.dtype)
-    populations = jnp.asarray(parameters.populations, dtype=a.dtype)
+    gammas = jnp.asarray(p.gammas, dtype=c.dtype)
+    populations = jnp.asarray(p.populations, dtype=a.dtype)
     rate_column = rate[..., None]
-    investment_rate = investment_rate_from_q(q, parameters)
+    investment_rate = investment_rate_from_q(q, p)
     return {
-        "capital": dlog_k_dt
-        - (parameters.chi * investment_rate**parameters.eta - parameters.delta),
-        "assets": da_dt - current_account(k, a, q, c, z, rate_column, parameters),
-        "tobin_q": dlog_q_dt - q_drift(k, q, z, rate_column, parameters) / q,
-        "marginal_wealth": dlog_mu_dt - mu_drift(mu, rate_column, parameters) / mu,
+        "capital": dlog_k_dt - (p.chi * investment_rate**p.eta - p.delta),
+        "assets": da_dt - current_account(k, a, q, c, z, rate_column, p),
+        "tobin_q": dlog_q_dt - q_drift(k, q, z, rate_column, p) / q,
+        "marginal_wealth": dlog_mu_dt - mu_drift(mu, rate_column, p) / mu,
         "consumption_foc": mu * c**gammas - 1.0,
         # World bond clearing, per capita so the row size is N-free.
         "asset_clearing": jnp.sum(populations * a, axis=-1) / jnp.sum(populations),
@@ -287,15 +279,15 @@ def path_residuals(
 # callers differentiate, so the two tables are comparable cell by cell. The
 # input dict needs the path_values/path_coordinates keys (interest_rate, a, k,
 # q, c); column order matches sensitivity_observable_labels.
-def sensitivity_observables(values, parameters):
-    populations = parameters.populations
+def sensitivity_observables(values, p):
+    populations = p.populations
     weights = populations / jnp.sum(populations)
-    x = investment_expenditure(values["k"], values["q"], parameters)
-    output = production(values["k"], parameters.productivities, parameters)
+    x = investment_expenditure(values["k"], values["q"], p)
+    output = production(values["k"], p.productivities, p)
     # World saving is world investment: with no outside world the aggregate
     # current account is identically zero.
     saving_rate = jnp.sum(weights * x, axis=-1) / jnp.sum(weights * output, axis=-1)
-    steady = steady_state(parameters, values["a"].dtype)
+    steady = steady_state(p, values["a"].dtype)
     nfa_dispersion = (
         jnp.sqrt(jnp.sum(weights * values["a"] ** 2, axis=-1)) / steady["output_scale"]
     )
@@ -398,14 +390,14 @@ def sensitivity_fields_frame(
     return fields, pd.DataFrame(rows)
 
 
-def tvc_diagnostics(t, values, parameters):
+def tvc_diagnostics(t, values, p):
     # Certificates at the end of the supplied grid (t[-1] = train_T in the
     # drivers): assets discounted at the solved rate path, and the asset and
     # capital transversality products at the utility discount rate with
     # per-country marginal utilities c_i^{-gamma_i}.
-    gammas = jnp.asarray(parameters.gammas, dtype=values["c"].dtype)
+    gammas = jnp.asarray(p.gammas, dtype=values["c"].dtype)
     discount = jnp.exp(-jnp.trapezoid(values["interest_rate"], t))
-    utility_discount = jnp.exp(-parameters.r * t[-1])
+    utility_discount = jnp.exp(-p.r * t[-1])
     marginal_utility = values["c"][-1] ** (-gammas)
     return {
         "discounted_assets": jnp.abs(discount * values["a"][-1]),
@@ -416,14 +408,14 @@ def tvc_diagnostics(t, values, parameters):
     }
 
 
-def tail_diagnostics(values, parameters):
-    steady = resolved_steady_state(values["mu"][-1], parameters)
-    scale = steady_state(parameters, values["k"].dtype)["output_scale"]
+def tail_diagnostics(values, p):
+    steady = resolved_steady_state(values["mu"][-1], p)
+    scale = steady_state(p, values["k"].dtype)["output_scale"]
     return {
         "k_log_gap": jnp.abs(jnp.log(values["k"][-1] / steady["k"])),
         "q_log_gap": jnp.abs(jnp.log(values["q"][-1] / steady["q"])),
         "asset_scaled_gap": jnp.abs(values["a"][-1] - steady["a"]) / scale,
-        "interest_rate_gap": jnp.abs(values["interest_rate"][-1] - parameters.r),
+        "interest_rate_gap": jnp.abs(values["interest_rate"][-1] - p.r),
     }
 
 
@@ -431,7 +423,7 @@ def long_run_diagnostics(
     t,
     values,
     a_0,
-    parameters,
+    p,
     check_T=100.0,
     window=10.0,
 ):
@@ -449,11 +441,11 @@ def long_run_diagnostics(
     a_0 = jnp.asarray(a_0, dtype=values["k"].dtype)
     i_check = int(jnp.argmin(jnp.abs(t - check_T)))
     i_before = int(jnp.argmin(jnp.abs(t - (check_T - window))))
-    steady = resolved_steady_state(values["mu"][-1], parameters)
-    scale = steady_state(parameters, values["k"].dtype)["output_scale"]
-    productivities = jnp.asarray(parameters.productivities, dtype=values["k"].dtype)
-    mpk_steady = parameters.delta + parameters.r / parameters.eta
-    mpk_check = marginal_product(values["k"][i_check], productivities, parameters)
+    steady = resolved_steady_state(values["mu"][-1], p)
+    scale = steady_state(p, values["k"].dtype)["output_scale"]
+    productivities = jnp.asarray(p.productivities, dtype=values["k"].dtype)
+    mpk_steady = p.delta + p.r / p.eta
+    mpk_check = marginal_product(values["k"][i_check], productivities, p)
     rate = values["interest_rate"]
     diagnostics = {
         "c_flatness": jnp.max(
@@ -467,10 +459,8 @@ def long_run_diagnostics(
         ),
         "k_theory_gap": jnp.max(jnp.abs(jnp.log(values["k"][i_check] / steady["k"]))),
         "mpk_equalization_gap": jnp.max(jnp.abs(mpk_check - mpk_steady)) / mpk_steady,
-        "interest_rate_gap": jnp.abs(rate[i_check] - parameters.r) / parameters.r,
-        "common_gamma": bool(
-            np.all(np.asarray(parameters.gammas) == np.asarray(parameters.gammas)[0])
-        ),
+        "interest_rate_gap": jnp.abs(rate[i_check] - p.r) / p.r,
+        "common_gamma": bool(np.all(np.asarray(p.gammas) == np.asarray(p.gammas)[0])),
     }
     if not diagnostics["common_gamma"]:
         return diagnostics
@@ -485,7 +475,7 @@ def long_run_diagnostics(
     discount = jnp.exp(-cumulative_rate)
     resource_pv = (
         jnp.trapezoid(discount[:, None] * values["resources"], t, axis=0)
-        + discount[-1] * steady["resources"] / parameters.r
+        + discount[-1] * steady["resources"] / p.r
     )
     initial_wealth = a_0 + resource_pv
     consumption_wealth_shares = values["c"][0] / initial_wealth

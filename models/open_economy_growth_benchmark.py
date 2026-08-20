@@ -33,7 +33,7 @@ class BenchmarkParameters:
 
 def state_field(t, y, z, args):
     alpha, delta, eta, chi = args["alpha"], args["delta"], args["eta"], args["chi"]
-    r_star = args["interest_rate"]
+    r_star = args["r_star"]
     k, q, a = y["k"], y["q"], y["a"]
     s = (chi * eta * q) ** (1.0 / (1.0 - eta))
     c = z[0] * jnp.exp((r_star - args["r"]) / args["gamma"] * t)
@@ -47,7 +47,7 @@ def state_field(t, y, z, args):
 
 def state_bc(ya, yb, z, args):
     alpha, delta, eta = args["alpha"], args["delta"], args["eta"]
-    r_star = args["interest_rate"]
+    r_star = args["r_star"]
     consumption_growth = (r_star - args["r"]) / args["gamma"]
     annuity_rate = r_star - consumption_growth
     q_ss = 1.0 / eta
@@ -81,7 +81,7 @@ def state_bc(ya, yb, z, args):
 @jax.jit
 def solve_transition_bvp(args, bench_set):
     alpha, delta, eta = args["alpha"], args["delta"], args["eta"]
-    r_star = args["interest_rate"]
+    r_star = args["r_star"]
     annuity_rate = r_star - (r_star - args["r"]) / args["gamma"]
     q_ss = 1.0 / eta
     k_ss = (alpha / (delta + r_star / eta)) ** (1.0 / (1.0 - alpha))
@@ -123,16 +123,16 @@ def open_economy_growth_benchmark(
 ):
     alpha = parameters.alpha
     delta = parameters.delta
-    interest_rate = parameters.interest_rate
+    r_star = parameters.r_star
     eta = parameters.eta
-    chi = parameters.chi
+    chi = parameters.delta ** (1.0 - parameters.eta)
     consumption_growth = consumption_growth_rate(parameters)
     annuity_rate = consumption_annuity_rate(parameters)
 
     args = {
         "alpha": alpha,
         "delta": delta,
-        "interest_rate": interest_rate,
+        "r_star": r_star,
         "eta": eta,
         "chi": chi,
         "r": parameters.r,
@@ -160,7 +160,7 @@ def open_economy_growth_benchmark(
         x = k * s
         output = k**alpha
         c = c_0 * jnp.exp(consumption_growth * points)
-        current_account = interest_rate * a + output - c - x
+        current_account = r_star * a + output - c - x
         return {
             "t": points,
             "k": k,
@@ -173,12 +173,12 @@ def open_economy_growth_benchmark(
         }
 
     q_ss = 1.0 / eta
-    k_ss = (alpha / (delta + interest_rate / eta)) ** (1.0 / (1.0 - alpha))
+    k_ss = (alpha / (delta + r_star / eta)) ** (1.0 / (1.0 - alpha))
     g_ss = k_ss**alpha - delta * k_ss
     capital_loading = delta * eta / (1.0 - eta)
-    q_loading = (1.0 - alpha) * (interest_rate + eta * delta)
+    q_loading = (1.0 - alpha) * (r_star + eta * delta)
     stable_root = 0.5 * (
-        interest_rate - np.sqrt(interest_rate**2 + 4.0 * capital_loading * q_loading)
+        r_star - np.sqrt(r_star**2 + 4.0 * capital_loading * q_loading)
     )
     stable_slope = stable_root / capital_loading
     resource_loading = (
@@ -186,8 +186,8 @@ def open_economy_growth_benchmark(
     )
     terminal = evaluate(np.asarray([bench_set.T]))
     h_terminal = float(np.log(terminal["k"][0] / k_ss))
-    tail_resources = g_ss / interest_rate + resource_loading * h_terminal / (
-        interest_rate - stable_root
+    tail_resources = g_ss / r_star + resource_loading * h_terminal / (
+        r_star - stable_root
     )
     a_terminal = float(terminal["a"][0])
     c_terminal = float(terminal["c"][0])

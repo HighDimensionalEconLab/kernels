@@ -13,84 +13,72 @@ class ModelParameters:
     delta: float = -math.log(0.94)
     r: float = -math.log(0.96)
     eta: float = 0.76
-    r_star: float | None = None
-
-    @property
-    def interest_rate(self):
-        if self.r_star is None:
-            return self.r
-        return self.r_star
-
-    @property
-    def chi(self):
-        return self.delta ** (1.0 - self.eta)
+    r_star: float = -math.log(0.96)
 
 
-def production(k, z, parameters):
-    return z * k**parameters.alpha
+def production(k, z, p):
+    return z * k**p.alpha
 
 
-def marginal_product(k, z, parameters):
-    return parameters.alpha * z * k ** (parameters.alpha - 1.0)
+def marginal_product(k, z, p):
+    return p.alpha * z * k ** (p.alpha - 1.0)
 
 
-def investment_rate_from_q(q, parameters):
-    eta = parameters.eta
-    return (parameters.chi * eta * q) ** (1.0 / (1.0 - eta))
+# chi = delta^(1 - eta) normalizes adjustment costs so the steady-state
+# investment rate is exactly delta.
+def investment_rate_from_q(q, p):
+    eta = p.eta
+    chi = p.delta ** (1.0 - eta)
+    return (chi * eta * q) ** (1.0 / (1.0 - eta))
 
 
-def investment_expenditure(k, q, parameters):
-    return k * investment_rate_from_q(q, parameters)
+def investment_expenditure(k, q, p):
+    return k * investment_rate_from_q(q, p)
 
 
-def consumption_from_mu(mu, parameters):
-    return mu ** (-1.0 / parameters.gamma)
+def consumption_from_mu(mu, p):
+    return mu ** (-1.0 / p.gamma)
 
 
-def capital_drift(k, q, parameters):
-    investment_rate = investment_rate_from_q(q, parameters)
-    return k * (parameters.chi * investment_rate**parameters.eta - parameters.delta)
+def capital_drift(k, q, p):
+    chi = p.delta ** (1.0 - p.eta)
+    investment_rate = investment_rate_from_q(q, p)
+    return k * (chi * investment_rate**p.eta - p.delta)
 
 
-def current_account(k, a, q, c, z, parameters):
+def current_account(k, a, q, c, z, p):
+    return p.r_star * a + production(k, z, p) - c - investment_expenditure(k, q, p)
+
+
+def q_drift(k, q, z, p):
+    eta = p.eta
+    chi = p.delta ** (1.0 - eta)
+    investment_rate = investment_rate_from_q(q, p)
     return (
-        parameters.interest_rate * a
-        + production(k, z, parameters)
-        - c
-        - investment_expenditure(k, q, parameters)
-    )
+        p.r_star + p.delta - (1.0 - eta) * chi * investment_rate**eta
+    ) * q - marginal_product(k, z, p)
 
 
-def q_drift(k, q, z, parameters):
-    eta = parameters.eta
-    investment_rate = investment_rate_from_q(q, parameters)
-    return (
-        parameters.interest_rate
-        + parameters.delta
-        - (1.0 - eta) * parameters.chi * investment_rate**eta
-    ) * q - marginal_product(k, z, parameters)
+def mu_drift(mu, p):
+    return (p.r - p.r_star) * mu
 
 
-def mu_drift(mu, parameters):
-    return (parameters.r - parameters.interest_rate) * mu
+def consumption_growth_rate(p):
+    return (p.r_star - p.r) / p.gamma
 
 
-def consumption_growth_rate(parameters):
-    return (parameters.interest_rate - parameters.r) / parameters.gamma
+def consumption_annuity_rate(p):
+    return p.r_star - consumption_growth_rate(p)
 
 
-def consumption_annuity_rate(parameters):
-    return parameters.interest_rate - consumption_growth_rate(parameters)
-
-
-def steady_state(parameters):
-    eta = parameters.eta
-    investment_rate = parameters.delta
+def steady_state(p):
+    eta = p.eta
+    investment_rate = p.delta
     q = 1.0 / eta
-    marginal_product_ss = parameters.delta + parameters.interest_rate / eta
-    k = (parameters.alpha / marginal_product_ss) ** (1.0 / (1.0 - parameters.alpha))
-    output = production(k, 1.0, parameters)
-    investment = parameters.delta * k
+    marginal_product_ss = p.delta + p.r_star / eta
+    k = (p.alpha / marginal_product_ss) ** (1.0 / (1.0 - p.alpha))
+    output = production(k, 1.0, p)
+    investment = p.delta * k
     domestic_resources = output - investment
     return {
         "k": k,
@@ -103,21 +91,19 @@ def steady_state(parameters):
     }
 
 
-def stable_tail_terms(parameters):
-    steady = steady_state(parameters)
-    eta = parameters.eta
-    capital_loading = parameters.delta * eta / (1.0 - eta)
-    q_loading = (1.0 - parameters.alpha) * (
-        parameters.interest_rate + eta * parameters.delta
-    )
-    discriminant = parameters.interest_rate**2 + 4.0 * capital_loading * q_loading
-    stable_root = 0.5 * (parameters.interest_rate - jnp.sqrt(discriminant))
-    unstable_root = 0.5 * (parameters.interest_rate + jnp.sqrt(discriminant))
+def stable_tail_terms(p):
+    steady = steady_state(p)
+    eta = p.eta
+    capital_loading = p.delta * eta / (1.0 - eta)
+    q_loading = (1.0 - p.alpha) * (p.r_star + eta * p.delta)
+    discriminant = p.r_star**2 + 4.0 * capital_loading * q_loading
+    stable_root = 0.5 * (p.r_star - jnp.sqrt(discriminant))
+    unstable_root = 0.5 * (p.r_star + jnp.sqrt(discriminant))
     stable_slope = stable_root / capital_loading
     resource_loading = (
-        parameters.alpha * steady["output"]
-        - parameters.delta * steady["k"]
-        - parameters.delta * steady["k"] * stable_slope / (1.0 - eta)
+        p.alpha * steady["output"]
+        - p.delta * steady["k"]
+        - p.delta * steady["k"] * stable_slope / (1.0 - eta)
     )
     return {
         "capital_loading": capital_loading,
@@ -140,44 +126,44 @@ def path_residuals(
     da_dt,
     dlog_q_dt,
     dlog_mu_dt,
-    parameters,
+    p,
 ):
-    investment_rate = investment_rate_from_q(q, parameters)
+    chi = p.delta ** (1.0 - p.eta)
+    investment_rate = investment_rate_from_q(q, p)
     return {
-        "capital": dlog_k_dt
-        - (parameters.chi * investment_rate**parameters.eta - parameters.delta),
-        "assets": da_dt - current_account(k, a, q, c, z, parameters),
-        "tobin_q": dlog_q_dt - q_drift(k, q, z, parameters) / q,
-        "marginal_wealth": dlog_mu_dt - mu_drift(mu, parameters) / mu,
-        "consumption_foc": mu * c**parameters.gamma - 1.0,
+        "capital": dlog_k_dt - (chi * investment_rate**p.eta - p.delta),
+        "assets": da_dt - current_account(k, a, q, c, z, p),
+        "tobin_q": dlog_q_dt - q_drift(k, q, z, p) / q,
+        "marginal_wealth": dlog_mu_dt - mu_drift(mu, p) / mu,
+        "consumption_foc": mu * c**p.gamma - 1.0,
     }
 
 
-def tail_diagnostics(k, a, q, c, parameters):
-    steady = steady_state(parameters)
-    tail = stable_tail_terms(parameters)
+def tail_diagnostics(k, a, q, c, p):
+    steady = steady_state(p)
+    tail = stable_tail_terms(p)
     h = jnp.log(k / steady["k"])
     v = jnp.log(q / steady["q"])
     stable = v - tail["stable_slope"] * h
-    tail_resources = steady["g"] / parameters.interest_rate + tail[
-        "resource_loading"
-    ] * h / (parameters.interest_rate - tail["stable_root"])
-    present_value = (
-        c - consumption_annuity_rate(parameters) * (a + tail_resources)
-    ) / steady["output"]
+    tail_resources = steady["g"] / p.r_star + tail["resource_loading"] * h / (
+        p.r_star - tail["stable_root"]
+    )
+    present_value = (c - consumption_annuity_rate(p) * (a + tail_resources)) / steady[
+        "output"
+    ]
     return {"stable": stable, "present_value": present_value}
 
 
-def present_value_gap(t, k, q, c, a_0, parameters):
-    steady = steady_state(parameters)
-    tail = stable_tail_terms(parameters)
-    investment = investment_expenditure(k, q, parameters)
-    domestic_resources = production(k, 1.0, parameters) - investment
-    discount = jnp.exp(-parameters.interest_rate * t)
+def present_value_gap(t, k, q, c, a_0, p):
+    steady = steady_state(p)
+    tail = stable_tail_terms(p)
+    investment = investment_expenditure(k, q, p)
+    domestic_resources = production(k, 1.0, p) - investment
+    discount = jnp.exp(-p.r_star * t)
     h_terminal = jnp.log(k[-1] / steady["k"])
-    continuation = steady["g"] / parameters.interest_rate + tail[
-        "resource_loading"
-    ] * h_terminal / (parameters.interest_rate - tail["stable_root"])
+    continuation = steady["g"] / p.r_star + tail["resource_loading"] * h_terminal / (
+        p.r_star - tail["stable_root"]
+    )
     resource_wealth = (
         a_0
         + jnp.trapezoid(discount * domestic_resources, t)
@@ -185,14 +171,14 @@ def present_value_gap(t, k, q, c, a_0, parameters):
     )
     consumption_wealth = jnp.trapezoid(discount * c, t) + discount[-1] * c[
         -1
-    ] / consumption_annuity_rate(parameters)
-    return consumption_annuity_rate(parameters) * (consumption_wealth - resource_wealth)
+    ] / consumption_annuity_rate(p)
+    return consumption_annuity_rate(p) * (consumption_wealth - resource_wealth)
 
 
-def tvc_diagnostics(k, a, q, c, t, parameters):
-    mu = c ** (-parameters.gamma)
-    discount_assets = jnp.exp(-parameters.interest_rate * t) * a
-    utility_discount = jnp.exp(-parameters.r * t)
+def tvc_diagnostics(k, a, q, c, t, p):
+    mu = c ** (-p.gamma)
+    discount_assets = jnp.exp(-p.r_star * t) * a
+    utility_discount = jnp.exp(-p.r * t)
     return {
         "discounted_assets": jnp.abs(discount_assets),
         "asset_tvc": jnp.abs(utility_discount * mu * a),

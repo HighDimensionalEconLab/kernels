@@ -308,10 +308,10 @@ def residual_fn(theta, args, p):
     euler = euler_residuals(policy, log_states.reshape(-1, 2), p).reshape(
         log_states.shape[:2]
     )
-    # Mean squared residual, so the loss threshold means the same thing at any
-    # number of trajectories or steps. An adaptive simulation only fills the
-    # accepted prefix of the step buffer, so both the residuals and the count
-    # are restricted to that prefix.
+    # Residual vector scaled by 1/sqrt(count); the caller decides how to use
+    # it. An adaptive simulation only fills the accepted prefix of the step
+    # buffer, so both the residuals and the count are restricted to that
+    # prefix.
     if args.data_set.ode_solver == "rk4":
         count = jnp.asarray(euler.size, dtype=euler.dtype)
         normalized = euler / jnp.sqrt(count)

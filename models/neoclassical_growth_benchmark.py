@@ -2,28 +2,65 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pandas as pd
-from scipy.integrate import solve_bvp
+from tinydiffeq import hermite_interpolate, solve_bvp
 
 # Reference saddle path of the smooth model. The interface is the tidy-frame
-# benchmark_df below; the engine behind solve_kappa_path is scipy's
-# solve_bvp (bvp4c-style residual-controlled collocation) and is the single
+# benchmark_df below; the engine behind solve_kappa_path is tinydiffeq's
+# solve_bvp (Lobatto IIIA residual-controlled collocation) and is the single
 # swap point for a different algorithm. Solved in the detrended coordinates
 # kappa = k / z^{1/(1-a)}, c_tilde = c / z^{1/(1-a)}: TFP grows at (1 - a) g
 # so the labor-augmenting scale z^{1/(1-a)} grows at g, and the
-# balanced-growth boundary is stationary. Pure numpy: a jax ODE here would
-# inherit the caller's x64 flag, and under float32 solve_bvp can never
-# verify BENCHMARK_TOL and exhausts max_nodes.
+# balanced-growth boundary is stationary. The solve must run in float64 --
+# under float32 the collocation tolerance clamps at ~1e-5, far above
+# BENCHMARK_TOL -- so it relies on the drivers' always-on x64 setup and
+# fails loudly on a downgraded dtype.
 
 # Truncation horizon (~20 e-foldings of the calibrated saddle path) with the
 # terminal pin kappa(T) = kappa_ss; requested dates beyond it would
-# extrapolate. scipy's default tol=1e-3 leaves ~1e-4 errors in the
-# "benchmark" itself, polluting every reported solver error.
+# extrapolate. The default tol=1e-3 would leave ~1e-4 errors in the
+# "benchmark" itself, polluting every reported solver error. MAX_NODES is the
+# static padded-mesh budget and must exceed the refined mesh (~1500 nodes at
+# the calibrated tolerance).
 BENCHMARK_T = 200.0
 BENCHMARK_TOL = 1e-10
 INITIAL_MESH_POINTS = 801
-MAX_MESH_NODES = 100000
+MAX_NODES = 2048
+
+
+# kappa' = kappa^a - c_tilde - (delta + g) kappa,
+# c_tilde' = (c_tilde / sigma)(a kappa^{a-1} - rho_hat - delta - sigma g).
+def kappa_field(t, y, _, args):
+    kappa, c_tilde = y
+    a, delta, rho_hat = args["a"], args["delta"], args["rho_hat"]
+    sigma_crra, g = args["sigma_crra"], args["g"]
+    return jnp.array(
+        [
+            kappa**a - c_tilde - (delta + g) * kappa,
+            (c_tilde / sigma_crra)
+            * (a * kappa ** (a - 1.0) - rho_hat - delta - sigma_crra * g),
+        ]
+    )
+
+
+def kappa_bc(ya, yb, _, args):
+    return jnp.array([ya[0] - args["kappa_0"], yb[0] - args["kappa_ss"]])
+
+
+@jax.jit
+def solve_kappa_bvp(mesh, y_guess, args):
+    return solve_bvp(
+        kappa_field,
+        kappa_bc,
+        mesh,
+        y_guess,
+        args=args,
+        tol=BENCHMARK_TOL,
+        max_nodes=MAX_NODES,
+    )
 
 
 @lru_cache(maxsize=None)
@@ -34,20 +71,6 @@ def solve_kappa_path(a, delta, rho_hat, sigma_crra, g, kappa_0, times):
     mesh = np.linspace(0.0, BENCHMARK_T, INITIAL_MESH_POINTS)
     marginal_product_ss = delta + rho_hat + sigma_crra * g
     kappa_ss = (marginal_product_ss / a) ** (1.0 / (a - 1.0))
-
-    def ODE(t, y):
-        kappa = y[0]
-        c_tilde = y[1]
-        return np.vstack(
-            (
-                kappa**a - c_tilde - (delta + g) * kappa,
-                (c_tilde / sigma_crra)
-                * (a * kappa ** (a - 1) - rho_hat - delta - sigma_crra * g),
-            )
-        )
-
-    def bc(ya, yb):
-        return np.array([ya[0] - kappa_0, yb[0] - kappa_ss])
 
     # Saddle-shaped initial guess: exponential approach to the steady state at
     # the linearized stable eigenvalue, with steady-flow consumption. A naive
@@ -60,19 +83,32 @@ def solve_kappa_path(a, delta, rho_hat, sigma_crra, g, kappa_0, times):
     lambda_stable = 0.5 * (trace - np.sqrt(discriminant))
     kappa_guess = kappa_ss + (kappa_0 - kappa_ss) * np.exp(lambda_stable * mesh)
     c_tilde_guess = kappa_guess**a - (delta + g) * kappa_guess
-    solution = solve_bvp(
-        ODE,
-        bc,
-        mesh,
-        np.vstack((kappa_guess, c_tilde_guess)),
-        tol=BENCHMARK_TOL,
-        max_nodes=MAX_MESH_NODES,
+    y_guess = jnp.asarray(np.stack([kappa_guess, c_tilde_guess], axis=-1))
+    args = {
+        name: jnp.asarray(value, dtype=jnp.float64)
+        for name, value in dict(
+            a=a,
+            delta=delta,
+            rho_hat=rho_hat,
+            sigma_crra=sigma_crra,
+            g=g,
+            kappa_0=kappa_0,
+            kappa_ss=kappa_ss,
+        ).items()
+    }
+    solution = solve_kappa_bvp(jnp.asarray(mesh), y_guess, args)
+    # The Hermite interpolant is the solver's own C1 collocation spline,
+    # accurate to BENCHMARK_TOL everywhere, so requested dates need not be
+    # mesh nodes.
+    paths = hermite_interpolate(
+        jnp.asarray(times_array), solution.t, solution.y, solution.yp
     )
-    if solution.status != 0:
-        raise RuntimeError(f"solve_bvp failed: {solution.message}")
-    # solution.sol is the solver's own C1 collocation spline, accurate to
-    # BENCHMARK_TOL everywhere, so requested dates need not be mesh nodes.
-    kappa, c_tilde = solution.sol(times_array)
+    kappa = np.asarray(paths[:, 0])
+    c_tilde = np.asarray(paths[:, 1])
+    if not bool(solution.ok) or kappa.dtype != np.float64:
+        raise RuntimeError(
+            f"solve_bvp failed: status {int(solution.status)}, dtype {kappa.dtype}"
+        )
     return kappa, c_tilde
 
 

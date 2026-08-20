@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import jax
 import jsonargparse
 import pandas as pd
 
@@ -10,16 +9,11 @@ from models import (
 )
 from replication.utilities import (
     DETERMINISTIC_TIMING_REPETITIONS,
-    enable_compilation_cache,
+    configure_process,
     ensemble,
     save_experiment,
     write_summary,
 )
-
-jax.config.update("jax_enable_x64", True)
-jax.config.update("jax_default_matmul_precision", "highest")
-
-enable_compilation_cache()
 
 PREFIX = "neoclassical_growth_recursive_comparison"
 
@@ -118,6 +112,7 @@ def run(
     data_seed: int = 0,
     verbose: bool = False,
 ):
+    configure_process()
     if n_nn_seeds < 1:
         raise ValueError("n_nn_seeds must be positive")
     if train_points < 2:
@@ -148,7 +143,7 @@ def run(
         "ic_set": ic_set,
         "verbose": verbose,
     }
-    # ``train_points`` means the same count on both sides: the NN's rollout
+    # ``train_points`` means the same count on both sides: the NN's simulation
     # knots and the kernel's fixed centers land on the same dates.
     meta = {
         "n_nn_seeds": n_nn_seeds,

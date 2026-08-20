@@ -1,20 +1,14 @@
 from __future__ import annotations
 
-import jax
 import jsonargparse
 
 import extra.human_capital_kernel_uno as human_capital_kernel_uno
 from replication.utilities import (
-    enable_compilation_cache,
+    configure_process,
     ensemble,
     save_experiment,
     write_summary,
 )
-
-jax.config.update("jax_enable_x64", True)
-jax.config.update("jax_default_matmul_precision", "highest")
-
-enable_compilation_cache()
 
 PREFIX = "human_capital_kernel_uno"
 
@@ -23,6 +17,7 @@ def run(
     output_dir: str = ".results",
     verbose: bool = False,
 ):
+    configure_process()
     print(f"baseline -> {output_dir}/")
     results_df, frames, hyperparameters = ensemble(
         human_capital_kernel_uno.human_capital_kernel_uno,

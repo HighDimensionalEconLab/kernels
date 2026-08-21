@@ -1,6 +1,7 @@
 import math
 from dataclasses import dataclass
 from functools import partial
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -245,3 +246,30 @@ def integrated_metric_factorization(train_data, kernel, sigma, ell, repeats):
         repeats=repeats,
     )
     return K, K_tilde, metric
+
+
+class IntegratedPath(NamedTuple):
+    alpha: jax.Array
+    init: jax.Array
+    trend_rate: jax.Array | None = None
+
+
+class PathValues(NamedTuple):
+    value: jax.Array
+    d_dt: jax.Array
+
+
+# paths: {name: IntegratedPath}; anchored representer evaluation
+# value = e^{trend_rate t} (init + K_tilde @ alpha), d_dt by the product rule.
+def integrated_kernel_paths(paths, K, K_tilde, t_grid=None):
+    out = {}
+    for name, path in paths.items():
+        raw = path.init + K_tilde @ path.alpha
+        d_raw = K @ path.alpha
+        if path.trend_rate is None:
+            out[name] = PathValues(raw, d_raw)
+        else:
+            trend = jnp.exp(path.trend_rate * t_grid)
+            value = trend * raw
+            out[name] = PathValues(value, path.trend_rate * value + trend * d_raw)
+    return out

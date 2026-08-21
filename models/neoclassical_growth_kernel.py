@@ -11,8 +11,10 @@ import pandas as pd
 from nlls_gram import RidgeLevenbergMarquardt
 
 from models.kernels import (
+    IntegratedPath,
     KernelSettings,
     integrated_kernel_matrices,
+    integrated_kernel_paths,
     integrated_metric_factorization,
     normalize_kernel,
 )
@@ -33,49 +35,35 @@ from models.utilities import (
 )
 
 
-class InitialValues(NamedTuple):
-    c_0: jax.Array
-    mu_0: jax.Array
-
-
 # Alpha blocks first (the metric penalizes the leading flat coordinates);
 # g_hat is the trend rate of the approximation class, None unless learned.
 class Theta(NamedTuple):
     alpha_mu: jax.Array
     alpha_c: jax.Array
     alpha_k: jax.Array
-    initial: InitialValues
+    c_0: jax.Array
+    mu_0: jax.Array
     g_hat: jax.Array | None = None
-
-
-# Anchored paths and time-derivatives, trend-scaled by e^{g_hat t} (k, c) and
-# e^{-sigma_crra g_hat t} (mu) when a rate is given.
-def path_values(theta, K_eval, K_tilde_eval, p, t_grid=None, g_hat=None):
-    if theta.g_hat is not None:
-        g_hat = theta.g_hat
-    mu = theta.initial.mu_0 + K_tilde_eval @ theta.alpha_mu
-    c = theta.initial.c_0 + K_tilde_eval @ theta.alpha_c
-    k = p.k_0 + K_tilde_eval @ theta.alpha_k
-    dmu_dt = K_eval @ theta.alpha_mu
-    dk_dt = K_eval @ theta.alpha_k
-    if g_hat is None:
-        return k, c, mu, dk_dt, dmu_dt
-    trend = jnp.exp(g_hat * t_grid)
-    mu_trend = jnp.exp(-p.sigma_crra * g_hat * t_grid)
-    k = trend * k
-    c = trend * c
-    mu = mu_trend * mu
-    dk_dt = g_hat * k + trend * dk_dt
-    dmu_dt = -p.sigma_crra * g_hat * mu + mu_trend * dmu_dt
-    return k, c, mu, dk_dt, dmu_dt
 
 
 # CRRA first-order condition u'(c) = mu; the costate and resource residuals
 # are utility-free.
 def residual_fn(theta, args, p):
-    k, c, mu, dk_dt, dmu_dt = path_values(
-        theta, args["K"], args["K_tilde"], p, t_grid=args["t"], g_hat=args["g_hat"]
+    g_hat = theta.g_hat if theta.g_hat is not None else args["g_hat"]
+    trend_mu = None if g_hat is None else -p.sigma_crra * g_hat
+    paths = integrated_kernel_paths(
+        {
+            "mu": IntegratedPath(theta.alpha_mu, theta.mu_0, trend_mu),
+            "c": IntegratedPath(theta.alpha_c, theta.c_0, g_hat),
+            "k": IntegratedPath(theta.alpha_k, p.k_0, g_hat),
+        },
+        args["K"],
+        args["K_tilde"],
+        args["t"],
     )
+    k, dk_dt = paths["k"]
+    mu, dmu_dt = paths["mu"]
+    c = paths["c"].value
     z = p.z_0 * args["z_trend"]
     resource = dk_dt - (production(z, k, p) - p.delta * k - c)
     euler = dmu_dt + mu * (mpk(z, k, p) - p.delta - p.rho_hat)
@@ -94,11 +82,26 @@ def evaluate_paths(theta, t_grid, train_data, kernel_set, p, g_hat=None):
         kernel_set.sigma,
         kernel_set.ell,
     )
-    return path_values(theta, K_eval, K_tilde_eval, p, t_grid=t_grid, g_hat=g_hat)
+    if theta.g_hat is not None:
+        g_hat = theta.g_hat
+    trend_mu = None if g_hat is None else -p.sigma_crra * g_hat
+    return integrated_kernel_paths(
+        {
+            "mu": IntegratedPath(theta.alpha_mu, theta.mu_0, trend_mu),
+            "c": IntegratedPath(theta.alpha_c, theta.c_0, g_hat),
+            "k": IntegratedPath(theta.alpha_k, p.k_0, g_hat),
+        },
+        K_eval,
+        K_tilde_eval,
+        t_grid,
+    )
 
 
 def snapshot(theta, t, p, train_data, kernel_set, g_hat=None, benchmark=None, z=1.0):
-    k, c, mu, dk_dt, dmu_dt = evaluate_paths(theta, t, train_data, kernel_set, p, g_hat)
+    paths = evaluate_paths(theta, t, train_data, kernel_set, p, g_hat)
+    k, dk_dt = paths["k"]
+    mu, dmu_dt = paths["mu"]
+    c = paths["c"].value
     df = pd.DataFrame(
         {
             "t": np.asarray(t),
@@ -239,10 +242,8 @@ def neoclassical_growth_kernel(
         alpha_mu=jnp.zeros(n_train, dtype=dtype),
         alpha_c=jnp.zeros(n_train, dtype=dtype),
         alpha_k=jnp.zeros(n_train, dtype=dtype),
-        initial=InitialValues(
-            c_0=jnp.asarray(c_flow_guess, dtype=dtype),
-            mu_0=jnp.asarray(c_flow_guess**-sigma_crra, dtype=dtype),
-        ),
+        c_0=jnp.asarray(c_flow_guess, dtype=dtype),
+        mu_0=jnp.asarray(c_flow_guess**-sigma_crra, dtype=dtype),
         g_hat=jnp.zeros((), dtype=dtype) if learn_g_hat else None,
     )
 
@@ -268,7 +269,7 @@ def neoclassical_growth_kernel(
     elapsed = timer.elapsed(result)
 
     theta = result.x
-    c_0, mu_0 = theta.initial
+    c_0, mu_0 = theta.c_0, theta.mu_0
     steps = int(result.steps)
 
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
@@ -300,9 +301,8 @@ def neoclassical_growth_kernel(
     )
 
     tvc_t = jnp.asarray([data_set.test_tvc_T], dtype=dtype)
-    k_T, c_T, _, _, _ = evaluate_paths(
-        theta, tvc_t, train_data, kernel_set, p, g_hat_fixed
-    )
+    paths_T = evaluate_paths(theta, tvc_t, train_data, kernel_set, p, g_hat_fixed)
+    k_T, c_T = paths_T["k"].value, paths_T["c"].value
     log_tvc = float(
         -rho_hat * data_set.test_tvc_T - sigma_crra * jnp.log(c_T[0]) + jnp.log(k_T[0])
     )
@@ -411,7 +411,14 @@ def neoclassical_growth_kernel(
 
     @jax.jit
     def kernel_solution(t_grid):
-        return evaluate_paths(theta, t_grid, train_data, kernel_set, p, g_hat_fixed)
+        paths = evaluate_paths(theta, t_grid, train_data, kernel_set, p, g_hat_fixed)
+        return (
+            paths["k"].value,
+            paths["c"].value,
+            paths["mu"].value,
+            paths["k"].d_dt,
+            paths["mu"].d_dt,
+        )
 
     return results, {
         "model": kernel_solution,

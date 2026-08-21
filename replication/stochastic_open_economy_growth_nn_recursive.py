@@ -19,7 +19,6 @@ DIAGNOSTIC_COLUMNS = [
     "test_euler_mean_abs",
     "test_c_euler_max_abs",
     "test_q_euler_max_abs",
-    "test_asset_squash_saturation",
     "steps",
     "solve_time",
 ]

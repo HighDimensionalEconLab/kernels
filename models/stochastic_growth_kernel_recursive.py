@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import pathlib
 from dataclasses import asdict, dataclass
-from typing import Literal
 
 import jax
 import jax.numpy as jnp
@@ -12,7 +11,11 @@ import numpy as np
 from flax import struct
 from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
 
-from models.kernels import rbf_state_features, rbf_state_gram, state_features
+from models.kernels import (
+    ard_rbf_state_features,
+    rbf_state_features,
+    rbf_state_gram,
+)
 from models.stochastic_growth import (
     STOCHASTIC_GROWTH_CONSTANTS as CONSTANTS,
 )
@@ -46,28 +49,20 @@ from models.utilities import (
 
 @dataclass(frozen=True)
 class StateKernelSettings:
+    # Additive kernel: a 1-D RBF on the ray coordinate
+    # q = log k - ray_slope * log z plus a 2-D ARD RBF on (log z, log k). The
+    # penalized solve finds the minimum-norm split between the two components,
+    # so the amplitude ratio sets how much of the policy the ray explains;
+    # ray_amplitude = 0 recovers the pure 2-D representation. ray_slope is a
+    # tuned hyperparameter like the lengthscales -- the structural detrending
+    # 1/(1-a) must never enter the approximation class.
+    ray_slope: float = 2.0
+    ray_amplitude: float = 1.0
+    ray_lengthscale: float = 0.6
     amplitude: float = 1.0
-    lengthscale: float = 0.6
+    log_z_lengthscale: float = 0.4
+    log_k_lengthscale: float = 0.45
     metric_epsilon: float = 3e-5
-    # With the free constant, theta is (alpha, h_const) and only alpha is
-    # penalized; without it the policy is the pure RKHS expansion.
-    free_constant: bool = True
-    # Homothetic: 1-D RBF on log(k/z). Non-homothetic: a 2-D expansion on the
-    # centered (log z, log k) with product (ard) or sum (additive) composition
-    # of RBF or Matern 1-D kernels; lengthscales default per axis to
-    # `lengthscale`, and linear_mean appends two unpenalized coefficients.
-    homothetic_representation: bool = True
-    state_kernel: Literal[
-        "ard_rbf",
-        "additive_rbf",
-        "ard_matern32",
-        "ard_matern52",
-        "additive_matern32",
-        "additive_matern52",
-    ] = "ard_rbf"
-    log_z_lengthscale: float | None = None
-    log_k_lengthscale: float | None = None
-    linear_mean: bool = False
 
 
 @dataclass(frozen=True)
@@ -82,95 +77,67 @@ class ToleranceSettings:
 
 @struct.dataclass
 class ResidualArgs:
-    centers: jax.Array
+    # train_log_states doubles as the 2-D kernel centers: the representer
+    # nodes are the collocation states.
     train_log_states: jax.Array
+    q_centers: jax.Array
     gram: jax.Array
-    state_offset: jax.Array
     k_scale: jax.Array
-    # 1/(1-a): log kappa = log k - z_detrend * log z for Hicks-neutral z.
-    z_detrend: jax.Array
     kernel_set: StateKernelSettings = struct.field(pytree_node=False)
 
 
-def state_lengthscales(kernel_set):
-    ell_z = kernel_set.log_z_lengthscale
-    ell_k = kernel_set.log_k_lengthscale
-    return (
-        kernel_set.lengthscale if ell_z is None else ell_z,
-        kernel_set.lengthscale if ell_k is None else ell_k,
-    )
-
-
-def build_residual_args(train_log_states, kernel_set, a, z_0=1.0, k_0=1.0):
+def build_residual_args(train_log_states, kernel_set, k_0=1.0):
     flat_states = train_log_states.reshape(-1, 2)
     dtype = flat_states.dtype
-    state_offset = jnp.log(jnp.asarray([z_0, k_0], dtype))
-    z_detrend = jnp.asarray(1.0 / (1.0 - a), dtype)
-    if kernel_set.homothetic_representation:
-        centers = flat_states[:, 1] - z_detrend * flat_states[:, 0]
-        gram = rbf_state_gram(
-            centers,
-            jnp.asarray(kernel_set.amplitude, dtype),
-            jnp.asarray(kernel_set.lengthscale, dtype),
-        )
-    else:
-        centers = flat_states - state_offset
-        gram = state_features(
-            kernel_set.state_kernel,
-            centers,
-            centers,
-            kernel_set.amplitude,
-            state_lengthscales(kernel_set),
-        )
+    q_centers = flat_states[:, 1] - kernel_set.ray_slope * flat_states[:, 0]
+    gram = ard_rbf_state_features(
+        flat_states,
+        flat_states,
+        jnp.asarray(kernel_set.amplitude, dtype),
+        jnp.asarray(
+            (kernel_set.log_z_lengthscale, kernel_set.log_k_lengthscale), dtype
+        ),
+    ) + rbf_state_gram(
+        q_centers,
+        jnp.asarray(kernel_set.ray_amplitude, dtype),
+        jnp.asarray(kernel_set.ray_lengthscale, dtype),
+    )
     gram = (gram + gram.T) / 2.0
     return ResidualArgs(
-        centers=centers,
         train_log_states=flat_states,
+        q_centers=q_centers,
         gram=gram,
-        state_offset=state_offset,
         k_scale=jnp.asarray(k_0, dtype),
-        z_detrend=z_detrend,
         kernel_set=kernel_set,
     )
 
 
-def raw_policy(theta, args, log_state, kernel_set):
-    alpha = theta[0]
-    if kernel_set.homothetic_representation:
-        q = log_state[1] - args.z_detrend * log_state[0]
-        features = rbf_state_features(
-            q,
-            args.centers,
-            jnp.asarray(kernel_set.amplitude, q.dtype),
-            jnp.asarray(kernel_set.lengthscale, q.dtype),
-        )
-        h = features @ alpha
-    else:
-        x = log_state - args.state_offset
-        features = state_features(
-            kernel_set.state_kernel,
-            x,
-            args.centers,
-            kernel_set.amplitude,
-            state_lengthscales(kernel_set),
-        )
-        h = features @ alpha
-        # The linear-mean coefficients are the last theta leaf, after the free
-        # constant when both are present; like h_const they are unpenalized.
-        if kernel_set.linear_mean:
-            h = h + x @ theta[-1]
-    if kernel_set.free_constant and len(theta) > 1:
-        h = h + theta[1]
-    return h
+# theta = (alpha, h_const, linear_coeffs); only alpha is penalized.
+def raw_policy(theta, args, log_state):
+    kernel_set = args.kernel_set
+    alpha, h_const, linear_coeffs = theta
+    q = log_state[1] - kernel_set.ray_slope * log_state[0]
+    features = ard_rbf_state_features(
+        log_state,
+        args.train_log_states,
+        jnp.asarray(kernel_set.amplitude, log_state.dtype),
+        jnp.asarray(
+            (kernel_set.log_z_lengthscale, kernel_set.log_k_lengthscale),
+            log_state.dtype,
+        ),
+    ) + rbf_state_features(
+        q,
+        args.q_centers,
+        jnp.asarray(kernel_set.ray_amplitude, q.dtype),
+        jnp.asarray(kernel_set.ray_lengthscale, q.dtype),
+    )
+    return features @ alpha + log_state @ linear_coeffs + h_const
 
 
-# Same output maps as the recursive NN: unit softplus of the raw policy
-# anchored at delta * k (homothetic) or the constant delta * k_0.
-def investment(theta, args, log_state, p, kernel_set):
-    raw = raw_policy(theta, args, log_state, kernel_set)
-    if kernel_set.homothetic_representation:
-        k = jnp.exp(log_state[1])
-        return p.delta * k * unit_softplus(raw)
+# Same output map as the recursive NN: unit softplus of the raw policy
+# anchored at the constant delta * k_0.
+def investment(theta, args, log_state, p):
+    raw = raw_policy(theta, args, log_state)
     return p.delta * args.k_scale * unit_softplus(raw)
 
 
@@ -178,10 +145,9 @@ def investment(theta, args, log_state, p, kernel_set):
 class KernelInvestmentPolicy:
     theta: tuple
     args: ResidualArgs
-    kernel_set: StateKernelSettings = struct.field(pytree_node=False)
 
     def __call__(self, log_state, p):
-        return investment(self.theta, self.args, log_state, p, self.kernel_set)
+        return investment(self.theta, self.args, log_state, p)
 
 
 # Locate the reference NN policy for this exact problem (structural
@@ -208,7 +174,7 @@ def load_reference_policy(policy_dir, problem_config):
 
 
 def residual_fn(theta, args, p):
-    policy = KernelInvestmentPolicy(theta, args, args.kernel_set)
+    policy = KernelInvestmentPolicy(theta, args)
     residual = euler_residuals(policy, args.train_log_states, p)
     return residual / jnp.sqrt(residual.size)
 
@@ -238,16 +204,7 @@ def stochastic_growth_kernel_recursive(
         train_log_z_variance=CONSTANTS.z_ergodic_variance,
         train_log_k_variance=0.01,
     ),
-    # Lengthscales sized to the Hicks-neutral state cloud: output moves
-    # one-for-one with log z and k_ss with log z / (1 - a), so both directions
-    # need shorter scales than detrended-capital intuition suggests.
-    kernel_set: StateKernelSettings = StateKernelSettings(
-        homothetic_representation=False,
-        state_kernel="ard_rbf",
-        linear_mean=True,
-        log_z_lengthscale=0.4,
-        log_k_lengthscale=0.45,
-    ),
+    kernel_set: StateKernelSettings = StateKernelSettings(),
     lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=1e-6,
         damping_decrease=0.25,
@@ -334,18 +291,18 @@ def stochastic_growth_kernel_recursive(
     if not bool(jnp.all(train_solution.ok)):
         raise RuntimeError("reference-policy collocation simulation failed")
     train_log_states = train_solution.xs
-    args = build_residual_args(train_log_states, kernel_set, a, z_bar, k_0)
-    n_train = args.centers.shape[0]
+    args = build_residual_args(train_log_states, kernel_set, k_0)
+    n_train = args.train_log_states.shape[0]
     shifted_gram = args.gram + kernel_set.metric_epsilon * jnp.eye(n_train, dtype=dtype)
     metric = RepeatedFactorMetric(
         jnp.linalg.cholesky(shifted_gram, upper=True),
         repeats=1,
     )
-    theta_0 = (jnp.zeros(n_train, dtype=dtype),)
-    if kernel_set.free_constant:
-        theta_0 = theta_0 + (jnp.zeros((), dtype=dtype),)
-    if kernel_set.linear_mean:
-        theta_0 = theta_0 + (jnp.zeros(2, dtype=dtype),)
+    theta_0 = (
+        jnp.zeros(n_train, dtype=dtype),
+        jnp.zeros((), dtype=dtype),
+        jnp.zeros(2, dtype=dtype),
+    )
     solver = RidgeLevenbergMarquardt(
         residual_fn,
         metric=metric,
@@ -382,7 +339,18 @@ def stochastic_growth_kernel_recursive(
         )
 
     theta = result.x
-    policy = KernelInvestmentPolicy(theta, args, kernel_set)
+    # Component attribution: the representer solution splits as
+    # h_ray = sum_i alpha_i K_ray(., q_i) plus the 2-D remainder, with squared
+    # RKHS norms alpha' G_ray alpha and alpha' G_2d alpha.
+    ray_gram = rbf_state_gram(
+        args.q_centers,
+        jnp.asarray(kernel_set.ray_amplitude, dtype),
+        jnp.asarray(kernel_set.ray_lengthscale, dtype),
+    )
+    alpha = theta[0]
+    rkhs_norm_ray = float(alpha @ ray_gram @ alpha)
+    rkhs_norm_2d = float(alpha @ (args.gram - ray_gram) @ alpha)
+    policy = KernelInvestmentPolicy(theta, args)
     train_values = trajectory_values(policy, train_log_states, p)
     train_initial = np.asarray(train_initial_conditions)
     train_df = long_df(
@@ -515,10 +483,12 @@ def stochastic_growth_kernel_recursive(
         # Measured, not requested: a float64 leak upstream shows up here.
         "residual_dtype": str(train_values["euler_residual"].dtype),
         "sde_solver": sde_solver,
-        "kernel": kernel_set.state_kernel,
         "amplitude": kernel_set.amplitude,
-        "log_z_lengthscale": state_lengthscales(kernel_set)[0],
-        "log_k_lengthscale": state_lengthscales(kernel_set)[1],
+        "ray_slope": kernel_set.ray_slope,
+        "ray_amplitude": kernel_set.ray_amplitude,
+        "ray_lengthscale": kernel_set.ray_lengthscale,
+        "log_z_lengthscale": kernel_set.log_z_lengthscale,
+        "log_k_lengthscale": kernel_set.log_k_lengthscale,
         "metric_epsilon": kernel_set.metric_epsilon,
         "ridge": tolerance_set.ridge,
         "train_loss": train_loss,
@@ -547,6 +517,8 @@ def stochastic_growth_kernel_recursive(
         "num_centers": n_train,
         "gram_min_eigenvalue": float(gram_eigenvalues[0]),
         "gram_max_eigenvalue": float(gram_eigenvalues[-1]),
+        "rkhs_norm_ray": rkhs_norm_ray,
+        "rkhs_norm_2d": rkhs_norm_2d,
         "test_mean_abs_k_rel_error": float(np.mean(np.abs(k_error))),
         "test_mean_abs_c_rel_error": float(np.mean(np.abs(c_error))),
         "test_max_abs_k_rel_error": float(np.max(np.abs(k_error))),

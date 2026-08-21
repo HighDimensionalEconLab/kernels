@@ -14,8 +14,10 @@ from nlls_gram import (
 
 from models.asset_pricing_benchmark import mu_f_array
 from models.kernels import (
+    IntegratedPath,
     KernelSettings,
     integrated_kernel_matrices,
+    integrated_kernel_paths,
     integrated_metric_factorization,
     rkhs_norm_squared,
 )
@@ -32,18 +34,16 @@ class Theta(NamedTuple):
     p_0: jax.Array
 
 
-# Anchored price path and its time-derivative.
-def path_values(theta, K_eval, K_tilde_eval):
-    return theta.p_0 + K_tilde_eval @ theta.alpha, K_eval @ theta.alpha
-
-
 def dividends(t, p):
     return (p["x_0"] + p["c"] / p["g"]) * jnp.exp(p["g"] * t) - p["c"] / p["g"]
 
 
 # No-arbitrage residual dp/dt = r p - x along the dividend path.
 def residual_fn(theta, args, p):
-    price, dprice_dt = path_values(theta, args["K"], args["K_tilde"])
+    paths = integrated_kernel_paths(
+        {"price": IntegratedPath(theta.alpha, theta.p_0)}, args["K"], args["K_tilde"]
+    )
+    price, dprice_dt = paths["price"]
     return dprice_dt - (p["r"] * price - dividends(args["t"], p))
 
 
@@ -140,7 +140,10 @@ def asset_pricing_kernel(
     theta = result.x
     alpha, p_0 = theta.alpha, theta.p_0
     steps = int(result.steps)
-    p_train, dp_train = path_values(theta, K_jax, K_tilde_jax)
+    paths = integrated_kernel_paths(
+        {"price": IntegratedPath(theta.alpha, theta.p_0)}, K_jax, K_tilde_jax
+    )
+    p_train, dp_train = paths["price"]
     train_residual = dp_train - (r * p_train - dividends(train_data, p))
     max_train_residual = float(jnp.max(jnp.abs(train_residual)))
 
@@ -149,7 +152,10 @@ def asset_pricing_kernel(
         K_test, K_tilde_test = integrated_kernel_matrices(
             test_points_data, train_data, kernel, sigma, ell
         )
-        return path_values(theta, K_test, K_tilde_test)
+        paths = integrated_kernel_paths(
+            {"price": IntegratedPath(theta.alpha, theta.p_0)}, K_test, K_tilde_test
+        )
+        return paths["price"].value, paths["price"].d_dt
 
     p_test, dp_test = kernel_solution(test_data)
     test_residual = dp_test - (r * p_test - dividends(test_data, p))

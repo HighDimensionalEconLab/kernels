@@ -11,8 +11,10 @@ import unopy
 
 from models.asset_pricing_benchmark import mu_f_array
 from models.kernels import (
+    IntegratedPath,
     KernelSettings,
     integrated_kernel_matrices,
+    integrated_kernel_paths,
     rkhs_norm_squared,
 )
 from models.utilities import Stopwatch, acceptance_fields
@@ -25,13 +27,6 @@ def unpack(x):
     alpha = x[:n_train]
     p_0 = x[n_train]
     return alpha, p_0
-
-
-def path_values(x, K_eval, K_tilde_eval):
-    alpha, p_0 = unpack(x)
-    price = p_0 + K_tilde_eval @ alpha
-    dprice_dt = K_eval @ alpha
-    return price, dprice_dt
 
 
 def dividends(t, p):
@@ -47,7 +42,9 @@ def objective(x, K):
 # No-arbitrage residual dp/dt = r p - x along the dividend path.
 @jax.jit
 def constraints(x, K, K_tilde, t, p):
-    price, dprice_dt = path_values(x, K, K_tilde)
+    alpha, p_0 = unpack(x)
+    paths = integrated_kernel_paths({"price": IntegratedPath(alpha, p_0)}, K, K_tilde)
+    price, dprice_dt = paths["price"]
     return dprice_dt - (p["r"] * price - dividends(t, p))
 
 
@@ -240,8 +237,10 @@ def asset_pricing_kernel_uno(
         K_test, K_tilde_test = integrated_kernel_matrices(
             test_points_data, train_data, kernel, sigma, ell
         )
-        p_test, dp_test = path_values(x, K_test, K_tilde_test)
-        return p_test, dp_test
+        paths = integrated_kernel_paths(
+            {"price": IntegratedPath(alpha, p_0)}, K_test, K_tilde_test
+        )
+        return paths["price"].value, paths["price"].d_dt
 
     p_test, dp_test = kernel_solution(test_data)
     test_residual = dp_test - (r * p_test - dividends(test_data, p))
@@ -292,7 +291,10 @@ def asset_pricing_kernel_uno(
         f"E(|rel_error(p)|) = {results['p_rel_error_mean']:.3e}"
     )
 
-    p_train, dp_train = path_values(x, K_jax, K_tilde_jax)
+    paths = integrated_kernel_paths(
+        {"price": IntegratedPath(alpha, p_0)}, K_jax, K_tilde_jax
+    )
+    p_train, dp_train = paths["price"]
     train_df = pd.DataFrame(
         {
             "t": np.asarray(train_data),

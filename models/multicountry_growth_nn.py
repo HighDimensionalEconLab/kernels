@@ -103,7 +103,7 @@ class PathScales:
 class ResidualParameters:
     k_0: jax.Array
     a_0: jax.Array
-    model: MulticountryParameterValues
+    structural: MulticountryParameterValues
 
 
 @struct.dataclass
@@ -182,14 +182,14 @@ def path_values(model, t, p, scales):
     # Population demeaning is a no-op at the primal point (the driver
     # anchors cleared positions) and projects AD perturbations of a_0 onto
     # the feasible clearing set, so every direction is meaningful.
-    populations = p.model.populations
+    populations = p.structural.populations
     a_0 = p.a_0 - jnp.sum(populations * p.a_0) / jnp.sum(populations)
     log_k = jnp.log(p.k_0) + (blocks[:, 0] - blocks_at_zero[0])
     a = a_0 + scales.output * (blocks[:, 1] - blocks_at_zero[1])
     log_q = scales.log_q_ss + blocks[:, 2]
     log_c = scales.log_consumption + blocks[:, 3]
-    log_mu = -p.model.gammas * scales.log_consumption + blocks[:, 4]
-    log_rate = jnp.log(p.model.r) + raw[:, -1]
+    log_mu = -p.structural.gammas * scales.log_consumption + blocks[:, 4]
+    log_rate = jnp.log(p.structural.r) + raw[:, -1]
 
     return {
         "t": t,
@@ -227,7 +227,7 @@ def residual_fn(theta, args, p):
     values = path_values(
         nnx.merge(args.graphdef, theta, args.nondiff), args.t, p, args.scales
     )
-    residuals = dae_residuals(values, p.model)
+    residuals = dae_residuals(values, p.structural)
     residual = jnp.concatenate(
         [
             residuals["capital"].reshape(-1),
@@ -300,7 +300,7 @@ def multicountry_growth_nn(
     residual_parameters = ResidualParameters(
         k_0=jnp.asarray(k_0, dtype=dtype),
         a_0=a_0_array,
-        model=multicountry_parameter_values(parameters, dtype),
+        structural=multicountry_parameter_values(parameters, dtype),
     )
 
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
@@ -346,7 +346,7 @@ def multicountry_growth_nn(
 
     def evaluate_grid(points):
         values = path_values(model, points, residual_parameters, scales)
-        parameters_p = residual_parameters.model
+        parameters_p = residual_parameters.structural
         residuals = dae_residuals(values, parameters_p)
         x = investment_expenditure(values["k"], values["q"], parameters_p)
         output = production(values["k"], parameters_p.productivities, parameters_p)
@@ -437,7 +437,6 @@ def multicountry_growth_nn(
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
         "max_resource_gap": max_resource_gap,
-        "terminal_residual_count": 0,
         "differential_residual_count": 4 * num_countries * n_train,
         "algebraic_residual_count": (num_countries + 1) * n_train,
         "dae_residual_count": (5 * num_countries + 1) * n_train,

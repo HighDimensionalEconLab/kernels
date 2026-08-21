@@ -80,6 +80,128 @@ class Theta(NamedTuple):
     initial: InitialValues
 
 
+# Module-level so callers can evaluate solved paths on their own kernel
+# matrices.
+def path_coordinates(theta, K_eval, K_tilde_eval, p):
+    parameters_p = p["parameters"]
+    populations_p = parameters_p.populations
+    k_0_p = p["k_0"]
+    # Population demeaning is a no-op at the primal point (the inputs
+    # already clear) and projects AD perturbations of a_0 onto the
+    # feasible clearing set, so every direction is meaningful.
+    a_0_p = p["a_0"] - jnp.sum(populations_p * p["a_0"]) / jnp.sum(populations_p)
+    steady_p = steady_state(parameters_p, k_0_p.dtype)
+    # The asset block is the one path with no unpenalized offset, so its
+    # coefficient scale enters the minimum-norm selection metric; the
+    # scale must be differentiation-inert or every parameter sensitivity
+    # picks up a selection-drift term from the metric moving with p.
+    # The other normalizations are absorbed by their free offsets and
+    # need no such guard.
+    output_scale_p = jax.lax.stop_gradient(steady_p["output_scale"])
+    log_consumption_scale_p = jnp.log(steady_p["consumption_scale"])
+    alpha_k, alpha_a, alpha_q, alpha_c, alpha_mu, alpha_rate = (
+        theta.alpha_k,
+        theta.alpha_a,
+        theta.alpha_q,
+        theta.alpha_c,
+        theta.alpha_mu,
+        theta.alpha_rate,
+    )
+    q_offsets = theta.initial.q_offsets
+    c_offsets = theta.initial.c_offsets
+    mu_offsets = theta.initial.mu_offsets
+    rate_offset = theta.initial.rate_offset
+    log_k = jnp.log(k_0_p) + K_tilde_eval @ alpha_k.T
+    a = a_0_p + output_scale_p * (K_tilde_eval @ alpha_a.T)
+    log_q = -jnp.log(parameters_p.eta) + q_offsets + K_tilde_eval @ alpha_q.T
+    log_c = log_consumption_scale_p + c_offsets + K_tilde_eval @ alpha_c.T
+    log_mu = (
+        -parameters_p.gammas * log_consumption_scale_p
+        + mu_offsets
+        + K_tilde_eval @ alpha_mu.T
+    )
+    log_rate = jnp.log(parameters_p.r) + rate_offset + K_tilde_eval @ alpha_rate
+    return {
+        "k": jnp.exp(log_k),
+        "a": a,
+        "q": jnp.exp(log_q),
+        "c": jnp.exp(log_c),
+        "mu": jnp.exp(log_mu),
+        "interest_rate": jnp.exp(log_rate),
+        "dlog_k_dt": K_eval @ alpha_k.T,
+        "da_dt": output_scale_p * (K_eval @ alpha_a.T),
+        "dlog_q_dt": K_eval @ alpha_q.T,
+        "dlog_mu_dt": K_eval @ alpha_mu.T,
+    }
+
+
+def coordinate_residuals(coordinates, parameters_p):
+    return path_residuals(
+        coordinates["k"],
+        coordinates["a"],
+        coordinates["q"],
+        coordinates["c"],
+        coordinates["mu"],
+        parameters_p.productivities,
+        coordinates["interest_rate"],
+        coordinates["dlog_k_dt"],
+        coordinates["da_dt"],
+        coordinates["dlog_q_dt"],
+        coordinates["dlog_mu_dt"],
+        parameters_p,
+    )
+
+
+# p carries the structural parameters and initial conditions for implicit
+# differentiation; args carries the kernel matrices (the CG path adds the
+# whitened factors its preconditioner rebuild needs).
+def residual_fn(theta, args, p):
+    coordinates = path_coordinates(theta, args["K"], args["K_tilde"], p)
+    residuals = coordinate_residuals(coordinates, p["parameters"])
+    # No algebraic row contains the rate (clearing is a stock condition
+    # on the states, so the DAE has index > 1); the rate path is
+    # disciplined by the assets and Euler rows, with the pointwise slack
+    # resolved by the minimum-norm selection. The t=0 clearing row is
+    # identically zero because a_0 clears, and is kept for uniformity.
+    residual = jnp.concatenate(
+        [
+            residuals["capital"].reshape(-1),
+            residuals["assets"].reshape(-1),
+            residuals["tobin_q"].reshape(-1),
+            residuals["marginal_wealth"].reshape(-1),
+            residuals["consumption_foc"].reshape(-1),
+            residuals["asset_clearing"],
+        ]
+    )
+    return residual * (1.0 / jnp.sqrt(residual.size))
+
+
+def evaluate_coordinates(theta_value, K_eval, K_tilde_eval, p_value):
+    coordinates = path_coordinates(theta_value, K_eval, K_tilde_eval, p_value)
+    parameters_p = p_value["parameters"]
+    residuals = coordinate_residuals(coordinates, parameters_p)
+    x = investment_expenditure(coordinates["k"], coordinates["q"], parameters_p)
+    output = production(coordinates["k"], parameters_p.productivities, parameters_p)
+    resources = output - x
+    populations_p = parameters_p.populations
+    # Goods-market clearing is implied by the budgets and the clearing
+    # row (Walras), so the per-capita goods gap is a reported
+    # diagnostic, not a residual.
+    resource_gap = jnp.sum(
+        populations_p * (resources - coordinates["c"]), axis=-1
+    ) / jnp.sum(populations_p)
+    return {
+        **coordinates,
+        "x": x,
+        "output": output,
+        "resources": resources,
+        "current_account": coordinates["da_dt"],
+        "relative_welfare_weights": relative_welfare_weights(coordinates["mu"]),
+        "resource_gap": resource_gap,
+        **residuals,
+    }
+
+
 # Numerical acceptance and ex-post quality thresholds, CLI-reachable so a
 # float32 caller can pass its own bars (the float32 replication driver does).
 @dataclass(frozen=True)
@@ -146,61 +268,6 @@ class SolverSettings:
     cg_tol: float = 1e-10
     cg_maxiter: int = 40
     cg_damping_floor: float = 1e-10
-
-
-# Module-level so callers can evaluate solved paths on their own kernel
-# matrices.
-def path_coordinates(theta, K_eval, K_tilde_eval, p):
-    parameters_p = p["parameters"]
-    populations_p = parameters_p.populations
-    k_0_p = p["k_0"]
-    # Population demeaning is a no-op at the primal point (the inputs
-    # already clear) and projects AD perturbations of a_0 onto the
-    # feasible clearing set, so every direction is meaningful.
-    a_0_p = p["a_0"] - jnp.sum(populations_p * p["a_0"]) / jnp.sum(populations_p)
-    steady_p = steady_state(parameters_p, k_0_p.dtype)
-    # The asset block is the one path with no unpenalized offset, so its
-    # coefficient scale enters the minimum-norm selection metric; the
-    # scale must be differentiation-inert or every parameter sensitivity
-    # picks up a selection-drift term from the metric moving with p.
-    # The other normalizations are absorbed by their free offsets and
-    # need no such guard.
-    output_scale_p = jax.lax.stop_gradient(steady_p["output_scale"])
-    log_consumption_scale_p = jnp.log(steady_p["consumption_scale"])
-    alpha_k, alpha_a, alpha_q, alpha_c, alpha_mu, alpha_rate = (
-        theta.alpha_k,
-        theta.alpha_a,
-        theta.alpha_q,
-        theta.alpha_c,
-        theta.alpha_mu,
-        theta.alpha_rate,
-    )
-    q_offsets = theta.initial.q_offsets
-    c_offsets = theta.initial.c_offsets
-    mu_offsets = theta.initial.mu_offsets
-    rate_offset = theta.initial.rate_offset
-    log_k = jnp.log(k_0_p) + K_tilde_eval @ alpha_k.T
-    a = a_0_p + output_scale_p * (K_tilde_eval @ alpha_a.T)
-    log_q = -jnp.log(parameters_p.eta) + q_offsets + K_tilde_eval @ alpha_q.T
-    log_c = log_consumption_scale_p + c_offsets + K_tilde_eval @ alpha_c.T
-    log_mu = (
-        -parameters_p.gammas * log_consumption_scale_p
-        + mu_offsets
-        + K_tilde_eval @ alpha_mu.T
-    )
-    log_rate = jnp.log(parameters_p.r) + rate_offset + K_tilde_eval @ alpha_rate
-    return {
-        "k": jnp.exp(log_k),
-        "a": a,
-        "q": jnp.exp(log_q),
-        "c": jnp.exp(log_c),
-        "mu": jnp.exp(log_mu),
-        "interest_rate": jnp.exp(log_rate),
-        "dlog_k_dt": K_eval @ alpha_k.T,
-        "da_dt": output_scale_p * (K_eval @ alpha_a.T),
-        "dlog_q_dt": K_eval @ alpha_q.T,
-        "dlog_mu_dt": K_eval @ alpha_mu.T,
-    }
 
 
 def multicountry_growth_kernel(
@@ -271,46 +338,6 @@ def multicountry_growth_kernel(
         "a_0": a_0_array,
     }
 
-    def coordinate_residuals(coordinates, parameters_p):
-        return path_residuals(
-            coordinates["k"],
-            coordinates["a"],
-            coordinates["q"],
-            coordinates["c"],
-            coordinates["mu"],
-            parameters_p.productivities,
-            coordinates["interest_rate"],
-            coordinates["dlog_k_dt"],
-            coordinates["da_dt"],
-            coordinates["dlog_q_dt"],
-            coordinates["dlog_mu_dt"],
-            parameters_p,
-        )
-
-    residual_count = (5 * num_countries + 1) * n_train
-    residual_scale = 1.0 / jnp.sqrt(float(residual_count))
-
-    # p carries the structural parameters and initial conditions for
-    # implicit differentiation; the model equations never read args.
-    def residual_fn(theta, _, p):
-        coordinates = path_coordinates(theta, K, K_tilde, p)
-        residuals = coordinate_residuals(coordinates, p["parameters"])
-        # No algebraic row contains the rate (clearing is a stock condition
-        # on the states, so the DAE has index > 1); the rate path is
-        # disciplined by the assets and Euler rows, with the pointwise slack
-        # resolved by the minimum-norm selection. The t=0 clearing row is
-        # identically zero because a_0 clears, and is kept for uniformity.
-        return residual_scale * jnp.concatenate(
-            [
-                residuals["capital"].reshape(-1),
-                residuals["assets"].reshape(-1),
-                residuals["tobin_q"].reshape(-1),
-                residuals["marginal_wealth"].reshape(-1),
-                residuals["consumption_foc"].reshape(-1),
-                residuals["asset_clearing"],
-            ]
-        )
-
     # The zero coordinate contains no saddle-path or present-value
     # information: it is flat in the derivative RKHS at the model's scale
     # normalizations.
@@ -368,7 +395,7 @@ def multicountry_growth_kernel(
             anneal=anneal,
         )
     else:
-        kernel_args = None
+        kernel_args = {"K": K, "K_tilde": K_tilde}
         init_damping = lm_set.init_damping
         linear_solver = {"auto": Cholesky(), "cholesky": Cholesky(), "qr": QR()}[
             lm_set.linear_solver
@@ -407,31 +434,6 @@ def multicountry_growth_kernel(
     solve_time = timer.elapsed(result)
     theta = result.x
 
-    def evaluate_coordinates(theta_value, K_eval, K_tilde_eval, p_value):
-        coordinates = path_coordinates(theta_value, K_eval, K_tilde_eval, p_value)
-        parameters_p = p_value["parameters"]
-        residuals = coordinate_residuals(coordinates, parameters_p)
-        x = investment_expenditure(coordinates["k"], coordinates["q"], parameters_p)
-        output = production(coordinates["k"], parameters_p.productivities, parameters_p)
-        resources = output - x
-        populations_p = parameters_p.populations
-        # Goods-market clearing is implied by the budgets and the clearing
-        # row (Walras), so the per-capita goods gap is a reported
-        # diagnostic, not a residual.
-        resource_gap = jnp.sum(
-            populations_p * (resources - coordinates["c"]), axis=-1
-        ) / jnp.sum(populations_p)
-        return {
-            **coordinates,
-            "x": x,
-            "output": output,
-            "resources": resources,
-            "current_account": coordinates["da_dt"],
-            "relative_welfare_weights": relative_welfare_weights(coordinates["mu"]),
-            "resource_gap": resource_gap,
-            **residuals,
-        }
-
     def evaluate_grid(points):
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             points,
@@ -469,6 +471,7 @@ def multicountry_growth_kernel(
             for name in ("a", "current_account", "interest_rate")
         )
     )
+    residual_count = (5 * num_countries + 1) * n_train
     rejection_reasons = []
     if int(result.status) != LMStatus.CONVERGED:
         rejection_reasons.append("solver_status")
@@ -528,7 +531,6 @@ def multicountry_growth_kernel(
         "validation_pass": validation_pass,
         "max_resource_gap": max_resource_gap,
         "max_asset_clearing": max_asset_clearing,
-        "terminal_residual_count": 0,
         "differential_residual_count": 4 * num_countries * n_train,
         "algebraic_residual_count": (num_countries + 1) * n_train,
         "dae_residual_count": residual_count,

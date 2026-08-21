@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import jax
 import jax.numpy as jnp
 
 
@@ -14,6 +15,32 @@ class ModelParameters:
     r: float = -math.log(0.96)
     eta: float = 0.76
     r_star: float = -math.log(0.96)
+
+
+# Differentiable duck-type of ModelParameters: a pytree whose leaves can
+# carry tracers, for implicit-AD comparative statics through the solver's
+# `p` argument. The model functions only use attribute access, so either
+# container works.
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class ModelParameterValues:
+    alpha: jax.Array
+    gamma: jax.Array
+    delta: jax.Array
+    r: jax.Array
+    eta: jax.Array
+    r_star: jax.Array
+
+
+def model_parameter_values(p, dtype=jnp.float64):
+    return ModelParameterValues(
+        alpha=jnp.asarray(p.alpha, dtype=dtype),
+        gamma=jnp.asarray(p.gamma, dtype=dtype),
+        delta=jnp.asarray(p.delta, dtype=dtype),
+        r=jnp.asarray(p.r, dtype=dtype),
+        eta=jnp.asarray(p.eta, dtype=dtype),
+        r_star=jnp.asarray(p.r_star, dtype=dtype),
+    )
 
 
 def production(k, z, p):

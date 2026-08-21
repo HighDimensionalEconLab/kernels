@@ -13,6 +13,7 @@ from models.kernels import KernelSettings, integrated_kernel_matrices, normalize
 from models.open_economy_growth import (
     ModelParameters,
     investment_expenditure,
+    model_parameter_values,
     path_residuals,
     present_value_gap,
     production,
@@ -22,11 +23,126 @@ from models.open_economy_growth import (
 )
 from models.open_economy_growth_benchmark import open_economy_growth_benchmark
 from models.open_economy_growth_kernel import DataSettings
-from models.utilities import Stopwatch, acceptance_fields
+from models.utilities import Stopwatch, acceptance_fields, make_sampled_train_grid
 
 ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
-TRAIN_RESIDUAL_TOL = 1e-5
-VALIDATION_RESIDUAL_TOL = 1e-2
+
+
+def unpack(x):
+    n_train = (x.shape[0] - 3) // 5
+    alpha_mu = x[:n_train]
+    alpha_c = x[n_train : 2 * n_train]
+    alpha_k = x[2 * n_train : 3 * n_train]
+    alpha_a = x[3 * n_train : 4 * n_train]
+    alpha_q = x[4 * n_train : 5 * n_train]
+    offsets = x[5 * n_train :]
+    return alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets
+
+
+def path_values(x, K_eval, K_tilde_eval, p):
+    parameters_p = p["parameters"]
+    steady_p = steady_state(parameters_p)
+    output_scale_p = steady_p["output"]
+    log_consumption_scale_p = jnp.log(steady_p["g"])
+    alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets = unpack(x)
+    c_offset, mu_offset, q_offset = offsets
+    log_mu = (
+        -parameters_p.gamma * log_consumption_scale_p
+        + mu_offset
+        + K_tilde_eval @ alpha_mu
+    )
+    log_c = log_consumption_scale_p + c_offset + K_tilde_eval @ alpha_c
+    log_k = jnp.log(p["k_0"]) + K_tilde_eval @ alpha_k
+    a = p["a_0"] + output_scale_p * (K_tilde_eval @ alpha_a)
+    log_q = jnp.log(steady_p["q"]) + q_offset + K_tilde_eval @ alpha_q
+    mu = jnp.exp(log_mu)
+    c = jnp.exp(log_c)
+    k = jnp.exp(log_k)
+    q = jnp.exp(log_q)
+    dlog_mu_dt = K_eval @ alpha_mu
+    dlog_k_dt = K_eval @ alpha_k
+    da_dt = output_scale_p * (K_eval @ alpha_a)
+    dlog_q_dt = K_eval @ alpha_q
+    return (
+        k,
+        a,
+        q,
+        c,
+        mu,
+        dlog_k_dt,
+        da_dt,
+        dlog_q_dt,
+        dlog_mu_dt,
+    )
+
+
+def objective(x, K):
+    alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, _ = unpack(x)
+    return (
+        alpha_mu @ K @ alpha_mu
+        + alpha_c @ K @ alpha_c
+        + alpha_k @ K @ alpha_k
+        + alpha_a @ K @ alpha_a
+        + alpha_q @ K @ alpha_q
+    )
+
+
+def constraints(x, K, K_tilde, p):
+    (
+        k,
+        a,
+        q,
+        c,
+        mu,
+        dlog_k_dt,
+        da_dt,
+        dlog_q_dt,
+        dlog_mu_dt,
+    ) = path_values(x, K, K_tilde, p)
+    residuals = path_residuals(
+        k,
+        a,
+        q,
+        c,
+        mu,
+        jnp.ones_like(k),
+        dlog_k_dt,
+        da_dt,
+        dlog_q_dt,
+        dlog_mu_dt,
+        p["parameters"],
+    )
+    residual_scale = 1.0 / jnp.sqrt(5.0 * k.shape[0])
+    return residual_scale * jnp.concatenate(
+        [
+            residuals["capital"],
+            residuals["assets"],
+            residuals["tobin_q"],
+            residuals["marginal_wealth"],
+            residuals["consumption_foc"],
+        ]
+    )
+
+
+def lagrangian(x, objective_multiplier, multipliers, K, K_tilde, p):
+    return objective_multiplier * objective(x, K) + jnp.dot(
+        multipliers, constraints(x, K, K_tilde, p)
+    )
+
+
+# Module level: per-call grad/jacfwd/hessian closures would retrace on
+# every solve.
+objective_value = jax.jit(objective)
+objective_gradient = jax.jit(jax.grad(objective))
+constraint_values = jax.jit(constraints)
+constraint_jacobian = jax.jit(jax.jacfwd(constraints))
+lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
+
+
+@dataclass(frozen=True)
+class ToleranceSettings:
+    train_residual: float = 1e-5
+    validation_residual: float = 1e-2
 
 
 @dataclass(frozen=True)
@@ -45,6 +161,7 @@ def open_economy_growth_kernel_uno(
     kernel_set: KernelSettings = KernelSettings(ell=20.0),
     data_set: DataSettings = DataSettings(),
     solver_set: SolverSettings = SolverSettings(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = False,
 ):
     # IPOPT works in float64 C arrays, so this solver is float64-only.
@@ -52,33 +169,7 @@ def open_economy_growth_kernel_uno(
     jax.config.update("jax_default_matmul_precision", "highest")
 
     kernel = normalize_kernel(kernel_set.kernel)
-    if data_set.train_points_list is None:
-        if data_set.sampling == "uniform":
-            train_data = jnp.linspace(
-                0.0, data_set.train_T, data_set.train_points, dtype=jnp.float64
-            )
-        elif data_set.sampling == "front_loaded":
-            dense_points = data_set.train_points - data_set.tail_points
-            dense_data = jnp.linspace(
-                0.0, data_set.dense_T, dense_points, dtype=jnp.float64
-            )
-            tail_data = jnp.linspace(
-                data_set.dense_T,
-                data_set.train_T,
-                data_set.tail_points + 1,
-                dtype=jnp.float64,
-            )[1:]
-            train_data = jnp.concatenate([dense_data, tail_data])
-        else:
-            raise ValueError("sampling must be 'front_loaded' or 'uniform'")
-    else:
-        train_data = jnp.sort(
-            jnp.asarray(data_set.train_points_list, dtype=jnp.float64)
-        )
-    if len(train_data) < 3 or not bool(jnp.all(jnp.diff(train_data) > 0.0)):
-        raise ValueError("training points must be strictly increasing")
-    if float(train_data[0]) != 0.0:
-        raise ValueError("training points must start at zero")
+    train_data = make_sampled_train_grid(data_set, jnp.float64)
 
     test_data = jnp.linspace(
         0.0, data_set.test_T, data_set.test_points, dtype=jnp.float64
@@ -102,114 +193,22 @@ def open_economy_growth_kernel_uno(
 
     n_variables = 5 * n_train + 3
     n_constraints = 5 * n_train
-
-    def unpack(x):
-        alpha_mu = x[:n_train]
-        alpha_c = x[n_train : 2 * n_train]
-        alpha_k = x[2 * n_train : 3 * n_train]
-        alpha_a = x[3 * n_train : 4 * n_train]
-        alpha_q = x[4 * n_train : 5 * n_train]
-        offsets = x[5 * n_train :]
-        return alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets
-
-    def path_values(x, K_eval, K_tilde_eval):
-        alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets = unpack(x)
-        c_offset, mu_offset, q_offset = offsets
-        log_mu = (
-            -parameters.gamma * jnp.log(consumption_scale)
-            + mu_offset
-            + K_tilde_eval @ alpha_mu
-        )
-        log_c = jnp.log(consumption_scale) + c_offset + K_tilde_eval @ alpha_c
-        log_k = jnp.log(k_0) + K_tilde_eval @ alpha_k
-        a = a_0 + output_scale * (K_tilde_eval @ alpha_a)
-        log_q = jnp.log(steady["q"]) + q_offset + K_tilde_eval @ alpha_q
-        mu = jnp.exp(log_mu)
-        c = jnp.exp(log_c)
-        k = jnp.exp(log_k)
-        q = jnp.exp(log_q)
-        dlog_mu_dt = K_eval @ alpha_mu
-        dlog_k_dt = K_eval @ alpha_k
-        da_dt = output_scale * (K_eval @ alpha_a)
-        dlog_q_dt = K_eval @ alpha_q
-        return (
-            k,
-            a,
-            q,
-            c,
-            mu,
-            dlog_k_dt,
-            da_dt,
-            dlog_q_dt,
-            dlog_mu_dt,
-        )
-
-    def objective(x):
-        alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, _ = unpack(x)
-        return (
-            alpha_mu @ K @ alpha_mu
-            + alpha_c @ K @ alpha_c
-            + alpha_k @ K @ alpha_k
-            + alpha_a @ K @ alpha_a
-            + alpha_q @ K @ alpha_q
-        )
-
-    residual_scale = 1.0 / jnp.sqrt(5.0 * n_train)
-
-    def constraints(x):
-        (
-            k,
-            a,
-            q,
-            c,
-            mu,
-            dlog_k_dt,
-            da_dt,
-            dlog_q_dt,
-            dlog_mu_dt,
-        ) = path_values(x, K, K_tilde)
-        residuals = path_residuals(
-            k,
-            a,
-            q,
-            c,
-            mu,
-            jnp.ones_like(k),
-            dlog_k_dt,
-            da_dt,
-            dlog_q_dt,
-            dlog_mu_dt,
-            parameters,
-        )
-        return residual_scale * jnp.concatenate(
-            [
-                residuals["capital"],
-                residuals["assets"],
-                residuals["tobin_q"],
-                residuals["marginal_wealth"],
-                residuals["consumption_foc"],
-            ]
-        )
-
-    def lagrangian(x, objective_multiplier, multipliers):
-        return objective_multiplier * objective(x) + jnp.dot(
-            multipliers, constraints(x)
-        )
-
-    objective_value = jax.jit(objective)
-    objective_gradient = jax.jit(jax.grad(objective))
-    constraint_values = jax.jit(constraints)
-    constraint_jacobian = jax.jit(jax.jacfwd(constraints))
-    lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
+    p = {
+        "parameters": model_parameter_values(parameters),
+        "k_0": jnp.asarray(k_0, dtype=jnp.float64),
+        "a_0": jnp.asarray(a_0, dtype=jnp.float64),
+    }
 
     x_initial = np.zeros(n_variables, dtype=np.float64)
     x_initial_jax = jnp.asarray(x_initial)
     zero_multipliers = jnp.zeros(n_constraints, dtype=jnp.float64)
-    jax.block_until_ready(objective_value(x_initial_jax))
-    jax.block_until_ready(objective_gradient(x_initial_jax))
-    jax.block_until_ready(constraint_values(x_initial_jax))
-    jax.block_until_ready(constraint_jacobian(x_initial_jax))
-    jax.block_until_ready(lagrangian_hessian(x_initial_jax, 1.0, zero_multipliers))
+    jax.block_until_ready(objective_value(x_initial_jax, K))
+    jax.block_until_ready(objective_gradient(x_initial_jax, K))
+    jax.block_until_ready(constraint_values(x_initial_jax, K, K_tilde, p))
+    jax.block_until_ready(constraint_jacobian(x_initial_jax, K, K_tilde, p))
+    jax.block_until_ready(
+        lagrangian_hessian(x_initial_jax, 1.0, zero_multipliers, K, K_tilde, p)
+    )
 
     variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
     variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
@@ -224,10 +223,10 @@ def open_economy_growth_kernel_uno(
     )
 
     def objective_callback(x):
-        return float(objective_value(jnp.asarray(x)))
+        return float(objective_value(jnp.asarray(x), K))
 
     def objective_gradient_callback(x, gradient):
-        gradient[:] = np.asarray(objective_gradient(jnp.asarray(x)))
+        gradient[:] = np.asarray(objective_gradient(jnp.asarray(x), K))
 
     model.set_objective(unopy.MINIMIZE, objective_callback, objective_gradient_callback)
 
@@ -235,10 +234,14 @@ def open_economy_growth_kernel_uno(
     jacobian_columns = np.tile(np.arange(n_variables, dtype=np.int32), n_constraints)
 
     def constraints_callback(x, constraint_output):
-        constraint_output[:] = np.asarray(constraint_values(jnp.asarray(x)))
+        constraint_output[:] = np.asarray(
+            constraint_values(jnp.asarray(x), K, K_tilde, p)
+        )
 
     def jacobian_callback(x, jacobian_output):
-        jacobian_output[:] = np.asarray(constraint_jacobian(jnp.asarray(x))).reshape(-1)
+        jacobian_output[:] = np.asarray(
+            constraint_jacobian(jnp.asarray(x), K, K_tilde, p)
+        ).reshape(-1)
 
     model.set_constraints(
         n_constraints,
@@ -261,6 +264,9 @@ def open_economy_growth_kernel_uno(
                 jnp.asarray(x),
                 float(objective_multiplier),
                 jnp.asarray(multipliers),
+                K,
+                K_tilde,
+                p,
             )
         )
         hessian_output[:] = hessian[hessian_rows, hessian_columns]
@@ -290,7 +296,9 @@ def open_economy_growth_kernel_uno(
     timer = Stopwatch()
     result = solver.optimize(model)
     elapsed = timer.elapsed()
-    x = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))
+    # primal_solution appends solver-internal auxiliaries; only the leading
+    # primal block is the solution.
+    x = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))[:n_variables]
 
     def evaluate_grid(points):
         K_eval, K_tilde_eval = integrated_kernel_matrices(
@@ -310,7 +318,7 @@ def open_economy_growth_kernel_uno(
             da_dt,
             dlog_q_dt,
             dlog_mu_dt,
-        ) = path_values(x, K_eval, K_tilde_eval)
+        ) = path_values(x, K_eval, K_tilde_eval, p)
         z = jnp.ones_like(k)
         residuals = path_residuals(
             k,
@@ -424,9 +432,9 @@ def open_economy_growth_kernel_uno(
         rejection_reasons.append("solution_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > TRAIN_RESIDUAL_TOL:
+    if max_train_residual > tolerance_set.train_residual:
         rejection_reasons.append("train_residual")
-    if max_validation_residual > VALIDATION_RESIDUAL_TOL:
+    if max_validation_residual > tolerance_set.validation_residual:
         rejection_reasons.append("validation_residual")
 
     alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets = unpack(x)
@@ -439,7 +447,7 @@ def open_economy_growth_kernel_uno(
     rkhs_norm_total = (
         rkhs_norm_mu + rkhs_norm_c + rkhs_norm_k + rkhs_norm_a + rkhs_norm_q
     )
-    objective_norm_squared = objective_value(x)
+    objective_norm_squared = objective_value(x, K)
 
     @jax.jit
     def kernel_solution(points):
@@ -450,7 +458,7 @@ def open_economy_growth_kernel_uno(
             kernel_set.sigma,
             kernel_set.ell,
         )
-        k, a, q, c, *_ = path_values(x, K_eval, K_tilde_eval)
+        k, a, q, c, *_ = path_values(x, K_eval, K_tilde_eval, p)
         return k, a, q, c
 
     results = {
@@ -475,7 +483,6 @@ def open_economy_growth_kernel_uno(
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
         "max_benchmark_error": max_benchmark_error,
-        "terminal_residual_count": 0,
         "differential_residual_count": 4 * n_train,
         "algebraic_residual_count": n_train,
         "dae_residual_count": 5 * n_train,
@@ -554,6 +561,7 @@ def open_economy_growth_kernel_uno(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "solver_set": asdict(solver_set),
+        "tolerance_set": asdict(tolerance_set),
         "parameters": asdict(parameters),
         "initial_conditions": {"k_0": k_0, "a_0": a_0},
     }

@@ -9,18 +9,71 @@ import numpy as np
 import pandas as pd
 import unopy
 
-from models.kernels import integrated_kernel_matrices, rkhs_norm_squared
+from models.kernels import (
+    KernelSettings,
+    integrated_kernel_matrices,
+    normalize_kernel,
+    rkhs_norm_squared,
+)
 from models.utilities import Stopwatch, acceptance_fields
 
 ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
-TRAIN_RESIDUAL_TOL = 1e-8
 
 
-@dataclass(frozen=True)
-class KernelSettings:
-    nu: float = 0.5  # math.inf selects the Gaussian/RBF kernel
-    ell: float = 15.0
-    sigma: float = 1.0
+def unpack(z):
+    n_train = (z.shape[0] - 2) // 3
+    alpha_x = z[:n_train]
+    alpha_mu = z[n_train : 2 * n_train]
+    alpha_u = z[2 * n_train : 3 * n_train]
+    mu_0 = z[3 * n_train]
+    u_0 = z[3 * n_train + 1]
+    return alpha_x, alpha_mu, alpha_u, mu_0, u_0
+
+
+def path_values(z, K_eval, K_tilde_eval, p):
+    alpha_x, alpha_mu, alpha_u, mu_0, u_0 = unpack(z)
+    x = p["x_0"] + K_tilde_eval @ alpha_x
+    mu = mu_0 + K_tilde_eval @ alpha_mu
+    u = u_0 + K_tilde_eval @ alpha_u
+    dx_dt = K_eval @ alpha_x
+    dmu_dt = K_eval @ alpha_mu
+    return x, mu, u, dx_dt, dmu_dt
+
+
+def objective(z, K):
+    alpha_x, alpha_mu, alpha_u, _, _ = unpack(z)
+    return alpha_x @ K @ alpha_x + alpha_mu @ K @ alpha_mu + alpha_u @ K @ alpha_u
+
+
+def residuals(x, mu, u, dx_dt, dmu_dt, p):
+    rho_hat, c, beta, kappa = p["rho_hat"], p["c"], p["beta"], p["kappa"]
+    gamma = (beta + rho_hat) / c
+    control_power = (1.0 - kappa) / kappa
+    state = dx_dt - ((1.0 - x) * u - beta * x)
+    costate = dmu_dt - (-gamma + (rho_hat + beta) * mu + mu * u)
+    shadow_price = u**control_power - kappa * mu * (1.0 - x)
+    return state, costate, shadow_price
+
+
+def constraints(z, K, K_tilde, p):
+    x, mu, u, dx_dt, dmu_dt = path_values(z, K, K_tilde, p)
+    state, costate, shadow_price = residuals(x, mu, u, dx_dt, dmu_dt, p)
+    return jnp.concatenate([state, costate, shadow_price, u])
+
+
+def lagrangian(z, objective_multiplier, multipliers, K, K_tilde, p):
+    return objective_multiplier * objective(z, K) + jnp.dot(
+        multipliers, constraints(z, K, K_tilde, p)
+    )
+
+
+# Module level: per-call grad/jacfwd/hessian closures would retrace on
+# every solve.
+objective_value = jax.jit(objective)
+objective_gradient = jax.jit(jax.grad(objective))
+constraint_values = jax.jit(constraints)
+constraint_jacobian = jax.jit(jax.jacfwd(constraints))
+lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
 
 
 @dataclass(frozen=True)
@@ -30,6 +83,11 @@ class DataSettings:
     train_points_list: list[float] | None = None
     test_T: float = 50.0
     test_points: int = 100
+
+
+@dataclass(frozen=True)
+class ToleranceSettings:
+    train_residual: float = 1e-8
 
 
 @dataclass(frozen=True)
@@ -48,14 +106,16 @@ def optimal_advertising_kernel_uno(
     beta: float = 0.05,
     kappa: float = 0.5,
     x_0: float = 0.4,
-    kernel_set: KernelSettings = KernelSettings(),
+    kernel_set: KernelSettings = KernelSettings(ell=15.0),
     data_set: DataSettings = DataSettings(),
     solver_set: SolverSettings = SolverSettings(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = False,
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
-    nu, ell, sigma = kernel_set.nu, kernel_set.ell, kernel_set.sigma
+    kernel = normalize_kernel(kernel_set.kernel)
+    ell, sigma = kernel_set.ell, kernel_set.sigma
     if data_set.train_points_list is None:
         train_data = jnp.linspace(0, data_set.train_T, data_set.train_points)
     else:
@@ -63,7 +123,7 @@ def optimal_advertising_kernel_uno(
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points)
 
     n_train = len(train_data)
-    K, K_tilde = integrated_kernel_matrices(train_data, train_data, nu, sigma, ell)
+    K, K_tilde = integrated_kernel_matrices(train_data, train_data, kernel, sigma, ell)
     K = np.asarray((K + K.T) / 2)
     K_tilde = np.asarray(K_tilde)
     K_jax = jnp.asarray(K)
@@ -72,67 +132,31 @@ def optimal_advertising_kernel_uno(
     n_variables = 3 * n_train + 2
     n_constraints = 4 * n_train
     gamma = (beta + rho_hat) / c
-    control_power = (1.0 - kappa) / kappa
+    p = {
+        name: jnp.asarray(value, dtype=jnp.float64)
+        for name, value in {
+            "rho_hat": rho_hat,
+            "c": c,
+            "beta": beta,
+            "kappa": kappa,
+            "x_0": x_0,
+        }.items()
+    }
     u_0_guess = beta * x_0 / (1.0 - x_0)
     mu_0_guess = gamma / (rho_hat + beta + u_0_guess)
     x_initial = np.zeros(n_variables, dtype=np.float64)
     x_initial[3 * n_train] = mu_0_guess
     x_initial[3 * n_train + 1] = u_0_guess
 
-    def unpack(z):
-        alpha_x = z[:n_train]
-        alpha_mu = z[n_train : 2 * n_train]
-        alpha_u = z[2 * n_train : 3 * n_train]
-        mu_0 = z[3 * n_train]
-        u_0 = z[3 * n_train + 1]
-        return alpha_x, alpha_mu, alpha_u, mu_0, u_0
-
-    def path_values(z, K_eval, K_tilde_eval):
-        alpha_x, alpha_mu, alpha_u, mu_0, u_0 = unpack(z)
-        x = x_0 + K_tilde_eval @ alpha_x
-        mu = mu_0 + K_tilde_eval @ alpha_mu
-        u = u_0 + K_tilde_eval @ alpha_u
-        dx_dt = K_eval @ alpha_x
-        dmu_dt = K_eval @ alpha_mu
-        return x, mu, u, dx_dt, dmu_dt
-
-    def objective(z):
-        alpha_x, alpha_mu, alpha_u, _, _ = unpack(z)
-        return (
-            alpha_x @ K_jax @ alpha_x
-            + alpha_mu @ K_jax @ alpha_mu
-            + alpha_u @ K_jax @ alpha_u
-        )
-
-    def residuals(x, mu, u, dx_dt, dmu_dt):
-        state = dx_dt - ((1.0 - x) * u - beta * x)
-        costate = dmu_dt - (-gamma + (rho_hat + beta) * mu + mu * u)
-        shadow_price = u**control_power - kappa * mu * (1.0 - x)
-        return state, costate, shadow_price
-
-    def constraints(z):
-        x, mu, u, dx_dt, dmu_dt = path_values(z, K_jax, K_tilde_jax)
-        state, costate, shadow_price = residuals(x, mu, u, dx_dt, dmu_dt)
-        return jnp.concatenate([state, costate, shadow_price, u])
-
-    def lagrangian(z, objective_multiplier, multipliers):
-        return objective_multiplier * objective(z) + jnp.dot(
-            multipliers, constraints(z)
-        )
-
-    objective_value = jax.jit(objective)
-    objective_gradient = jax.jit(jax.grad(objective))
-    constraint_values = jax.jit(constraints)
-    constraint_jacobian = jax.jit(jax.jacfwd(constraints))
-    lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
-
     x_initial_jax = jnp.asarray(x_initial)
     zero_multipliers = jnp.zeros(n_constraints, dtype=jnp.float64)
-    jax.block_until_ready(objective_value(x_initial_jax))
-    jax.block_until_ready(objective_gradient(x_initial_jax))
-    jax.block_until_ready(constraint_values(x_initial_jax))
-    jax.block_until_ready(constraint_jacobian(x_initial_jax))
-    jax.block_until_ready(lagrangian_hessian(x_initial_jax, 1.0, zero_multipliers))
+    jax.block_until_ready(objective_value(x_initial_jax, K_jax))
+    jax.block_until_ready(objective_gradient(x_initial_jax, K_jax))
+    jax.block_until_ready(constraint_values(x_initial_jax, K_jax, K_tilde_jax, p))
+    jax.block_until_ready(constraint_jacobian(x_initial_jax, K_jax, K_tilde_jax, p))
+    jax.block_until_ready(
+        lagrangian_hessian(x_initial_jax, 1.0, zero_multipliers, K_jax, K_tilde_jax, p)
+    )
 
     variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
     variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
@@ -160,10 +184,10 @@ def optimal_advertising_kernel_uno(
     )
 
     def objective_callback(z):
-        return float(objective_value(jnp.asarray(z)))
+        return float(objective_value(jnp.asarray(z), K_jax))
 
     def objective_gradient_callback(z, gradient):
-        gradient[:] = np.asarray(objective_gradient(jnp.asarray(z)))
+        gradient[:] = np.asarray(objective_gradient(jnp.asarray(z), K_jax))
 
     model.set_objective(unopy.MINIMIZE, objective_callback, objective_gradient_callback)
 
@@ -171,10 +195,14 @@ def optimal_advertising_kernel_uno(
     jacobian_columns = np.tile(np.arange(n_variables, dtype=np.int32), n_constraints)
 
     def constraints_callback(z, constraint_output):
-        constraint_output[:] = np.asarray(constraint_values(jnp.asarray(z)))
+        constraint_output[:] = np.asarray(
+            constraint_values(jnp.asarray(z), K_jax, K_tilde_jax, p)
+        )
 
     def jacobian_callback(z, jacobian_output):
-        jacobian_output[:] = np.asarray(constraint_jacobian(jnp.asarray(z))).reshape(-1)
+        jacobian_output[:] = np.asarray(
+            constraint_jacobian(jnp.asarray(z), K_jax, K_tilde_jax, p)
+        ).reshape(-1)
 
     model.set_constraints(
         n_constraints,
@@ -197,6 +225,9 @@ def optimal_advertising_kernel_uno(
                 jnp.asarray(z),
                 float(objective_multiplier),
                 jnp.asarray(multipliers),
+                K_jax,
+                K_tilde_jax,
+                p,
             )
         )
         hessian_output[:] = hessian[hessian_rows, hessian_columns]
@@ -225,12 +256,16 @@ def optimal_advertising_kernel_uno(
     result = solver.optimize(model)
     elapsed = timer.elapsed()
 
-    z = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))
+    # primal_solution appends solver-internal auxiliaries; only the leading
+    # primal block is the solution.
+    z = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))[:n_variables]
     alpha_x, alpha_mu, alpha_u, mu_0, u_0 = unpack(z)
 
-    x_train, mu_train, u_train, dx_train, dmu_train = path_values(z, K_jax, K_tilde_jax)
+    x_train, mu_train, u_train, dx_train, dmu_train = path_values(
+        z, K_jax, K_tilde_jax, p
+    )
     state_res, costate_res, shadow_res = residuals(
-        x_train, mu_train, u_train, dx_train, dmu_train
+        x_train, mu_train, u_train, dx_train, dmu_train, p
     )
     max_train_residual = max(
         float(jnp.max(jnp.abs(residual)))
@@ -240,16 +275,14 @@ def optimal_advertising_kernel_uno(
     @jax.jit
     def kernel_solution(test_points_data):
         K_test, K_tilde_test = integrated_kernel_matrices(
-            test_points_data, train_data, nu, sigma, ell
+            test_points_data, train_data, kernel, sigma, ell
         )
-        x_test, mu_test, u_test, _, _ = path_values(z, K_test, K_tilde_test)
+        x_test, mu_test, u_test, _, _ = path_values(z, K_test, K_tilde_test, p)
         return x_test, mu_test, u_test
 
     x_test, mu_test, u_test = kernel_solution(test_data)
 
-    solve_time = result.cpu_time
-    if solve_time is None:
-        solve_time = elapsed
+    solve_time = elapsed
     solver_status = str(result.optimization_status).split(".")[-1]
     solution_status = str(result.solution_status).split(".")[-1]
     finite_valid = bool(
@@ -265,7 +298,7 @@ def optimal_advertising_kernel_uno(
         rejection_reasons.append("solution_status")
     if not finite_valid:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > TRAIN_RESIDUAL_TOL:
+    if max_train_residual > tolerance_set.train_residual:
         rejection_reasons.append("train_residual")
 
     results = {
@@ -275,7 +308,7 @@ def optimal_advertising_kernel_uno(
         "kappa": kappa,
         "x_0": x_0,
         "gamma": gamma,
-        "nu": nu,
+        "kernel": kernel,
         "ell": ell,
         "sigma": sigma,
         "train_T": float(train_data[-1]),
@@ -289,7 +322,6 @@ def optimal_advertising_kernel_uno(
         "rkhs_norm_u": float(rkhs_norm_squared(alpha_u, K)),
         "max_train_residual": max_train_residual,
         "solve_time": solve_time,
-        "wall_time": elapsed,
         "stationarity": result.solution_stationarity,
         "primal_feasibility": result.solution_primal_feasibility,
         **acceptance_fields(rejection_reasons),
@@ -319,6 +351,7 @@ def optimal_advertising_kernel_uno(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "solver_set": asdict(solver_set),
+        "tolerance_set": asdict(tolerance_set),
         "parameters": {
             "rho_hat": rho_hat,
             "c": c,

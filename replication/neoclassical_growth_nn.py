@@ -42,7 +42,8 @@ def run(
             "tolerance_set": {"train_loss_threshold": 1e-14},
         },
     }
-    for name, experiment in experiments.items():
+
+    def go(name, **experiment):
         print(f"{name}: {n_seeds} seeds -> {output_dir}/")
         results_df, frames, hyperparameters = ensemble(
             SOLVER,
@@ -62,6 +63,9 @@ def run(
             prefix=PREFIX,
             hyperparameters=hyperparameters,
         )
+
+    for name, experiment in experiments.items():
+        go(name, **experiment)
 
     # Explicit set: the prefix is a strict prefix of
     # neoclassical_growth_nn_recursive, whose JSONs share the glob.

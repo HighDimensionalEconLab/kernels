@@ -25,7 +25,6 @@ class KernelSettings:
 
 
 def rkhs_norm_squared(coefficients, gram):
-    """Return the RKHS coefficient quadratic form along the last axis."""
     coefficients = jnp.asarray(coefficients)
     gram = jnp.asarray(gram, dtype=coefficients.dtype)
     return jnp.einsum(

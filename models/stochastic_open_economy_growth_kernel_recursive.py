@@ -4,7 +4,6 @@ import json
 import math
 import pathlib
 from dataclasses import asdict, dataclass
-from functools import partial
 from typing import Literal
 
 import jax
@@ -19,7 +18,7 @@ from nlls_gram import (
     RidgeLevenbergMarquardt,
 )
 
-from models.kernels import STATE_KERNEL_NAMES, state_features
+from models.kernels import state_features
 from models.stochastic_open_economy_growth import (
     PROCESS_CONSTANTS,
     DataSettings,
@@ -113,6 +112,7 @@ class ResidualArgs:
     investment_anchor: jax.Array
     current_account_anchor: jax.Array
     output_scale: jax.Array
+    kernel_set: StateKernelSettings = struct.field(pytree_node=False)
 
 
 def state_lengthscales(kernel_set):
@@ -149,6 +149,7 @@ def build_residual_args(train_states, kernel_set, reference_policy):
         investment_anchor=reference_policy.investment_anchor[...],
         current_account_anchor=reference_policy.current_account_anchor[...],
         output_scale=reference_policy.output_scale[...],
+        kernel_set=kernel_set,
     )
 
 
@@ -186,8 +187,8 @@ class KernelSequentialPolicy:
         )
 
 
-def residual_fn(theta, args, p, kernel_set):
-    policy = KernelSequentialPolicy(theta=theta, args=args, kernel_set=kernel_set)
+def residual_fn(theta, args, p):
+    policy = KernelSequentialPolicy(theta=theta, args=args, kernel_set=args.kernel_set)
     residuals = euler_residual_terms(policy, args.train_states, p)[0]
     count = jnp.asarray(residuals.size, dtype=residuals.dtype)
     return residuals.reshape(-1) / jnp.sqrt(count)
@@ -239,7 +240,7 @@ def stochastic_open_economy_growth_kernel_recursive(
     # with --policy_cache feeds a module-default kernel run.
     ic_set: InitialConditionSettings = InitialConditionSettings(),
     kernel_set: StateKernelSettings = StateKernelSettings(),
-    opt_set: OptimizerSettings = OptimizerSettings(
+    lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=4.9e-4,
         damping_decrease=0.16,
         damping_increase=8.5,
@@ -262,8 +263,6 @@ def stochastic_open_economy_growth_kernel_recursive(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    if kernel_set.state_kernel not in STATE_KERNEL_NAMES:
-        raise ValueError(f"unknown state_kernel: {kernel_set.state_kernel!r}")
 
     train_variances = (
         ic_set.train_log_z_variance,
@@ -424,14 +423,14 @@ def stochastic_open_economy_growth_kernel_recursive(
             "user_state": callback.init_state(dtype),
         }
     solver = RidgeLevenbergMarquardt(
-        partial(residual_fn, kernel_set=kernel_set),
+        residual_fn,
         metric=metric,
         ridge=initial_ridge,
-        init_damping=opt_set.init_damping,
-        damping_decrease=opt_set.damping_decrease,
-        damping_increase=opt_set.damping_increase,
-        geodesic_acceleration=opt_set.geodesic_acceleration,
-        geodesic_acceptance_ratio=opt_set.geodesic_acceptance_ratio,
+        init_damping=lm_set.init_damping,
+        damping_decrease=lm_set.damping_decrease,
+        damping_increase=lm_set.damping_increase,
+        geodesic_acceleration=lm_set.geodesic_acceleration,
+        geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
 
     solve_timer = Stopwatch()
@@ -670,7 +669,7 @@ def stochastic_open_economy_growth_kernel_recursive(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
-        "opt_set": asdict(opt_set),
+        "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),
         "parameters": asdict(parameters),
         "shocks": {
@@ -693,7 +692,7 @@ def stochastic_open_economy_growth_kernel_recursive(
         for name, value in results.items():
             print(f"  {name}: {value}")
     return results, {
-        "model": policy,
+        "policy": policy,
         "theta": theta,
         "residual_args": args,
         "parameters": p,

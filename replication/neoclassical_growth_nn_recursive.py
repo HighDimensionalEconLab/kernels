@@ -79,22 +79,24 @@ def run(
             raise ValueError(f"unknown experiments: {sorted(unknown)}")
         all_experiments = {name: all_experiments[name] for name in experiments}
 
-    meta = dict(n_seeds=n_seeds, residual_dtype="float64")
-    for name, (experiment_options, experiment_seeds) in all_experiments.items():
+    def go(name, experiment_seeds, **experiment):
         print(f"{name}: {experiment_seeds} seeds -> {output_dir}/")
         results_df, frames, hyperparameters = ensemble(
-            SOLVER, experiment_seeds, options=experiment_options
+            SOLVER, experiment_seeds, options=experiment
         )
         save_experiment(
             name,
             results_df,
             frames,
             output_dir,
-            {**meta, "n_seeds": experiment_seeds},
+            dict(n_seeds=experiment_seeds, residual_dtype="float64"),
             prefix=PREFIX,
             hyperparameters=hyperparameters,
         )
         report(results_df)
+
+    for name, (experiment_options, experiment_seeds) in all_experiments.items():
+        go(name, experiment_seeds, **experiment_options)
 
     write_summary(output_dir, PREFIX, experiments=set(all_experiments))
 

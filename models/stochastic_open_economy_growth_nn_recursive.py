@@ -39,7 +39,6 @@ from models.stochastic_open_economy_growth import (
     transversality_trajectory_values,
 )
 from models.utilities import (
-    ACTIVATIONS,
     SDE_SOLVERS,
     STATUS_TO_REASON,
     OptimizerSettings,
@@ -55,9 +54,6 @@ from models.utilities import (
 # Recursive stochastic small open economy on (log z, log k, a/output_scale,
 # rate_gap). No benchmark or steady-state information enters the residual or
 # initialization; the deterministic benchmark is ex-post diagnostics only.
-
-# The residual differentiates the policy twice, so no kinked activation.
-SMOOTH_ACTIVATIONS = frozenset(ACTIVATIONS) - {"relu"}
 
 
 # Acceptance gates on the held-out batch (the float32 replication driver
@@ -276,8 +272,9 @@ def stochastic_open_economy_growth_nn_recursive(
     sde_solver: str = "sra1",
     data_set: DataSettings = DataSettings(),
     ic_set: InitialConditionSettings = InitialConditionSettings(),
+    # The residual differentiates the policy twice, so no kinked activation.
     nn_set: SequentialPolicySettings = SequentialPolicySettings(),
-    opt_set: OptimizerSettings = OptimizerSettings(
+    lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=5.1e-4,
         damping_decrease=0.195,
         damping_increase=3.22,
@@ -295,11 +292,6 @@ def stochastic_open_economy_growth_nn_recursive(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    if nn_set.hidden_activation not in SMOOTH_ACTIVATIONS:
-        raise ValueError(
-            f"hidden_activation must be one of {sorted(SMOOTH_ACTIVATIONS)}"
-        )
-
     train_variances = (
         ic_set.train_log_z_variance,
         ic_set.train_log_k_variance,
@@ -319,16 +311,6 @@ def stochastic_open_economy_growth_nn_recursive(
             strict=True,
         )
     )
-    if ic_set.num_train_trajectories == 1 and any(
-        value > 0.0 for value in train_variances
-    ):
-        raise ValueError(
-            "multiple training trajectories are required for nonzero spread"
-        )
-    if ic_set.num_test_trajectories == 1 and any(
-        value > 0.0 for value in test_variances
-    ):
-        raise ValueError("multiple test trajectories are required for nonzero spread")
 
     z_ergodic_variance = sigma_z**2 / (2.0 * kappa_z)
     rate_ergodic_variance = sigma_r**2 / (2.0 * kappa_r)
@@ -492,7 +474,7 @@ def stochastic_open_economy_growth_nn_recursive(
         "train_points": data_set.train_points,
         "train_T": data_set.train_T,
         "nn_set": asdict(nn_set),
-        "opt_set": asdict(opt_set),
+        "lm_set": asdict(lm_set),
     }
     problem_key = cache_key(problem_config)
     run_key = cache_key(run_config)
@@ -529,11 +511,11 @@ def stochastic_open_economy_growth_nn_recursive(
     else:
         solver = LevenbergMarquardt(
             residual_fn,
-            init_damping=opt_set.init_damping,
-            damping_decrease=opt_set.damping_decrease,
-            damping_increase=opt_set.damping_increase,
-            geodesic_acceleration=opt_set.geodesic_acceleration,
-            geodesic_acceptance_ratio=opt_set.geodesic_acceptance_ratio,
+            init_damping=lm_set.init_damping,
+            damping_decrease=lm_set.damping_decrease,
+            damping_increase=lm_set.damping_increase,
+            geodesic_acceleration=lm_set.geodesic_acceleration,
+            geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
         )
         callback = EpochCallback(
             num_train_trajectories=ic_set.num_train_trajectories,
@@ -900,7 +882,7 @@ def stochastic_open_economy_growth_nn_recursive(
         "nn_set": asdict(nn_set),
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
-        "opt_set": asdict(opt_set),
+        "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),
         "parameters": asdict(parameters),
         "shocks": {
@@ -962,7 +944,7 @@ def stochastic_open_economy_growth_nn_recursive(
     if save_policy is not None:
         save_model(save_policy, policy, policy_meta)
     return results, {
-        "model": policy,
+        "policy": policy,
         "parameters": p,
         "train_initial_conditions": solve_args.initial_states,
         "test_initial_conditions": test_initial_states,

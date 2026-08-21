@@ -45,10 +45,10 @@ parameters:
   stop_set.initial_shock_scale: {distribution: uniform, min: 0.05, max: 0.5}
   stop_set.continuation_epochs: {values: [1, 2, 3]}
   # --- LM axes ---
-  opt_set.init_damping:          {distribution: log_uniform_values, min: 1e-7, max: 1e-2}
-  opt_set.damping_decrease:      {distribution: uniform, min: 0.1, max: 0.9}
-  opt_set.damping_increase:      {distribution: log_uniform_values, min: 1.5, max: 10.0}
-  opt_set.geodesic_acceptance_ratio: {distribution: uniform, min: 0.5, max: 0.99}
+  lm_set.init_damping:          {distribution: log_uniform_values, min: 1e-7, max: 1e-2}
+  lm_set.damping_decrease:      {distribution: uniform, min: 0.1, max: 0.9}
+  lm_set.damping_increase:      {distribution: log_uniform_values, min: 1.5, max: 10.0}
+  lm_set.geodesic_acceptance_ratio: {distribution: uniform, min: 0.5, max: 0.99}
   # --- data axes ---
   ic_set.num_train_trajectories: {values: [1, 2, 4, 8]}
   # Collocation density (train dt 1.9 / 1.25 / 0.94 / 0.625 at T = 60): cost

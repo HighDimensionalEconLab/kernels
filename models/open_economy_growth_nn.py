@@ -58,8 +58,8 @@ class ToleranceSettings:
     num_attempts: int = 5
 
 
-# The kernel driver's collocation grid, reused verbatim so the sequence-space
-# NN and the sequence-space kernel are solved on identical dates.
+# The kernel driver's front-loaded collocation design on the same [0, 160]
+# span at half its density (96 vs 192 points).
 @dataclass(frozen=True)
 class DataSettings:
     train_T: float = 160.0
@@ -117,7 +117,7 @@ class DynamicModelParameters:
 class ResidualParameters:
     k_0: jax.Array
     a_0: jax.Array
-    model: DynamicModelParameters
+    structural: DynamicModelParameters
 
 
 @struct.dataclass
@@ -189,7 +189,7 @@ def path_values(model, t, p, scales):
     a = p.a_0 + scales.output * (raw[:, 1] - raw_at_zero[1])
     log_q = scales.log_q_ss + raw[:, 2]
     log_c = scales.log_consumption + raw[:, 3]
-    log_mu = -p.model.gamma * scales.log_consumption + raw[:, 4]
+    log_mu = -p.structural.gamma * scales.log_consumption + raw[:, 4]
 
     return {
         "t": t,
@@ -225,7 +225,7 @@ def residual_fn(theta, args, p):
     values = path_values(
         nnx.merge(args.graphdef, theta, args.nondiff), args.t, p, args.scales
     )
-    residuals = dae_residuals(values, p.model)
+    residuals = dae_residuals(values, p.structural)
     residual = jnp.concatenate([residuals[name] for name in RESIDUAL_NAMES])
     return residual / jnp.sqrt(residual.size)
 
@@ -313,7 +313,7 @@ def open_economy_growth_nn(
 
     def evaluate_grid(points):
         values = path_values(model, points, residual_parameters, scales)
-        residuals = dae_residuals(values, residual_parameters.model)
+        residuals = dae_residuals(values, residual_parameters.structural)
         return {
             **values,
             "x": investment_expenditure(values["k"], values["q"], parameters),
@@ -427,7 +427,6 @@ def open_economy_growth_nn(
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
         "max_benchmark_error": max_benchmark_error,
-        "terminal_residual_count": 0,
         "differential_residual_count": 4 * n_train,
         "algebraic_residual_count": n_train,
         "dae_residual_count": 5 * n_train,

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from functools import partial
 from typing import Literal
 
 import jax
@@ -12,7 +11,6 @@ from flax import struct
 from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
 
 from models.kernels import (
-    STATE_KERNEL_NAMES,
     rbf_state_features,
     rbf_state_gram,
     rkhs_norm_squared,
@@ -35,6 +33,7 @@ from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
     Stopwatch,
+    acceptance_fields,
     long_df,
     unit_softplus,
 )
@@ -98,6 +97,7 @@ class ResidualArgs:
     k_scale: jax.Array
     # 1/(1-a): log kappa = log k - z_detrend * log z for Hicks-neutral z.
     z_detrend: jax.Array
+    kernel_set: StateKernelSettings = struct.field(pytree_node=False)
 
 
 def state_lengthscales(kernel_set):
@@ -138,6 +138,7 @@ def build_residual_args(train_log_states, kernel_set, a, z_0=1.0, k_0=1.0):
         state_offset=state_offset,
         k_scale=jnp.asarray(k_0, dtype),
         z_detrend=z_detrend,
+        kernel_set=kernel_set,
     )
 
 
@@ -215,8 +216,8 @@ def fixed_collocation_data(
     )
 
 
-def residual_fn(theta, args, p, kernel_set):
-    policy = KernelInvestmentPolicy(theta, args, kernel_set)
+def residual_fn(theta, args, p):
+    policy = KernelInvestmentPolicy(theta, args, args.kernel_set)
     residual = euler_residuals(policy, args.train_log_states, p)
     return residual / jnp.sqrt(residual.size)
 
@@ -233,7 +234,7 @@ def neoclassical_growth_kernel_recursive(
     data_set: DataSettings = DataSettings(),
     ic_set: InitialConditionSettings = InitialConditionSettings(),
     kernel_set: StateKernelSettings = StateKernelSettings(),
-    opt_set: OptimizerSettings = OptimizerSettings(
+    lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=1e-6,
         damping_decrease=0.25,
         damping_increase=4.0,
@@ -243,14 +244,9 @@ def neoclassical_growth_kernel_recursive(
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
 ):
-    # Model and collocation design setup.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    if kernel_set.state_kernel not in STATE_KERNEL_NAMES:
-        raise ValueError(f"unknown state_kernel: {kernel_set.state_kernel!r}")
-    if kernel_set.linear_mean and kernel_set.homothetic_representation:
-        raise ValueError("linear_mean requires homothetic_representation=False")
     n_test_steps = data_set.test_points - 1
     test_T = data_set.test_T
 
@@ -298,14 +294,14 @@ def neoclassical_growth_kernel_recursive(
 
     # Ridge Levenberg-Marquardt solve.
     solver = RidgeLevenbergMarquardt(
-        partial(residual_fn, kernel_set=kernel_set),
+        residual_fn,
         metric=metric,
         ridge=tolerance_set.ridge,
-        init_damping=opt_set.init_damping,
-        damping_decrease=opt_set.damping_decrease,
-        damping_increase=opt_set.damping_increase,
-        geodesic_acceleration=opt_set.geodesic_acceleration,
-        geodesic_acceptance_ratio=opt_set.geodesic_acceptance_ratio,
+        init_damping=lm_set.init_damping,
+        damping_decrease=lm_set.damping_decrease,
+        damping_increase=lm_set.damping_increase,
+        geodesic_acceleration=lm_set.geodesic_acceleration,
+        geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
 
     solve_timer = Stopwatch()
@@ -337,7 +333,6 @@ def neoclassical_growth_kernel_recursive(
     h_const = float(theta[1]) if kernel_set.free_constant else 0.0
     policy = KernelInvestmentPolicy(theta, args, kernel_set)
 
-    # Diagnostics on the frozen centers and held-out simulations.
     train_values = trajectory_values(policy, train_log_states, p)
     train_initial = np.asarray(train_initial_conditions)
     train_df = long_df(
@@ -407,7 +402,9 @@ def neoclassical_growth_kernel_recursive(
     test_trajectory_euler = jnp.mean(jnp.abs(test_values["euler_residual"]), axis=1)
     gram_eigenvalues = jnp.linalg.eigvalsh(args.gram)
 
-    # Published results.
+    rejection_reasons = []
+    if not solver_converged:
+        rejection_reasons.append("solver")
     results = {
         "a": a,
         "delta": delta,
@@ -456,7 +453,7 @@ def neoclassical_growth_kernel_recursive(
         "solve_time": solve_time,
         "setup_time": setup_time,
         "total_fit_time": total_fit_time,
-        "solution_accepted": solver_converged,
+        **acceptance_fields(rejection_reasons),
         "num_train_trajectories": ic_set.num_train_trajectories,
         "num_test_trajectories": ic_set.num_test_trajectories,
         "num_centers": n_centers,
@@ -482,7 +479,7 @@ def neoclassical_growth_kernel_recursive(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
-        "opt_set": asdict(opt_set),
+        "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),
         "parameters": {
             "a": a,
@@ -501,7 +498,7 @@ def neoclassical_growth_kernel_recursive(
         for name, value in results.items():
             print(f"  {name}: {value}")
     return results, {
-        "model": policy,
+        "policy": policy,
         "theta": theta,
         "residual_args": args,
         "parameters": p,

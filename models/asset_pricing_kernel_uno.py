@@ -10,11 +10,15 @@ import pandas as pd
 import unopy
 
 from models.asset_pricing_benchmark import mu_f_array
-from models.kernels import integrated_kernel_matrices, rkhs_norm_squared
+from models.kernels import (
+    KernelSettings,
+    integrated_kernel_matrices,
+    normalize_kernel,
+    rkhs_norm_squared,
+)
 from models.utilities import Stopwatch, acceptance_fields
 
 ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
-TRAIN_RESIDUAL_TOL = 1e-8
 
 
 def unpack(x):
@@ -62,19 +66,17 @@ lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
 
 
 @dataclass(frozen=True)
-class KernelSettings:
-    nu: float = 0.5  # math.inf selects the Gaussian/RBF kernel
-    ell: float = 10.0
-    sigma: float = 1.0
-
-
-@dataclass(frozen=True)
 class DataSettings:
     train_T: float = 40.0
     train_points: int = 41
     train_points_list: list[float] | None = None
     test_T: float = 50.0
     test_points: int = 100
+
+
+@dataclass(frozen=True)
+class ToleranceSettings:
+    train_residual: float = 1e-8
 
 
 @dataclass(frozen=True)
@@ -92,12 +94,14 @@ def asset_pricing_kernel_uno(
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
     solver_set: SolverSettings = SolverSettings(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = False,
 ):
     # IPOPT works in float64 C arrays, so this solver is float64-only.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
-    nu, ell, sigma = kernel_set.nu, kernel_set.ell, kernel_set.sigma
+    kernel = normalize_kernel(kernel_set.kernel)
+    ell, sigma = kernel_set.ell, kernel_set.sigma
     if data_set.train_points_list is None:
         train_data = jnp.linspace(
             0, data_set.train_T, data_set.train_points, dtype=jnp.float64
@@ -109,7 +113,7 @@ def asset_pricing_kernel_uno(
     )
 
     n_train = len(train_data)
-    K, K_tilde = integrated_kernel_matrices(train_data, train_data, nu, sigma, ell)
+    K, K_tilde = integrated_kernel_matrices(train_data, train_data, kernel, sigma, ell)
     K = np.asarray((K + K.T) / 2)
     K_tilde = np.asarray(K_tilde)
     K_jax = jnp.asarray(K)
@@ -235,7 +239,7 @@ def asset_pricing_kernel_uno(
     @jax.jit
     def kernel_solution(test_points_data):
         K_test, K_tilde_test = integrated_kernel_matrices(
-            test_points_data, train_data, nu, sigma, ell
+            test_points_data, train_data, kernel, sigma, ell
         )
         p_test, dp_test = path_values(x, K_test, K_tilde_test)
         return p_test, dp_test
@@ -256,7 +260,7 @@ def asset_pricing_kernel_uno(
         rejection_reasons.append("solution_status")
     if not finite:
         rejection_reasons.append("nonfinite")
-    if max_train_residual > TRAIN_RESIDUAL_TOL:
+    if max_train_residual > tolerance_set.train_residual:
         rejection_reasons.append("train_residual")
 
     results = {
@@ -264,7 +268,7 @@ def asset_pricing_kernel_uno(
         "c": c,
         "g": g,
         "x_0": x_0,
-        "nu": nu,
+        "kernel": kernel,
         "ell": ell,
         "sigma": sigma,
         "train_T": float(train_data[-1]),
@@ -310,6 +314,7 @@ def asset_pricing_kernel_uno(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "solver_set": asdict(solver_set),
+        "tolerance_set": asdict(tolerance_set),
         "parameters": {"r": r, "c": c, "g": g},
         "initial_conditions": {"x_0": x_0},
     }

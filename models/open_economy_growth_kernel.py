@@ -26,6 +26,7 @@ from models.kernels import (
 from models.open_economy_growth import (
     ModelParameters,
     investment_expenditure,
+    model_parameter_values,
     path_residuals,
     present_value_gap,
     production,
@@ -55,6 +56,87 @@ class Theta(NamedTuple):
     alpha_a: jax.Array
     alpha_q: jax.Array
     initial: InitialValues
+
+
+def path_values(theta, K_eval, K_tilde_eval, p):
+    parameters_p = p["parameters"]
+    steady_p = steady_state(parameters_p)
+    # The asset block is the one path with no unpenalized offset, so its
+    # scale enters the minimum-norm selection metric; the scale must be
+    # differentiation-inert or every parameter sensitivity picks up a
+    # selection-drift term from the metric moving with p. The other
+    # normalizations are absorbed by their free offsets.
+    output_scale_p = jax.lax.stop_gradient(steady_p["output"])
+    log_consumption_scale_p = jnp.log(steady_p["g"])
+    log_mu = (
+        -parameters_p.gamma * log_consumption_scale_p
+        + theta.initial.mu_offset
+        + K_tilde_eval @ theta.alpha_mu
+    )
+    log_c = (
+        log_consumption_scale_p + theta.initial.c_offset + K_tilde_eval @ theta.alpha_c
+    )
+    log_k = jnp.log(p["k_0"]) + K_tilde_eval @ theta.alpha_k
+    a = p["a_0"] + output_scale_p * (K_tilde_eval @ theta.alpha_a)
+    log_q = (
+        jnp.log(steady_p["q"]) + theta.initial.q_offset + K_tilde_eval @ theta.alpha_q
+    )
+    mu = jnp.exp(log_mu)
+    c = jnp.exp(log_c)
+    k = jnp.exp(log_k)
+    q = jnp.exp(log_q)
+    dlog_mu_dt = K_eval @ theta.alpha_mu
+    dlog_k_dt = K_eval @ theta.alpha_k
+    da_dt = output_scale_p * (K_eval @ theta.alpha_a)
+    dlog_q_dt = K_eval @ theta.alpha_q
+    return (
+        k,
+        a,
+        q,
+        c,
+        mu,
+        dlog_k_dt,
+        da_dt,
+        dlog_q_dt,
+        dlog_mu_dt,
+    )
+
+
+def residual_fn(theta, args, p):
+    (
+        k,
+        a,
+        q,
+        c,
+        mu,
+        dlog_k_dt,
+        da_dt,
+        dlog_q_dt,
+        dlog_mu_dt,
+    ) = path_values(theta, args["K"], args["K_tilde"], p)
+    residuals = path_residuals(
+        k,
+        a,
+        q,
+        c,
+        mu,
+        jnp.ones_like(k),
+        dlog_k_dt,
+        da_dt,
+        dlog_q_dt,
+        dlog_mu_dt,
+        p["parameters"],
+    )
+    residual = jnp.concatenate(
+        [
+            residuals["capital"],
+            residuals["assets"],
+            residuals["tobin_q"],
+            residuals["marginal_wealth"],
+            residuals["consumption_foc"],
+        ]
+    )
+    return residual / jnp.sqrt(residual.size)
 
 
 @dataclass(frozen=True)
@@ -150,79 +232,14 @@ def open_economy_growth_kernel(
         train_data, kernel, kernel_set.sigma, kernel_set.ell, repeats=5
     )
 
-    def path_values(theta, K_eval, K_tilde_eval):
-        log_mu = (
-            -parameters.gamma * jnp.log(consumption_scale)
-            + theta.initial.mu_offset
-            + K_tilde_eval @ theta.alpha_mu
-        )
-        log_c = (
-            jnp.log(consumption_scale)
-            + theta.initial.c_offset
-            + K_tilde_eval @ theta.alpha_c
-        )
-        log_k = jnp.log(k_0) + K_tilde_eval @ theta.alpha_k
-        a = a_0 + output_scale * (K_tilde_eval @ theta.alpha_a)
-        log_q = (
-            jnp.log(steady["q"]) + theta.initial.q_offset + K_tilde_eval @ theta.alpha_q
-        )
-        mu = jnp.exp(log_mu)
-        c = jnp.exp(log_c)
-        k = jnp.exp(log_k)
-        q = jnp.exp(log_q)
-        dlog_mu_dt = K_eval @ theta.alpha_mu
-        dlog_k_dt = K_eval @ theta.alpha_k
-        da_dt = output_scale * (K_eval @ theta.alpha_a)
-        dlog_q_dt = K_eval @ theta.alpha_q
-        return (
-            k,
-            a,
-            q,
-            c,
-            mu,
-            dlog_k_dt,
-            da_dt,
-            dlog_q_dt,
-            dlog_mu_dt,
-        )
-
-    residual_scale = 1.0 / jnp.sqrt(5.0 * n_train)
-
-    def residual_fn(theta):
-        values = path_values(theta, K, K_tilde)
-        (
-            k,
-            a,
-            q,
-            c,
-            mu,
-            dlog_k_dt,
-            da_dt,
-            dlog_q_dt,
-            dlog_mu_dt,
-        ) = values
-        residuals = path_residuals(
-            k,
-            a,
-            q,
-            c,
-            mu,
-            jnp.ones_like(k),
-            dlog_k_dt,
-            da_dt,
-            dlog_q_dt,
-            dlog_mu_dt,
-            parameters,
-        )
-        return residual_scale * jnp.concatenate(
-            [
-                residuals["capital"],
-                residuals["assets"],
-                residuals["tobin_q"],
-                residuals["marginal_wealth"],
-                residuals["consumption_foc"],
-            ]
-        )
+    # Everything in p is implicitly differentiable through the solve
+    # (nlls-gram's implicit JVP/VJP at the ridge stationary point).
+    p = {
+        "parameters": model_parameter_values(parameters, dtype),
+        "k_0": jnp.asarray(k_0, dtype=dtype),
+        "a_0": jnp.asarray(a_0, dtype=dtype),
+    }
+    residual_args = {"K": K, "K_tilde": K_tilde}
 
     # The zero coordinate contains no saddle-path or present-value information:
     # it is flat in the derivative RKHS at the model's scale normalizations.
@@ -273,7 +290,9 @@ def open_economy_growth_kernel(
     )
 
     timer = Stopwatch()
-    result = solver.solve(theta_0, **solve_options, **continuation_options)
+    result = solver.solve(
+        theta_0, residual_args, p=p, **solve_options, **continuation_options
+    )
     solve_time = timer.elapsed(result)
     theta = result.x
 
@@ -295,7 +314,7 @@ def open_economy_growth_kernel(
             da_dt,
             dlog_q_dt,
             dlog_mu_dt,
-        ) = path_values(theta, K_eval, K_tilde_eval)
+        ) = path_values(theta, K_eval, K_tilde_eval, p)
         z = jnp.ones_like(k)
         residuals = path_residuals(
             k,
@@ -431,7 +450,7 @@ def open_economy_growth_kernel(
             kernel_set.sigma,
             kernel_set.ell,
         )
-        k, a, q, c, *_ = path_values(theta, K_eval, K_tilde_eval)
+        k, a, q, c, *_ = path_values(theta, K_eval, K_tilde_eval, p)
         return k, a, q, c
 
     results = {
@@ -459,7 +478,6 @@ def open_economy_growth_kernel(
         "max_validation_residual": max_validation_residual,
         "validation_pass": validation_pass,
         "max_benchmark_error": max_benchmark_error,
-        "terminal_residual_count": 0,
         "differential_residual_count": 4 * n_train,
         "algebraic_residual_count": n_train,
         "dae_residual_count": 5 * n_train,
@@ -558,8 +576,8 @@ def open_economy_growth_kernel(
             "solver": solver,
             "residual_fn": residual_fn,
             "theta_0": theta_0,
-            "p": None,
-            "residual_args": None,
+            "p": p,
+            "residual_args": residual_args,
             "multi_start": None,
             "options": solve_options,
         },

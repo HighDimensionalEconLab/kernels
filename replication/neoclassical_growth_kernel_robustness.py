@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import jsonargparse
 
-from replication.neoclassical_growth_kernel import PREFIX, run_experiment
+from replication.neoclassical_growth_kernel import PREFIX, go
 from replication.utilities import configure_process, write_summary
 
 
@@ -13,31 +13,31 @@ def run(
 ):
     configure_process()
 
-    run_experiment(
+    go(
         "nu15_ell10",
         output_dir,
         kernel_set=dict(kernel="matern32", ell=10.0),
     )
-    run_experiment(
+    go(
         "nu25_ell10",
         output_dir,
         kernel_set=dict(kernel="matern52", ell=10.0),
     )
-    run_experiment(
+    go(
         "nu05_ell2",
         output_dir,
         kernel_set=dict(kernel="matern12", ell=2.0),
     )
-    run_experiment(
+    go(
         "nu05_ell20",
         output_dir,
         kernel_set=dict(kernel="matern12", ell=20.0),
     )
     # Gaussian/RBF (nu -> inf) referee rows: ill-conditioned Gram matrices at
     # large ell may reject -- a first-class outcome rendered as "--" in the table.
-    run_experiment("rbf_ell10", output_dir, kernel_set=dict(kernel="rbf", ell=10.0))
-    run_experiment("rbf_ell2", output_dir, kernel_set=dict(kernel="rbf", ell=2.0))
-    run_experiment("rbf_ell20", output_dir, kernel_set=dict(kernel="rbf", ell=20.0))
+    go("rbf_ell10", output_dir, kernel_set=dict(kernel="rbf", ell=10.0))
+    go("rbf_ell2", output_dir, kernel_set=dict(kernel="rbf", ell=2.0))
+    go("rbf_ell20", output_dir, kernel_set=dict(kernel="rbf", ell=20.0))
 
     write_summary(output_dir, PREFIX)
 

@@ -112,7 +112,7 @@ class DynamicModelParameters:
 class ResidualParameters:
     k_0: jax.Array
     a_0: jax.Array
-    model: DynamicModelParameters
+    structural: DynamicModelParameters
 
 
 class SequentialPolicyNN(nnx.Module):
@@ -253,12 +253,10 @@ def simulate_train(policy, initial_k, p, data_set):
     return jax.vmap(solve_one)(initial_k)
 
 
+# Collocation states, the active-state mask, and the raw solution. Every step
+# of the fixed-step mesh is a collocation point, so the returned mask is full;
+# it is kept so the caller can assert that.
 def collocation_states(policy, k_0, a_0, p, data_set):
-    """Return collocation states, the active-state mask, and the raw solution.
-
-    Every step of the fixed-step mesh is a collocation point, so the returned
-    mask is full; it is kept so the caller can assert that.
-    """
     initial_k = jnp.reshape(k_0, (1,))
     initial_a = jnp.reshape(a_0, (1,))
     solution = simulate_train(policy, initial_k, p, data_set)
@@ -282,10 +280,10 @@ def residual_fn(theta, args, p):
         policy,
         p.k_0,
         p.a_0,
-        p.model,
+        p.structural,
         args.data_set,
     )
-    values = path_values(policy, states.reshape(-1, 2), p.model)
+    values = path_values(policy, states.reshape(-1, 2), p.structural)
     euler = jnp.stack([values["q_euler"], values["c_euler"]], axis=-1)
     euler = euler.reshape(active.shape + (2,))
     active_count = jnp.asarray(jnp.maximum(jnp.sum(active), 1), dtype=euler.dtype)
@@ -317,8 +315,8 @@ def evaluate_path_jit(policy, T, budget, k_0, a_0, args):
     return {"t": solution.ts, **path_values(policy, states, args)}
 
 
+# Evaluates along the integrator's own states: n_points from n - 1 steps.
 def evaluate_path(policy, T, n_points, k_0, a_0, p):
-    """Evaluate along the integrator's own states: ``n_points`` from n-1 steps."""
     dtype = jnp.asarray(k_0).dtype
     dynamic_parameters = DynamicModelParameters.from_model(p, dtype)
     return evaluate_path_jit(
@@ -372,7 +370,7 @@ def open_economy_growth_nn_recursive(
     residual_parameters = ResidualParameters(
         k_0=k_0_jax,
         a_0=a_0_jax,
-        model=dynamic_parameters,
+        structural=dynamic_parameters,
     )
 
     solver = LevenbergMarquardt(
@@ -546,7 +544,6 @@ def open_economy_growth_nn_recursive(
         "seed": seed,
         # Measured, not requested: a float64 leak upstream shows up here.
         "residual_dtype": str(train_eval["q_euler"].dtype),
-        "terminal_residual_count": 0,
         "dae_residual_count": 2 * int(train_t.size),
         "domain_residual_count": int(train_t.size),
         "residual_count": 3 * int(train_t.size),
@@ -642,7 +639,7 @@ def open_economy_growth_nn_recursive(
     }
     jax.block_until_ready(nnx.state(policy))
     return results, {
-        "model": policy,
+        "policy": policy,
         "train_df": train_df,
         "test_df": test_df,
         "diagnostic_df": diagnostic_df,

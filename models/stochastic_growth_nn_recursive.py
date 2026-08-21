@@ -40,6 +40,7 @@ from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
     Stopwatch,
+    acceptance_fields,
     cache_key,
     load_model,
     long_df,
@@ -205,10 +206,12 @@ def stochastic_growth_nn_recursive(
         train_log_z_variance=CONSTANTS.z_ergodic_variance,
         train_log_k_variance=0.01,
     ),
+    # Mean reversion in z fixes a scale, so the homothetic representation is
+    # misspecified by construction for this model.
     nn_set: InvestmentPolicySettings = InvestmentPolicySettings(
         homothetic_representation=False
     ),
-    opt_set: OptimizerSettings = OptimizerSettings(
+    lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=3.26e-5,
         damping_decrease=0.482,
         damping_increase=2.71,
@@ -227,13 +230,6 @@ def stochastic_growth_nn_recursive(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    # Mean reversion in z fixes a scale, so the homothetic representation is
-    # misspecified by construction for this model.
-    if nn_set.homothetic_representation:
-        raise ValueError(
-            "the stochastic model requires homothetic_representation=False"
-        )
-
     sde = SDE_SOLVERS[sde_solver]
     n_train_steps = data_set.train_points - 1
     n_test_steps = data_set.test_points - 1
@@ -325,7 +321,7 @@ def stochastic_growth_nn_recursive(
         "train_points": data_set.train_points,
         "train_T": data_set.train_T,
         "nn_set": asdict(nn_set),
-        "opt_set": asdict(opt_set),
+        "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),
     }
     problem_key = cache_key(problem_config)
@@ -357,11 +353,11 @@ def stochastic_growth_nn_recursive(
     else:
         solver = LevenbergMarquardt(
             residual_fn,
-            init_damping=opt_set.init_damping,
-            damping_decrease=opt_set.damping_decrease,
-            damping_increase=opt_set.damping_increase,
-            geodesic_acceleration=opt_set.geodesic_acceleration,
-            geodesic_acceptance_ratio=opt_set.geodesic_acceptance_ratio,
+            init_damping=lm_set.init_damping,
+            damping_decrease=lm_set.damping_decrease,
+            damping_increase=lm_set.damping_increase,
+            geodesic_acceleration=lm_set.geodesic_acceleration,
+            geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
         )
         _, theta_0, _ = nnx.split(
             InvestmentPolicyNN(
@@ -524,6 +520,9 @@ def stochastic_growth_nn_recursive(
     observed_log_z = observed_log_z[np.isfinite(observed_log_z)]
     observed_log_k = observed_log_k[np.isfinite(observed_log_k)]
 
+    rejection_reasons = []
+    if not solver_accepted:
+        rejection_reasons.append("train_loss")
     results = {
         "a": a,
         "delta": delta,
@@ -572,7 +571,7 @@ def stochastic_growth_nn_recursive(
         "total_fit_time": total_fit_time,
         "solve_time_success": solve_time if solver_accepted else np.nan,
         "total_params": int(ravel_pytree(nnx.state(policy, nnx.Param))[0].size),
-        "solution_accepted": solver_accepted,
+        **acceptance_fields(rejection_reasons),
         "num_train_trajectories": ic_set.num_train_trajectories,
         "num_test_trajectories": ic_set.num_test_trajectories,
         "num_simulation_states": num_simulation_states,
@@ -692,7 +691,7 @@ def stochastic_growth_nn_recursive(
         "nn_set": asdict(nn_set),
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
-        "opt_set": asdict(opt_set),
+        "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),
         "parameters": {
             "a": a,
@@ -713,7 +712,7 @@ def stochastic_growth_nn_recursive(
         for name, value in results.items():
             print(f"  {name}: {value}")
     extras = {
-        "model": policy,
+        "policy": policy,
         "parameters": p,
         "train_initial_conditions": train_initial_conditions,
         "test_initial_conditions": test_initial_conditions,

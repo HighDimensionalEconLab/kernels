@@ -179,7 +179,6 @@ def neoclassical_growth_kernel(
     c_0_guess: float | None = None,  # overrides the flat steady-flow warm start
     verbose: bool = False,
 ):
-    # Model setup.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
@@ -272,7 +271,6 @@ def neoclassical_growth_kernel(
     c_0, mu_0 = theta.initial
     steps = int(result.steps)
 
-    # Diagnostics on the train and test grids.
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
     test_benchmark = (
         None
@@ -332,7 +330,6 @@ def neoclassical_growth_kernel(
 
     g_hat_value = float(theta.g_hat) if learn_g_hat else float(g)
 
-    # Published results.
     results = {
         "a": a,
         "delta": delta,

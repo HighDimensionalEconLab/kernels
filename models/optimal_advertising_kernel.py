@@ -39,6 +39,33 @@ class Theta(NamedTuple):
     initial: InitialValues
 
 
+def path_values(theta, K_eval, K_tilde_eval, p):
+    x = p["x_0"] + K_tilde_eval @ theta.alpha_x
+    mu = theta.initial.mu_0 + K_tilde_eval @ theta.alpha_mu
+    u = theta.initial.u_0 + K_tilde_eval @ theta.alpha_u
+    dx_dt = K_eval @ theta.alpha_x
+    dmu_dt = K_eval @ theta.alpha_mu
+    return x, mu, u, dx_dt, dmu_dt
+
+
+def residuals(values, p):
+    rho_hat, c, beta, kappa = p["rho_hat"], p["c"], p["beta"], p["kappa"]
+    gamma = (beta + rho_hat) / c
+    control_power = (1.0 - kappa) / kappa
+    x, mu, u, dx_dt, dmu_dt = values
+    state = dx_dt - ((1.0 - x) * u - beta * x)
+    costate = dmu_dt - (-gamma + (rho_hat + beta) * mu + mu * u)
+    shadow_price = u**control_power - kappa * mu * (1.0 - x)
+    return state, costate, shadow_price
+
+
+def residual_fn(theta, args, p):
+    residual = jnp.concatenate(
+        residuals(path_values(theta, args["K"], args["K_tilde"], p), p)
+    )
+    return residual / jnp.sqrt(residual.size)
+
+
 @dataclass(frozen=True)
 class DataSettings:
     train_T: float = 40.0
@@ -107,29 +134,20 @@ def optimal_advertising_kernel(
         train_data, kernel, sigma, ell, repeats=3
     )
     gamma = (beta + rho_hat) / c
-    control_power = (1.0 - kappa) / kappa
 
-    def path_values(theta, K_eval, K_tilde_eval):
-        x = x_0 + K_tilde_eval @ theta.alpha_x
-        mu = theta.initial.mu_0 + K_tilde_eval @ theta.alpha_mu
-        u = theta.initial.u_0 + K_tilde_eval @ theta.alpha_u
-        dx_dt = K_eval @ theta.alpha_x
-        dmu_dt = K_eval @ theta.alpha_mu
-        return x, mu, u, dx_dt, dmu_dt
-
-    def residuals(values):
-        x, mu, u, dx_dt, dmu_dt = values
-        state = dx_dt - ((1.0 - x) * u - beta * x)
-        costate = dmu_dt - (-gamma + (rho_hat + beta) * mu + mu * u)
-        shadow_price = u**control_power - kappa * mu * (1.0 - x)
-        return state, costate, shadow_price
-
-    residual_scale = 1.0 / jnp.sqrt(3.0 * n_train)
-
-    def residual_fn(theta):
-        return residual_scale * jnp.concatenate(
-            residuals(path_values(theta, K, K_tilde))
-        )
+    # Everything in p is implicitly differentiable through the solve
+    # (nlls-gram's implicit JVP/VJP at the ridge stationary point).
+    p = {
+        name: jnp.asarray(value, dtype=dtype)
+        for name, value in {
+            "rho_hat": rho_hat,
+            "c": c,
+            "beta": beta,
+            "kappa": kappa,
+            "x_0": x_0,
+        }.items()
+    }
+    residual_args = {"K": K, "K_tilde": K_tilde}
 
     u_0_guess = beta * x_0 / (1.0 - x_0)
     mu_0_guess = gamma / (rho_hat + beta + u_0_guess)
@@ -159,7 +177,7 @@ def optimal_advertising_kernel(
     )
 
     timer = Stopwatch()
-    result = solver.solve(theta_0, **solve_options)
+    result = solver.solve(theta_0, residual_args, p=p, **solve_options)
     elapsed = timer.elapsed(result)
     theta = result.x
     alpha_x, alpha_mu, alpha_u = theta.alpha_x, theta.alpha_mu, theta.alpha_u
@@ -169,8 +187,8 @@ def optimal_advertising_kernel(
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             points, train_data, kernel, sigma, ell
         )
-        values = path_values(theta, K_eval, K_tilde_eval)
-        state, costate, shadow_price = residuals(values)
+        values = path_values(theta, K_eval, K_tilde_eval, p)
+        state, costate, shadow_price = residuals(values, p)
         x, mu, u, *_ = values
         return {
             "t": points,
@@ -218,7 +236,7 @@ def optimal_advertising_kernel(
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             points, train_data, kernel, sigma, ell
         )
-        x, mu, u, *_ = path_values(theta, K_eval, K_tilde_eval)
+        x, mu, u, *_ = path_values(theta, K_eval, K_tilde_eval, p)
         return x, mu, u
 
     rkhs_norms = {
@@ -289,8 +307,8 @@ def optimal_advertising_kernel(
             "solver": solver,
             "residual_fn": residual_fn,
             "theta_0": theta_0,
-            "p": None,
-            "residual_args": None,
+            "p": p,
+            "residual_args": residual_args,
             "multi_start": None,
             "options": solve_options,
         },

@@ -97,6 +97,74 @@ class Theta(NamedTuple):
     initial: InitialValues
 
 
+RESIDUAL_NAMES = (
+    "physical_accumulation",
+    "human_accumulation",
+    "physical_euler",
+    "human_euler",
+    "feasibility",
+    "shadow_price",
+    "costate_gap",
+)
+
+
+def path_values(theta, K_eval, K_tilde_eval, p):
+    k = p["k_0"] + K_tilde_eval @ theta.alpha_k
+    h = p["h_0"] + K_tilde_eval @ theta.alpha_h
+    i_k = theta.initial.i_k_0 + K_tilde_eval @ theta.alpha_i_k
+    i_h = theta.initial.i_h_0 + K_tilde_eval @ theta.alpha_i_h
+    c = theta.initial.c_0 + K_tilde_eval @ theta.alpha_c
+    mu_k = theta.initial.mu_k_0 + K_tilde_eval @ theta.alpha_mu_k
+    mu_h = theta.initial.mu_h_0 + K_tilde_eval @ theta.alpha_mu_h
+    dk_dt = K_eval @ theta.alpha_k
+    dh_dt = K_eval @ theta.alpha_h
+    dmu_k_dt = K_eval @ theta.alpha_mu_k
+    dmu_h_dt = K_eval @ theta.alpha_mu_h
+    return k, h, i_k, i_h, c, mu_k, mu_h, dk_dt, dh_dt, dmu_k_dt, dmu_h_dt
+
+
+def production_terms(k, h, p):
+    a_k, a_h = p["a_k"], p["a_h"]
+    output = (k**a_k) * (h**a_h)
+    f_k = a_k * k ** (a_k - 1.0) * h**a_h
+    f_h = a_h * k**a_k * h ** (a_h - 1.0)
+    return output, f_k, f_h
+
+
+def residuals(values, p):
+    delta_k, delta_h, rho_hat = p["delta_k"], p["delta_h"], p["rho_hat"]
+    (
+        k,
+        h,
+        i_k,
+        i_h,
+        c,
+        mu_k,
+        mu_h,
+        dk_dt,
+        dh_dt,
+        dmu_k_dt,
+        dmu_h_dt,
+    ) = values
+    output, f_k, f_h = production_terms(k, h, p)
+    return (
+        dk_dt - (i_k - delta_k * k),
+        dh_dt - (i_h - delta_h * h),
+        dmu_k_dt + mu_k * (f_k - delta_k - rho_hat),
+        dmu_h_dt + mu_h * (f_h - delta_h - rho_hat),
+        c + i_h + i_k - output,
+        mu_k * c - 1.0,
+        mu_k - mu_h,
+    )
+
+
+def residual_fn(theta, args, p):
+    residual = jnp.concatenate(
+        residuals(path_values(theta, args["K"], args["K_tilde"], p), p)
+    )
+    return residual / jnp.sqrt(residual.size)
+
+
 @dataclass(frozen=True)
 class DataSettings:
     train_T: float = 80.0
@@ -165,57 +233,22 @@ def human_capital_kernel(
     h_0 = float(h_0_jax)
     c_0_init = float(c_0_init_jax)
 
-    def path_values(theta, K_eval, K_tilde_eval):
-        k = k_0 + K_tilde_eval @ theta.alpha_k
-        h = h_0 + K_tilde_eval @ theta.alpha_h
-        i_k = theta.initial.i_k_0 + K_tilde_eval @ theta.alpha_i_k
-        i_h = theta.initial.i_h_0 + K_tilde_eval @ theta.alpha_i_h
-        c = theta.initial.c_0 + K_tilde_eval @ theta.alpha_c
-        mu_k = theta.initial.mu_k_0 + K_tilde_eval @ theta.alpha_mu_k
-        mu_h = theta.initial.mu_h_0 + K_tilde_eval @ theta.alpha_mu_h
-        dk_dt = K_eval @ theta.alpha_k
-        dh_dt = K_eval @ theta.alpha_h
-        dmu_k_dt = K_eval @ theta.alpha_mu_k
-        dmu_h_dt = K_eval @ theta.alpha_mu_h
-        return k, h, i_k, i_h, c, mu_k, mu_h, dk_dt, dh_dt, dmu_k_dt, dmu_h_dt
-
-    def production_terms(k, h):
-        output = (k**a_k) * (h**a_h)
-        f_k = a_k * k ** (a_k - 1.0) * h**a_h
-        f_h = a_h * k**a_k * h ** (a_h - 1.0)
-        return output, f_k, f_h
-
-    def residuals(values):
-        (
-            k,
-            h,
-            i_k,
-            i_h,
-            c,
-            mu_k,
-            mu_h,
-            dk_dt,
-            dh_dt,
-            dmu_k_dt,
-            dmu_h_dt,
-        ) = values
-        output, f_k, f_h = production_terms(k, h)
-        return (
-            dk_dt - (i_k - delta_k * k),
-            dh_dt - (i_h - delta_h * h),
-            dmu_k_dt + mu_k * (f_k - delta_k - rho_hat),
-            dmu_h_dt + mu_h * (f_h - delta_h - rho_hat),
-            c + i_h + i_k - output,
-            mu_k * c - 1.0,
-            mu_k - mu_h,
-        )
-
-    residual_scale = 1.0 / jnp.sqrt(7.0 * n_train)
-
-    def residual_fn(theta):
-        return residual_scale * jnp.concatenate(
-            residuals(path_values(theta, K, K_tilde))
-        )
+    # Everything in p -- h_0 as its own leaf included -- is implicitly
+    # differentiable through the solve (nlls-gram's implicit JVP/VJP at the
+    # ridge stationary point).
+    p = {
+        name: jnp.asarray(value, dtype=dtype)
+        for name, value in {
+            "a_k": a_k,
+            "a_h": a_h,
+            "delta_k": delta_k,
+            "delta_h": delta_h,
+            "rho_hat": rho_hat,
+            "k_0": k_0,
+            "h_0": h_0,
+        }.items()
+    }
+    residual_args = {"K": K, "K_tilde": K_tilde}
 
     theta_0 = Theta(
         alpha_k=jnp.zeros(n_train, dtype=dtype),
@@ -250,7 +283,7 @@ def human_capital_kernel(
     )
 
     timer = Stopwatch()
-    result = solver.solve(theta_0, **solve_options)
+    result = solver.solve(theta_0, residual_args, p=p, **solve_options)
     elapsed = timer.elapsed(result)
     theta = result.x
     (
@@ -269,19 +302,10 @@ def human_capital_kernel(
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             points, train_data, kernel, sigma, ell
         )
-        values = path_values(theta, K_eval, K_tilde_eval)
-        residual_values = residuals(values)
+        values = path_values(theta, K_eval, K_tilde_eval, p)
+        residual_values = residuals(values, p)
         k, h, i_k, i_h, c, mu_k, mu_h, *_ = values
-        output, f_k, f_h = production_terms(k, h)
-        names = (
-            "physical_accumulation",
-            "human_accumulation",
-            "physical_euler",
-            "human_euler",
-            "feasibility",
-            "shadow_price",
-            "costate_gap",
-        )
+        output, f_k, f_h = production_terms(k, h, p)
         return {
             "t": points,
             "k": k,
@@ -291,7 +315,7 @@ def human_capital_kernel(
             "c": c,
             "mu_k": mu_k,
             "mu_h": mu_h,
-            **dict(zip(names, residual_values, strict=True)),
+            **dict(zip(RESIDUAL_NAMES, residual_values, strict=True)),
             "hidden_dae_residual": (f_k - delta_k) - (f_h - delta_h),
             "Y": output,
         }
@@ -299,20 +323,11 @@ def human_capital_kernel(
     train_eval = evaluate_grid(train_data)
     validation_eval = evaluate_grid(validation_data)
     test_eval = evaluate_grid(test_data)
-    residual_names = (
-        "physical_accumulation",
-        "human_accumulation",
-        "physical_euler",
-        "human_euler",
-        "feasibility",
-        "shadow_price",
-        "costate_gap",
-    )
     max_train_residual = max(
-        float(jnp.max(jnp.abs(train_eval[name]))) for name in residual_names
+        float(jnp.max(jnp.abs(train_eval[name]))) for name in RESIDUAL_NAMES
     )
     max_validation_residual = max(
-        float(jnp.max(jnp.abs(validation_eval[name]))) for name in residual_names
+        float(jnp.max(jnp.abs(validation_eval[name]))) for name in RESIDUAL_NAMES
     )
     positive_names = ("k", "h", "i_k", "i_h", "c", "mu_k", "mu_h")
     finite_positive = bool(
@@ -334,7 +349,7 @@ def human_capital_kernel(
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             points, train_data, kernel, sigma, ell
         )
-        k, h, i_k, i_h, c, mu_k, mu_h, *_ = path_values(theta, K_eval, K_tilde_eval)
+        k, h, i_k, i_h, c, mu_k, mu_h, *_ = path_values(theta, K_eval, K_tilde_eval, p)
         return k, h, c, i_k, i_h, mu_k, mu_h
 
     alpha_by_name = {
@@ -435,8 +450,8 @@ def human_capital_kernel(
             "solver": solver,
             "residual_fn": residual_fn,
             "theta_0": theta_0,
-            "p": None,
-            "residual_args": None,
+            "p": p,
+            "residual_args": residual_args,
             "multi_start": None,
             "options": solve_options,
         },

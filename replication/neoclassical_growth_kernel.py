@@ -15,7 +15,7 @@ PREFIX = "neoclassical_growth_kernel"
 SOLVER = neoclassical_growth_kernel.neoclassical_growth_kernel
 
 
-def run_experiment(name, output_dir, **experiment):
+def go(name, output_dir, **experiment):
     print(f"{name} -> {output_dir}/")
     results_df, frames, hyperparameters = ensemble(
         SOLVER,
@@ -41,8 +41,8 @@ def run(
     # QE figure experiments. The sparse grid keeps the baseline's front-loaded
     # relative spacing over the full train_T; far_steady_state trains on the
     # first ~2 e-foldings of the saddle path only.
-    run_experiment("baseline", output_dir)
-    run_experiment(
+    go("baseline", output_dir)
+    go(
         "sparse",
         output_dir,
         data_set=dict(
@@ -62,14 +62,14 @@ def run(
             ]
         ),
     )
-    run_experiment(
+    go(
         "far_steady_state",
         output_dir,
         data_set=dict(train_T=20.0, train_points=21, test_T=30.0),
     )
 
-    run_experiment("baseline_g02", output_dir, g=0.02)
-    run_experiment("baseline_g02_learned", output_dir, g=0.02, learn_g_hat=True)
+    go("baseline_g02", output_dir, g=0.02)
+    go("baseline_g02_learned", output_dir, g=0.02, learn_g_hat=True)
 
     write_summary(output_dir, PREFIX)
 

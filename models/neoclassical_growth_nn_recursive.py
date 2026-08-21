@@ -33,6 +33,7 @@ from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
     Stopwatch,
+    acceptance_fields,
     cache_key,
     load_model,
     long_df,
@@ -343,7 +344,7 @@ def neoclassical_growth_nn_recursive(
     data_set: DataSettings = DataSettings(),
     ic_set: InitialConditionSettings = InitialConditionSettings(),
     nn_set: InvestmentPolicySettings = InvestmentPolicySettings(),
-    opt_set: OptimizerSettings = OptimizerSettings(
+    lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=3.26e-5,
         damping_decrease=0.482,
         damping_increase=2.71,
@@ -359,20 +360,11 @@ def neoclassical_growth_nn_recursive(
     save_policy: str | None = None,
     verbose: bool = True,
 ):
-    # Model and training design setup.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    if data_set.ode_solver not in {"rk4", "tsit5"}:
-        raise ValueError("ode_solver must be 'rk4' or 'tsit5'")
     n_test_steps = data_set.test_points - 1
     test_T = data_set.test_T
-    # Without a positive variance every epoch redraw returns the same batch.
-    if tolerance_set.num_epochs > 1 and (
-        ic_set.train_log_z_variance <= 0.0 and ic_set.train_log_k_variance <= 0.0
-    ):
-        raise ValueError("epoch resampling requires a positive training log variance")
-
     ic_draw = growth_initial_conditions(z_0, k_0, ic_set, dtype)
     train_ic_key = ic_draw.train_ic_key
     train_initial_conditions = ic_draw.train_initial_conditions
@@ -448,7 +440,7 @@ def neoclassical_growth_nn_recursive(
         "atol": data_set.atol,
         "initial_dt": data_set.initial_dt,
         "nn_set": asdict(nn_set),
-        "opt_set": asdict(opt_set),
+        "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),
     }
     problem_key = cache_key(problem_config)
@@ -483,11 +475,11 @@ def neoclassical_growth_nn_recursive(
     else:
         solver = LevenbergMarquardt(
             residual_fn,
-            init_damping=opt_set.init_damping,
-            damping_decrease=opt_set.damping_decrease,
-            damping_increase=opt_set.damping_increase,
-            geodesic_acceleration=opt_set.geodesic_acceleration,
-            geodesic_acceptance_ratio=opt_set.geodesic_acceptance_ratio,
+            init_damping=lm_set.init_damping,
+            damping_decrease=lm_set.damping_decrease,
+            damping_increase=lm_set.damping_increase,
+            geodesic_acceleration=lm_set.geodesic_acceleration,
+            geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
         )
         _, theta_0, _ = nnx.split(
             InvestmentPolicyNN(
@@ -637,7 +629,9 @@ def neoclassical_growth_nn_recursive(
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
     test_trajectory_euler = jnp.mean(jnp.abs(test_values["euler_residual"]), axis=1)
 
-    # Published results.
+    rejection_reasons = []
+    if not solver_accepted:
+        rejection_reasons.append("train_loss")
     results = {
         "a": a,
         "delta": delta,
@@ -675,7 +669,7 @@ def neoclassical_growth_nn_recursive(
         "total_fit_time": total_fit_time,
         "solve_time_success": solve_time if solver_accepted else np.nan,
         "total_params": int(ravel_pytree(nnx.state(policy, nnx.Param))[0].size),
-        "solution_accepted": solver_accepted,
+        **acceptance_fields(rejection_reasons),
         "num_train_trajectories": ic_set.num_train_trajectories,
         "num_test_trajectories": ic_set.num_test_trajectories,
         "num_simulation_states": num_simulation_states,
@@ -701,7 +695,7 @@ def neoclassical_growth_nn_recursive(
         "nn_set": asdict(nn_set),
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
-        "opt_set": asdict(opt_set),
+        "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),
         "parameters": {
             "a": a,
@@ -720,7 +714,7 @@ def neoclassical_growth_nn_recursive(
         for name, value in results.items():
             print(f"  {name}: {value}")
     extras = {
-        "model": policy,
+        "policy": policy,
         "parameters": p,
         "train_initial_conditions": train_initial_conditions,
         "test_initial_conditions": test_initial_conditions,

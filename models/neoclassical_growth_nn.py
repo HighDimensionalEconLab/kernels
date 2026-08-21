@@ -30,6 +30,7 @@ from models.utilities import (
     ACTIVATIONS,
     OptimizerSettings,
     Stopwatch,
+    acceptance_fields,
     make_train_t_grid,
     unit_softplus,
 )
@@ -221,7 +222,6 @@ def neoclassical_growth_nn(
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
 ):
-    # Model setup.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     # Kinked production is enabled exactly when all of A, b_1, b_2 are given.
@@ -313,7 +313,6 @@ def neoclassical_growth_nn(
     train_loss = float(result.info.loss)
     accepted = bool(result.multi_start.accepted)
 
-    # Diagnostics against the benchmark.
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     z_trend_test = jnp.exp((1.0 - a) * g * test_t) if g != 0.0 else None
     benchmark = (
@@ -343,9 +342,11 @@ def neoclassical_growth_nn(
     log_tvc = float(-p.rho_hat * tvc_t - p.sigma_crra * jnp.log(c_T) + jnp.log(k_T))
     transversality_ok = bool(log_tvc < tolerance_set.log_tvc_threshold)
 
-    # Published results.
     g_hat_value = float(model.g_hat[...])
 
+    rejection_reasons = []
+    if not accepted:
+        rejection_reasons.append("train_loss")
     results = {
         "a": a,
         "delta": delta,
@@ -378,7 +379,7 @@ def neoclassical_growth_nn(
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
         "nn_width": policy_settings.width,
         "nn_depth": policy_settings.depth,
-        "solution_accepted": bool(accepted),
+        **acceptance_fields(rejection_reasons),
         "train_T": float(t_train[-1]),
         "num_train_points": int(t_train.shape[0]),
         "test_T": data_set.test_T,

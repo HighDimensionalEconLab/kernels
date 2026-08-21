@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import pathlib
 from dataclasses import asdict, dataclass
-from functools import partial
 from typing import Literal
 
 import jax
@@ -36,6 +35,7 @@ from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
     Stopwatch,
+    acceptance_fields,
     cache_key,
     load_model,
     long_df,
@@ -89,6 +89,7 @@ class ResidualArgs:
     k_scale: jax.Array
     # 1/(1-a): log kappa = log k - z_detrend * log z for Hicks-neutral z.
     z_detrend: jax.Array
+    kernel_set: StateKernelSettings = struct.field(pytree_node=False)
 
 
 def state_lengthscales(kernel_set):
@@ -129,6 +130,7 @@ def build_residual_args(train_log_states, kernel_set, a, z_0=1.0, k_0=1.0):
         state_offset=state_offset,
         k_scale=jnp.asarray(k_0, dtype),
         z_detrend=z_detrend,
+        kernel_set=kernel_set,
     )
 
 
@@ -205,8 +207,8 @@ def load_reference_policy(policy_dir, problem_config):
     return policy, meta, best
 
 
-def residual_fn(theta, args, p, kernel_set):
-    policy = KernelInvestmentPolicy(theta, args, kernel_set)
+def residual_fn(theta, args, p):
+    policy = KernelInvestmentPolicy(theta, args, args.kernel_set)
     residual = euler_residuals(policy, args.train_log_states, p)
     return residual / jnp.sqrt(residual.size)
 
@@ -246,7 +248,7 @@ def stochastic_growth_kernel_recursive(
         log_z_lengthscale=0.4,
         log_k_lengthscale=0.45,
     ),
-    opt_set: OptimizerSettings = OptimizerSettings(
+    lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=1e-6,
         damping_decrease=0.25,
         damping_increase=4.0,
@@ -263,13 +265,6 @@ def stochastic_growth_kernel_recursive(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    # Mean reversion in z fixes a scale, so the homothetic representation is
-    # misspecified by construction for this model.
-    if kernel_set.homothetic_representation:
-        raise ValueError(
-            "the stochastic model requires homothetic_representation=False"
-        )
-
     sde = SDE_SOLVERS[sde_solver]
     n_train_steps = data_set.train_points - 1
     n_test_steps = data_set.test_points - 1
@@ -352,14 +347,14 @@ def stochastic_growth_kernel_recursive(
     if kernel_set.linear_mean:
         theta_0 = theta_0 + (jnp.zeros(2, dtype=dtype),)
     solver = RidgeLevenbergMarquardt(
-        partial(residual_fn, kernel_set=kernel_set),
+        residual_fn,
         metric=metric,
         ridge=tolerance_set.ridge,
-        init_damping=opt_set.init_damping,
-        damping_decrease=opt_set.damping_decrease,
-        damping_increase=opt_set.damping_increase,
-        geodesic_acceleration=opt_set.geodesic_acceleration,
-        geodesic_acceptance_ratio=opt_set.geodesic_acceptance_ratio,
+        init_damping=lm_set.init_damping,
+        damping_decrease=lm_set.damping_decrease,
+        damping_increase=lm_set.damping_increase,
+        geodesic_acceleration=lm_set.geodesic_acceleration,
+        geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
 
     solve_timer = Stopwatch()
@@ -498,6 +493,11 @@ def stochastic_growth_kernel_recursive(
     )
 
     gram_eigenvalues = jnp.linalg.eigvalsh(args.gram)
+    rejection_reasons = []
+    if not solver_converged:
+        rejection_reasons.append("solver")
+    if not test_path_ok:
+        rejection_reasons.append("test_path")
     results = {
         "reference_test_euler_mean_abs": float(reference_meta["test_euler_mean_abs"]),
         "a": a,
@@ -538,7 +538,7 @@ def stochastic_growth_kernel_recursive(
         "transversality_ok": transversality_ok,
         "min_test_c": float(jnp.min(test_values["c"])),
         "steps": steps,
-        "solution_accepted": bool(solver_converged and test_path_ok),
+        **acceptance_fields(rejection_reasons),
         "setup_time": setup_time,
         "solve_time": solve_time,
         "total_fit_time": total_fit_time,
@@ -568,7 +568,7 @@ def stochastic_growth_kernel_recursive(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
-        "opt_set": asdict(opt_set),
+        "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),
         "parameters": {
             "a": a,
@@ -589,7 +589,7 @@ def stochastic_growth_kernel_recursive(
         for name, value in results.items():
             print(f"  {name}: {value}")
     extras = {
-        "model": policy,
+        "policy": policy,
         "theta": theta,
         "residual_args": args,
         "parameters": p,

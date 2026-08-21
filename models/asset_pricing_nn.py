@@ -105,7 +105,7 @@ class PricePolicyNN(nnx.Module):
         return self.head(h)[0]
 
 
-def policy_values(model, t, p):
+def path_values(model, t, p):
     r, c, g, x_0 = p["r"], p["c"], p["g"], p["x_0"]
     price, price_derivative = jax.vmap(
         lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),))
@@ -123,13 +123,13 @@ def policy_values(model, t, p):
 
 def residual_fn(theta, args, p):
     model = nnx.merge(args.graphdef, theta, args.nondiff)
-    residual = policy_values(model, args.train_t, p)["residual"]
+    residual = path_values(model, args.train_t, p)["residual"]
     return residual / jnp.sqrt(residual.size)
 
 
 def snapshot(model, t, p):
     r, c, g, x_0 = (float(p[name]) for name in ("r", "c", "g", "x_0"))
-    values = jax.device_get(policy_values(model, t, p))
+    values = jax.device_get(path_values(model, t, p))
     frame = pd.DataFrame({key: np.asarray(value) for key, value in values.items()})
     benchmark = np.asarray(jax.device_get(mu_f_array(t, c, g, r, x_0)))
     frame["p_benchmark"] = benchmark
@@ -223,9 +223,6 @@ def asset_pricing_nn(
         # Measured from the trained parameters, not requested: a float64 leak
         # in the solve promotes them.
         "residual_dtype": str(ravel_pytree(nnx.state(model, nnx.Param))[0].dtype),
-        "terminal_residual_count": 0,
-        "tvc_training_residual_count": 0,
-        "benchmark_training_residual_count": 0,
         "num_train_points": int(train_t.size),
         "train_T": float(train_t[-1]),
         "test_T": data_set.test_T,

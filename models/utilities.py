@@ -44,8 +44,6 @@ def finite_difference_directional(f, x, v, eps_f, order=4):
     x_leaves = jax.tree_util.tree_leaves(x)
     v_leaves = jax.tree_util.tree_leaves(v)
     v_norm = math.sqrt(sum(float(jnp.sum(jnp.square(leaf))) for leaf in v_leaves))
-    if v_norm == 0.0:
-        raise ValueError("the direction v must be nonzero")
     x_along_v = (
         sum(
             float(jnp.sum(x_leaf * v_leaf))
@@ -126,7 +124,7 @@ def standardized_initial_states(key, center, scales, num_trajectories):
 
 
 # Gram-form Levenberg-Marquardt settings shared across solvers; each solver
-# pins its tuned values inline in its opt_set signature default.
+# pins its tuned values inline in its lm_set signature default.
 @dataclass(frozen=True)
 class OptimizerSettings:
     init_damping: float = 1e-5
@@ -163,10 +161,6 @@ def make_sampled_train_grid(data_set, dtype):
         train_data = jnp.concatenate([dense_data, tail_data])
     else:
         raise ValueError("sampling must be 'front_loaded' or 'uniform'")
-    if len(train_data) < 3 or not bool(jnp.all(jnp.diff(train_data) > 0.0)):
-        raise ValueError("training points must be strictly increasing")
-    if float(train_data[0]) != 0.0:
-        raise ValueError("training points must start at zero")
     return train_data
 
 

@@ -253,7 +253,6 @@ def neoclassical_growth_nn_k(
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
 ):
-    # Model setup.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     # Kinked production is enabled exactly when all of A, b_1, b_2 are given.
@@ -339,7 +338,6 @@ def neoclassical_growth_nn_k(
     train_loss = float(result.info.loss)
     accepted = bool(result.multi_start.accepted)
 
-    # Diagnostics against the benchmark.
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     benchmark = (
         None
@@ -357,7 +355,6 @@ def neoclassical_growth_nn_k(
     log_tvc = float(-p.rho_hat * tvc_t - p.sigma_crra * jnp.log(c_T) + jnp.log(k_T))
     transversality_ok = bool(log_tvc < tolerance_set.log_tvc_threshold)
 
-    # Published results.
     g_hat_value = float(model.g_hat[...])
 
     results = {

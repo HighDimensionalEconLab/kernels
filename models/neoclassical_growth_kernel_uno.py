@@ -213,7 +213,6 @@ def neoclassical_growth_kernel_uno(
         ]
     )
 
-    # IPOPT model wiring.
     model = unopy.Model(
         unopy.PROBLEM_NONLINEAR,
         n_variables,
@@ -301,8 +300,6 @@ def neoclassical_growth_kernel_uno(
     x = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))[:n_variables]
     c_0, mu_0 = unpack(x)[3], unpack(x)[4]
 
-    # Diagnostics: solved paths and residuals on the train, dense validation,
-    # and test grids.
     def snapshot(t_grid):
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             t_grid, train_data, kernel, sigma, ell
@@ -417,7 +414,6 @@ def neoclassical_growth_kernel_uno(
     ):
         rejection_reasons.append("p_bound")
 
-    # Published results.
     results = {
         "a": a,
         "delta": delta,

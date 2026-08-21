@@ -11,7 +11,6 @@ import unopy
 
 from models.kernels import (
     integrated_kernel_matrices,
-    normalize_kernel,
 )
 from models.neoclassical_growth import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
@@ -161,7 +160,7 @@ def neoclassical_growth_kernel_uno(
         )
     domain_eps = solver_set.domain_eps
 
-    kernel = normalize_kernel(kernel_set.kernel)
+    kernel = kernel_set.kernel
     ell, sigma = kernel_set.ell, kernel_set.sigma
     train_data = make_train_t_grid(data_set, jnp.float64)
     n_train = len(train_data)

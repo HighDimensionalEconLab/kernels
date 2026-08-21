@@ -13,7 +13,6 @@ from nlls_gram import LevenbergMarquardt
 from models.kernels import (
     KernelSettings,
     integrated_kernel_matrices,
-    normalize_kernel,
     rkhs_norm_squared,
 )
 from models.utilities import Stopwatch, acceptance_fields
@@ -255,7 +254,7 @@ def human_capital_kernel_uno(
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
-    kernel = normalize_kernel(kernel_set.kernel)
+    kernel = kernel_set.kernel
     ell, sigma = kernel_set.ell, kernel_set.sigma
     domain_eps = solver_set.domain_eps
     if data_set.train_points_list is None:

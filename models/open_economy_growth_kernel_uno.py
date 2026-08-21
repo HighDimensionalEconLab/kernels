@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import unopy
 
-from models.kernels import KernelSettings, integrated_kernel_matrices, normalize_kernel
+from models.kernels import KernelSettings, integrated_kernel_matrices
 from models.open_economy_growth import (
     ModelParameters,
     investment_expenditure,
@@ -168,7 +168,7 @@ def open_economy_growth_kernel_uno(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
 
-    kernel = normalize_kernel(kernel_set.kernel)
+    kernel = kernel_set.kernel
     train_data = make_sampled_train_grid(data_set, jnp.float64)
 
     test_data = jnp.linspace(

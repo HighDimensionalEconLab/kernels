@@ -22,7 +22,6 @@ from models.kernels import (
     KernelSettings,
     integrated_kernel_matrices,
     integrated_metric_factorization,
-    normalize_kernel,
     rkhs_norm_squared,
 )
 from models.multicountry_growth import (
@@ -297,7 +296,7 @@ def multicountry_growth_kernel(
             a_0 = drawn_a_0
     validate_initial_conditions(k_0, a_0, parameters)
 
-    kernel = normalize_kernel(kernel_set.kernel)
+    kernel = kernel_set.kernel
     train_data = make_sampled_train_grid(data_set, dtype)
     test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     validation_data = jnp.linspace(

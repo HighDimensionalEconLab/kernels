@@ -13,7 +13,6 @@ from models.asset_pricing_benchmark import mu_f_array
 from models.kernels import (
     KernelSettings,
     integrated_kernel_matrices,
-    normalize_kernel,
     rkhs_norm_squared,
 )
 from models.utilities import Stopwatch, acceptance_fields
@@ -100,7 +99,7 @@ def asset_pricing_kernel_uno(
     # IPOPT works in float64 C arrays, so this solver is float64-only.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
-    kernel = normalize_kernel(kernel_set.kernel)
+    kernel = kernel_set.kernel
     ell, sigma = kernel_set.ell, kernel_set.sigma
     if data_set.train_points_list is None:
         train_data = jnp.linspace(

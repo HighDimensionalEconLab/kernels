@@ -17,7 +17,6 @@ from models.kernels import (
     KernelSettings,
     integrated_kernel_matrices,
     integrated_metric_factorization,
-    normalize_kernel,
 )
 from models.utilities import (
     Stopwatch,
@@ -212,7 +211,7 @@ def human_capital_kernel(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    kernel = normalize_kernel(kernel_set.kernel)
+    kernel = kernel_set.kernel
     ell, sigma = kernel_set.ell, kernel_set.sigma
     train_data = make_train_t_grid(data_set, dtype)
     test_data = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)

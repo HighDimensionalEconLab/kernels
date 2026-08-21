@@ -16,7 +16,6 @@ from models.kernels import (
     integrated_kernel_matrices,
     integrated_kernel_paths,
     integrated_metric_factorization,
-    normalize_kernel,
 )
 from models.neoclassical_growth import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
@@ -78,12 +77,11 @@ def evaluate_paths(theta, t_grid, train_data, kernel_set, p, g_hat=None):
     K_eval, K_tilde_eval = integrated_kernel_matrices(
         t_grid,
         train_data,
-        normalize_kernel(kernel_set.kernel),
+        kernel_set.kernel,
         kernel_set.sigma,
         kernel_set.ell,
     )
-    if theta.g_hat is not None:
-        g_hat = theta.g_hat
+    g_hat = theta.g_hat if theta.g_hat is not None else g_hat
     trend_mu = None if g_hat is None else -p.sigma_crra * g_hat
     return integrated_kernel_paths(
         {
@@ -193,7 +191,7 @@ def neoclassical_growth_kernel(
     else:
         A, b_1, b_2, k_thr = 1.0, 1.0, 0.0, float("inf")
 
-    kernel = normalize_kernel(kernel_set.kernel)
+    kernel = kernel_set.kernel
     ell, sigma = kernel_set.ell, kernel_set.sigma
     train_data = make_train_t_grid(data_set, dtype)
     n_train = len(train_data)

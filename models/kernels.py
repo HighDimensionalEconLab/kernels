@@ -9,12 +9,9 @@ from jax.scipy.special import erf
 from nlls_gram import RepeatedFactorMetric
 
 # Stationary kernels with length scale ell (the paper's l) and amplitude
-# sigma, selected by name; the legacy Matern smoothness values nu in
-# {0.5, 1.5, 2.5, inf} are accepted as aliases. The integrated kernels
+# sigma, selected by name. The integrated kernels
 # K_tilde(t_i, t_j) = int_0^{t_i} K(t, t_j) dt implement the integrated RKHS
 # representation x(t) = x_0 + K_tilde alpha; all four have closed forms.
-
-KERNEL_NAMES = ("matern12", "matern32", "matern52", "rbf")
 
 
 # Sequential time kernel; drivers override ell in their signature defaults.
@@ -33,21 +30,6 @@ def rkhs_norm_squared(coefficients, gram):
         coefficients,
         gram,
         coefficients,
-    )
-
-
-def normalize_kernel(kernel):
-    if kernel in {"rbf", "gaussian", "squared_exponential", "se", math.inf}:
-        return "rbf"
-    if kernel in {"matern12", "matern_1_2", "matern0.5", "matern_0.5", 0.5}:
-        return "matern12"
-    if kernel in {"matern32", "matern_3_2", "matern1.5", "matern_1.5", 1.5}:
-        return "matern32"
-    if kernel in {"matern52", "matern_5_2", "matern2.5", "matern_2.5", 2.5}:
-        return "matern52"
-    raise ValueError(
-        f"unknown kernel: {kernel!r} (use one of {KERNEL_NAMES} or "
-        "nu in {0.5, 1.5, 2.5, inf})"
     )
 
 
@@ -103,17 +85,9 @@ def ard_matern_state_features(name, x, centers, sigma, lengthscales):
     return sigma**2 * jnp.prod(matern_correlation(name, scaled), axis=-1)
 
 
-def ard_matern_state_gram(name, centers, sigma, lengthscales):
-    return ard_matern_state_features(name, centers, centers, sigma, lengthscales)
-
-
 def additive_matern_state_features(name, x, centers, sigmas, lengthscales):
     scaled = jnp.abs(x[..., None, :] - centers) / lengthscales
     return jnp.sum(sigmas**2 * matern_correlation(name, scaled), axis=-1)
-
-
-def additive_matern_state_gram(name, centers, sigmas, lengthscales):
-    return additive_matern_state_features(name, centers, centers, sigmas, lengthscales)
 
 
 def ard_rbf_state_features(x, centers, sigma, lengthscales):
@@ -121,24 +95,9 @@ def ard_rbf_state_features(x, centers, sigma, lengthscales):
     return sigma**2 * jnp.exp(-0.5 * jnp.sum(scaled**2, axis=-1))
 
 
-def ard_rbf_state_gram(centers, sigma, lengthscales):
-    return ard_rbf_state_features(centers, centers, sigma, lengthscales)
-
-
 def additive_rbf_state_features(x, centers, sigmas, lengthscales):
     scaled = (x[..., None, :] - centers) / lengthscales
     return jnp.sum(sigmas**2 * jnp.exp(-0.5 * scaled**2), axis=-1)
-
-
-def additive_rbf_state_gram(centers, sigmas, lengthscales):
-    return additive_rbf_state_features(centers, centers, sigmas, lengthscales)
-
-
-STATE_KERNEL_NAMES = tuple(
-    f"{structure}_{family}"
-    for structure in ("ard", "additive")
-    for family in ("rbf", *MATERN_STATE_FAMILIES)
-)
 
 
 # ard: one amplitude, product of per-axis correlations. additive: one
@@ -213,17 +172,15 @@ def integrated_gaussian_kernel(t_i, t_j, sigma, ell):
     return scale * (erf((t_i - t_j) / root_2_ell) + erf(t_j / root_2_ell))
 
 
-# The kernel choice is static: the pair is selected at trace time. Accepts a
-# name from KERNEL_NAMES or a legacy nu float.
+# The kernel choice is static: the pair is selected at trace time.
 @partial(jax.jit, static_argnums=(2,))
 def integrated_kernel_matrices(t_i, t_j, kernel, sigma, ell):
-    name = normalize_kernel(kernel)
     kernel_fn, integrated_fn = {
         "matern12": (matern_kernel_0p5, integrated_matern_kernel_0p5),
         "matern32": (matern_kernel_1p5, integrated_matern_kernel_1p5),
         "matern52": (matern_kernel_2p5, integrated_matern_kernel_2p5),
         "rbf": (gaussian_kernel, integrated_gaussian_kernel),
-    }[name]
+    }[kernel]
     K = jax.vmap(
         jax.vmap(kernel_fn, in_axes=(None, 0, None, None)),
         in_axes=(0, None, None, None),

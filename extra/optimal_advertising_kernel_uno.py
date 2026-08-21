@@ -12,7 +12,6 @@ import unopy
 from models.kernels import (
     KernelSettings,
     integrated_kernel_matrices,
-    normalize_kernel,
     rkhs_norm_squared,
 )
 from models.utilities import Stopwatch, acceptance_fields
@@ -114,7 +113,7 @@ def optimal_advertising_kernel_uno(
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
-    kernel = normalize_kernel(kernel_set.kernel)
+    kernel = kernel_set.kernel
     ell, sigma = kernel_set.ell, kernel_set.sigma
     if data_set.train_points_list is None:
         train_data = jnp.linspace(0, data_set.train_T, data_set.train_points)

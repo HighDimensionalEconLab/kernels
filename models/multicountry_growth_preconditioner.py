@@ -66,16 +66,16 @@ def arrow_woodbury_indices(theta):
             index.alpha_mu,
             jnp.stack(
                 [
-                    index.initial.q_offsets,
-                    index.initial.c_offsets,
-                    index.initial.mu_offsets,
+                    index.q_offsets,
+                    index.c_offsets,
+                    index.mu_offsets,
                 ],
                 axis=1,
             ),
         ],
         axis=1,
     )
-    border_index = jnp.concatenate([index.alpha_rate, index.initial.rate_offset[None]])
+    border_index = jnp.concatenate([index.alpha_rate, index.rate_offset[None]])
     return country_index, border_index
 
 
@@ -179,10 +179,10 @@ def build_arrow_woodbury(theta, kernel_args, p, ridge, damping, num_countries):
     )
     offsets_flat = jnp.concatenate(
         [
-            theta.initial.q_offsets,
-            theta.initial.c_offsets,
-            theta.initial.mu_offsets,
-            theta.initial.rate_offset[None],
+            theta.q_offsets,
+            theta.c_offsets,
+            theta.mu_offsets,
+            theta.rate_offset[None],
         ]
     )
     levels = K_tilde @ coefficients.T

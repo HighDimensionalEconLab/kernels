@@ -10,7 +10,10 @@ import pandas as pd
 import unopy
 
 from models.kernels import (
+    IntegratedPath,
+    KernelSettings,
     integrated_kernel_matrices,
+    integrated_kernel_paths,
 )
 from models.neoclassical_growth import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
@@ -41,16 +44,6 @@ def unpack(x):
     return alpha_mu, alpha_c, alpha_k, c_0, mu_0
 
 
-def path_values(x, K_eval, K_tilde_eval, k_0):
-    alpha_mu, alpha_c, alpha_k, c_0, mu_0 = unpack(x)
-    mu = mu_0 + K_tilde_eval @ alpha_mu
-    c = c_0 + K_tilde_eval @ alpha_c
-    k = k_0 + K_tilde_eval @ alpha_k
-    dmu_dt = K_eval @ alpha_mu
-    dk_dt = K_eval @ alpha_k
-    return k, c, mu, dk_dt, dmu_dt
-
-
 @jax.jit
 def objective(x, K):
     alpha_mu, alpha_c, alpha_k, _, _ = unpack(x)
@@ -62,7 +55,19 @@ def objective(x, K):
 # evaluates infeasible trial iterates, so k clamps at domain_eps.
 @jax.jit
 def constraints(x, K, K_tilde, p, domain_eps):
-    k, c, mu, dk_dt, dmu_dt = path_values(x, K, K_tilde, p.k_0)
+    alpha_mu, alpha_c, alpha_k, c_0, mu_0 = unpack(x)
+    paths = integrated_kernel_paths(
+        {
+            "mu": IntegratedPath(alpha_mu, mu_0),
+            "c": IntegratedPath(alpha_c, c_0),
+            "k": IntegratedPath(alpha_k, p.k_0),
+        },
+        K,
+        K_tilde,
+    )
+    k, dk_dt = paths["k"]
+    mu, dmu_dt = paths["mu"]
+    c = paths["c"].value
     k_positive = jnp.maximum(k, domain_eps)
     resource = dk_dt - (production(p.z_0, k_positive, p) - p.delta * k - c)
     euler = dmu_dt + mu * (mpk(p.z_0, k_positive, p) - p.delta - p.rho_hat)
@@ -81,13 +86,6 @@ def lagrangian(x, objective_multiplier, multipliers, K, K_tilde, p, domain_eps):
 objective_gradient = jax.jit(jax.grad(objective))
 constraint_jacobian = jax.jit(jax.jacfwd(constraints))
 lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
-
-
-@dataclass(frozen=True)
-class KernelSettings:
-    kernel: str = "matern12"  # matern12 | matern32 | matern52 | rbf
-    ell: float = 10.0
-    sigma: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -297,13 +295,24 @@ def neoclassical_growth_kernel_uno(
     # primal_solution appends solver-internal auxiliaries; only the leading
     # 3n + 2 block is ours.
     x = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))[:n_variables]
-    c_0, mu_0 = unpack(x)[3], unpack(x)[4]
+    alpha_mu, alpha_c, alpha_k, c_0, mu_0 = unpack(x)
 
     def snapshot(t_grid):
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             t_grid, train_data, kernel, sigma, ell
         )
-        k, c, mu, dk_dt, dmu_dt = path_values(x, K_eval, K_tilde_eval, k_0)
+        paths = integrated_kernel_paths(
+            {
+                "mu": IntegratedPath(alpha_mu, mu_0),
+                "c": IntegratedPath(alpha_c, c_0),
+                "k": IntegratedPath(alpha_k, k_0),
+            },
+            K_eval,
+            K_tilde_eval,
+        )
+        k, dk_dt = paths["k"]
+        mu, dmu_dt = paths["mu"]
+        c = paths["c"].value
         k_positive = jnp.maximum(k, domain_eps)
         return pd.DataFrame(
             {
@@ -366,8 +375,15 @@ def neoclassical_growth_kernel_uno(
         K_test, K_tilde_test = integrated_kernel_matrices(
             test_points_data, train_data, kernel, sigma, ell
         )
-        k_test, c_test, _, _, _ = path_values(x, K_test, K_tilde_test, k_0)
-        return k_test, c_test
+        paths = integrated_kernel_paths(
+            {
+                "c": IntegratedPath(alpha_c, c_0),
+                "k": IntegratedPath(alpha_k, k_0),
+            },
+            K_test,
+            K_tilde_test,
+        )
+        return paths["k"].value, paths["c"].value
 
     K_tvc, K_tilde_tvc = integrated_kernel_matrices(
         jnp.asarray([data_set.test_tvc_T], dtype=jnp.float64),
@@ -376,7 +392,15 @@ def neoclassical_growth_kernel_uno(
         sigma,
         ell,
     )
-    k_T, c_T, _, _, _ = path_values(x, K_tvc, K_tilde_tvc, k_0)
+    paths_T = integrated_kernel_paths(
+        {
+            "c": IntegratedPath(alpha_c, c_0),
+            "k": IntegratedPath(alpha_k, k_0),
+        },
+        K_tvc,
+        K_tilde_tvc,
+    )
+    k_T, c_T = paths_T["k"].value, paths_T["c"].value
     log_tvc = float(
         -rho_hat * data_set.test_tvc_T - sigma_crra * jnp.log(c_T[0]) + jnp.log(k_T[0])
     )

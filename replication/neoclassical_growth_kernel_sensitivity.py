@@ -6,9 +6,12 @@ import jsonargparse
 import pandas as pd
 from nlls_gram import LMStatus
 
-from models.kernels import integrated_kernel_matrices
+from models.kernels import (
+    IntegratedPath,
+    integrated_kernel_matrices,
+    integrated_kernel_paths,
+)
 from models.neoclassical_growth import neoclassical_steady_state_sensitivities
-from models.neoclassical_growth_kernel import path_values
 from replication.neoclassical_growth_kernel import PREFIX, SOLVER
 from replication.utilities import (
     configure_process,
@@ -50,8 +53,15 @@ def run(
         solved = solver.solve(
             spec["theta_0"], spec["residual_args"], p=p_value, **spec["options"]
         )
-        k, c, _, _, _ = path_values(solved.x, K_sens, K_tilde_sens, p_value)
-        return jnp.column_stack([k, c]), solved.status
+        paths = integrated_kernel_paths(
+            {
+                "c": IntegratedPath(solved.x.alpha_c, solved.x.c_0),
+                "k": IntegratedPath(solved.x.alpha_k, p_value.k_0),
+            },
+            K_sens,
+            K_tilde_sens,
+        )
+        return jnp.column_stack([paths["k"].value, paths["c"].value]), solved.status
 
     jacobian, status = jax.jacrev(paths_at_sensitivity_times, has_aux=True)(spec["p"])
     jax.block_until_ready(jacobian)
@@ -59,9 +69,16 @@ def run(
     # tangents, indistinguishable from a genuine null effect.
     if int(status) != LMStatus.CONVERGED:
         raise RuntimeError("the sensitivity re-solve did not converge")
-    k_sens, c_sens, _, _, _ = path_values(
-        extras["result"].x, K_sens, K_tilde_sens, spec["p"]
+    theta = extras["result"].x
+    paths = integrated_kernel_paths(
+        {
+            "c": IntegratedPath(theta.alpha_c, theta.c_0),
+            "k": IntegratedPath(theta.alpha_k, spec["p"].k_0),
+        },
+        K_sens,
+        K_tilde_sens,
     )
+    k_sens, c_sens = paths["k"].value, paths["c"].value
     fields = {}
     for index, time_value in enumerate(SENSITIVITY_TIMES):
         suffix = f"T{time_value:g}".replace(".", "p")

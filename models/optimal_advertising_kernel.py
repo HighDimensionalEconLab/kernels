@@ -13,8 +13,10 @@ from nlls_gram import (
 )
 
 from models.kernels import (
+    IntegratedPath,
     KernelSettings,
     integrated_kernel_matrices,
+    integrated_kernel_paths,
     integrated_metric_factorization,
     rkhs_norm_squared,
 )
@@ -25,26 +27,13 @@ from models.utilities import (
 )
 
 
-class InitialValues(NamedTuple):
-    mu_0: jax.Array
-    u_0: jax.Array
-
-
 # Alpha blocks first (the metric penalizes the leading flat coordinates).
 class Theta(NamedTuple):
     alpha_x: jax.Array
     alpha_mu: jax.Array
     alpha_u: jax.Array
-    initial: InitialValues
-
-
-def path_values(theta, K_eval, K_tilde_eval, p):
-    x = p["x_0"] + K_tilde_eval @ theta.alpha_x
-    mu = theta.initial.mu_0 + K_tilde_eval @ theta.alpha_mu
-    u = theta.initial.u_0 + K_tilde_eval @ theta.alpha_u
-    dx_dt = K_eval @ theta.alpha_x
-    dmu_dt = K_eval @ theta.alpha_mu
-    return x, mu, u, dx_dt, dmu_dt
+    mu_0: jax.Array
+    u_0: jax.Array
 
 
 def residuals(values, p):
@@ -59,9 +48,23 @@ def residuals(values, p):
 
 
 def residual_fn(theta, args, p):
-    residual = jnp.concatenate(
-        residuals(path_values(theta, args["K"], args["K_tilde"], p), p)
+    paths = integrated_kernel_paths(
+        {
+            "x": IntegratedPath(theta.alpha_x, p["x_0"]),
+            "mu": IntegratedPath(theta.alpha_mu, theta.mu_0),
+            "u": IntegratedPath(theta.alpha_u, theta.u_0),
+        },
+        args["K"],
+        args["K_tilde"],
     )
+    values = (
+        paths["x"].value,
+        paths["mu"].value,
+        paths["u"].value,
+        paths["x"].d_dt,
+        paths["mu"].d_dt,
+    )
+    residual = jnp.concatenate(residuals(values, p))
     return residual / jnp.sqrt(residual.size)
 
 
@@ -154,10 +157,8 @@ def optimal_advertising_kernel(
         alpha_x=jnp.zeros(n_train, dtype=dtype),
         alpha_mu=jnp.zeros(n_train, dtype=dtype),
         alpha_u=jnp.zeros(n_train, dtype=dtype),
-        initial=InitialValues(
-            mu_0=jnp.asarray(mu_0_guess, dtype=dtype),
-            u_0=jnp.asarray(u_0_guess, dtype=dtype),
-        ),
+        mu_0=jnp.asarray(mu_0_guess, dtype=dtype),
+        u_0=jnp.asarray(u_0_guess, dtype=dtype),
     )
     solver = RidgeLevenbergMarquardt(
         residual_fn,
@@ -180,15 +181,24 @@ def optimal_advertising_kernel(
     elapsed = timer.elapsed(result)
     theta = result.x
     alpha_x, alpha_mu, alpha_u = theta.alpha_x, theta.alpha_mu, theta.alpha_u
-    mu_0, u_0 = theta.initial
+    mu_0, u_0 = theta.mu_0, theta.u_0
 
     def evaluate_grid(points):
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             points, train_data, kernel, sigma, ell
         )
-        values = path_values(theta, K_eval, K_tilde_eval, p)
+        paths = integrated_kernel_paths(
+            {
+                "x": IntegratedPath(theta.alpha_x, p["x_0"]),
+                "mu": IntegratedPath(theta.alpha_mu, theta.mu_0),
+                "u": IntegratedPath(theta.alpha_u, theta.u_0),
+            },
+            K_eval,
+            K_tilde_eval,
+        )
+        x, mu, u = paths["x"].value, paths["mu"].value, paths["u"].value
+        values = (x, mu, u, paths["x"].d_dt, paths["mu"].d_dt)
         state, costate, shadow_price = residuals(values, p)
-        x, mu, u, *_ = values
         return {
             "t": points,
             "x": x,
@@ -235,8 +245,16 @@ def optimal_advertising_kernel(
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             points, train_data, kernel, sigma, ell
         )
-        x, mu, u, *_ = path_values(theta, K_eval, K_tilde_eval, p)
-        return x, mu, u
+        paths = integrated_kernel_paths(
+            {
+                "x": IntegratedPath(theta.alpha_x, p["x_0"]),
+                "mu": IntegratedPath(theta.alpha_mu, theta.mu_0),
+                "u": IntegratedPath(theta.alpha_u, theta.u_0),
+            },
+            K_eval,
+            K_tilde_eval,
+        )
+        return paths["x"].value, paths["mu"].value, paths["u"].value
 
     rkhs_norms = {
         "x": rkhs_norm_squared(alpha_x, K),

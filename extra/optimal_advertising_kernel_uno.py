@@ -10,8 +10,10 @@ import pandas as pd
 import unopy
 
 from models.kernels import (
+    IntegratedPath,
     KernelSettings,
     integrated_kernel_matrices,
+    integrated_kernel_paths,
     rkhs_norm_squared,
 )
 from models.utilities import Stopwatch, acceptance_fields
@@ -27,16 +29,6 @@ def unpack(z):
     mu_0 = z[3 * n_train]
     u_0 = z[3 * n_train + 1]
     return alpha_x, alpha_mu, alpha_u, mu_0, u_0
-
-
-def path_values(z, K_eval, K_tilde_eval, p):
-    alpha_x, alpha_mu, alpha_u, mu_0, u_0 = unpack(z)
-    x = p["x_0"] + K_tilde_eval @ alpha_x
-    mu = mu_0 + K_tilde_eval @ alpha_mu
-    u = u_0 + K_tilde_eval @ alpha_u
-    dx_dt = K_eval @ alpha_x
-    dmu_dt = K_eval @ alpha_mu
-    return x, mu, u, dx_dt, dmu_dt
 
 
 def objective(z, K):
@@ -55,8 +47,20 @@ def residuals(x, mu, u, dx_dt, dmu_dt, p):
 
 
 def constraints(z, K, K_tilde, p):
-    x, mu, u, dx_dt, dmu_dt = path_values(z, K, K_tilde, p)
-    state, costate, shadow_price = residuals(x, mu, u, dx_dt, dmu_dt, p)
+    alpha_x, alpha_mu, alpha_u, mu_0, u_0 = unpack(z)
+    paths = integrated_kernel_paths(
+        {
+            "x": IntegratedPath(alpha_x, p["x_0"]),
+            "mu": IntegratedPath(alpha_mu, mu_0),
+            "u": IntegratedPath(alpha_u, u_0),
+        },
+        K,
+        K_tilde,
+    )
+    x, mu, u = paths["x"].value, paths["mu"].value, paths["u"].value
+    state, costate, shadow_price = residuals(
+        x, mu, u, paths["x"].d_dt, paths["mu"].d_dt, p
+    )
     return jnp.concatenate([state, costate, shadow_price, u])
 
 
@@ -260,11 +264,22 @@ def optimal_advertising_kernel_uno(
     z = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))[:n_variables]
     alpha_x, alpha_mu, alpha_u, mu_0, u_0 = unpack(z)
 
-    x_train, mu_train, u_train, dx_train, dmu_train = path_values(
-        z, K_jax, K_tilde_jax, p
+    paths = integrated_kernel_paths(
+        {
+            "x": IntegratedPath(alpha_x, p["x_0"]),
+            "mu": IntegratedPath(alpha_mu, mu_0),
+            "u": IntegratedPath(alpha_u, u_0),
+        },
+        K_jax,
+        K_tilde_jax,
+    )
+    x_train, mu_train, u_train = (
+        paths["x"].value,
+        paths["mu"].value,
+        paths["u"].value,
     )
     state_res, costate_res, shadow_res = residuals(
-        x_train, mu_train, u_train, dx_train, dmu_train, p
+        x_train, mu_train, u_train, paths["x"].d_dt, paths["mu"].d_dt, p
     )
     max_train_residual = max(
         float(jnp.max(jnp.abs(residual)))
@@ -276,8 +291,16 @@ def optimal_advertising_kernel_uno(
         K_test, K_tilde_test = integrated_kernel_matrices(
             test_points_data, train_data, kernel, sigma, ell
         )
-        x_test, mu_test, u_test, _, _ = path_values(z, K_test, K_tilde_test, p)
-        return x_test, mu_test, u_test
+        paths = integrated_kernel_paths(
+            {
+                "x": IntegratedPath(alpha_x, p["x_0"]),
+                "mu": IntegratedPath(alpha_mu, mu_0),
+                "u": IntegratedPath(alpha_u, u_0),
+            },
+            K_test,
+            K_tilde_test,
+        )
+        return paths["x"].value, paths["mu"].value, paths["u"].value
 
     x_test, mu_test, u_test = kernel_solution(test_data)
 

@@ -19,8 +19,10 @@ from nlls_gram import (
 )
 
 from models.kernels import (
+    IntegratedPath,
     KernelSettings,
     integrated_kernel_matrices,
+    integrated_kernel_paths,
     integrated_metric_factorization,
     rkhs_norm_squared,
 )
@@ -60,13 +62,6 @@ RESIDUAL_NAMES = (
 )
 
 
-class InitialValues(NamedTuple):
-    q_offsets: jax.Array
-    c_offsets: jax.Array
-    mu_offsets: jax.Array
-    rate_offset: jax.Array
-
-
 # Alpha blocks first (the metric penalizes the leading flat coordinates);
 # the (N, n_train) blocks ravel country-major.
 class Theta(NamedTuple):
@@ -76,7 +71,10 @@ class Theta(NamedTuple):
     alpha_c: jax.Array
     alpha_mu: jax.Array
     alpha_rate: jax.Array
-    initial: InitialValues
+    q_offsets: jax.Array
+    c_offsets: jax.Array
+    mu_offsets: jax.Array
+    rate_offset: jax.Array
 
 
 # Module-level so callers can evaluate solved paths on their own kernel
@@ -98,39 +96,43 @@ def path_coordinates(theta, K_eval, K_tilde_eval, p):
     # need no such guard.
     output_scale_p = jax.lax.stop_gradient(steady_p["output_scale"])
     log_consumption_scale_p = jnp.log(steady_p["consumption_scale"])
-    alpha_k, alpha_a, alpha_q, alpha_c, alpha_mu, alpha_rate = (
-        theta.alpha_k,
-        theta.alpha_a,
-        theta.alpha_q,
-        theta.alpha_c,
-        theta.alpha_mu,
-        theta.alpha_rate,
+    # Country-major (N, n_train) alpha blocks enter transposed so the
+    # contraction K_tilde @ alpha.T yields (t_grid, N) paths; the (N,)
+    # offset anchors broadcast over rows.
+    paths = integrated_kernel_paths(
+        {
+            "log_k": IntegratedPath(theta.alpha_k.T, jnp.log(k_0_p)),
+            "a_raw": IntegratedPath(
+                theta.alpha_a.T, jnp.zeros((), theta.alpha_a.dtype)
+            ),
+            "log_q": IntegratedPath(
+                theta.alpha_q.T, -jnp.log(parameters_p.eta) + theta.q_offsets
+            ),
+            "log_c": IntegratedPath(
+                theta.alpha_c.T, log_consumption_scale_p + theta.c_offsets
+            ),
+            "log_mu": IntegratedPath(
+                theta.alpha_mu.T,
+                -parameters_p.gammas * log_consumption_scale_p + theta.mu_offsets,
+            ),
+            "log_rate": IntegratedPath(
+                theta.alpha_rate, jnp.log(parameters_p.r) + theta.rate_offset
+            ),
+        },
+        K_eval,
+        K_tilde_eval,
     )
-    q_offsets = theta.initial.q_offsets
-    c_offsets = theta.initial.c_offsets
-    mu_offsets = theta.initial.mu_offsets
-    rate_offset = theta.initial.rate_offset
-    log_k = jnp.log(k_0_p) + K_tilde_eval @ alpha_k.T
-    a = a_0_p + output_scale_p * (K_tilde_eval @ alpha_a.T)
-    log_q = -jnp.log(parameters_p.eta) + q_offsets + K_tilde_eval @ alpha_q.T
-    log_c = log_consumption_scale_p + c_offsets + K_tilde_eval @ alpha_c.T
-    log_mu = (
-        -parameters_p.gammas * log_consumption_scale_p
-        + mu_offsets
-        + K_tilde_eval @ alpha_mu.T
-    )
-    log_rate = jnp.log(parameters_p.r) + rate_offset + K_tilde_eval @ alpha_rate
     return {
-        "k": jnp.exp(log_k),
-        "a": a,
-        "q": jnp.exp(log_q),
-        "c": jnp.exp(log_c),
-        "mu": jnp.exp(log_mu),
-        "interest_rate": jnp.exp(log_rate),
-        "dlog_k_dt": K_eval @ alpha_k.T,
-        "da_dt": output_scale_p * (K_eval @ alpha_a.T),
-        "dlog_q_dt": K_eval @ alpha_q.T,
-        "dlog_mu_dt": K_eval @ alpha_mu.T,
+        "k": jnp.exp(paths["log_k"].value),
+        "a": a_0_p + output_scale_p * paths["a_raw"].value,
+        "q": jnp.exp(paths["log_q"].value),
+        "c": jnp.exp(paths["log_c"].value),
+        "mu": jnp.exp(paths["log_mu"].value),
+        "interest_rate": jnp.exp(paths["log_rate"].value),
+        "dlog_k_dt": paths["log_k"].d_dt,
+        "da_dt": output_scale_p * paths["a_raw"].d_dt,
+        "dlog_q_dt": paths["log_q"].d_dt,
+        "dlog_mu_dt": paths["log_mu"].d_dt,
     }
 
 
@@ -347,12 +349,10 @@ def multicountry_growth_kernel(
         alpha_c=jnp.zeros((num_countries, n_train), dtype=dtype),
         alpha_mu=jnp.zeros((num_countries, n_train), dtype=dtype),
         alpha_rate=jnp.zeros(n_train, dtype=dtype),
-        initial=InitialValues(
-            q_offsets=jnp.zeros(num_countries, dtype=dtype),
-            c_offsets=jnp.zeros(num_countries, dtype=dtype),
-            mu_offsets=jnp.zeros(num_countries, dtype=dtype),
-            rate_offset=jnp.zeros((), dtype=dtype),
-        ),
+        q_offsets=jnp.zeros(num_countries, dtype=dtype),
+        c_offsets=jnp.zeros(num_countries, dtype=dtype),
+        mu_offsets=jnp.zeros(num_countries, dtype=dtype),
+        rate_offset=jnp.zeros((), dtype=dtype),
     )
 
     if lm_set.ridge_init is None:
@@ -602,9 +602,9 @@ def multicountry_growth_kernel(
                 f"q_0_{suffix}": float(test_eval["q"][0, country]),
                 f"c_0_{suffix}": float(test_eval["c"][0, country]),
                 f"m_0_{suffix}": float(test_eval["mu"][0, country]),
-                f"q_offset_{suffix}": float(theta.initial.q_offsets[country]),
-                f"c_offset_{suffix}": float(theta.initial.c_offsets[country]),
-                f"mu_offset_{suffix}": float(theta.initial.mu_offsets[country]),
+                f"q_offset_{suffix}": float(theta.q_offsets[country]),
+                f"c_offset_{suffix}": float(theta.c_offsets[country]),
+                f"mu_offset_{suffix}": float(theta.mu_offsets[country]),
                 f"relative_weight_{suffix}": float(relative_weights[country]),
                 f"log_relative_weight_{suffix}": float(log_relative_weights[country]),
                 f"terminal_a_{suffix}": float(validation_eval["a"][-1, country]),
@@ -620,7 +620,7 @@ def multicountry_growth_kernel(
             results[f"initial_wealth_{suffix}"] = float(
                 long_run["initial_wealth"][country]
             )
-    results["rate_offset"] = float(theta.initial.rate_offset)
+    results["rate_offset"] = float(theta.rate_offset)
 
     def frame(values, points):
         data = {

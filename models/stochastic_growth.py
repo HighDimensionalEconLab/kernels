@@ -13,7 +13,6 @@ from tinydiffeq import SaveAt, solve_sde
 
 from models.stochastic_growth_benchmark import stochastic_growth_benchmark
 from models.utilities import (
-    ACTIVATIONS,
     unit_softplus,
 )
 
@@ -456,35 +455,27 @@ def growth_initial_conditions(z_0, k_0, ic_set, dtype):
 class InvestmentPolicySettings:
     mlp_width: int = 32
     mlp_depth: int = 3
-    hidden_activation: str = "gelu"
     head_init_scale: float = 1e-3
-    homothetic_representation: bool = True
 
 
-# i = anchor * U(h), U the unit softplus with near-zero head: homothetic is
-# h(log kappa) with kappa = k / z^{1/(1-a)} the detrended capital, anchored at
-# delta * k; non-homothetic h(centered log z, log k) anchored at the constant
-# delta * k_scale; consumption Y - i stays unclamped.
+# i = delta * k_scale * U(h(log z, log k)), U the unit softplus with
+# near-zero head. Mean reversion in z fixes a scale, so h is a free gelu MLP
+# of both states anchored at the constant delta * k_scale; consumption Y - i
+# stays unclamped.
 class InvestmentPolicyNN(nnx.Module):
     def __init__(
         self,
         settings: InvestmentPolicySettings,
         *,
-        z_scale=1.0,
         k_scale=1.0,
         dtype,
         rngs: nnx.Rngs,
     ):
-        self.homothetic = nnx.static(settings.homothetic_representation)
-        self.log_z_scale = nnx.Variable(jnp.asarray(math.log(z_scale), dtype=dtype))
-        self.log_k_scale = nnx.Variable(jnp.asarray(math.log(k_scale), dtype=dtype))
         self.k_scale = nnx.Variable(jnp.asarray(k_scale, dtype=dtype))
-        self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
-        in_features = 1 if self.homothetic else 2
         self.layers = nnx.List(
             [
                 nnx.Linear(
-                    in_features,
+                    2,
                     settings.mlp_width,
                     dtype=dtype,
                     param_dtype=dtype,
@@ -513,18 +504,10 @@ class InvestmentPolicyNN(nnx.Module):
         )
 
     def __call__(self, log_state, p):
-        log_z, log_k = log_state
-        if self.homothetic:
-            h = jnp.atleast_1d(log_k - log_z / (1.0 - p.a))
-            anchor = p.delta * jnp.exp(log_k)
-        else:
-            h = jnp.stack(
-                [log_z - self.log_z_scale[...], log_k - self.log_k_scale[...]]
-            )
-            anchor = p.delta * self.k_scale[...]
+        h = log_state
         for layer in self.layers:
-            h = self.hidden_activation(layer(h))
-        return anchor * unit_softplus(self.head(h)[0])
+            h = jax.nn.gelu(layer(h))
+        return p.delta * self.k_scale[...] * unit_softplus(self.head(h)[0])
 
 
 # DrawNNXModule redraws theta but passes args through unchanged; multi-start
@@ -532,9 +515,9 @@ class InvestmentPolicyNN(nnx.Module):
 # restart_key/epoch_key here (and resetting epoch to 0) is what keeps each
 # retry's epoch-boundary resampling independent of the others.
 class DrawInvestmentPolicy:
-    def __init__(self, settings, *, z_scale, k_scale, dtype):
+    def __init__(self, settings, *, k_scale, dtype):
         self.draw_theta = DrawNNXModule(
-            InvestmentPolicyNN, settings, z_scale=z_scale, k_scale=k_scale, dtype=dtype
+            InvestmentPolicyNN, settings, k_scale=k_scale, dtype=dtype
         )
 
     def __call__(self, key, _, args):

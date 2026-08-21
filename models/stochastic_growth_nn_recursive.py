@@ -206,11 +206,7 @@ def stochastic_growth_nn_recursive(
         train_log_z_variance=CONSTANTS.z_ergodic_variance,
         train_log_k_variance=0.01,
     ),
-    # Mean reversion in z fixes a scale, so the homothetic representation is
-    # misspecified by construction for this model.
-    nn_set: InvestmentPolicySettings = InvestmentPolicySettings(
-        homothetic_representation=False
-    ),
+    nn_set: InvestmentPolicySettings = InvestmentPolicySettings(),
     lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=3.26e-5,
         damping_decrease=0.482,
@@ -257,9 +253,7 @@ def stochastic_growth_nn_recursive(
     fit_timer = Stopwatch()
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     graphdef, _, nondiff = nnx.split(
-        InvestmentPolicyNN(
-            nn_set, z_scale=z_bar, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(0)
-        ),
+        InvestmentPolicyNN(nn_set, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(0)),
         nnx.Param,
         ...,
     )
@@ -361,7 +355,7 @@ def stochastic_growth_nn_recursive(
         )
         _, theta_0, _ = nnx.split(
             InvestmentPolicyNN(
-                nn_set, z_scale=z_bar, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(init_key)
+                nn_set, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(init_key)
             ),
             nnx.Param,
             ...,
@@ -379,7 +373,7 @@ def stochastic_growth_nn_recursive(
             n_steps=n_train_steps,
             dt=train_dt,
         )
-        draw = DrawInvestmentPolicy(nn_set, z_scale=z_bar, k_scale=k_0, dtype=dtype)
+        draw = DrawInvestmentPolicy(nn_set, k_scale=k_0, dtype=dtype)
         # The per-step tolerance is sound only while the training batch never
         # changes; across epochs, convergence is judged at the boundaries
         # instead.

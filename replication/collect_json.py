@@ -1204,7 +1204,7 @@ def stochastic_growth_nn_recursive(out):
         "architecture": {
             "width": hp["nn_set"]["mlp_width"],
             "depth": hp["nn_set"]["mlp_depth"],
-            "hidden_activation": hp["nn_set"]["hidden_activation"],
+            "hidden_activation": "gelu",
             "total_params": int(med(j["total_params"])),
         },
         "stopping": hp["tolerance_set"],

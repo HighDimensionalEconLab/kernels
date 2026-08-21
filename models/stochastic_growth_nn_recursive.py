@@ -54,12 +54,16 @@ from models.utilities import (
 class ToleranceSettings:
     # max_steps is the LM-update budget per epoch; the noise realization (and
     # the training ICs when their variance is positive) is redrawn at each
-    # interior epoch boundary.
-    max_steps: int = 250
-    train_loss_threshold: float = 1e-14
+    # interior epoch boundary. An attempt can only succeed at those interior
+    # boundaries, so a failed fresh-batch gate costs the full epoch budget.
+    max_steps: int = 125
+    # The gate must sit well above the reachable fresh-batch floor (~1e-15):
+    # tighter gates make acceptance depend on the noise draw and burn whole
+    # attempts, while test-Euler quality is flat below ~5e-13.
+    train_loss_threshold: float = 5e-13
     num_attempts: int = 4
     log_tvc_threshold: float = 0.0
-    num_epochs: int = 3
+    num_epochs: int = 6
     epoch_early_stopping: bool = True
 
 

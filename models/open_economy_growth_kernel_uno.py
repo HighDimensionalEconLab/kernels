@@ -9,7 +9,12 @@ import numpy as np
 import pandas as pd
 import unopy
 
-from models.kernels import KernelSettings, integrated_kernel_matrices
+from models.kernels import (
+    IntegratedPath,
+    KernelSettings,
+    integrated_kernel_matrices,
+    integrated_kernel_paths,
+)
 from models.open_economy_growth import (
     ModelParameters,
     investment_expenditure,
@@ -39,43 +44,6 @@ def unpack(x):
     return alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets
 
 
-def path_values(x, K_eval, K_tilde_eval, p):
-    parameters_p = p["parameters"]
-    steady_p = steady_state(parameters_p)
-    output_scale_p = steady_p["output"]
-    log_consumption_scale_p = jnp.log(steady_p["g"])
-    alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets = unpack(x)
-    c_offset, mu_offset, q_offset = offsets
-    log_mu = (
-        -parameters_p.gamma * log_consumption_scale_p
-        + mu_offset
-        + K_tilde_eval @ alpha_mu
-    )
-    log_c = log_consumption_scale_p + c_offset + K_tilde_eval @ alpha_c
-    log_k = jnp.log(p["k_0"]) + K_tilde_eval @ alpha_k
-    a = p["a_0"] + output_scale_p * (K_tilde_eval @ alpha_a)
-    log_q = jnp.log(steady_p["q"]) + q_offset + K_tilde_eval @ alpha_q
-    mu = jnp.exp(log_mu)
-    c = jnp.exp(log_c)
-    k = jnp.exp(log_k)
-    q = jnp.exp(log_q)
-    dlog_mu_dt = K_eval @ alpha_mu
-    dlog_k_dt = K_eval @ alpha_k
-    da_dt = output_scale_p * (K_eval @ alpha_a)
-    dlog_q_dt = K_eval @ alpha_q
-    return (
-        k,
-        a,
-        q,
-        c,
-        mu,
-        dlog_k_dt,
-        da_dt,
-        dlog_q_dt,
-        dlog_mu_dt,
-    )
-
-
 def objective(x, K):
     alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, _ = unpack(x)
     return (
@@ -88,17 +56,34 @@ def objective(x, K):
 
 
 def constraints(x, K, K_tilde, p):
-    (
-        k,
-        a,
-        q,
-        c,
-        mu,
-        dlog_k_dt,
-        da_dt,
-        dlog_q_dt,
-        dlog_mu_dt,
-    ) = path_values(x, K, K_tilde, p)
+    parameters_p = p["parameters"]
+    steady_p = steady_state(parameters_p)
+    output_scale_p = steady_p["output"]
+    log_consumption_scale_p = jnp.log(steady_p["g"])
+    alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets = unpack(x)
+    c_offset, mu_offset, q_offset = offsets
+    paths = integrated_kernel_paths(
+        {
+            "log_mu": IntegratedPath(
+                alpha_mu, -parameters_p.gamma * log_consumption_scale_p + mu_offset
+            ),
+            "log_c": IntegratedPath(alpha_c, log_consumption_scale_p + c_offset),
+            "log_k": IntegratedPath(alpha_k, jnp.log(p["k_0"])),
+            "a_raw": IntegratedPath(alpha_a, jnp.zeros((), alpha_a.dtype)),
+            "log_q": IntegratedPath(alpha_q, jnp.log(steady_p["q"]) + q_offset),
+        },
+        K,
+        K_tilde,
+    )
+    k = jnp.exp(paths["log_k"].value)
+    a = p["a_0"] + output_scale_p * paths["a_raw"].value
+    q = jnp.exp(paths["log_q"].value)
+    c = jnp.exp(paths["log_c"].value)
+    mu = jnp.exp(paths["log_mu"].value)
+    dlog_k_dt = paths["log_k"].d_dt
+    da_dt = output_scale_p * paths["a_raw"].d_dt
+    dlog_q_dt = paths["log_q"].d_dt
+    dlog_mu_dt = paths["log_mu"].d_dt
     residuals = path_residuals(
         k,
         a,
@@ -308,17 +293,34 @@ def open_economy_growth_kernel_uno(
             kernel_set.sigma,
             kernel_set.ell,
         )
-        (
-            k,
-            a,
-            q,
-            c,
-            mu,
-            dlog_k_dt,
-            da_dt,
-            dlog_q_dt,
-            dlog_mu_dt,
-        ) = path_values(x, K_eval, K_tilde_eval, p)
+        parameters_p = p["parameters"]
+        steady_p = steady_state(parameters_p)
+        output_scale_p = steady_p["output"]
+        log_consumption_scale_p = jnp.log(steady_p["g"])
+        alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets = unpack(x)
+        c_offset, mu_offset, q_offset = offsets
+        paths = integrated_kernel_paths(
+            {
+                "log_mu": IntegratedPath(
+                    alpha_mu, -parameters_p.gamma * log_consumption_scale_p + mu_offset
+                ),
+                "log_c": IntegratedPath(alpha_c, log_consumption_scale_p + c_offset),
+                "log_k": IntegratedPath(alpha_k, jnp.log(p["k_0"])),
+                "a_raw": IntegratedPath(alpha_a, jnp.zeros((), alpha_a.dtype)),
+                "log_q": IntegratedPath(alpha_q, jnp.log(steady_p["q"]) + q_offset),
+            },
+            K_eval,
+            K_tilde_eval,
+        )
+        k = jnp.exp(paths["log_k"].value)
+        a = p["a_0"] + output_scale_p * paths["a_raw"].value
+        q = jnp.exp(paths["log_q"].value)
+        c = jnp.exp(paths["log_c"].value)
+        mu = jnp.exp(paths["log_mu"].value)
+        dlog_k_dt = paths["log_k"].d_dt
+        da_dt = output_scale_p * paths["a_raw"].d_dt
+        dlog_q_dt = paths["log_q"].d_dt
+        dlog_mu_dt = paths["log_mu"].d_dt
         z = jnp.ones_like(k)
         residuals = path_residuals(
             k,
@@ -458,7 +460,29 @@ def open_economy_growth_kernel_uno(
             kernel_set.sigma,
             kernel_set.ell,
         )
-        k, a, q, c, *_ = path_values(x, K_eval, K_tilde_eval, p)
+        parameters_p = p["parameters"]
+        steady_p = steady_state(parameters_p)
+        output_scale_p = steady_p["output"]
+        log_consumption_scale_p = jnp.log(steady_p["g"])
+        alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets = unpack(x)
+        c_offset, mu_offset, q_offset = offsets
+        paths = integrated_kernel_paths(
+            {
+                "log_mu": IntegratedPath(
+                    alpha_mu, -parameters_p.gamma * log_consumption_scale_p + mu_offset
+                ),
+                "log_c": IntegratedPath(alpha_c, log_consumption_scale_p + c_offset),
+                "log_k": IntegratedPath(alpha_k, jnp.log(p["k_0"])),
+                "a_raw": IntegratedPath(alpha_a, jnp.zeros((), alpha_a.dtype)),
+                "log_q": IntegratedPath(alpha_q, jnp.log(steady_p["q"]) + q_offset),
+            },
+            K_eval,
+            K_tilde_eval,
+        )
+        k = jnp.exp(paths["log_k"].value)
+        a = p["a_0"] + output_scale_p * paths["a_raw"].value
+        q = jnp.exp(paths["log_q"].value)
+        c = jnp.exp(paths["log_c"].value)
         return k, a, q, c
 
     results = {

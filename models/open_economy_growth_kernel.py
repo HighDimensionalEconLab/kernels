@@ -17,8 +17,10 @@ from nlls_gram import (
 )
 
 from models.kernels import (
+    IntegratedPath,
     KernelSettings,
     integrated_kernel_matrices,
+    integrated_kernel_paths,
     integrated_metric_factorization,
     rkhs_norm_squared,
 )
@@ -41,12 +43,6 @@ from models.utilities import (
 )
 
 
-class InitialValues(NamedTuple):
-    c_offset: jax.Array
-    mu_offset: jax.Array
-    q_offset: jax.Array
-
-
 # Alpha blocks first (the metric penalizes the leading flat coordinates).
 class Theta(NamedTuple):
     alpha_mu: jax.Array
@@ -54,10 +50,12 @@ class Theta(NamedTuple):
     alpha_k: jax.Array
     alpha_a: jax.Array
     alpha_q: jax.Array
-    initial: InitialValues
+    c_offset: jax.Array
+    mu_offset: jax.Array
+    q_offset: jax.Array
 
 
-def path_values(theta, K_eval, K_tilde_eval, p):
+def residual_fn(theta, args, p):
     parameters_p = p["parameters"]
     steady_p = steady_state(parameters_p)
     # The asset block is the one path with no unpenalized offset, so its
@@ -67,52 +65,33 @@ def path_values(theta, K_eval, K_tilde_eval, p):
     # normalizations are absorbed by their free offsets.
     output_scale_p = jax.lax.stop_gradient(steady_p["output"])
     log_consumption_scale_p = jnp.log(steady_p["g"])
-    log_mu = (
-        -parameters_p.gamma * log_consumption_scale_p
-        + theta.initial.mu_offset
-        + K_tilde_eval @ theta.alpha_mu
+    paths = integrated_kernel_paths(
+        {
+            "log_mu": IntegratedPath(
+                theta.alpha_mu,
+                -parameters_p.gamma * log_consumption_scale_p + theta.mu_offset,
+            ),
+            "log_c": IntegratedPath(
+                theta.alpha_c, log_consumption_scale_p + theta.c_offset
+            ),
+            "log_k": IntegratedPath(theta.alpha_k, jnp.log(p["k_0"])),
+            "a_raw": IntegratedPath(theta.alpha_a, jnp.zeros((), theta.alpha_a.dtype)),
+            "log_q": IntegratedPath(
+                theta.alpha_q, jnp.log(steady_p["q"]) + theta.q_offset
+            ),
+        },
+        args["K"],
+        args["K_tilde"],
     )
-    log_c = (
-        log_consumption_scale_p + theta.initial.c_offset + K_tilde_eval @ theta.alpha_c
-    )
-    log_k = jnp.log(p["k_0"]) + K_tilde_eval @ theta.alpha_k
-    a = p["a_0"] + output_scale_p * (K_tilde_eval @ theta.alpha_a)
-    log_q = (
-        jnp.log(steady_p["q"]) + theta.initial.q_offset + K_tilde_eval @ theta.alpha_q
-    )
-    mu = jnp.exp(log_mu)
-    c = jnp.exp(log_c)
-    k = jnp.exp(log_k)
-    q = jnp.exp(log_q)
-    dlog_mu_dt = K_eval @ theta.alpha_mu
-    dlog_k_dt = K_eval @ theta.alpha_k
-    da_dt = output_scale_p * (K_eval @ theta.alpha_a)
-    dlog_q_dt = K_eval @ theta.alpha_q
-    return (
-        k,
-        a,
-        q,
-        c,
-        mu,
-        dlog_k_dt,
-        da_dt,
-        dlog_q_dt,
-        dlog_mu_dt,
-    )
-
-
-def residual_fn(theta, args, p):
-    (
-        k,
-        a,
-        q,
-        c,
-        mu,
-        dlog_k_dt,
-        da_dt,
-        dlog_q_dt,
-        dlog_mu_dt,
-    ) = path_values(theta, args["K"], args["K_tilde"], p)
+    k = jnp.exp(paths["log_k"].value)
+    a = p["a_0"] + output_scale_p * paths["a_raw"].value
+    q = jnp.exp(paths["log_q"].value)
+    c = jnp.exp(paths["log_c"].value)
+    mu = jnp.exp(paths["log_mu"].value)
+    dlog_k_dt = paths["log_k"].d_dt
+    da_dt = output_scale_p * paths["a_raw"].d_dt
+    dlog_q_dt = paths["log_q"].d_dt
+    dlog_mu_dt = paths["log_mu"].d_dt
     residuals = path_residuals(
         k,
         a,
@@ -248,11 +227,9 @@ def open_economy_growth_kernel(
         alpha_k=jnp.zeros(n_train, dtype=dtype),
         alpha_a=jnp.zeros(n_train, dtype=dtype),
         alpha_q=jnp.zeros(n_train, dtype=dtype),
-        initial=InitialValues(
-            c_offset=jnp.zeros((), dtype=dtype),
-            mu_offset=jnp.zeros((), dtype=dtype),
-            q_offset=jnp.zeros((), dtype=dtype),
-        ),
+        c_offset=jnp.zeros((), dtype=dtype),
+        mu_offset=jnp.zeros((), dtype=dtype),
+        q_offset=jnp.zeros((), dtype=dtype),
     )
 
     if lm_set.ridge_init is None:
@@ -303,17 +280,39 @@ def open_economy_growth_kernel(
             kernel_set.sigma,
             kernel_set.ell,
         )
-        (
-            k,
-            a,
-            q,
-            c,
-            mu,
-            dlog_k_dt,
-            da_dt,
-            dlog_q_dt,
-            dlog_mu_dt,
-        ) = path_values(theta, K_eval, K_tilde_eval, p)
+        parameters_p = p["parameters"]
+        steady_p = steady_state(parameters_p)
+        output_scale_p = jax.lax.stop_gradient(steady_p["output"])
+        log_consumption_scale_p = jnp.log(steady_p["g"])
+        paths = integrated_kernel_paths(
+            {
+                "log_mu": IntegratedPath(
+                    theta.alpha_mu,
+                    -parameters_p.gamma * log_consumption_scale_p + theta.mu_offset,
+                ),
+                "log_c": IntegratedPath(
+                    theta.alpha_c, log_consumption_scale_p + theta.c_offset
+                ),
+                "log_k": IntegratedPath(theta.alpha_k, jnp.log(p["k_0"])),
+                "a_raw": IntegratedPath(
+                    theta.alpha_a, jnp.zeros((), theta.alpha_a.dtype)
+                ),
+                "log_q": IntegratedPath(
+                    theta.alpha_q, jnp.log(steady_p["q"]) + theta.q_offset
+                ),
+            },
+            K_eval,
+            K_tilde_eval,
+        )
+        k = jnp.exp(paths["log_k"].value)
+        a = p["a_0"] + output_scale_p * paths["a_raw"].value
+        q = jnp.exp(paths["log_q"].value)
+        c = jnp.exp(paths["log_c"].value)
+        mu = jnp.exp(paths["log_mu"].value)
+        dlog_k_dt = paths["log_k"].d_dt
+        da_dt = output_scale_p * paths["a_raw"].d_dt
+        dlog_q_dt = paths["log_q"].d_dt
+        dlog_mu_dt = paths["log_mu"].d_dt
         z = jnp.ones_like(k)
         residuals = path_residuals(
             k,
@@ -429,8 +428,7 @@ def open_economy_growth_kernel(
         rejection_reasons.append("train_residual")
     validation_pass = max_validation_residual <= tolerance_set.validation_residual
 
-    alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, initial = theta
-    c_offset, mu_offset, q_offset = initial
+    alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, c_offset, mu_offset, q_offset = theta
     rkhs_norm_mu = rkhs_norm_squared(alpha_mu, K)
     rkhs_norm_c = rkhs_norm_squared(alpha_c, K)
     rkhs_norm_k = rkhs_norm_squared(alpha_k, K)
@@ -449,7 +447,34 @@ def open_economy_growth_kernel(
             kernel_set.sigma,
             kernel_set.ell,
         )
-        k, a, q, c, *_ = path_values(theta, K_eval, K_tilde_eval, p)
+        parameters_p = p["parameters"]
+        steady_p = steady_state(parameters_p)
+        output_scale_p = jax.lax.stop_gradient(steady_p["output"])
+        log_consumption_scale_p = jnp.log(steady_p["g"])
+        paths = integrated_kernel_paths(
+            {
+                "log_mu": IntegratedPath(
+                    theta.alpha_mu,
+                    -parameters_p.gamma * log_consumption_scale_p + theta.mu_offset,
+                ),
+                "log_c": IntegratedPath(
+                    theta.alpha_c, log_consumption_scale_p + theta.c_offset
+                ),
+                "log_k": IntegratedPath(theta.alpha_k, jnp.log(p["k_0"])),
+                "a_raw": IntegratedPath(
+                    theta.alpha_a, jnp.zeros((), theta.alpha_a.dtype)
+                ),
+                "log_q": IntegratedPath(
+                    theta.alpha_q, jnp.log(steady_p["q"]) + theta.q_offset
+                ),
+            },
+            K_eval,
+            K_tilde_eval,
+        )
+        k = jnp.exp(paths["log_k"].value)
+        a = p["a_0"] + output_scale_p * paths["a_raw"].value
+        q = jnp.exp(paths["log_q"].value)
+        c = jnp.exp(paths["log_c"].value)
         return k, a, q, c
 
     results = {

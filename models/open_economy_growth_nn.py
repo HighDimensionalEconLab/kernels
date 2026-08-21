@@ -267,7 +267,7 @@ def open_economy_growth_nn(
     residual_parameters = ResidualParameters(
         k_0=jnp.asarray(k_0, dtype=dtype),
         a_0=jnp.asarray(a_0, dtype=dtype),
-        model=DynamicModelParameters.from_model(parameters, dtype),
+        structural=DynamicModelParameters.from_model(parameters, dtype),
     )
 
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))

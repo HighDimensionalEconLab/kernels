@@ -14,8 +14,10 @@ from nlls_gram import (
 )
 
 from models.kernels import (
+    IntegratedPath,
     KernelSettings,
     integrated_kernel_matrices,
+    integrated_kernel_paths,
     integrated_metric_factorization,
 )
 from models.utilities import (
@@ -76,14 +78,6 @@ def human_capital_initial_conditions(
     return h_0, c_0, residual, result
 
 
-class InitialValues(NamedTuple):
-    i_k_0: jax.Array
-    i_h_0: jax.Array
-    c_0: jax.Array
-    mu_k_0: jax.Array
-    mu_h_0: jax.Array
-
-
 # Alpha blocks first (the metric penalizes the leading flat coordinates).
 class Theta(NamedTuple):
     alpha_k: jax.Array
@@ -93,7 +87,11 @@ class Theta(NamedTuple):
     alpha_c: jax.Array
     alpha_mu_k: jax.Array
     alpha_mu_h: jax.Array
-    initial: InitialValues
+    i_k_0: jax.Array
+    i_h_0: jax.Array
+    c_0: jax.Array
+    mu_k_0: jax.Array
+    mu_h_0: jax.Array
 
 
 RESIDUAL_NAMES = (
@@ -105,21 +103,6 @@ RESIDUAL_NAMES = (
     "shadow_price",
     "costate_gap",
 )
-
-
-def path_values(theta, K_eval, K_tilde_eval, p):
-    k = p["k_0"] + K_tilde_eval @ theta.alpha_k
-    h = p["h_0"] + K_tilde_eval @ theta.alpha_h
-    i_k = theta.initial.i_k_0 + K_tilde_eval @ theta.alpha_i_k
-    i_h = theta.initial.i_h_0 + K_tilde_eval @ theta.alpha_i_h
-    c = theta.initial.c_0 + K_tilde_eval @ theta.alpha_c
-    mu_k = theta.initial.mu_k_0 + K_tilde_eval @ theta.alpha_mu_k
-    mu_h = theta.initial.mu_h_0 + K_tilde_eval @ theta.alpha_mu_h
-    dk_dt = K_eval @ theta.alpha_k
-    dh_dt = K_eval @ theta.alpha_h
-    dmu_k_dt = K_eval @ theta.alpha_mu_k
-    dmu_h_dt = K_eval @ theta.alpha_mu_h
-    return k, h, i_k, i_h, c, mu_k, mu_h, dk_dt, dh_dt, dmu_k_dt, dmu_h_dt
 
 
 def production_terms(k, h, p):
@@ -158,9 +141,33 @@ def residuals(values, p):
 
 
 def residual_fn(theta, args, p):
-    residual = jnp.concatenate(
-        residuals(path_values(theta, args["K"], args["K_tilde"], p), p)
+    paths = integrated_kernel_paths(
+        {
+            "k": IntegratedPath(theta.alpha_k, p["k_0"]),
+            "h": IntegratedPath(theta.alpha_h, p["h_0"]),
+            "i_k": IntegratedPath(theta.alpha_i_k, theta.i_k_0),
+            "i_h": IntegratedPath(theta.alpha_i_h, theta.i_h_0),
+            "c": IntegratedPath(theta.alpha_c, theta.c_0),
+            "mu_k": IntegratedPath(theta.alpha_mu_k, theta.mu_k_0),
+            "mu_h": IntegratedPath(theta.alpha_mu_h, theta.mu_h_0),
+        },
+        args["K"],
+        args["K_tilde"],
     )
+    values = (
+        paths["k"].value,
+        paths["h"].value,
+        paths["i_k"].value,
+        paths["i_h"].value,
+        paths["c"].value,
+        paths["mu_k"].value,
+        paths["mu_h"].value,
+        paths["k"].d_dt,
+        paths["h"].d_dt,
+        paths["mu_k"].d_dt,
+        paths["mu_h"].d_dt,
+    )
+    residual = jnp.concatenate(residuals(values, p))
     return residual / jnp.sqrt(residual.size)
 
 
@@ -257,13 +264,11 @@ def human_capital_kernel(
         alpha_c=jnp.zeros(n_train, dtype=dtype),
         alpha_mu_k=jnp.zeros(n_train, dtype=dtype),
         alpha_mu_h=jnp.zeros(n_train, dtype=dtype),
-        initial=InitialValues(
-            i_k_0=jnp.asarray(delta_k * k_0, dtype=dtype),
-            i_h_0=jnp.asarray(delta_h * h_0, dtype=dtype),
-            c_0=jnp.asarray(c_0_init, dtype=dtype),
-            mu_k_0=jnp.asarray(1.0 / c_0_init, dtype=dtype),
-            mu_h_0=jnp.asarray(1.0 / c_0_init, dtype=dtype),
-        ),
+        i_k_0=jnp.asarray(delta_k * k_0, dtype=dtype),
+        i_h_0=jnp.asarray(delta_h * h_0, dtype=dtype),
+        c_0=jnp.asarray(c_0_init, dtype=dtype),
+        mu_k_0=jnp.asarray(1.0 / c_0_init, dtype=dtype),
+        mu_h_0=jnp.asarray(1.0 / c_0_init, dtype=dtype),
     )
     solver = RidgeLevenbergMarquardt(
         residual_fn,
@@ -293,17 +298,53 @@ def human_capital_kernel(
         alpha_c,
         alpha_mu_k,
         alpha_mu_h,
-        initial,
+        i_k_0,
+        i_h_0,
+        c_0,
+        mu_k_0,
+        mu_h_0,
     ) = theta
-    i_k_0, i_h_0, c_0, mu_k_0, mu_h_0 = initial
 
     def evaluate_grid(points):
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             points, train_data, kernel, sigma, ell
         )
-        values = path_values(theta, K_eval, K_tilde_eval, p)
+        paths = integrated_kernel_paths(
+            {
+                "k": IntegratedPath(theta.alpha_k, p["k_0"]),
+                "h": IntegratedPath(theta.alpha_h, p["h_0"]),
+                "i_k": IntegratedPath(theta.alpha_i_k, theta.i_k_0),
+                "i_h": IntegratedPath(theta.alpha_i_h, theta.i_h_0),
+                "c": IntegratedPath(theta.alpha_c, theta.c_0),
+                "mu_k": IntegratedPath(theta.alpha_mu_k, theta.mu_k_0),
+                "mu_h": IntegratedPath(theta.alpha_mu_h, theta.mu_h_0),
+            },
+            K_eval,
+            K_tilde_eval,
+        )
+        k, h, i_k, i_h, c, mu_k, mu_h = (
+            paths["k"].value,
+            paths["h"].value,
+            paths["i_k"].value,
+            paths["i_h"].value,
+            paths["c"].value,
+            paths["mu_k"].value,
+            paths["mu_h"].value,
+        )
+        values = (
+            k,
+            h,
+            i_k,
+            i_h,
+            c,
+            mu_k,
+            mu_h,
+            paths["k"].d_dt,
+            paths["h"].d_dt,
+            paths["mu_k"].d_dt,
+            paths["mu_h"].d_dt,
+        )
         residual_values = residuals(values, p)
-        k, h, i_k, i_h, c, mu_k, mu_h, *_ = values
         output, f_k, f_h = production_terms(k, h, p)
         return {
             "t": points,
@@ -348,8 +389,28 @@ def human_capital_kernel(
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             points, train_data, kernel, sigma, ell
         )
-        k, h, i_k, i_h, c, mu_k, mu_h, *_ = path_values(theta, K_eval, K_tilde_eval, p)
-        return k, h, c, i_k, i_h, mu_k, mu_h
+        paths = integrated_kernel_paths(
+            {
+                "k": IntegratedPath(theta.alpha_k, p["k_0"]),
+                "h": IntegratedPath(theta.alpha_h, p["h_0"]),
+                "i_k": IntegratedPath(theta.alpha_i_k, theta.i_k_0),
+                "i_h": IntegratedPath(theta.alpha_i_h, theta.i_h_0),
+                "c": IntegratedPath(theta.alpha_c, theta.c_0),
+                "mu_k": IntegratedPath(theta.alpha_mu_k, theta.mu_k_0),
+                "mu_h": IntegratedPath(theta.alpha_mu_h, theta.mu_h_0),
+            },
+            K_eval,
+            K_tilde_eval,
+        )
+        return (
+            paths["k"].value,
+            paths["h"].value,
+            paths["c"].value,
+            paths["i_k"].value,
+            paths["i_h"].value,
+            paths["mu_k"].value,
+            paths["mu_h"].value,
+        )
 
     alpha_by_name = {
         "k": alpha_k,

@@ -11,8 +11,10 @@ import unopy
 from nlls_gram import LevenbergMarquardt
 
 from models.kernels import (
+    IntegratedPath,
     KernelSettings,
     integrated_kernel_matrices,
+    integrated_kernel_paths,
     rkhs_norm_squared,
 )
 from models.utilities import Stopwatch, acceptance_fields
@@ -48,35 +50,6 @@ def unpack(x):
         mu_k_0,
         mu_h_0,
     )
-
-
-def path_values(x, K_eval, K_tilde_eval, p):
-    (
-        alpha_k,
-        alpha_h,
-        alpha_i_k,
-        alpha_i_h,
-        alpha_c,
-        alpha_mu_k,
-        alpha_mu_h,
-        i_k_0,
-        i_h_0,
-        c_0,
-        mu_k_0,
-        mu_h_0,
-    ) = unpack(x)
-    k = p["k_0"] + K_tilde_eval @ alpha_k
-    h = p["h_0"] + K_tilde_eval @ alpha_h
-    i_k = i_k_0 + K_tilde_eval @ alpha_i_k
-    i_h = i_h_0 + K_tilde_eval @ alpha_i_h
-    c = c_0 + K_tilde_eval @ alpha_c
-    mu_k = mu_k_0 + K_tilde_eval @ alpha_mu_k
-    mu_h = mu_h_0 + K_tilde_eval @ alpha_mu_h
-    dk_dt = K_eval @ alpha_k
-    dh_dt = K_eval @ alpha_h
-    dmu_k_dt = K_eval @ alpha_mu_k
-    dmu_h_dt = K_eval @ alpha_mu_h
-    return k, h, i_k, i_h, c, mu_k, mu_h, dk_dt, dh_dt, dmu_k_dt, dmu_h_dt
 
 
 # IPOPT's interior point evaluates infeasible trial iterates, so (k, h)
@@ -116,18 +89,47 @@ def objective(x, K):
 def constraints(x, K, K_tilde, p, domain_eps):
     delta_k, delta_h, rho_hat = p["delta_k"], p["delta_h"], p["rho_hat"]
     (
-        k,
-        h,
-        i_k,
-        i_h,
-        c,
-        mu_k,
-        mu_h,
-        dk_dt,
-        dh_dt,
-        dmu_k_dt,
-        dmu_h_dt,
-    ) = path_values(x, K, K_tilde, p)
+        alpha_k,
+        alpha_h,
+        alpha_i_k,
+        alpha_i_h,
+        alpha_c,
+        alpha_mu_k,
+        alpha_mu_h,
+        i_k_0,
+        i_h_0,
+        c_0,
+        mu_k_0,
+        mu_h_0,
+    ) = unpack(x)
+    paths = integrated_kernel_paths(
+        {
+            "k": IntegratedPath(alpha_k, p["k_0"]),
+            "h": IntegratedPath(alpha_h, p["h_0"]),
+            "i_k": IntegratedPath(alpha_i_k, i_k_0),
+            "i_h": IntegratedPath(alpha_i_h, i_h_0),
+            "c": IntegratedPath(alpha_c, c_0),
+            "mu_k": IntegratedPath(alpha_mu_k, mu_k_0),
+            "mu_h": IntegratedPath(alpha_mu_h, mu_h_0),
+        },
+        K,
+        K_tilde,
+    )
+    k, h, i_k, i_h, c, mu_k, mu_h = (
+        paths["k"].value,
+        paths["h"].value,
+        paths["i_k"].value,
+        paths["i_h"].value,
+        paths["c"].value,
+        paths["mu_k"].value,
+        paths["mu_h"].value,
+    )
+    dk_dt, dh_dt, dmu_k_dt, dmu_h_dt = (
+        paths["k"].d_dt,
+        paths["h"].d_dt,
+        paths["mu_k"].d_dt,
+        paths["mu_h"].d_dt,
+    )
     f, f_k, f_h = production_terms(k, h, p, domain_eps)
     equalities = jnp.concatenate(
         [
@@ -448,19 +450,36 @@ def human_capital_kernel_uno(
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             points_data, train_data, kernel, sigma, ell
         )
-        (
-            k_values,
-            h_values,
-            i_k_values,
-            i_h_values,
-            c_values,
-            mu_k_values,
-            mu_h_values,
-            dk_values,
-            dh_values,
-            dmu_k_values,
-            dmu_h_values,
-        ) = path_values(x, K_eval, K_tilde_eval, p)
+        paths = integrated_kernel_paths(
+            {
+                "k": IntegratedPath(alpha_k, p["k_0"]),
+                "h": IntegratedPath(alpha_h, p["h_0"]),
+                "i_k": IntegratedPath(alpha_i_k, i_k_0),
+                "i_h": IntegratedPath(alpha_i_h, i_h_0),
+                "c": IntegratedPath(alpha_c, c_0),
+                "mu_k": IntegratedPath(alpha_mu_k, mu_k_0),
+                "mu_h": IntegratedPath(alpha_mu_h, mu_h_0),
+            },
+            K_eval,
+            K_tilde_eval,
+        )
+        k_values, h_values, i_k_values, i_h_values = (
+            paths["k"].value,
+            paths["h"].value,
+            paths["i_k"].value,
+            paths["i_h"].value,
+        )
+        c_values, mu_k_values, mu_h_values = (
+            paths["c"].value,
+            paths["mu_k"].value,
+            paths["mu_h"].value,
+        )
+        dk_values, dh_values, dmu_k_values, dmu_h_values = (
+            paths["k"].d_dt,
+            paths["h"].d_dt,
+            paths["mu_k"].d_dt,
+            paths["mu_h"].d_dt,
+        )
         f_values, f_k_values, f_h_values = production_terms(
             k_values, h_values, p, domain_eps
         )
@@ -520,17 +539,28 @@ def human_capital_kernel_uno(
         K_test, K_tilde_test = integrated_kernel_matrices(
             test_points_data, train_data, kernel, sigma, ell
         )
-        (
-            k_test,
-            h_test,
-            i_k_test,
-            i_h_test,
-            c_test,
-            mu_k_test,
-            mu_h_test,
-            *_,
-        ) = path_values(x, K_test, K_tilde_test, p)
-        return k_test, h_test, c_test, i_k_test, i_h_test, mu_k_test, mu_h_test
+        paths = integrated_kernel_paths(
+            {
+                "k": IntegratedPath(alpha_k, p["k_0"]),
+                "h": IntegratedPath(alpha_h, p["h_0"]),
+                "i_k": IntegratedPath(alpha_i_k, i_k_0),
+                "i_h": IntegratedPath(alpha_i_h, i_h_0),
+                "c": IntegratedPath(alpha_c, c_0),
+                "mu_k": IntegratedPath(alpha_mu_k, mu_k_0),
+                "mu_h": IntegratedPath(alpha_mu_h, mu_h_0),
+            },
+            K_test,
+            K_tilde_test,
+        )
+        return (
+            paths["k"].value,
+            paths["h"].value,
+            paths["c"].value,
+            paths["i_k"].value,
+            paths["i_h"].value,
+            paths["mu_k"].value,
+            paths["mu_h"].value,
+        )
 
     solve_time = elapsed
     solver_status = str(result.optimization_status).split(".")[-1]

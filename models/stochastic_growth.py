@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from functools import lru_cache, partial
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -11,7 +11,6 @@ from flax import nnx, struct
 from nlls_gram import DrawNNXModule
 from tinydiffeq import SaveAt, solve_sde
 
-from models.stochastic_growth_benchmark import stochastic_growth_benchmark
 from models.utilities import (
     unit_softplus,
 )
@@ -104,11 +103,6 @@ class DataSettings:
     train_tvc_T: float = STOCHASTIC_GROWTH_CONSTANTS.transversality_T
     test_T: float = STOCHASTIC_GROWTH_CONSTANTS.test_T
     policy_grid_size: int = 100
-    benchmark_z_points: int = 161
-    benchmark_k_points: int = 1201
-    benchmark_z_sd_span: float = 5.0
-    benchmark_k_lo: float = 0.4
-    benchmark_k_hi: float | None = None
 
 
 def production(z, k, p):
@@ -259,66 +253,10 @@ def log_tvc_residual(sde, policy, initial_log_states, noise, T, n_steps, p):
     return jnp.where(solution.ok, log_tvc - initial_log_tvc, jnp.inf)
 
 
-# The FD consumption policy as a simulation-compatible callable: bilinear
-# interpolation on the benchmark grid, edge-clamped, i = f - c.
-@struct.dataclass
-class FDInterpolatedPolicy:
-    log_z_grid: jax.Array
-    log_k_grid: jax.Array
-    consumption_grid: jax.Array
-
-    def __call__(self, log_state, p):
-        index_z = (log_state[0] - self.log_z_grid[0]) / (
-            self.log_z_grid[1] - self.log_z_grid[0]
-        )
-        index_k = (log_state[1] - self.log_k_grid[0]) / (
-            self.log_k_grid[1] - self.log_k_grid[0]
-        )
-        c = jax.scipy.ndimage.map_coordinates(
-            self.consumption_grid,
-            [index_z[None], index_k[None]],
-            order=1,
-            mode="nearest",
-        )[0]
-        z, k = jnp.exp(log_state)
-        return production(z, k, p) - c
-
-
-@lru_cache(maxsize=None)
-def cached_stochastic_benchmark(
-    a,
-    delta,
-    rho_hat,
-    sigma_crra,
-    eta,
-    sigma_z,
-    log_z_bar,
-    num_z_points,
-    num_k_points,
-    z_sd_span,
-    k_lo,
-    k_hi,
-):
-    return stochastic_growth_benchmark(
-        a,
-        delta,
-        rho_hat,
-        sigma_crra,
-        eta,
-        sigma_z,
-        log_z_bar=log_z_bar,
-        num_z_points=num_z_points,
-        num_k_points=num_k_points,
-        z_sd_span=z_sd_span,
-        k_lo=k_lo,
-        k_hi=k_hi,
-    )
-
-
-# Common-noise pathwise errors against the FD policy: the exogenous z path is
-# identical under both policies, so the comparison isolates the capital and
-# consumption responses.
-def add_fd_path_diagnostics(test_df, test_values, fd_values):
+# Common-noise pathwise errors against a reference policy: the exogenous z
+# path is identical under both policies, so the comparison isolates the
+# capital and consumption responses.
+def add_reference_path_diagnostics(test_df, test_values, fd_values):
     k_benchmark = np.asarray(fd_values["k"])
     c_benchmark = np.asarray(fd_values["c"])
     k_error = (np.asarray(test_values["k"]) - k_benchmark) / np.abs(k_benchmark)

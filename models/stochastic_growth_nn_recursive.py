@@ -8,7 +8,6 @@ import jax
 import jax.numpy as jnp
 import jsonargparse
 import numpy as np
-import pandas as pd
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
@@ -19,13 +18,10 @@ from models.stochastic_growth import (
 from models.stochastic_growth import (
     DataSettings,
     DrawInvestmentPolicy,
-    FDInterpolatedPolicy,
     InitialConditionSettings,
     InvestmentPolicyNN,
     InvestmentPolicySettings,
     StructuralParameters,
-    add_fd_path_diagnostics,
-    cached_stochastic_benchmark,
     euler_residuals,
     growth_initial_conditions,
     log_tvc_residual,
@@ -592,99 +588,6 @@ def stochastic_growth_nn_recursive(
         "train_tvc_T": data_set.train_tvc_T,
     }
 
-    # FD-HJBE reference: policy-grid errors on the realized state box and
-    # common-noise pathwise errors on the test trajectories.
-    fd = cached_stochastic_benchmark(
-        a,
-        delta,
-        rho_hat,
-        sigma_crra,
-        eta,
-        sigma_z,
-        math.log(z_bar),
-        data_set.benchmark_z_points,
-        data_set.benchmark_k_points,
-        data_set.benchmark_z_sd_span,
-        data_set.benchmark_k_lo,
-        data_set.benchmark_k_hi,
-    )
-    fd_policy = FDInterpolatedPolicy(
-        log_z_grid=jnp.asarray(fd["log_z_grid"], dtype=dtype),
-        log_k_grid=jnp.asarray(fd["log_k_grid"], dtype=dtype),
-        consumption_grid=jnp.asarray(fd["c"], dtype=dtype),
-    )
-    fd_solution = simulate(
-        sde,
-        fd_policy,
-        test_initial_log_states,
-        test_noise,
-        test_T,
-        n_test_steps,
-        p,
-    )
-    fd_values = trajectory_values(fd_policy, fd_solution.xs, p)
-    k_error, c_error = add_fd_path_diagnostics(test_df, test_values, fd_values)
-    results.update(
-        fd_benchmark_iterations=int(fd["iterations"]),
-        # The FD reference's own residual level in the same metric: NN-vs-FD
-        # relative errors are only interpretable down to this scale, so
-        # residuals are the headline accuracy metric whenever the NN's are
-        # smaller.
-        fd_test_euler_mean_abs=float(jnp.mean(jnp.abs(fd_values["euler_residual"]))),
-        fd_test_euler_max=float(jnp.max(jnp.abs(fd_values["euler_residual"]))),
-        test_mean_abs_k_rel_error=float(np.mean(np.abs(k_error))),
-        test_mean_abs_c_rel_error=float(np.mean(np.abs(c_error))),
-        test_max_abs_k_rel_error=float(np.max(np.abs(k_error))),
-        test_max_abs_c_rel_error=float(np.max(np.abs(c_error))),
-    )
-
-    # Policy-function comparison on the realized state box: log k grid over
-    # the observed range, z rows at the observed log z quantiles.
-    log_k_lo = float(observed_log_k.min())
-    log_k_hi = float(observed_log_k.max())
-    log_k_grid = np.linspace(log_k_lo, log_k_hi, data_set.policy_grid_size)
-    z_row_quantiles = (0.05, 0.5, 0.95)
-    z_rows = np.quantile(observed_log_z, z_row_quantiles)
-    grid_log_states = jnp.asarray(
-        np.stack(
-            [
-                np.stack(
-                    [np.full_like(log_k_grid, z_row), log_k_grid],
-                    axis=-1,
-                )
-                for z_row in z_rows
-            ]
-        ),
-        dtype=dtype,
-    )
-    grid_values = trajectory_values(policy, grid_log_states, p)
-    c_fd_grid = fd["interpolate_consumption"](
-        np.asarray(grid_log_states[..., 0]), np.asarray(grid_log_states[..., 1])
-    )
-    c_grid_error = (np.asarray(grid_values["c"]) - c_fd_grid) / np.abs(c_fd_grid)
-    policy_rows = []
-    for row, (tag, z_row) in enumerate(zip(("lo", "mid", "hi"), z_rows, strict=True)):
-        policy_rows.append(
-            pd.DataFrame(
-                {
-                    "z_tag": tag,
-                    "log_z": z_row,
-                    "z": np.exp(z_row),
-                    "k": np.exp(log_k_grid),
-                    "c_nn": np.asarray(grid_values["c"][row]),
-                    "i_nn": np.asarray(grid_values["i"][row]),
-                    "c_fd": c_fd_grid[row],
-                    "c_rel_error": c_grid_error[row],
-                    "c_abs_rel_error": np.abs(c_grid_error[row]),
-                }
-            )
-        )
-    policy_df = pd.concat(policy_rows, ignore_index=True)
-    results.update(
-        policy_mean_abs_c_rel_error=float(np.mean(np.abs(c_grid_error))),
-        policy_max_abs_c_rel_error=float(np.max(np.abs(c_grid_error))),
-    )
-
     hyperparameters = {
         "nn_set": asdict(nn_set),
         "data_set": asdict(data_set),
@@ -716,7 +619,6 @@ def stochastic_growth_nn_recursive(
         "test_initial_conditions": test_initial_conditions,
         "train_df": train_df,
         "test_df": test_df,
-        "policy_df": policy_df,
         "hyperparameters": hyperparameters,
     }
     # A cache hit loads the policy from disk instead of solving, so there is

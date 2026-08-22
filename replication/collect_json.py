@@ -1212,24 +1212,12 @@ def stochastic_growth_nn_recursive(out):
         "experiments": {
             "baseline": {
                 "frac_accepted": sig(j["frac_accepted"]),
-                "test_mean_abs_k_rel_error_median": sci(
-                    float(accepted["test_mean_abs_k_rel_error"].median())
-                ),
-                "test_mean_abs_c_rel_error_median": sci(
-                    float(accepted["test_mean_abs_c_rel_error"].median())
-                ),
-                "policy_mean_abs_c_rel_error_median": sci(
-                    float(accepted["policy_mean_abs_c_rel_error"].median())
-                ),
                 "test_euler_mean_abs_median": sci(
                     float(accepted["test_euler_mean_abs"].median())
                 ),
                 "max_test_euler_median": sci(
                     float(accepted["max_test_euler"].median())
                 ),
-                # FD-HJBE benchmark residual floor: NN-vs-FD relative errors are
-                # only interpretable down to this scale.
-                "fd_test_euler_mean_abs": sci(med(j["fd_test_euler_mean_abs"])),
                 "max_log_tvc_residual_median": sig(
                     float(accepted["max_log_tvc_residual"].median()), 4
                 ),

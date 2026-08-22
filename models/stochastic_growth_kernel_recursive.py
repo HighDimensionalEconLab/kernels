@@ -23,7 +23,7 @@ from models.stochastic_growth import (
     DataSettings,
     InitialConditionSettings,
     StructuralParameters,
-    add_fd_path_diagnostics,
+    add_reference_path_diagnostics,
     euler_residuals,
     growth_initial_conditions,
     log_tvc_residual,
@@ -409,7 +409,9 @@ def stochastic_growth_kernel_recursive(
         p,
     )
     reference_values = trajectory_values(reference_policy, reference_solution.xs, p)
-    k_error, c_error = add_fd_path_diagnostics(test_df, test_values, reference_values)
+    k_error, c_error = add_reference_path_diagnostics(
+        test_df, test_values, reference_values
+    )
 
     # Terminal transversality certificate on the training initial conditions.
     tvc_noise = sample_trajectory_noise(

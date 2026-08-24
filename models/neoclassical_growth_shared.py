@@ -343,8 +343,6 @@ def draw_initial_conditions(
     base = jnp.asarray([z_0, k_0], dtype=dtype)
     if log_z_variance == 0.0 and log_k_variance == 0.0:
         return jnp.tile(base, (num_trajectories, 1))
-    if num_trajectories < 2:
-        raise ValueError("positive log variances require at least two trajectories")
     draws = jax.random.normal(key, (num_trajectories, 2), dtype=dtype)
     # Center and standardize each column so every axis carries exactly the
     # requested population variance; a zero variance pins its axis at the base.

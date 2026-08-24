@@ -25,6 +25,7 @@ TVC_T = 200.0
 RIDGE = 1e-10  # disappearing penalty weight
 ATOL = 2e-8  # on the 1/sqrt(3n)-scaled residual norm
 GTOL = 1e-9
+INIT_DAMPING = 1e-8
 MAX_STEPS = 50
 
 t_train = jnp.linspace(0.0, TRAIN_T, N_TRAIN)
@@ -88,7 +89,9 @@ theta_0 = {
     "mu_0": jnp.asarray(c_flow**-sigma_crra),
 }
 
-solver = RidgeLevenbergMarquardt(residual_fn, metric=metric, ridge=RIDGE)
+solver = RidgeLevenbergMarquardt(
+    residual_fn, metric=metric, ridge=RIDGE, init_damping=INIT_DAMPING
+)
 start = time.perf_counter()
 result = solver.solve(
     theta_0,

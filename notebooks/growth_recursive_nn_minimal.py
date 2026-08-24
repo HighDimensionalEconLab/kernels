@@ -37,6 +37,7 @@ TVC_T = 200.0
 TVC_STEPS = 256
 MAX_STEPS = 250
 LOSS_THRESHOLD = 1e-14  # sum of squared residuals; atol is its square root
+INIT_DAMPING = 1e-8
 
 
 # U(0) = U'(0) = 1, so a near-zero head starts at its declared output scale.
@@ -131,7 +132,7 @@ def residual_fn(theta, args, p):
     return euler / jnp.sqrt(euler.size)
 
 
-solver = LevenbergMarquardt(residual_fn)
+solver = LevenbergMarquardt(residual_fn, init_damping=INIT_DAMPING)
 start = time.perf_counter()
 result = solver.solve(
     theta_0,

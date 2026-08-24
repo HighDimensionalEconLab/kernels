@@ -41,6 +41,7 @@ N_TEST = 100
 RIDGE = 1e-10  # disappearing penalty weight
 ATOL = 1e-9  # unscaled residual norm
 GTOL = 1e-13
+INIT_DAMPING = 1e-8
 MAX_STEPS = 100
 
 t_train = jnp.linspace(0.0, TRAIN_T, N_TRAIN)
@@ -137,7 +138,9 @@ args = {"K": K, "K_tilde": K_tilde, "t": t_train}
 # Flattened by sorted key: "alpha" (penalized by the metric) precedes the free "p_0".
 theta_0 = {"alpha": jnp.zeros(N_TRAIN), "p_0": jnp.zeros(())}
 
-solver = RidgeLevenbergMarquardt(residual_fn, metric=metric, ridge=RIDGE)
+solver = RidgeLevenbergMarquardt(
+    residual_fn, metric=metric, ridge=RIDGE, init_damping=INIT_DAMPING
+)
 start = time.perf_counter()
 result = solver.solve(
     theta_0,

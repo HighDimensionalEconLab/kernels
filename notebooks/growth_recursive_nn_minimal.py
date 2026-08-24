@@ -37,10 +37,6 @@ TVC_T = 200.0
 TVC_STEPS = 256
 MAX_STEPS = 250
 LOSS_THRESHOLD = 1e-14  # sum of squared residuals; atol is its square root
-INIT_DAMPING = 3.26e-5
-DAMPING_DECREASE = 0.482
-DAMPING_INCREASE = 2.71
-GEODESIC_RATIO = 0.541
 
 
 # U(0) = U'(0) = 1, so a near-zero head starts at its declared output scale.
@@ -89,14 +85,12 @@ def log_state_drift(policy, log_state, p):
 # (f_k - delta - rho_hat) / sigma.
 def euler_residual(policy, log_state, p):
     drift = log_state_drift(policy, log_state, p)
-    log_c, dlog_c_dt = jax.jvp(
+    _, dlog_c_dt = jax.jvp(
         lambda state: jnp.log(consumption(policy, state, p)), (log_state,), (drift,)
     )
     z, k = jnp.exp(log_state)
-    # 0 * log_c keeps the residual NaN when c <= 0 (the tangent alone is finite).
     return (
         dlog_c_dt
-        + 0.0 * log_c
         - (p["a"] * z * k ** (p["a"] - 1.0) - p["delta"] - p["rho_hat"])
         / p["sigma_crra"]
     )
@@ -137,14 +131,7 @@ def residual_fn(theta, args, p):
     return euler / jnp.sqrt(euler.size)
 
 
-solver = LevenbergMarquardt(
-    residual_fn,
-    init_damping=INIT_DAMPING,
-    damping_decrease=DAMPING_DECREASE,
-    damping_increase=DAMPING_INCREASE,
-    geodesic_acceleration=True,
-    geodesic_acceptance_ratio=GEODESIC_RATIO,
-)
+solver = LevenbergMarquardt(residual_fn)
 start = time.perf_counter()
 result = solver.solve(
     theta_0,

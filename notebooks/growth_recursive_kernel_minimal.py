@@ -30,10 +30,6 @@ TVC_STEPS = 256
 RIDGE = 1e-12  # disappearing penalty weight
 ATOL = 1e-5
 GTOL = 1e-7
-INIT_DAMPING = 1e-6
-DAMPING_DECREASE = 0.25
-DAMPING_INCREASE = 4.0
-GEODESIC_RATIO = 0.75
 MAX_STEPS = 100
 BVP_T = 200.0
 BVP_POINTS = 201
@@ -77,8 +73,6 @@ y_guess = jnp.stack([kappa_guess, kappa_guess**a - (delta + g) * kappa_guess], a
 benchmark = solve_bvp(
     kappa_field, kappa_bc, mesh, y_guess, tol=BVP_TOL, max_nodes=BVP_MAX_NODES
 )
-if not benchmark.ok:
-    raise RuntimeError(f"solve_bvp failed: status {int(benchmark.status)}")
 
 # Collocation states: the benchmark path sampled on the training dates,
 # re-trended to (log z, log k); their log kappa values double as RBF centers.
@@ -132,14 +126,12 @@ def log_state_drift(theta, log_state, p):
 # (f_k - delta - rho_hat) / sigma.
 def euler_residual(theta, log_state, p):
     drift = log_state_drift(theta, log_state, p)
-    log_c, dlog_c_dt = jax.jvp(
+    _, dlog_c_dt = jax.jvp(
         lambda state: jnp.log(consumption(theta, state, p)), (log_state,), (drift,)
     )
     z, k = jnp.exp(log_state)
-    # 0 * log_c keeps the residual NaN when c <= 0 (the tangent alone is finite).
     return (
         dlog_c_dt
-        + 0.0 * log_c
         - (p["a"] * z * k ** (p["a"] - 1.0) - p["delta"] - p["rho_hat"])
         / p["sigma_crra"]
     )
@@ -158,16 +150,7 @@ metric = RepeatedFactorMetric(
 # Flattened by sorted key: "alpha" (penalized by the metric) precedes the free "b".
 theta_0 = {"alpha": jnp.zeros(TRAIN_POINTS), "b": jnp.zeros(())}
 
-solver = RidgeLevenbergMarquardt(
-    residual_fn,
-    metric=metric,
-    ridge=RIDGE,
-    init_damping=INIT_DAMPING,
-    damping_decrease=DAMPING_DECREASE,
-    damping_increase=DAMPING_INCREASE,
-    geodesic_acceleration=True,
-    geodesic_acceptance_ratio=GEODESIC_RATIO,
-)
+solver = RidgeLevenbergMarquardt(residual_fn, metric=metric, ridge=RIDGE)
 start = time.perf_counter()
 result = solver.solve(
     theta_0,

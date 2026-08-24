@@ -10,10 +10,8 @@ import unopy
 from jax.flatten_util import ravel_pytree
 
 from models.kernels import (
-    IntegratedPath,
     KernelSettings,
     integrated_kernel_matrices,
-    integrated_kernel_paths,
     rkhs_norm_squared,
 )
 from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
@@ -44,29 +42,10 @@ def objective(x, args):
     )
 
 
-# The equality block is the NLLS residual (1/sqrt(3n)-scaled); the appended
-# unscaled path rows carry the bounds keeping (k, c, mu) above domain_eps
-# through the interior point's infeasible trial iterates.
 @jax.jit
 def constraints(x, args, p):
     theta = ravel_pytree(args["theta_like"])[1](x)
-    paths = integrated_kernel_paths(
-        {
-            "mu": IntegratedPath(theta.alpha_mu, theta.mu_0),
-            "c": IntegratedPath(theta.alpha_c, theta.c_0),
-            "k": IntegratedPath(theta.alpha_k, p.k_0),
-        },
-        args["K"],
-        args["K_tilde"],
-    )
-    return jnp.concatenate(
-        [
-            residual_fn(theta, args, p),
-            paths["k"].value,
-            paths["c"].value,
-            paths["mu"].value,
-        ]
-    )
+    return residual_fn(theta, args, p)
 
 
 def lagrangian(x, objective_multiplier, multipliers, args, p):
@@ -97,10 +76,6 @@ class SolverSettings:
     preset: str = "ipopt"
     max_iterations: int | None = None
     time_limit: float | None = None
-    # Domain floor for the interior point's infeasible trial iterates: the
-    # primal bounds keep (c_0, mu_0) and the path constraint rows (k, c, mu)
-    # above it.
-    domain_eps: float = 1e-6
 
 
 # Fail-fast budget for kinked production: near the basin threshold the NLP
@@ -140,7 +115,6 @@ def neoclassical_growth_kernel_uno(
         solver_set = (
             KINKED_SOLVER_SETTINGS if use_kinked_production else SolverSettings()
         )
-    domain_eps = solver_set.domain_eps
 
     kernel = kernel_set.kernel
     ell, sigma = kernel_set.ell, kernel_set.sigma
@@ -187,31 +161,11 @@ def neoclassical_growth_kernel_uno(
     }
 
     n_variables = x_initial.size
-    n_constraints = 6 * n_train
-    variable_lower_bounds = np.asarray(
-        ravel_pytree(
-            Theta(
-                alpha_mu=jnp.full(n_train, -jnp.inf),
-                alpha_c=jnp.full(n_train, -jnp.inf),
-                alpha_k=jnp.full(n_train, -jnp.inf),
-                c_0=jnp.asarray(domain_eps),
-                mu_0=jnp.asarray(domain_eps),
-            )
-        )[0]
-    )
+    n_constraints = 3 * n_train
+    variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
     variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
-    constraint_lower_bounds = np.concatenate(
-        [
-            np.zeros(3 * n_train, dtype=np.float64),
-            np.full(3 * n_train, domain_eps, dtype=np.float64),
-        ]
-    )
-    constraint_upper_bounds = np.concatenate(
-        [
-            np.zeros(3 * n_train, dtype=np.float64),
-            np.full(3 * n_train, np.inf, dtype=np.float64),
-        ]
-    )
+    constraint_lower_bounds = np.zeros(n_constraints, dtype=np.float64)
+    constraint_upper_bounds = np.zeros(n_constraints, dtype=np.float64)
 
     model = unopy.Model(
         unopy.PROBLEM_NONLINEAR,
@@ -334,7 +288,7 @@ def neoclassical_growth_kernel_uno(
     # The costate-implied MPK must sit between the two branch slopes up to
     # kink slack; violations gate acceptance under kinked production.
     def mpk_violations(df):
-        k = np.maximum(df["k"].to_numpy(), domain_eps)
+        k = df["k"].to_numpy()
         m1 = z_0 * A * a * k ** (a - 1.0)
         m2 = b_1 * m1
         implied = (

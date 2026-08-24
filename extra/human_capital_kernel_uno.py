@@ -52,15 +52,11 @@ def unpack(x):
     )
 
 
-# IPOPT's interior point evaluates infeasible trial iterates, so (k, h)
-# clamp at domain_eps.
-def production_terms(k, h, p, domain_eps):
+def production_terms(k, h, p):
     a_k, a_h = p["a_k"], p["a_h"]
-    k_positive = jnp.maximum(k, domain_eps)
-    h_positive = jnp.maximum(h, domain_eps)
-    f = (k_positive**a_k) * (h_positive**a_h)
-    f_k = a_k * (k_positive ** (a_k - 1.0)) * (h_positive**a_h)
-    f_h = a_h * (k_positive**a_k) * (h_positive ** (a_h - 1.0))
+    f = (k**a_k) * (h**a_h)
+    f_k = a_k * (k ** (a_k - 1.0)) * (h**a_h)
+    f_h = a_h * (k**a_k) * (h ** (a_h - 1.0))
     return f, f_k, f_h
 
 
@@ -86,7 +82,7 @@ def objective(x, K):
     )
 
 
-def constraints(x, K, K_tilde, p, domain_eps):
+def constraints(x, K, K_tilde, p):
     delta_k, delta_h, rho_hat = p["delta_k"], p["delta_h"], p["rho_hat"]
     (
         alpha_k,
@@ -130,8 +126,8 @@ def constraints(x, K, K_tilde, p, domain_eps):
         paths["mu_k"].d_dt,
         paths["mu_h"].d_dt,
     )
-    f, f_k, f_h = production_terms(k, h, p, domain_eps)
-    equalities = jnp.concatenate(
+    f, f_k, f_h = production_terms(k, h, p)
+    return jnp.concatenate(
         [
             dk_dt - (i_k - delta_k * k),
             dh_dt - (i_h - delta_h * h),
@@ -142,13 +138,11 @@ def constraints(x, K, K_tilde, p, domain_eps):
             mu_k - mu_h,
         ]
     )
-    positive_domains = jnp.concatenate([k, h, i_k, i_h, c, mu_k, mu_h])
-    return jnp.concatenate([equalities, positive_domains])
 
 
-def lagrangian(x, objective_multiplier, multipliers, K, K_tilde, p, domain_eps):
+def lagrangian(x, objective_multiplier, multipliers, K, K_tilde, p):
     return objective_multiplier * objective(x, K) + jnp.dot(
-        multipliers, constraints(x, K, K_tilde, p, domain_eps)
+        multipliers, constraints(x, K, K_tilde, p)
     )
 
 
@@ -183,9 +177,6 @@ class SolverSettings:
     # Acceptance is wall-clock gated: filtersqp stops (and the solve is rejected)
     # when the limit is hit, so the budget must comfortably cover the NLP size.
     time_limit: float | None = 10.0
-    # Domain floor for infeasible trial iterates: production clamps (k, h)
-    # here and the primal bounds keep the paths above it.
-    domain_eps: float = 1e-8
 
 
 def human_capital_initial_residual(params, batch):
@@ -258,7 +249,6 @@ def human_capital_kernel_uno(
     jax.config.update("jax_default_matmul_precision", "highest")
     kernel = kernel_set.kernel
     ell, sigma = kernel_set.ell, kernel_set.sigma
-    domain_eps = solver_set.domain_eps
     if data_set.train_points_list is None:
         train_data = jnp.linspace(0, data_set.train_T, data_set.train_points)
     else:
@@ -295,8 +285,7 @@ def human_capital_kernel_uno(
     n_functions = 7
     n_scalars = 5
     n_variables = n_functions * n_train + n_scalars
-    n_equalities = 7 * n_train
-    n_constraints = 14 * n_train
+    n_constraints = 7 * n_train
     x_initial = np.zeros(n_variables, dtype=np.float64)
     scalar_start = n_functions * n_train
     x_initial[scalar_start] = delta_k * k_0
@@ -309,33 +298,16 @@ def human_capital_kernel_uno(
     zero_multipliers = jnp.zeros(n_constraints, dtype=jnp.float64)
     jax.block_until_ready(objective_value(x_initial_jax, K_jax))
     jax.block_until_ready(objective_gradient(x_initial_jax, K_jax))
+    jax.block_until_ready(constraint_values(x_initial_jax, K_jax, K_tilde_jax, p))
+    jax.block_until_ready(constraint_jacobian(x_initial_jax, K_jax, K_tilde_jax, p))
     jax.block_until_ready(
-        constraint_values(x_initial_jax, K_jax, K_tilde_jax, p, domain_eps)
-    )
-    jax.block_until_ready(
-        constraint_jacobian(x_initial_jax, K_jax, K_tilde_jax, p, domain_eps)
-    )
-    jax.block_until_ready(
-        lagrangian_hessian(
-            x_initial_jax, 1.0, zero_multipliers, K_jax, K_tilde_jax, p, domain_eps
-        )
+        lagrangian_hessian(x_initial_jax, 1.0, zero_multipliers, K_jax, K_tilde_jax, p)
     )
 
     variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
     variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
-    variable_lower_bounds[scalar_start:] = domain_eps
-    constraint_lower_bounds = np.concatenate(
-        [
-            np.zeros(n_equalities, dtype=np.float64),
-            np.full(7 * n_train, domain_eps, dtype=np.float64),
-        ]
-    )
-    constraint_upper_bounds = np.concatenate(
-        [
-            np.zeros(n_equalities, dtype=np.float64),
-            np.full(7 * n_train, np.inf, dtype=np.float64),
-        ]
-    )
+    constraint_lower_bounds = np.zeros(n_constraints, dtype=np.float64)
+    constraint_upper_bounds = np.zeros(n_constraints, dtype=np.float64)
 
     model = unopy.Model(
         unopy.PROBLEM_NONLINEAR,
@@ -358,12 +330,12 @@ def human_capital_kernel_uno(
 
     def constraints_callback(x, constraint_output):
         constraint_output[:] = np.asarray(
-            constraint_values(jnp.asarray(x), K_jax, K_tilde_jax, p, domain_eps)
+            constraint_values(jnp.asarray(x), K_jax, K_tilde_jax, p)
         )
 
     def jacobian_callback(x, jacobian_output):
         jacobian_output[:] = np.asarray(
-            constraint_jacobian(jnp.asarray(x), K_jax, K_tilde_jax, p, domain_eps)
+            constraint_jacobian(jnp.asarray(x), K_jax, K_tilde_jax, p)
         ).reshape(-1)
 
     model.set_constraints(
@@ -390,7 +362,6 @@ def human_capital_kernel_uno(
                 K_jax,
                 K_tilde_jax,
                 p,
-                domain_eps,
             )
         )
         hessian_output[:] = hessian[hessian_rows, hessian_columns]
@@ -480,9 +451,7 @@ def human_capital_kernel_uno(
             paths["mu_k"].d_dt,
             paths["mu_h"].d_dt,
         )
-        f_values, f_k_values, f_h_values = production_terms(
-            k_values, h_values, p, domain_eps
-        )
+        f_values, f_k_values, f_h_values = production_terms(k_values, h_values, p)
         return {
             "t": points_data,
             "k": k_values,

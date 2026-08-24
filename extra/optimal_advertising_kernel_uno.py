@@ -61,7 +61,7 @@ def constraints(z, K, K_tilde, p):
     state, costate, shadow_price = residuals(
         x, mu, u, paths["x"].d_dt, paths["mu"].d_dt, p
     )
-    return jnp.concatenate([state, costate, shadow_price, u])
+    return jnp.concatenate([state, costate, shadow_price])
 
 
 def lagrangian(z, objective_multiplier, multipliers, K, K_tilde, p):
@@ -98,9 +98,6 @@ class SolverSettings:
     preset: str = "ipopt"
     max_iterations: int | None = None
     time_limit: float | None = None
-    # Domain floor for the interior point's infeasible trial iterates: the
-    # primal bounds keep u and the goodwill gap above it.
-    domain_eps: float = 1e-8
 
 
 def optimal_advertising_kernel_uno(
@@ -133,7 +130,7 @@ def optimal_advertising_kernel_uno(
     K_tilde_jax = jnp.asarray(K_tilde)
 
     n_variables = 3 * n_train + 2
-    n_constraints = 4 * n_train
+    n_constraints = 3 * n_train
     gamma = (beta + rho_hat) / c
     p = {
         name: jnp.asarray(value, dtype=jnp.float64)
@@ -163,20 +160,8 @@ def optimal_advertising_kernel_uno(
 
     variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
     variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
-    variable_lower_bounds[3 * n_train] = 0.0
-    variable_lower_bounds[3 * n_train + 1] = solver_set.domain_eps
-    constraint_lower_bounds = np.concatenate(
-        [
-            np.zeros(3 * n_train, dtype=np.float64),
-            np.full(n_train, solver_set.domain_eps, dtype=np.float64),
-        ]
-    )
-    constraint_upper_bounds = np.concatenate(
-        [
-            np.zeros(3 * n_train, dtype=np.float64),
-            np.full(n_train, np.inf, dtype=np.float64),
-        ]
-    )
+    constraint_lower_bounds = np.zeros(n_constraints, dtype=np.float64)
+    constraint_upper_bounds = np.zeros(n_constraints, dtype=np.float64)
 
     model = unopy.Model(
         unopy.PROBLEM_NONLINEAR,

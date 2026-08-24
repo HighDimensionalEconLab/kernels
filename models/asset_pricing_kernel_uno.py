@@ -90,19 +90,16 @@ def asset_pricing_kernel_uno(
 
     p = {"r": r, "c": c, "g": g, "x_0": x_0}
 
-    p_0_guess = float(mu_f_array(jnp.array([0.0]), c, g, r, x_0)[0])
     theta_0 = Theta(
         alpha=jnp.zeros(n_train, dtype=jnp.float64),
-        p_0=jnp.asarray(max(p_0_guess, 0.0)),
+        p_0=jnp.zeros((), dtype=jnp.float64),
     )
     x_initial, unravel = ravel_pytree(theta_0)
     args = {"K": K_jax, "K_tilde": K_tilde_jax, "t": train_data, "theta_like": theta_0}
 
     n_variables = x_initial.size
     n_constraints = n_train
-    variable_lower_bounds = np.asarray(
-        ravel_pytree(Theta(alpha=jnp.full(n_train, -jnp.inf), p_0=jnp.asarray(0.0)))[0]
-    )
+    variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
     variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
     constraint_lower_bounds = np.zeros(n_constraints, dtype=np.float64)
     constraint_upper_bounds = np.zeros(n_constraints, dtype=np.float64)
@@ -225,6 +222,8 @@ def asset_pricing_kernel_uno(
         rejection_reasons.append("nonfinite")
     if max_train_residual > tolerance_set.train_residual:
         rejection_reasons.append("train_residual")
+    if float(p_0) < 0.0:
+        rejection_reasons.append("negative_p_0")
 
     results = {
         "r": r,

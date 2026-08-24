@@ -1,0 +1,9 @@
+# Generated notebook outputs and Quarto/Jupyter intermediates.
+# The .qmd files are the source of truth; rebuild with `quarto render notebooks`.
+# Rendered .ipynb files ARE tracked (one per source .qmd) so they preview on GitHub;
+# only the HTML, Quarto intermediates, and supporting _files/ dirs stay ignored.
+/.quarto/
+.jupyter_cache/
+**/*.quarto_ipynb
+*.html
+*_files/

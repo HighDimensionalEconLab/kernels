@@ -1,0 +1,173 @@
+import time
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import unopy
+
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
+
+r = 0.1  # interest rate
+c = 0.02  # dividend flow constant
+g = -0.2  # dividend growth rate
+x_0 = 0.01  # initial dividend
+
+ELL = 10.0  # Matern-1/2 length scale
+SIGMA = 1.0  # kernel amplitude
+TRAIN_T = 40.0
+N_TRAIN = 41
+TEST_T = 50.0
+N_TEST = 100
+
+t_train = jnp.linspace(0.0, TRAIN_T, N_TRAIN)
+t_test = jnp.linspace(0.0, TEST_T, N_TEST)
+
+
+# Matern-1/2 kernel k(t, t') = sigma^2 e^{-|t - t'|/ell} with antiderivative
+# h(d) = int_0^d k = sigma^2 ell (1 - e^{-d/ell}). The integrated kernel
+# K_tilde(t_i, t_j) = int_0^{t_i} k(s, t_j) ds splits at s = t_j:
+# h(t_j) + sign(t_i - t_j) h(|t_i - t_j|), so K_tilde(0, .) = 0 pins x(0).
+def antiderivative(d):
+    return SIGMA**2 * ELL * (1.0 - jnp.exp(-d / ELL))
+
+
+def kernel_matrices(t_i, t_j):
+    s = t_i[:, None] - t_j[None, :]
+    K = SIGMA**2 * jnp.exp(-jnp.abs(s) / ELL)
+    K_tilde = antiderivative(t_j)[None, :] + jnp.sign(s) * antiderivative(jnp.abs(s))
+    return K, K_tilde
+
+
+def dividends(t):
+    return (x_0 + c / g) * jnp.exp(g * t) - c / g
+
+
+K, K_tilde = kernel_matrices(t_train, t_train)
+
+N_VARIABLES = N_TRAIN + 1
+N_CONSTRAINTS = N_TRAIN
+
+
+def unpack(x):
+    return x[:N_TRAIN], x[N_TRAIN]
+
+
+# min alpha' K alpha subject to the no-arbitrage residual p'(t) - (r p(t) - x(t))
+# vanishing at every training date, with p(t) = p_0 + K_tilde alpha and
+# p'(t) = K alpha.
+@jax.jit
+def objective(x):
+    alpha, _ = unpack(x)
+    return alpha @ K @ alpha
+
+
+@jax.jit
+def constraints(x):
+    alpha, p_0 = unpack(x)
+    price = p_0 + K_tilde @ alpha
+    return K @ alpha - (r * price - dividends(t_train))
+
+
+def lagrangian(x, objective_multiplier, multipliers):
+    return objective_multiplier * objective(x) + multipliers @ constraints(x)
+
+
+objective_gradient = jax.jit(jax.grad(objective))
+constraint_jacobian = jax.jit(jax.jacfwd(constraints))
+lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
+
+# Interior-point NLP: dense Jacobian and lower-triangle Lagrangian Hessian
+# callbacks.
+variable_lower_bounds = np.full(N_VARIABLES, -np.inf)
+variable_upper_bounds = np.full(N_VARIABLES, np.inf)
+model = unopy.Model(
+    unopy.PROBLEM_QUADRATIC,
+    N_VARIABLES,
+    variable_lower_bounds,
+    variable_upper_bounds,
+    unopy.ZERO_BASED_INDEXING,
+)
+
+
+def objective_callback(x):
+    return float(objective(jnp.asarray(x)))
+
+
+def objective_gradient_callback(x, gradient):
+    gradient[:] = np.asarray(objective_gradient(jnp.asarray(x)))
+
+
+model.set_objective(unopy.MINIMIZE, objective_callback, objective_gradient_callback)
+
+jacobian_rows = np.repeat(np.arange(N_CONSTRAINTS, dtype=np.int32), N_VARIABLES)
+jacobian_columns = np.tile(np.arange(N_VARIABLES, dtype=np.int32), N_CONSTRAINTS)
+
+
+def constraints_callback(x, constraint_output):
+    constraint_output[:] = np.asarray(constraints(jnp.asarray(x)))
+
+
+def jacobian_callback(x, jacobian_output):
+    jacobian_output[:] = np.asarray(constraint_jacobian(jnp.asarray(x))).reshape(-1)
+
+
+model.set_constraints(
+    N_CONSTRAINTS,
+    constraints_callback,
+    np.zeros(N_CONSTRAINTS),
+    np.zeros(N_CONSTRAINTS),
+    len(jacobian_rows),
+    jacobian_rows,
+    jacobian_columns,
+    jacobian_callback,
+)
+
+hessian_rows, hessian_columns = (
+    idx.astype(np.int32) for idx in np.tril_indices(N_VARIABLES)
+)
+
+
+def hessian_callback(x, objective_multiplier, multipliers, hessian_output):
+    hessian = np.asarray(
+        lagrangian_hessian(
+            jnp.asarray(x), float(objective_multiplier), jnp.asarray(multipliers)
+        )
+    )
+    hessian_output[:] = hessian[hessian_rows, hessian_columns]
+
+
+model.set_lagrangian_hessian(
+    len(hessian_rows),
+    unopy.LOWER_TRIANGLE,
+    hessian_rows,
+    hessian_columns,
+    hessian_callback,
+)
+model.set_lagrangian_sign_convention(unopy.MULTIPLIER_POSITIVE)
+model.set_initial_primal_iterate(np.zeros(N_VARIABLES))
+
+solver = unopy.UnoSolver()
+solver.set_preset("ipopt")
+solver.set_option("logger", "SILENT")
+solver.set_option("print_solution", False)
+
+start = time.perf_counter()
+result = solver.optimize(model)
+solve_time = time.perf_counter() - start
+
+x = jnp.asarray(np.array(result.primal_solution))
+alpha, p_0 = unpack(x)
+
+K_test, K_tilde_test = kernel_matrices(t_test, t_train)
+price_test = p_0 + K_tilde_test @ alpha
+test_residual = K_test @ alpha - (r * price_test - dividends(t_test))
+
+# Closed-form fundamental (no-bubble) price.
+price_fundamental = (x_0 + c / g) * jnp.exp(g * t_test) / (r - g) - c / (g * r)
+rel_error = jnp.abs(price_test - price_fundamental) / price_fundamental
+
+print(f"solve: {result.solution_status.name} in {solve_time:.2f}s (incl. jit)")
+print(f"p_0 = {float(p_0):.6f}")
+print(f"max |test residual|: {float(jnp.max(jnp.abs(test_residual))):.3e}")
+print(f"max rel error vs fundamental: {float(jnp.max(rel_error)):.3e}")

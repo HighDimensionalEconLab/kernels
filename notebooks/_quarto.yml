@@ -1,0 +1,16 @@
+# Quarto project for the annotated notebooks. Shared config lives here so each
+# .qmd front-matter stays minimal. Render the whole directory with
+# `quarto render notebooks` or a single file with
+# `quarto render notebooks/<name>.qmd`.
+project:
+  type: default
+  render:
+    - "*.qmd" # source notebooks only; the generated .ipynb are outputs
+
+execute:
+  cache: true # solve once, reuse on re-render
+
+format:
+  html: default
+  ipynb:
+    html-table-processing: none

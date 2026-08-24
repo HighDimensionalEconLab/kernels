@@ -6,7 +6,7 @@ import jsonargparse
 import numpy as np
 
 from models import neoclassical_growth_nn
-from models.neoclassical_growth import KINKED_CALIBRATION, kinked_thresholds
+from models.neoclassical_growth_shared import KINKED_CALIBRATION, kinked_thresholds
 from replication.utilities import (
     classify_path_basin,
     configure_process,

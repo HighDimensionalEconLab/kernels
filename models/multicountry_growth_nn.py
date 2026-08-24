@@ -16,7 +16,7 @@ from nlls_gram import (
     MultiStart,
 )
 
-from models.multicountry_growth import (
+from models.multicountry_growth_shared import (
     InitialConditionSettings,
     MulticountryParameters,
     MulticountryParameterValues,

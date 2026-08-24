@@ -11,7 +11,7 @@ from models.kernels import (
     integrated_kernel_matrices,
     integrated_kernel_paths,
 )
-from models.neoclassical_growth import neoclassical_steady_state_sensitivities
+from models.neoclassical_growth_shared import neoclassical_steady_state_sensitivities
 from replication.neoclassical_growth_kernel import PREFIX, SOLVER
 from replication.utilities import (
     configure_process,

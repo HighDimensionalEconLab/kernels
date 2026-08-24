@@ -10,12 +10,12 @@ import pandas as pd
 from nlls_gram import LMStatus, RidgeLevenbergMarquardt
 
 from models.kernels import integrated_kernel_matrices
-from models.multicountry_growth import (
+from models.multicountry_growth_kernel import path_coordinates
+from models.multicountry_growth_shared import (
     sensitivity_fields_frame,
     sensitivity_observable_labels,
     sensitivity_observables,
 )
-from models.multicountry_growth_kernel import path_coordinates
 from replication.multicountry_growth_kernel import (
     LARGE_COUNTRY_PARAMETERS,
     PREFIX,

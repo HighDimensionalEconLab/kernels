@@ -8,8 +8,16 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 import unopy
+from jax.flatten_util import ravel_pytree
 
 from models.asset_pricing_benchmark import mu_f_array
+from models.asset_pricing_shared import (
+    DataSettings,
+    Theta,
+    ToleranceSettings,
+    dividends,
+    residual_fn,
+)
 from models.kernels import (
     IntegratedPath,
     KernelSettings,
@@ -17,40 +25,26 @@ from models.kernels import (
     integrated_kernel_paths,
     rkhs_norm_squared,
 )
-from models.utilities import Stopwatch, acceptance_fields
-
-ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
+from models.utilities import Stopwatch, acceptance_fields, make_train_t_grid
 
 
-def unpack(x):
-    n_train = x.shape[0] - 1
-    alpha = x[:n_train]
-    p_0 = x[n_train]
-    return alpha, p_0
-
-
-def dividends(t, p):
-    return (p["x_0"] + p["c"] / p["g"]) * jnp.exp(p["g"] * t) - p["c"] / p["g"]
+# The theta template in args maps IPOPT's flat float64 vector back to the
+# NLLS Theta; ravel_pytree's splits are static under jit.
+@jax.jit
+def objective(x, args):
+    theta = ravel_pytree(args["theta_like"])[1](x)
+    return rkhs_norm_squared(theta.alpha, args["K"])
 
 
 @jax.jit
-def objective(x, K):
-    alpha, _ = unpack(x)
-    return alpha @ K @ alpha
+def constraints(x, args, p):
+    theta = ravel_pytree(args["theta_like"])[1](x)
+    return residual_fn(theta, args, p)
 
 
-# No-arbitrage residual dp/dt = r p - x along the dividend path.
-@jax.jit
-def constraints(x, K, K_tilde, t, p):
-    alpha, p_0 = unpack(x)
-    paths = integrated_kernel_paths({"price": IntegratedPath(alpha, p_0)}, K, K_tilde)
-    price, dprice_dt = paths["price"]
-    return dprice_dt - (p["r"] * price - dividends(t, p))
-
-
-def lagrangian(x, objective_multiplier, multipliers, K, K_tilde, t, p):
-    return objective_multiplier * objective(x, K) + jnp.dot(
-        multipliers, constraints(x, K, K_tilde, t, p)
+def lagrangian(x, objective_multiplier, multipliers, args, p):
+    return objective_multiplier * objective(x, args) + jnp.dot(
+        multipliers, constraints(x, args, p)
     )
 
 
@@ -59,20 +53,6 @@ def lagrangian(x, objective_multiplier, multipliers, K, K_tilde, t, p):
 objective_gradient = jax.jit(jax.grad(objective))
 constraint_jacobian = jax.jit(jax.jacfwd(constraints))
 lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
-
-
-@dataclass(frozen=True)
-class DataSettings:
-    train_T: float = 40.0
-    train_points: int = 41
-    train_points_list: list[float] | None = None
-    test_T: float = 50.0
-    test_points: int = 100
-
-
-@dataclass(frozen=True)
-class ToleranceSettings:
-    train_residual: float = 1e-8
 
 
 @dataclass(frozen=True)
@@ -98,48 +78,32 @@ def asset_pricing_kernel_uno(
     jax.config.update("jax_default_matmul_precision", "highest")
     kernel = kernel_set.kernel
     ell, sigma = kernel_set.ell, kernel_set.sigma
-    if data_set.train_points_list is None:
-        train_data = jnp.linspace(
-            0, data_set.train_T, data_set.train_points, dtype=jnp.float64
-        )
-    else:
-        train_data = jnp.array(data_set.train_points_list, dtype=jnp.float64)
+    train_data = make_train_t_grid(data_set, jnp.float64)
     test_data = jnp.linspace(
         0, data_set.test_T, data_set.test_points, dtype=jnp.float64
     )
 
     n_train = len(train_data)
     K, K_tilde = integrated_kernel_matrices(train_data, train_data, kernel, sigma, ell)
-    K = np.asarray((K + K.T) / 2)
-    K_tilde = np.asarray(K_tilde)
-    K_jax = jnp.asarray(K)
+    K_jax = (K + K.T) / 2
     K_tilde_jax = jnp.asarray(K_tilde)
 
     p = {"r": r, "c": c, "g": g, "x_0": x_0}
 
-    n_variables = n_train + 1
-    n_constraints = n_train
     p_0_guess = float(mu_f_array(jnp.array([0.0]), c, g, r, x_0)[0])
-    x_initial = np.zeros(n_variables, dtype=np.float64)
-    x_initial[n_train] = max(p_0_guess, 0.0)
-
-    x_initial_jax = jnp.asarray(x_initial)
-    zero_multipliers = jnp.zeros(n_constraints, dtype=jnp.float64)
-    jax.block_until_ready(objective(x_initial_jax, K_jax))
-    jax.block_until_ready(objective_gradient(x_initial_jax, K_jax))
-    jax.block_until_ready(constraints(x_initial_jax, K_jax, K_tilde_jax, train_data, p))
-    jax.block_until_ready(
-        constraint_jacobian(x_initial_jax, K_jax, K_tilde_jax, train_data, p)
+    theta_0 = Theta(
+        alpha=jnp.zeros(n_train, dtype=jnp.float64),
+        p_0=jnp.asarray(max(p_0_guess, 0.0)),
     )
-    jax.block_until_ready(
-        lagrangian_hessian(
-            x_initial_jax, 1.0, zero_multipliers, K_jax, K_tilde_jax, train_data, p
-        )
-    )
+    x_initial, unravel = ravel_pytree(theta_0)
+    args = {"K": K_jax, "K_tilde": K_tilde_jax, "t": train_data, "theta_like": theta_0}
 
-    variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
+    n_variables = x_initial.size
+    n_constraints = n_train
+    variable_lower_bounds = np.asarray(
+        ravel_pytree(Theta(alpha=jnp.full(n_train, -jnp.inf), p_0=jnp.asarray(0.0)))[0]
+    )
     variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
-    variable_lower_bounds[n_train] = 0.0
     constraint_lower_bounds = np.zeros(n_constraints, dtype=np.float64)
     constraint_upper_bounds = np.zeros(n_constraints, dtype=np.float64)
 
@@ -152,10 +116,10 @@ def asset_pricing_kernel_uno(
     )
 
     def objective_callback(x):
-        return float(objective(jnp.asarray(x), K_jax))
+        return float(objective(jnp.asarray(x), args))
 
     def objective_gradient_callback(x, gradient):
-        gradient[:] = np.asarray(objective_gradient(jnp.asarray(x), K_jax))
+        gradient[:] = np.asarray(objective_gradient(jnp.asarray(x), args))
 
     model.set_objective(unopy.MINIMIZE, objective_callback, objective_gradient_callback)
 
@@ -163,13 +127,11 @@ def asset_pricing_kernel_uno(
     jacobian_columns = np.tile(np.arange(n_variables, dtype=np.int32), n_constraints)
 
     def constraints_callback(x, constraint_output):
-        constraint_output[:] = np.asarray(
-            constraints(jnp.asarray(x), K_jax, K_tilde_jax, train_data, p)
-        )
+        constraint_output[:] = np.asarray(constraints(jnp.asarray(x), args, p))
 
     def jacobian_callback(x, jacobian_output):
         jacobian_output[:] = np.asarray(
-            constraint_jacobian(jnp.asarray(x), K_jax, K_tilde_jax, train_data, p)
+            constraint_jacobian(jnp.asarray(x), args, p)
         ).reshape(-1)
 
     model.set_constraints(
@@ -193,9 +155,7 @@ def asset_pricing_kernel_uno(
                 jnp.asarray(x),
                 float(objective_multiplier),
                 jnp.asarray(multipliers),
-                K_jax,
-                K_tilde_jax,
-                train_data,
+                args,
                 p,
             )
         )
@@ -209,7 +169,7 @@ def asset_pricing_kernel_uno(
         hessian_callback,
     )
     model.set_lagrangian_sign_convention(unopy.MULTIPLIER_POSITIVE)
-    model.set_initial_primal_iterate(x_initial)
+    model.set_initial_primal_iterate(np.asarray(x_initial))
 
     solver = unopy.UnoSolver()
     solver.set_preset(solver_set.preset)
@@ -227,9 +187,14 @@ def asset_pricing_kernel_uno(
 
     # primal_solution appends solver-internal auxiliaries; only the leading
     # n + 1 block is ours.
-    x = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))[:n_variables]
-    alpha, p_0 = unpack(x)
-    train_residual = constraints(x, K_jax, K_tilde_jax, train_data, p)
+    x = np.array(result.primal_solution, dtype=np.float64)[:n_variables]
+    theta = unravel(jnp.asarray(x))
+    alpha, p_0 = theta.alpha, theta.p_0
+    paths = integrated_kernel_paths(
+        {"price": IntegratedPath(theta.alpha, theta.p_0)}, K_jax, K_tilde_jax
+    )
+    p_train, dp_train = paths["price"]
+    train_residual = dp_train - (r * p_train - dividends(train_data, p))
     max_train_residual = float(jnp.max(jnp.abs(train_residual)))
 
     @jax.jit
@@ -238,7 +203,7 @@ def asset_pricing_kernel_uno(
             test_points_data, train_data, kernel, sigma, ell
         )
         paths = integrated_kernel_paths(
-            {"price": IntegratedPath(alpha, p_0)}, K_test, K_tilde_test
+            {"price": IntegratedPath(theta.alpha, theta.p_0)}, K_test, K_tilde_test
         )
         return paths["price"].value, paths["price"].d_dt
 
@@ -254,7 +219,7 @@ def asset_pricing_kernel_uno(
     rejection_reasons = []
     if solver_status != "SUCCESS":
         rejection_reasons.append("solver_status")
-    if solution_status not in ACCEPTED_SOLUTION_STATUSES:
+    if solution_status not in {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}:
         rejection_reasons.append("solution_status")
     if not finite:
         rejection_reasons.append("nonfinite")
@@ -274,7 +239,7 @@ def asset_pricing_kernel_uno(
         "test_T": data_set.test_T,
         "test_points": data_set.test_points,
         "p_0": float(p_0),
-        "rkhs_norm_p": float(rkhs_norm_squared(alpha, K)),
+        "rkhs_norm_p": float(rkhs_norm_squared(alpha, K_jax)),
         "max_train_residual": max_train_residual,
         "max_test_residual": float(jnp.max(jnp.abs(test_residual))),
         # min/max error statistics exclude the pinned t = 0 point ([1:]).
@@ -291,10 +256,6 @@ def asset_pricing_kernel_uno(
         f"E(|rel_error(p)|) = {results['p_rel_error_mean']:.3e}"
     )
 
-    paths = integrated_kernel_paths(
-        {"price": IntegratedPath(alpha, p_0)}, K_jax, K_tilde_jax
-    )
-    p_train, dp_train = paths["price"]
     train_df = pd.DataFrame(
         {
             "t": np.asarray(train_data),

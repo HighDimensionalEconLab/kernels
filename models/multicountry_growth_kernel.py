@@ -26,7 +26,11 @@ from models.kernels import (
     integrated_metric_factorization,
     rkhs_norm_squared,
 )
-from models.multicountry_growth import (
+from models.multicountry_growth_preconditioner import (
+    ArrowWoodburyCallback,
+    build_arrow_woodbury,
+)
+from models.multicountry_growth_shared import (
     InitialConditionSettings,
     MulticountryParameters,
     draw_initial_conditions,
@@ -41,10 +45,6 @@ from models.multicountry_growth import (
     tail_diagnostics,
     tvc_diagnostics,
     validate_initial_conditions,
-)
-from models.multicountry_growth_preconditioner import (
-    ArrowWoodburyCallback,
-    build_arrow_woodbury,
 )
 from models.utilities import (
     Stopwatch,

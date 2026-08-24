@@ -14,10 +14,11 @@ from jax.flatten_util import ravel_pytree
 from nlls_gram import DrawNNXModule, LevenbergMarquardt, LMAction, LMStatus, MultiStart
 from tinydiffeq import RK4, ConstantStepSize, IController, SaveAt, Tsit5, solve_ode
 
-from models.neoclassical_growth import (
+from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
+from models.neoclassical_growth_shared import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
-from models.neoclassical_growth import (
+from models.neoclassical_growth_shared import (
     InitialConditionSettings,
     RecursiveParameters,
     euler_residuals,
@@ -27,7 +28,6 @@ from models.neoclassical_growth import (
     simulate,
     trajectory_values,
 )
-from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,

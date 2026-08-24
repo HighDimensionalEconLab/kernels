@@ -3,7 +3,7 @@ from __future__ import annotations
 import jsonargparse
 
 from models import open_economy_growth_kernel_uno
-from models.open_economy_growth import ModelParameters, steady_state
+from models.open_economy_growth_shared import ModelParameters, steady_state
 from replication.utilities import (
     configure_process,
     ensemble,

@@ -16,10 +16,11 @@ from models.kernels import (
     rkhs_norm_squared,
     state_features,
 )
-from models.neoclassical_growth import (
+from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
+from models.neoclassical_growth_shared import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
-from models.neoclassical_growth import (
+from models.neoclassical_growth_shared import (
     InitialConditionSettings,
     RecursiveParameters,
     euler_residuals,
@@ -28,7 +29,6 @@ from models.neoclassical_growth import (
     simulate,
     trajectory_values,
 )
-from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,

@@ -7,7 +7,7 @@ import jsonargparse
 import numpy as np
 
 from models import multicountry_growth_kernel
-from models.multicountry_growth import (
+from models.multicountry_growth_shared import (
     InitialConditionSettings,
     MulticountryParameters,
     draw_initial_conditions,

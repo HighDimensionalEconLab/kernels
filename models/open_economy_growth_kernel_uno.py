@@ -8,118 +8,58 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 import unopy
+from jax.flatten_util import ravel_pytree
 
 from models.kernels import (
-    IntegratedPath,
     KernelSettings,
     integrated_kernel_matrices,
-    integrated_kernel_paths,
+    rkhs_norm_squared,
 )
-from models.open_economy_growth import (
+from models.open_economy_growth_benchmark import open_economy_growth_benchmark
+from models.open_economy_growth_shared import (
+    DataSettings,
     ModelParameters,
-    investment_expenditure,
+    Theta,
+    evaluate_grid,
     model_parameter_values,
-    path_residuals,
     present_value_gap,
-    production,
+    residual_fn,
     steady_state,
     tail_diagnostics,
     tvc_diagnostics,
 )
-from models.open_economy_growth_benchmark import open_economy_growth_benchmark
-from models.open_economy_growth_kernel import DataSettings
 from models.utilities import Stopwatch, acceptance_fields, make_sampled_train_grid
 
-ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
 
-
-def unpack(x):
-    n_train = (x.shape[0] - 3) // 5
-    alpha_mu = x[:n_train]
-    alpha_c = x[n_train : 2 * n_train]
-    alpha_k = x[2 * n_train : 3 * n_train]
-    alpha_a = x[3 * n_train : 4 * n_train]
-    alpha_q = x[4 * n_train : 5 * n_train]
-    offsets = x[5 * n_train :]
-    return alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets
-
-
-def objective(x, K):
-    alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, _ = unpack(x)
+# The theta template in args maps IPOPT's flat float64 vector back to the
+# NLLS Theta; ravel_pytree's splits are static under jit.
+@jax.jit
+def objective(x, args):
+    theta = ravel_pytree(args["theta_like"])[1](x)
     return (
-        alpha_mu @ K @ alpha_mu
-        + alpha_c @ K @ alpha_c
-        + alpha_k @ K @ alpha_k
-        + alpha_a @ K @ alpha_a
-        + alpha_q @ K @ alpha_q
+        rkhs_norm_squared(theta.alpha_mu, args["K"])
+        + rkhs_norm_squared(theta.alpha_c, args["K"])
+        + rkhs_norm_squared(theta.alpha_k, args["K"])
+        + rkhs_norm_squared(theta.alpha_a, args["K"])
+        + rkhs_norm_squared(theta.alpha_q, args["K"])
     )
 
 
-def constraints(x, K, K_tilde, p):
-    parameters_p = p["parameters"]
-    steady_p = steady_state(parameters_p)
-    output_scale_p = steady_p["output"]
-    log_consumption_scale_p = jnp.log(steady_p["g"])
-    alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets = unpack(x)
-    c_offset, mu_offset, q_offset = offsets
-    paths = integrated_kernel_paths(
-        {
-            "log_mu": IntegratedPath(
-                alpha_mu, -parameters_p.gamma * log_consumption_scale_p + mu_offset
-            ),
-            "log_c": IntegratedPath(alpha_c, log_consumption_scale_p + c_offset),
-            "log_k": IntegratedPath(alpha_k, jnp.log(p["k_0"])),
-            "a_raw": IntegratedPath(alpha_a, jnp.zeros((), alpha_a.dtype)),
-            "log_q": IntegratedPath(alpha_q, jnp.log(steady_p["q"]) + q_offset),
-        },
-        K,
-        K_tilde,
-    )
-    k = jnp.exp(paths["log_k"].value)
-    a = p["a_0"] + output_scale_p * paths["a_raw"].value
-    q = jnp.exp(paths["log_q"].value)
-    c = jnp.exp(paths["log_c"].value)
-    mu = jnp.exp(paths["log_mu"].value)
-    dlog_k_dt = paths["log_k"].d_dt
-    da_dt = output_scale_p * paths["a_raw"].d_dt
-    dlog_q_dt = paths["log_q"].d_dt
-    dlog_mu_dt = paths["log_mu"].d_dt
-    residuals = path_residuals(
-        k,
-        a,
-        q,
-        c,
-        mu,
-        jnp.ones_like(k),
-        dlog_k_dt,
-        da_dt,
-        dlog_q_dt,
-        dlog_mu_dt,
-        p["parameters"],
-    )
-    residual_scale = 1.0 / jnp.sqrt(5.0 * k.shape[0])
-    return residual_scale * jnp.concatenate(
-        [
-            residuals["capital"],
-            residuals["assets"],
-            residuals["tobin_q"],
-            residuals["marginal_wealth"],
-            residuals["consumption_foc"],
-        ]
-    )
+@jax.jit
+def constraints(x, args, p):
+    theta = ravel_pytree(args["theta_like"])[1](x)
+    return residual_fn(theta, args, p)
 
 
-def lagrangian(x, objective_multiplier, multipliers, K, K_tilde, p):
-    return objective_multiplier * objective(x, K) + jnp.dot(
-        multipliers, constraints(x, K, K_tilde, p)
+def lagrangian(x, objective_multiplier, multipliers, args, p):
+    return objective_multiplier * objective(x, args) + jnp.dot(
+        multipliers, constraints(x, args, p)
     )
 
 
 # Module level: per-call grad/jacfwd/hessian closures would retrace on
 # every solve.
-objective_value = jax.jit(objective)
 objective_gradient = jax.jit(jax.grad(objective))
-constraint_values = jax.jit(constraints)
 constraint_jacobian = jax.jit(jax.jacfwd(constraints))
 lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
 
@@ -176,25 +116,29 @@ def open_economy_growth_kernel_uno(
     )
     K = (K + K.T) / 2.0
 
-    n_variables = 5 * n_train + 3
-    n_constraints = 5 * n_train
     p = {
         "parameters": model_parameter_values(parameters),
         "k_0": jnp.asarray(k_0, dtype=jnp.float64),
         "a_0": jnp.asarray(a_0, dtype=jnp.float64),
     }
 
-    x_initial = np.zeros(n_variables, dtype=np.float64)
-    x_initial_jax = jnp.asarray(x_initial)
-    zero_multipliers = jnp.zeros(n_constraints, dtype=jnp.float64)
-    jax.block_until_ready(objective_value(x_initial_jax, K))
-    jax.block_until_ready(objective_gradient(x_initial_jax, K))
-    jax.block_until_ready(constraint_values(x_initial_jax, K, K_tilde, p))
-    jax.block_until_ready(constraint_jacobian(x_initial_jax, K, K_tilde, p))
-    jax.block_until_ready(
-        lagrangian_hessian(x_initial_jax, 1.0, zero_multipliers, K, K_tilde, p)
+    # The zero coordinate contains no saddle-path or present-value information:
+    # it is flat in the derivative RKHS at the model's scale normalizations.
+    theta_0 = Theta(
+        alpha_mu=jnp.zeros(n_train, dtype=jnp.float64),
+        alpha_c=jnp.zeros(n_train, dtype=jnp.float64),
+        alpha_k=jnp.zeros(n_train, dtype=jnp.float64),
+        alpha_a=jnp.zeros(n_train, dtype=jnp.float64),
+        alpha_q=jnp.zeros(n_train, dtype=jnp.float64),
+        c_offset=jnp.zeros((), dtype=jnp.float64),
+        mu_offset=jnp.zeros((), dtype=jnp.float64),
+        q_offset=jnp.zeros((), dtype=jnp.float64),
     )
+    x_initial, unravel = ravel_pytree(theta_0)
+    args = {"K": K, "K_tilde": K_tilde, "theta_like": theta_0}
 
+    n_variables = x_initial.size
+    n_constraints = 5 * n_train
     variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
     variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
     constraint_lower_bounds = np.zeros(n_constraints, dtype=np.float64)
@@ -208,10 +152,10 @@ def open_economy_growth_kernel_uno(
     )
 
     def objective_callback(x):
-        return float(objective_value(jnp.asarray(x), K))
+        return float(objective(jnp.asarray(x), args))
 
     def objective_gradient_callback(x, gradient):
-        gradient[:] = np.asarray(objective_gradient(jnp.asarray(x), K))
+        gradient[:] = np.asarray(objective_gradient(jnp.asarray(x), args))
 
     model.set_objective(unopy.MINIMIZE, objective_callback, objective_gradient_callback)
 
@@ -219,13 +163,11 @@ def open_economy_growth_kernel_uno(
     jacobian_columns = np.tile(np.arange(n_variables, dtype=np.int32), n_constraints)
 
     def constraints_callback(x, constraint_output):
-        constraint_output[:] = np.asarray(
-            constraint_values(jnp.asarray(x), K, K_tilde, p)
-        )
+        constraint_output[:] = np.asarray(constraints(jnp.asarray(x), args, p))
 
     def jacobian_callback(x, jacobian_output):
         jacobian_output[:] = np.asarray(
-            constraint_jacobian(jnp.asarray(x), K, K_tilde, p)
+            constraint_jacobian(jnp.asarray(x), args, p)
         ).reshape(-1)
 
     model.set_constraints(
@@ -249,8 +191,7 @@ def open_economy_growth_kernel_uno(
                 jnp.asarray(x),
                 float(objective_multiplier),
                 jnp.asarray(multipliers),
-                K,
-                K_tilde,
+                args,
                 p,
             )
         )
@@ -264,7 +205,7 @@ def open_economy_growth_kernel_uno(
         hessian_callback,
     )
     model.set_lagrangian_sign_convention(unopy.MULTIPLIER_POSITIVE)
-    model.set_initial_primal_iterate(x_initial)
+    model.set_initial_primal_iterate(np.asarray(x_initial))
 
     solver = unopy.UnoSolver()
     solver.set_preset(solver_set.preset)
@@ -283,75 +224,12 @@ def open_economy_growth_kernel_uno(
     elapsed = timer.elapsed()
     # primal_solution appends solver-internal auxiliaries; only the leading
     # primal block is the solution.
-    x = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))[:n_variables]
+    x = np.array(result.primal_solution, dtype=np.float64)[:n_variables]
+    theta = unravel(jnp.asarray(x))
 
-    def evaluate_grid(points):
-        K_eval, K_tilde_eval = integrated_kernel_matrices(
-            points,
-            train_data,
-            kernel,
-            kernel_set.sigma,
-            kernel_set.ell,
-        )
-        parameters_p = p["parameters"]
-        steady_p = steady_state(parameters_p)
-        output_scale_p = steady_p["output"]
-        log_consumption_scale_p = jnp.log(steady_p["g"])
-        alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets = unpack(x)
-        c_offset, mu_offset, q_offset = offsets
-        paths = integrated_kernel_paths(
-            {
-                "log_mu": IntegratedPath(
-                    alpha_mu, -parameters_p.gamma * log_consumption_scale_p + mu_offset
-                ),
-                "log_c": IntegratedPath(alpha_c, log_consumption_scale_p + c_offset),
-                "log_k": IntegratedPath(alpha_k, jnp.log(p["k_0"])),
-                "a_raw": IntegratedPath(alpha_a, jnp.zeros((), alpha_a.dtype)),
-                "log_q": IntegratedPath(alpha_q, jnp.log(steady_p["q"]) + q_offset),
-            },
-            K_eval,
-            K_tilde_eval,
-        )
-        k = jnp.exp(paths["log_k"].value)
-        a = p["a_0"] + output_scale_p * paths["a_raw"].value
-        q = jnp.exp(paths["log_q"].value)
-        c = jnp.exp(paths["log_c"].value)
-        mu = jnp.exp(paths["log_mu"].value)
-        dlog_k_dt = paths["log_k"].d_dt
-        da_dt = output_scale_p * paths["a_raw"].d_dt
-        dlog_q_dt = paths["log_q"].d_dt
-        dlog_mu_dt = paths["log_mu"].d_dt
-        z = jnp.ones_like(k)
-        residuals = path_residuals(
-            k,
-            a,
-            q,
-            c,
-            mu,
-            z,
-            dlog_k_dt,
-            da_dt,
-            dlog_q_dt,
-            dlog_mu_dt,
-            parameters,
-        )
-        investment = investment_expenditure(k, q, parameters)
-        return {
-            "t": points,
-            "k": k,
-            "a": a,
-            "q": q,
-            "c": c,
-            "mu": mu,
-            "x": investment,
-            "output": production(k, z, parameters),
-            "current_account": da_dt,
-            **residuals,
-        }
-
-    train_eval = evaluate_grid(train_data)
-    validation_eval = evaluate_grid(validation_data)
-    test_eval = evaluate_grid(test_data)
+    train_eval = evaluate_grid(theta, train_data, train_data, kernel_set, p)
+    validation_eval = evaluate_grid(theta, validation_data, train_data, kernel_set, p)
+    test_eval = evaluate_grid(theta, test_data, train_data, kernel_set, p)
     tail = tail_diagnostics(
         train_eval["k"][-1],
         train_eval["a"][-1],
@@ -430,7 +308,7 @@ def open_economy_growth_kernel_uno(
     rejection_reasons = []
     if solver_status != "SUCCESS":
         rejection_reasons.append("solver_status")
-    if solution_status not in ACCEPTED_SOLUTION_STATUSES:
+    if solution_status not in {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}:
         rejection_reasons.append("solution_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
@@ -439,51 +317,20 @@ def open_economy_growth_kernel_uno(
     if max_validation_residual > tolerance_set.validation_residual:
         rejection_reasons.append("validation_residual")
 
-    alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets = unpack(x)
-    c_offset, mu_offset, q_offset = offsets
-    rkhs_norm_mu = alpha_mu @ K @ alpha_mu
-    rkhs_norm_c = alpha_c @ K @ alpha_c
-    rkhs_norm_k = alpha_k @ K @ alpha_k
-    rkhs_norm_a = alpha_a @ K @ alpha_a
-    rkhs_norm_q = alpha_q @ K @ alpha_q
+    rkhs_norm_mu = rkhs_norm_squared(theta.alpha_mu, K)
+    rkhs_norm_c = rkhs_norm_squared(theta.alpha_c, K)
+    rkhs_norm_k = rkhs_norm_squared(theta.alpha_k, K)
+    rkhs_norm_a = rkhs_norm_squared(theta.alpha_a, K)
+    rkhs_norm_q = rkhs_norm_squared(theta.alpha_q, K)
     rkhs_norm_total = (
         rkhs_norm_mu + rkhs_norm_c + rkhs_norm_k + rkhs_norm_a + rkhs_norm_q
     )
-    objective_norm_squared = objective_value(x, K)
+    objective_norm_squared = objective(jnp.asarray(x), args)
 
     @jax.jit
     def kernel_solution(points):
-        K_eval, K_tilde_eval = integrated_kernel_matrices(
-            points,
-            train_data,
-            kernel,
-            kernel_set.sigma,
-            kernel_set.ell,
-        )
-        parameters_p = p["parameters"]
-        steady_p = steady_state(parameters_p)
-        output_scale_p = steady_p["output"]
-        log_consumption_scale_p = jnp.log(steady_p["g"])
-        alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, offsets = unpack(x)
-        c_offset, mu_offset, q_offset = offsets
-        paths = integrated_kernel_paths(
-            {
-                "log_mu": IntegratedPath(
-                    alpha_mu, -parameters_p.gamma * log_consumption_scale_p + mu_offset
-                ),
-                "log_c": IntegratedPath(alpha_c, log_consumption_scale_p + c_offset),
-                "log_k": IntegratedPath(alpha_k, jnp.log(p["k_0"])),
-                "a_raw": IntegratedPath(alpha_a, jnp.zeros((), alpha_a.dtype)),
-                "log_q": IntegratedPath(alpha_q, jnp.log(steady_p["q"]) + q_offset),
-            },
-            K_eval,
-            K_tilde_eval,
-        )
-        k = jnp.exp(paths["log_k"].value)
-        a = p["a_0"] + output_scale_p * paths["a_raw"].value
-        q = jnp.exp(paths["log_q"].value)
-        c = jnp.exp(paths["log_c"].value)
-        return k, a, q, c
+        values = evaluate_grid(theta, points, train_data, kernel_set, p)
+        return values["k"], values["a"], values["q"], values["c"]
 
     results = {
         **asdict(parameters),
@@ -503,7 +350,7 @@ def open_economy_growth_kernel_uno(
         "output_ss": float(output_scale),
         "g_ss": float(consumption_scale),
         "c": float(train_eval["c"][0]),
-        "q_0": float(steady["q"] * jnp.exp(q_offset)),
+        "q_0": float(steady["q"] * jnp.exp(theta.q_offset)),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
         "max_benchmark_error": max_benchmark_error,
@@ -549,9 +396,9 @@ def open_economy_growth_kernel_uno(
         "stationarity": result.solution_stationarity,
         "primal_feasibility": result.solution_primal_feasibility,
         **acceptance_fields(rejection_reasons),
-        "c_offset": float(c_offset),
-        "mu_offset": float(mu_offset),
-        "q_offset": float(q_offset),
+        "c_offset": float(theta.c_offset),
+        "mu_offset": float(theta.mu_offset),
+        "q_offset": float(theta.q_offset),
     }
 
     frame_names = (

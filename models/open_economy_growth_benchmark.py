@@ -6,7 +6,7 @@ import numpy as np
 from flax import struct
 from tinydiffeq import solve_bvp
 
-from models.open_economy_growth import (
+from models.open_economy_growth_shared import (
     ModelParameters,
     consumption_annuity_rate,
     consumption_growth_rate,

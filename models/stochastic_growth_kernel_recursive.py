@@ -16,10 +16,10 @@ from models.kernels import (
     rbf_state_features,
     rbf_state_gram,
 )
-from models.stochastic_growth import (
+from models.stochastic_growth_shared import (
     STOCHASTIC_GROWTH_CONSTANTS as CONSTANTS,
 )
-from models.stochastic_growth import (
+from models.stochastic_growth_shared import (
     DataSettings,
     InitialConditionSettings,
     StructuralParameters,

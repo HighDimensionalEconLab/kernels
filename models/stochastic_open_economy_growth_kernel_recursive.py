@@ -19,7 +19,7 @@ from nlls_gram import (
 )
 
 from models.kernels import state_features
-from models.stochastic_open_economy_growth import (
+from models.stochastic_open_economy_growth_shared import (
     PROCESS_CONSTANTS,
     DataSettings,
     InitialConditionSettings,

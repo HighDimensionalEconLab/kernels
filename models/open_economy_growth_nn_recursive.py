@@ -14,7 +14,8 @@ from jax.flatten_util import ravel_pytree
 from nlls_gram import DrawNNXModule, LevenbergMarquardt, MultiStart
 from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 
-from models.open_economy_growth import (
+from models.open_economy_growth_benchmark import open_economy_growth_benchmark
+from models.open_economy_growth_shared import (
     ModelParameters,
     marginal_product,
     present_value_gap,
@@ -23,7 +24,6 @@ from models.open_economy_growth import (
     tail_diagnostics,
     tvc_diagnostics,
 )
-from models.open_economy_growth_benchmark import open_economy_growth_benchmark
 from models.utilities import (
     ACTIVATIONS,
     OptimizerSettings,

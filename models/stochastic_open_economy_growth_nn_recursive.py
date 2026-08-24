@@ -18,7 +18,7 @@ from nlls_gram import (
     MultiStart,
 )
 
-from models.stochastic_open_economy_growth import (
+from models.stochastic_open_economy_growth_shared import (
     PROCESS_CONSTANTS,
     DataSettings,
     InitialConditionSettings,

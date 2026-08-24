@@ -9,12 +9,12 @@ from flax import nnx
 from nlls_gram import LMStatus
 
 from models import multicountry_growth_nn
-from models.multicountry_growth import (
+from models.multicountry_growth_nn import path_values
+from models.multicountry_growth_shared import (
     sensitivity_fields_frame,
     sensitivity_observable_labels,
     sensitivity_observables,
 )
-from models.multicountry_growth_nn import path_values
 from replication.multicountry_growth_kernel import (
     LARGE_COUNTRY_PARAMETERS,
     SENSITIVITY_TIMES,

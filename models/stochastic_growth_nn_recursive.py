@@ -12,10 +12,10 @@ from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
 
-from models.stochastic_growth import (
+from models.stochastic_growth_shared import (
     STOCHASTIC_GROWTH_CONSTANTS as CONSTANTS,
 )
-from models.stochastic_growth import (
+from models.stochastic_growth_shared import (
     DataSettings,
     DrawInvestmentPolicy,
     InitialConditionSettings,

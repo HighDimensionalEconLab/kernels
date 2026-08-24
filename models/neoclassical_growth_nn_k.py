@@ -16,14 +16,14 @@ from nlls_gram import (
     MultiStart,
 )
 
-from models.neoclassical_growth import (
+from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
+from models.neoclassical_growth_shared import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
-from models.neoclassical_growth import (
+from models.neoclassical_growth_shared import (
     mpk,
     production,
 )
-from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from models.utilities import (
     ACTIVATIONS,
     OptimizerSettings,

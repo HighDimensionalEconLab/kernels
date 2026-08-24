@@ -34,7 +34,7 @@ import jax.scipy.linalg as jsp_linalg
 import numpy as np
 from nlls_gram import AnnealRidge, LMAction, Preconditioner, register_pytree_dataclass
 
-from models.multicountry_growth import path_residuals, steady_state
+from models.multicountry_growth_shared import path_residuals, steady_state
 
 
 # Flat position of every theta leaf, derived from the pytree itself, so the

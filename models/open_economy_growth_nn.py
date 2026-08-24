@@ -16,7 +16,8 @@ from nlls_gram import (
     MultiStart,
 )
 
-from models.open_economy_growth import (
+from models.open_economy_growth_benchmark import open_economy_growth_benchmark
+from models.open_economy_growth_shared import (
     ModelParameters,
     investment_expenditure,
     path_residuals,
@@ -26,7 +27,6 @@ from models.open_economy_growth import (
     tail_diagnostics,
     tvc_diagnostics,
 )
-from models.open_economy_growth_benchmark import open_economy_growth_benchmark
 from models.utilities import (
     ACTIVATIONS,
     OptimizerSettings,

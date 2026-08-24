@@ -6,78 +6,72 @@ import jax
 import jax.numpy as jnp
 import jsonargparse
 import numpy as np
-import pandas as pd
 import unopy
+from jax.flatten_util import ravel_pytree
 
 from models.kernels import (
     IntegratedPath,
     KernelSettings,
     integrated_kernel_matrices,
     integrated_kernel_paths,
-)
-from models.neoclassical_growth import (
-    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
-)
-from models.neoclassical_growth import (
-    StructuralParameters,
-    mpk,
-    production,
-    steady_flow_consumption_guess,
+    rkhs_norm_squared,
 )
 from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
-from models.utilities import (
-    Stopwatch,
-    acceptance_fields,
-    make_train_t_grid,
+from models.neoclassical_growth_shared import (
+    NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
-
-ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
-
-
-def unpack(x):
-    n_train = (x.shape[0] - 2) // 3
-    alpha_mu = x[:n_train]
-    alpha_c = x[n_train : 2 * n_train]
-    alpha_k = x[2 * n_train : 3 * n_train]
-    c_0 = x[3 * n_train]
-    mu_0 = x[3 * n_train + 1]
-    return alpha_mu, alpha_c, alpha_k, c_0, mu_0
+from models.neoclassical_growth_shared import (
+    DataSettings,
+    StructuralParameters,
+    Theta,
+    evaluate_paths,
+    residual_fn,
+    snapshot,
+    steady_flow_consumption_guess,
+)
+from models.utilities import Stopwatch, acceptance_fields, make_train_t_grid
 
 
+# The theta template in args maps IPOPT's flat float64 vector back to the
+# NLLS Theta; ravel_pytree's splits are static under jit.
 @jax.jit
-def objective(x, K):
-    alpha_mu, alpha_c, alpha_k, _, _ = unpack(x)
-    return alpha_mu @ K @ alpha_mu + alpha_c @ K @ alpha_c + alpha_k @ K @ alpha_k
+def objective(x, args):
+    theta = ravel_pytree(args["theta_like"])[1](x)
+    return (
+        rkhs_norm_squared(theta.alpha_mu, args["K"])
+        + rkhs_norm_squared(theta.alpha_c, args["K"])
+        + rkhs_norm_squared(theta.alpha_k, args["K"])
+    )
 
 
-# CRRA first-order condition u'(c) = mu, i.e. mu c^sigma_crra = 1; the
-# costate and resource residuals are utility-free. IPOPT's interior point
-# evaluates infeasible trial iterates, so k clamps at domain_eps.
+# The equality block is the NLLS residual (1/sqrt(3n)-scaled); the appended
+# unscaled path rows carry the bounds keeping (k, c, mu) above domain_eps
+# through the interior point's infeasible trial iterates.
 @jax.jit
-def constraints(x, K, K_tilde, p, domain_eps):
-    alpha_mu, alpha_c, alpha_k, c_0, mu_0 = unpack(x)
+def constraints(x, args, p):
+    theta = ravel_pytree(args["theta_like"])[1](x)
     paths = integrated_kernel_paths(
         {
-            "mu": IntegratedPath(alpha_mu, mu_0),
-            "c": IntegratedPath(alpha_c, c_0),
-            "k": IntegratedPath(alpha_k, p.k_0),
+            "mu": IntegratedPath(theta.alpha_mu, theta.mu_0),
+            "c": IntegratedPath(theta.alpha_c, theta.c_0),
+            "k": IntegratedPath(theta.alpha_k, p.k_0),
         },
-        K,
-        K_tilde,
+        args["K"],
+        args["K_tilde"],
     )
-    k, dk_dt = paths["k"]
-    mu, dmu_dt = paths["mu"]
-    c = paths["c"].value
-    k_positive = jnp.maximum(k, domain_eps)
-    resource = dk_dt - (production(p.z_0, k_positive, p) - p.delta * k - c)
-    euler = dmu_dt + mu * (mpk(p.z_0, k_positive, p) - p.delta - p.rho_hat)
-    shadow_price = mu * c**p.sigma_crra - 1.0
-    return jnp.concatenate([resource, euler, shadow_price, k, c, mu])
+    return jnp.concatenate(
+        [
+            residual_fn(theta, args, p),
+            paths["k"].value,
+            paths["c"].value,
+            paths["mu"].value,
+        ]
+    )
 
 
-def lagrangian(x, objective_multiplier, multipliers, K, K_tilde, p, domain_eps):
-    return objective_multiplier * objective(x, K) + jnp.dot(
-        multipliers, constraints(x, K, K_tilde, p, domain_eps)
+def lagrangian(x, objective_multiplier, multipliers, args, p):
+    return objective_multiplier * objective(x, args) + jnp.dot(
+        multipliers, constraints(x, args, p)
     )
 
 
@@ -86,16 +80,6 @@ def lagrangian(x, objective_multiplier, multipliers, K, K_tilde, p, domain_eps):
 objective_gradient = jax.jit(jax.grad(objective))
 constraint_jacobian = jax.jit(jax.jacfwd(constraints))
 lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
-
-
-@dataclass(frozen=True)
-class DataSettings:
-    train_T: float = CONSTANTS.train_T
-    train_points: int = 101
-    train_points_list: list[float] | None = None
-    test_T: float = CONSTANTS.sequence_test_T
-    test_points: int = 100
-    test_tvc_T: float = CONSTANTS.transversality_T
 
 
 # CLI-reachable bars; all but log_tvc_threshold gate acceptance, and the mpk
@@ -114,7 +98,7 @@ class SolverSettings:
     max_iterations: int | None = None
     time_limit: float | None = None
     # Domain floor for the interior point's infeasible trial iterates: the
-    # model functions clamp k here and the primal bounds keep (c, mu, k)
+    # primal bounds keep (c_0, mu_0) and the path constraint rows (k, c, mu)
     # above it.
     domain_eps: float = 1e-6
 
@@ -163,13 +147,8 @@ def neoclassical_growth_kernel_uno(
     train_data = make_train_t_grid(data_set, jnp.float64)
     n_train = len(train_data)
     K, K_tilde = integrated_kernel_matrices(train_data, train_data, kernel, sigma, ell)
-    K = np.asarray((K + K.T) / 2)
-    K_tilde = np.asarray(K_tilde)
-    K_jax = jnp.asarray(K)
+    K_jax = (K + K.T) / 2
     K_tilde_jax = jnp.asarray(K_tilde)
-
-    n_variables = 3 * n_train + 2
-    n_constraints = 6 * n_train
 
     # Value container only: no p rides through IPOPT for implicit
     # differentiation.
@@ -190,13 +169,37 @@ def neoclassical_growth_kernel_uno(
     c_flow_guess = steady_flow_consumption_guess(z_0, k_0, a, delta, A, b_1, b_2)
     if c_0_guess is not None:
         c_flow_guess = float(c_0_guess)
-    x_initial = np.zeros(n_variables, dtype=np.float64)
-    x_initial[3 * n_train] = c_flow_guess
-    x_initial[3 * n_train + 1] = c_flow_guess**-sigma_crra
+    theta_0 = Theta(
+        alpha_mu=jnp.zeros(n_train, dtype=jnp.float64),
+        alpha_c=jnp.zeros(n_train, dtype=jnp.float64),
+        alpha_k=jnp.zeros(n_train, dtype=jnp.float64),
+        c_0=jnp.asarray(c_flow_guess),
+        mu_0=jnp.asarray(c_flow_guess**-sigma_crra),
+    )
+    x_initial, unravel = ravel_pytree(theta_0)
+    args = {
+        "K": K_jax,
+        "K_tilde": K_tilde_jax,
+        "t": None,
+        "z_trend": 1.0,
+        "g_hat": None,
+        "theta_like": theta_0,
+    }
 
-    variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
+    n_variables = x_initial.size
+    n_constraints = 6 * n_train
+    variable_lower_bounds = np.asarray(
+        ravel_pytree(
+            Theta(
+                alpha_mu=jnp.full(n_train, -jnp.inf),
+                alpha_c=jnp.full(n_train, -jnp.inf),
+                alpha_k=jnp.full(n_train, -jnp.inf),
+                c_0=jnp.asarray(domain_eps),
+                mu_0=jnp.asarray(domain_eps),
+            )
+        )[0]
+    )
     variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
-    variable_lower_bounds[3 * n_train :] = domain_eps
     constraint_lower_bounds = np.concatenate(
         [
             np.zeros(3 * n_train, dtype=np.float64),
@@ -219,10 +222,10 @@ def neoclassical_growth_kernel_uno(
     )
 
     def objective_callback(x):
-        return float(objective(jnp.asarray(x), K_jax))
+        return float(objective(jnp.asarray(x), args))
 
     def objective_gradient_callback(x, gradient):
-        gradient[:] = np.asarray(objective_gradient(jnp.asarray(x), K_jax))
+        gradient[:] = np.asarray(objective_gradient(jnp.asarray(x), args))
 
     model.set_objective(unopy.MINIMIZE, objective_callback, objective_gradient_callback)
 
@@ -230,13 +233,11 @@ def neoclassical_growth_kernel_uno(
     jacobian_columns = np.tile(np.arange(n_variables, dtype=np.int32), n_constraints)
 
     def constraints_callback(x, constraint_output):
-        constraint_output[:] = np.asarray(
-            constraints(jnp.asarray(x), K_jax, K_tilde_jax, p, domain_eps)
-        )
+        constraint_output[:] = np.asarray(constraints(jnp.asarray(x), args, p))
 
     def jacobian_callback(x, jacobian_output):
         jacobian_output[:] = np.asarray(
-            constraint_jacobian(jnp.asarray(x), K_jax, K_tilde_jax, p, domain_eps)
+            constraint_jacobian(jnp.asarray(x), args, p)
         ).reshape(-1)
 
     model.set_constraints(
@@ -260,10 +261,8 @@ def neoclassical_growth_kernel_uno(
                 jnp.asarray(x),
                 float(objective_multiplier),
                 jnp.asarray(multipliers),
-                K_jax,
-                K_tilde_jax,
+                args,
                 p,
-                domain_eps,
             )
         )
         hessian_output[:] = hessian[hessian_rows, hessian_columns]
@@ -276,7 +275,7 @@ def neoclassical_growth_kernel_uno(
         hessian_callback,
     )
     model.set_lagrangian_sign_convention(unopy.MULTIPLIER_POSITIVE)
-    model.set_initial_primal_iterate(x_initial)
+    model.set_initial_primal_iterate(np.asarray(x_initial))
 
     solver = unopy.UnoSolver()
     solver.set_preset(solver_set.preset)
@@ -294,41 +293,9 @@ def neoclassical_growth_kernel_uno(
 
     # primal_solution appends solver-internal auxiliaries; only the leading
     # 3n + 2 block is ours.
-    x = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))[:n_variables]
-    alpha_mu, alpha_c, alpha_k, c_0, mu_0 = unpack(x)
-
-    def snapshot(t_grid):
-        K_eval, K_tilde_eval = integrated_kernel_matrices(
-            t_grid, train_data, kernel, sigma, ell
-        )
-        paths = integrated_kernel_paths(
-            {
-                "mu": IntegratedPath(alpha_mu, mu_0),
-                "c": IntegratedPath(alpha_c, c_0),
-                "k": IntegratedPath(alpha_k, k_0),
-            },
-            K_eval,
-            K_tilde_eval,
-        )
-        k, dk_dt = paths["k"]
-        mu, dmu_dt = paths["mu"]
-        c = paths["c"].value
-        k_positive = jnp.maximum(k, domain_eps)
-        return pd.DataFrame(
-            {
-                "t": np.asarray(t_grid),
-                "k": np.asarray(k),
-                "c": np.asarray(c),
-                "mu": np.asarray(mu),
-                "resource": np.asarray(
-                    dk_dt - (production(z_0, k_positive, p) - delta * k - c)
-                ),
-                "euler": np.asarray(
-                    dmu_dt + mu * (mpk(z_0, k_positive, p) - delta - rho_hat)
-                ),
-                "shadow_price": np.asarray(mu * c**sigma_crra - 1.0),
-            }
-        )
+    x = np.array(result.primal_solution, dtype=np.float64)[:n_variables]
+    theta = unravel(jnp.asarray(x))
+    c_0, mu_0 = theta.c_0, theta.mu_0
 
     test_data = jnp.linspace(
         0, data_set.test_T, data_set.test_points, dtype=jnp.float64
@@ -337,9 +304,24 @@ def neoclassical_growth_kernel_uno(
     validation_data = jnp.linspace(
         0, data_set.train_T, max(data_set.test_points, 801), dtype=jnp.float64
     )
-    train_df = snapshot(train_data)
-    validation_df = snapshot(validation_data)
-    test_df = snapshot(test_data)
+    test_benchmark = (
+        None
+        if use_kinked_production
+        else neoclassical_growth_benchmark(
+            a, delta, rho_hat, sigma_crra, g=0.0, z_0=z_0, k_0=k_0
+        )
+    )
+    train_df = snapshot(theta, train_data, p, train_data, kernel_set, z=z_0)
+    validation_df = snapshot(theta, validation_data, p, train_data, kernel_set, z=z_0)
+    test_df = snapshot(
+        theta,
+        test_data,
+        p,
+        train_data,
+        kernel_set,
+        benchmark=test_benchmark,
+        z=z_0,
+    )
 
     residual_names = ("resource", "euler", "shadow_price")
     max_train_residual = max(
@@ -371,35 +353,18 @@ def neoclassical_growth_kernel_uno(
     p_upper_violation = max(train_upper, validation_upper)
 
     @jax.jit
-    def kernel_solution(test_points_data):
-        K_test, K_tilde_test = integrated_kernel_matrices(
-            test_points_data, train_data, kernel, sigma, ell
+    def kernel_solution(t_grid):
+        paths = evaluate_paths(theta, t_grid, train_data, kernel_set, p)
+        return (
+            paths["k"].value,
+            paths["c"].value,
+            paths["mu"].value,
+            paths["k"].d_dt,
+            paths["mu"].d_dt,
         )
-        paths = integrated_kernel_paths(
-            {
-                "c": IntegratedPath(alpha_c, c_0),
-                "k": IntegratedPath(alpha_k, k_0),
-            },
-            K_test,
-            K_tilde_test,
-        )
-        return paths["k"].value, paths["c"].value
 
-    K_tvc, K_tilde_tvc = integrated_kernel_matrices(
-        jnp.asarray([data_set.test_tvc_T], dtype=jnp.float64),
-        train_data,
-        kernel,
-        sigma,
-        ell,
-    )
-    paths_T = integrated_kernel_paths(
-        {
-            "c": IntegratedPath(alpha_c, c_0),
-            "k": IntegratedPath(alpha_k, k_0),
-        },
-        K_tvc,
-        K_tilde_tvc,
-    )
+    tvc_t = jnp.asarray([data_set.test_tvc_T], dtype=jnp.float64)
+    paths_T = evaluate_paths(theta, tvc_t, train_data, kernel_set, p)
     k_T, c_T = paths_T["k"].value, paths_T["c"].value
     log_tvc = float(
         -rho_hat * data_set.test_tvc_T - sigma_crra * jnp.log(c_T[0]) + jnp.log(k_T[0])
@@ -420,7 +385,7 @@ def neoclassical_growth_kernel_uno(
     rejection_reasons = []
     if solver_status != "SUCCESS":
         rejection_reasons.append("solver_status")
-    if solution_status not in ACCEPTED_SOLUTION_STATUSES:
+    if solution_status not in {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}:
         rejection_reasons.append("solution_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
@@ -469,16 +434,8 @@ def neoclassical_growth_kernel_uno(
     }
 
     if not use_kinked_production:
-        benchmark = neoclassical_growth_benchmark(
-            a, delta, rho_hat, sigma_crra, g=0.0, z_0=z_0, k_0=k_0
-        )
-        k_benchmark, c_benchmark = (np.asarray(v) for v in benchmark(test_data))
-        k_rel_error = np.abs(k_benchmark - test_df["k"].to_numpy()) / k_benchmark
-        c_rel_error = np.abs(c_benchmark - test_df["c"].to_numpy()) / c_benchmark
-        test_df["k_benchmark"] = k_benchmark
-        test_df["c_benchmark"] = c_benchmark
-        test_df["k_rel_error"] = k_rel_error
-        test_df["c_rel_error"] = c_rel_error
+        k_rel_error = test_df["k_rel_error"].to_numpy()
+        c_rel_error = test_df["c_rel_error"].to_numpy()
         # min/max error statistics exclude the pinned t = 0 point ([1:]): its
         # near-zero error is an artifact of the initial condition, not accuracy.
         results.update(

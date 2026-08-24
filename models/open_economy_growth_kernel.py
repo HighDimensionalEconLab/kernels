@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -17,117 +16,28 @@ from nlls_gram import (
 )
 
 from models.kernels import (
-    IntegratedPath,
     KernelSettings,
-    integrated_kernel_matrices,
-    integrated_kernel_paths,
     integrated_metric_factorization,
     rkhs_norm_squared,
 )
-from models.open_economy_growth import (
+from models.open_economy_growth_benchmark import open_economy_growth_benchmark
+from models.open_economy_growth_shared import (
+    DataSettings,
     ModelParameters,
-    investment_expenditure,
+    Theta,
+    evaluate_grid,
     model_parameter_values,
-    path_residuals,
     present_value_gap,
-    production,
+    residual_fn,
     steady_state,
     tail_diagnostics,
     tvc_diagnostics,
 )
-from models.open_economy_growth_benchmark import open_economy_growth_benchmark
 from models.utilities import (
     Stopwatch,
     acceptance_fields,
     make_sampled_train_grid,
 )
-
-
-# Alpha blocks first (the metric penalizes the leading flat coordinates).
-class Theta(NamedTuple):
-    alpha_mu: jax.Array
-    alpha_c: jax.Array
-    alpha_k: jax.Array
-    alpha_a: jax.Array
-    alpha_q: jax.Array
-    c_offset: jax.Array
-    mu_offset: jax.Array
-    q_offset: jax.Array
-
-
-def residual_fn(theta, args, p):
-    parameters_p = p["parameters"]
-    steady_p = steady_state(parameters_p)
-    # The asset block is the one path with no unpenalized offset, so its
-    # scale enters the minimum-norm selection metric; the scale must be
-    # differentiation-inert or every parameter sensitivity picks up a
-    # selection-drift term from the metric moving with p. The other
-    # normalizations are absorbed by their free offsets.
-    output_scale_p = jax.lax.stop_gradient(steady_p["output"])
-    log_consumption_scale_p = jnp.log(steady_p["g"])
-    paths = integrated_kernel_paths(
-        {
-            "log_mu": IntegratedPath(
-                theta.alpha_mu,
-                -parameters_p.gamma * log_consumption_scale_p + theta.mu_offset,
-            ),
-            "log_c": IntegratedPath(
-                theta.alpha_c, log_consumption_scale_p + theta.c_offset
-            ),
-            "log_k": IntegratedPath(theta.alpha_k, jnp.log(p["k_0"])),
-            "a_raw": IntegratedPath(theta.alpha_a, jnp.zeros((), theta.alpha_a.dtype)),
-            "log_q": IntegratedPath(
-                theta.alpha_q, jnp.log(steady_p["q"]) + theta.q_offset
-            ),
-        },
-        args["K"],
-        args["K_tilde"],
-    )
-    k = jnp.exp(paths["log_k"].value)
-    a = p["a_0"] + output_scale_p * paths["a_raw"].value
-    q = jnp.exp(paths["log_q"].value)
-    c = jnp.exp(paths["log_c"].value)
-    mu = jnp.exp(paths["log_mu"].value)
-    dlog_k_dt = paths["log_k"].d_dt
-    da_dt = output_scale_p * paths["a_raw"].d_dt
-    dlog_q_dt = paths["log_q"].d_dt
-    dlog_mu_dt = paths["log_mu"].d_dt
-    residuals = path_residuals(
-        k,
-        a,
-        q,
-        c,
-        mu,
-        jnp.ones_like(k),
-        dlog_k_dt,
-        da_dt,
-        dlog_q_dt,
-        dlog_mu_dt,
-        p["parameters"],
-    )
-    residual = jnp.concatenate(
-        [
-            residuals["capital"],
-            residuals["assets"],
-            residuals["tobin_q"],
-            residuals["marginal_wealth"],
-            residuals["consumption_foc"],
-        ]
-    )
-    return residual / jnp.sqrt(residual.size)
-
-
-@dataclass(frozen=True)
-class DataSettings:
-    train_T: float = 160.0
-    train_points: int = 192
-    train_points_list: list[float] | None = None
-    sampling: str = "front_loaded"
-    dense_T: float = 40.0
-    tail_points: int = 15
-    test_T: float = 50.0
-    test_points: int = 201
-    validation_points: int = 401
 
 
 # Numerical acceptance and ex-post quality thresholds, CLI-reachable so a
@@ -272,80 +182,9 @@ def open_economy_growth_kernel(
     solve_time = timer.elapsed(result)
     theta = result.x
 
-    def evaluate_grid(points):
-        K_eval, K_tilde_eval = integrated_kernel_matrices(
-            points,
-            train_data,
-            kernel,
-            kernel_set.sigma,
-            kernel_set.ell,
-        )
-        parameters_p = p["parameters"]
-        steady_p = steady_state(parameters_p)
-        output_scale_p = jax.lax.stop_gradient(steady_p["output"])
-        log_consumption_scale_p = jnp.log(steady_p["g"])
-        paths = integrated_kernel_paths(
-            {
-                "log_mu": IntegratedPath(
-                    theta.alpha_mu,
-                    -parameters_p.gamma * log_consumption_scale_p + theta.mu_offset,
-                ),
-                "log_c": IntegratedPath(
-                    theta.alpha_c, log_consumption_scale_p + theta.c_offset
-                ),
-                "log_k": IntegratedPath(theta.alpha_k, jnp.log(p["k_0"])),
-                "a_raw": IntegratedPath(
-                    theta.alpha_a, jnp.zeros((), theta.alpha_a.dtype)
-                ),
-                "log_q": IntegratedPath(
-                    theta.alpha_q, jnp.log(steady_p["q"]) + theta.q_offset
-                ),
-            },
-            K_eval,
-            K_tilde_eval,
-        )
-        k = jnp.exp(paths["log_k"].value)
-        a = p["a_0"] + output_scale_p * paths["a_raw"].value
-        q = jnp.exp(paths["log_q"].value)
-        c = jnp.exp(paths["log_c"].value)
-        mu = jnp.exp(paths["log_mu"].value)
-        dlog_k_dt = paths["log_k"].d_dt
-        da_dt = output_scale_p * paths["a_raw"].d_dt
-        dlog_q_dt = paths["log_q"].d_dt
-        dlog_mu_dt = paths["log_mu"].d_dt
-        z = jnp.ones_like(k)
-        residuals = path_residuals(
-            k,
-            a,
-            q,
-            c,
-            mu,
-            z,
-            dlog_k_dt,
-            da_dt,
-            dlog_q_dt,
-            dlog_mu_dt,
-            parameters,
-        )
-        x = investment_expenditure(k, q, parameters)
-        output = production(k, z, parameters)
-        current_account = da_dt
-        return {
-            "t": points,
-            "k": k,
-            "a": a,
-            "q": q,
-            "c": c,
-            "mu": mu,
-            "x": x,
-            "output": output,
-            "current_account": current_account,
-            **residuals,
-        }
-
-    train_eval = evaluate_grid(train_data)
-    validation_eval = evaluate_grid(validation_data)
-    test_eval = evaluate_grid(test_data)
+    train_eval = evaluate_grid(theta, train_data, train_data, kernel_set, p)
+    validation_eval = evaluate_grid(theta, validation_data, train_data, kernel_set, p)
+    test_eval = evaluate_grid(theta, test_data, train_data, kernel_set, p)
     tail = tail_diagnostics(
         train_eval["k"][-1],
         train_eval["a"][-1],
@@ -440,42 +279,8 @@ def open_economy_growth_kernel(
 
     @jax.jit
     def kernel_solution(points):
-        K_eval, K_tilde_eval = integrated_kernel_matrices(
-            points,
-            train_data,
-            kernel,
-            kernel_set.sigma,
-            kernel_set.ell,
-        )
-        parameters_p = p["parameters"]
-        steady_p = steady_state(parameters_p)
-        output_scale_p = jax.lax.stop_gradient(steady_p["output"])
-        log_consumption_scale_p = jnp.log(steady_p["g"])
-        paths = integrated_kernel_paths(
-            {
-                "log_mu": IntegratedPath(
-                    theta.alpha_mu,
-                    -parameters_p.gamma * log_consumption_scale_p + theta.mu_offset,
-                ),
-                "log_c": IntegratedPath(
-                    theta.alpha_c, log_consumption_scale_p + theta.c_offset
-                ),
-                "log_k": IntegratedPath(theta.alpha_k, jnp.log(p["k_0"])),
-                "a_raw": IntegratedPath(
-                    theta.alpha_a, jnp.zeros((), theta.alpha_a.dtype)
-                ),
-                "log_q": IntegratedPath(
-                    theta.alpha_q, jnp.log(steady_p["q"]) + theta.q_offset
-                ),
-            },
-            K_eval,
-            K_tilde_eval,
-        )
-        k = jnp.exp(paths["log_k"].value)
-        a = p["a_0"] + output_scale_p * paths["a_raw"].value
-        q = jnp.exp(paths["log_q"].value)
-        c = jnp.exp(paths["log_c"].value)
-        return k, a, q, c
+        values = evaluate_grid(theta, points, train_data, kernel_set, p)
+        return values["k"], values["a"], values["q"], values["c"]
 
     results = {
         **asdict(parameters),

@@ -9,7 +9,7 @@ import jsonargparse
 import pandas as pd
 
 from models import multicountry_growth_kernel
-from models.multicountry_growth import InitialConditionSettings
+from models.multicountry_growth_shared import InitialConditionSettings
 from replication.utilities import (
     configure_process,
     run_solver,

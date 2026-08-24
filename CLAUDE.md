@@ -9,6 +9,10 @@ per-directory READMEs.
   `(results, extras)`, writes nothing, exposes a jsonargparse CLI. Unqualified
   kernel filenames are the NLLS formulation; `_uno` is the constrained IPOPT
   comparison (host-side float64 only — NLLS/NN are the float32/GPU methods).
+  `<model>_shared.py` holds everything used by more than one driver (model
+  structure plus the kernel Theta/residual/evaluation); drivers never import
+  other drivers. The `_uno` drivers map IPOPT's flat vector to the NLLS Theta
+  via `ravel_pytree` with the theta template riding in `args`.
 - `replication/` — ensemble + figure drivers; `collect_json.py` writes
   `.results/all_results.json`, the only place paper numbers are selected and
   rounded. Generated JSON is gitignored; track one with a targeted `!path` rule.

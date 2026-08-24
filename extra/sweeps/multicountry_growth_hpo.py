@@ -16,12 +16,6 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 
-from models.multicountry_growth import (
-    InitialConditionSettings,
-    MulticountryParameters,
-    draw_initial_conditions,
-    steady_state,
-)
 from models.multicountry_growth_kernel import (
     DataSettings,
     KernelSettings,
@@ -30,6 +24,12 @@ from models.multicountry_growth_kernel import (
 from models.multicountry_growth_nn import (
     SequencePathSettings,
     multicountry_growth_nn,
+)
+from models.multicountry_growth_shared import (
+    InitialConditionSettings,
+    MulticountryParameters,
+    draw_initial_conditions,
+    steady_state,
 )
 from models.utilities import OptimizerSettings
 from replication.utilities import configure_process

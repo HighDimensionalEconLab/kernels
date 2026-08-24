@@ -7,7 +7,7 @@ import pandas as pd
 from flax import nnx
 from nlls_gram import LMStatus
 
-from models.neoclassical_growth import neoclassical_steady_state_sensitivities
+from models.neoclassical_growth_shared import neoclassical_steady_state_sensitivities
 from replication.neoclassical_growth_nn import PREFIX, SOLVER, SUMMARY_EXPERIMENTS
 from replication.utilities import (
     configure_process,

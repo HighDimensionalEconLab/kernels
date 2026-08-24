@@ -48,29 +48,19 @@ def kernel_matrices(t_i, t_j):
 
 
 # Each path x(t) = x(0) + K_tilde alpha with exact derivative x'(t) = K alpha;
-# k(0) = k_0 is pinned while c(0), mu(0) are free scalars in theta.
-def paths(theta, K, K_tilde, p):
-    mu = theta["mu_0"] + K_tilde @ theta["alpha_mu"]
-    dmu_dt = K @ theta["alpha_mu"]
-    c = theta["c_0"] + K_tilde @ theta["alpha_c"]
-    k = p["k_0"] + K_tilde @ theta["alpha_k"]
-    dk_dt = K @ theta["alpha_k"]
-    return mu, dmu_dt, c, k, dk_dt
-
-
-# CRRA first-order condition u'(c) = mu; the costate and resource residuals
-# are utility-free.
-def residuals(theta, K, K_tilde, p):
-    mu, dmu_dt, c, k, dk_dt = paths(theta, K, K_tilde, p)
-    resource = dk_dt - (k ** p["a"] - p["delta"] * k - c)
-    costate = dmu_dt + mu * (p["a"] * k ** (p["a"] - 1.0) - p["delta"] - p["rho_hat"])
-    foc = mu * c ** p["sigma_crra"] - 1.0
-    return resource, costate, foc
-
-
+# k(0) = k_0 is pinned while c(0), mu(0) are free scalars in theta. CRRA
+# first-order condition u'(c) = mu; the euler and resource residuals are
+# utility-free.
 def residual_fn(theta, args, p):
-    resource, costate, foc = residuals(theta, args["K"], args["K_tilde"], p)
-    residual = jnp.concatenate([resource, costate, foc])
+    mu = theta["mu_0"] + args["K_tilde"] @ theta["alpha_mu"]
+    dmu_dt = args["K"] @ theta["alpha_mu"]
+    c = theta["c_0"] + args["K_tilde"] @ theta["alpha_c"]
+    k = p["k_0"] + args["K_tilde"] @ theta["alpha_k"]
+    dk_dt = args["K"] @ theta["alpha_k"]
+    resource = dk_dt - (k ** p["a"] - p["delta"] * k - c)
+    euler = dmu_dt + mu * (p["a"] * k ** (p["a"] - 1.0) - p["delta"] - p["rho_hat"])
+    shadow_price = mu * c ** p["sigma_crra"] - 1.0
+    residual = jnp.concatenate([resource, euler, shadow_price])
     return residual / jnp.sqrt(residual.size)
 
 
@@ -106,14 +96,19 @@ solve_time = time.perf_counter() - start
 theta = result.x
 
 K_test, K_tilde_test = kernel_matrices(t_test, t_train)
-_, costate_test, _ = residuals(theta, K_test, K_tilde_test, p)
+mu_test = theta["mu_0"] + K_tilde_test @ theta["alpha_mu"]
+k_test = k_0 + K_tilde_test @ theta["alpha_k"]
+euler_test = K_test @ theta["alpha_mu"] + mu_test * (
+    a * k_test ** (a - 1.0) - delta - rho_hat
+)
 
 # Log transversality certificate at T: -rho_hat T - sigma log c(T) + log k(T).
-K_tvc, K_tilde_tvc = kernel_matrices(jnp.array([TVC_T]), t_train)
-_, _, c_T, k_T, _ = paths(theta, K_tvc, K_tilde_tvc, p)
+_, K_tilde_tvc = kernel_matrices(jnp.array([TVC_T]), t_train)
+c_T = theta["c_0"] + K_tilde_tvc @ theta["alpha_c"]
+k_T = k_0 + K_tilde_tvc @ theta["alpha_k"]
 log_tvc = -rho_hat * TVC_T - sigma_crra * jnp.log(c_T[0]) + jnp.log(k_T[0])
 
 print(f"solve: {int(result.steps)} steps in {solve_time:.2f}s (incl. jit)")
 print(f"c_0 = {float(theta['c_0']):.6f}, mu_0 = {float(theta['mu_0']):.6f}")
-print(f"mean |Euler residual| test: {float(jnp.abs(costate_test).mean()):.3e}")
+print(f"mean |Euler residual| test: {float(jnp.abs(euler_test).mean()):.3e}")
 print(f"log-TVC at t={TVC_T:.0f}: {float(log_tvc):.1f}   (should be << 0)")

@@ -6,7 +6,7 @@ title: "Growth Sequential — Kernel, Constrained (Uno)"
 
 [JAX](https://docs.jax.dev) underlies everything below: array math via `jax.numpy`, [compilation](https://docs.jax.dev/en/latest/jit-compilation.html) via `jax.jit`, and exact derivatives via [automatic differentiation](https://docs.jax.dev/en/latest/automatic-differentiation.html) — the solver differentiates the residual program itself, so no derivative is coded by hand. JAX defaults to 32-bit floats, so we switch on 64-bit and the most accurate matmul *before* creating any array, then import everything we need.
 
-This notebook solves the same problem as the companion ridgeless notebook, but with a **constrained optimizer**: the interior-point solver [Uno](https://github.com/cvanaret/Uno) through `unopy`, with JAX supplying the gradient, Jacobian, and Hessian callbacks. Structural parameters stay plain module-level constants — the NLP solver is host-side C++, so nothing rides through a differentiable `p` here.
+This notebook solves the same problem as the companion ridgeless notebook, but with a **constrained optimizer**: the interior-point solver [Uno](https://github.com/cvanaret/Uno) through `unopy`, with JAX supplying the gradient, Jacobian, and Hessian callbacks. The model code — `p`, the kernel matrices, and `residual_fn` — is the ridgeless notebook's, retyped verbatim; here `p` is only a value container, since the NLP solver is host-side C++ and nothing differentiates through it.
 
 ```{python}
 import jax
@@ -31,9 +31,10 @@ delta = 0.1  # depreciation rate
 rho_hat = -4.0 * math.log(0.9896)  # continuous discount rate (quarterly beta anchor)
 sigma_crra = 2.0  # CRRA curvature
 k_0 = 1.0  # initial capital
+p = {"a": a, "delta": delta, "rho_hat": rho_hat, "sigma_crra": sigma_crra, "k_0": k_0}
 ```
 
-Parameters of the algorithm: the kernel hyperparameters, the collocation and test grids, and the domain floor for the interior point.
+Parameters of the algorithm: the kernel hyperparameters and the collocation and test grids.
 
 ```{python}
 ELL = 10.0  # Matern-1/2 length scale
@@ -43,7 +44,6 @@ N_TRAIN = 101
 TEST_T = 110.0
 N_TEST = 100
 TVC_T = 200.0
-DOMAIN_EPS = 1e-6  # domain floor for the interior point's infeasible iterates
 
 t_train = jnp.linspace(0.0, TRAIN_T, N_TRAIN)
 t_test = jnp.linspace(0.0, TEST_T, N_TEST)
@@ -69,7 +69,7 @@ x(t) = x(0) + \sum_j \alpha_j \tilde K(t, t_j),
 x'(t) = \sum_j \alpha_j k(t, t_j),
 $$
 
-with $k(t, t') = \sigma^2 e^{-|t-t'|/\ell}$, $h(d) = \sigma^2 \ell (1 - e^{-d/\ell})$, and $\tilde K(t_i, t_j) = h(t_j) + \operatorname{sign}(t_i - t_j) h(|t_i - t_j|)$.
+with $k(t, t') = \sigma^2 e^{-|t-t'|/\ell}$, $h(d) = \sigma^2 \ell (1 - e^{-d/\ell})$, and $\tilde K(t_i, t_j) = h(t_j) + \operatorname{sign}(t_i - t_j) h(|t_i - t_j|)$. Stacked on the training grid, the three Pontryagin residuals give the same `residual_fn` as the ridgeless notebook, $1/\sqrt{3n}$ scaling included.
 
 ```{python}
 def antiderivative(d):
@@ -81,6 +81,19 @@ def kernel_matrices(t_i, t_j):
     K = SIGMA**2 * jnp.exp(-jnp.abs(s) / ELL)
     K_tilde = antiderivative(t_j)[None, :] + jnp.sign(s) * antiderivative(jnp.abs(s))
     return K, K_tilde
+
+
+def residual_fn(theta, args, p):
+    mu = theta["mu_0"] + args["K_tilde"] @ theta["alpha_mu"]
+    dmu_dt = args["K"] @ theta["alpha_mu"]
+    c = theta["c_0"] + args["K_tilde"] @ theta["alpha_c"]
+    k = p["k_0"] + args["K_tilde"] @ theta["alpha_k"]
+    dk_dt = args["K"] @ theta["alpha_k"]
+    resource = dk_dt - (k ** p["a"] - p["delta"] * k - c)
+    euler = dmu_dt + mu * (p["a"] * k ** (p["a"] - 1.0) - p["delta"] - p["rho_hat"])
+    shadow_price = mu * c ** p["sigma_crra"] - 1.0
+    residual = jnp.concatenate([resource, euler, shadow_price])
+    return residual / jnp.sqrt(residual.size)
 ```
 
 ## The constrained program
@@ -98,43 +111,39 @@ $$
 \end{aligned}
 $$
 
-at every training date, plus the positivity constraints $k, c, \mu \ge \varepsilon$ — the interior point evaluates infeasible trial iterates, so $k$ also clamps at $\varepsilon$ inside the model functions. JAX supplies `jax.grad`, [`jax.jacfwd`](https://docs.jax.dev/en/latest/automatic-differentiation.html), and the Lagrangian Hessian via `jax.hessian` as jitted callbacks.
+at every training date. The equality constraints are `residual_fn` verbatim — its constant $1/\sqrt{3n}$ scale is immaterial to the constraint set — with `unpack` rebuilding the ridgeless `theta` dict from Uno's flat vector. JAX supplies `jax.grad`, [`jax.jacfwd`](https://docs.jax.dev/en/latest/automatic-differentiation.html), and the Lagrangian Hessian via `jax.hessian` as jitted callbacks.
 
 ```{python}
 K, K_tilde = kernel_matrices(t_train, t_train)
+args = {"K": K, "K_tilde": K_tilde}
 
 N_VARIABLES = 3 * N_TRAIN + 2
-N_CONSTRAINTS = 6 * N_TRAIN
+N_CONSTRAINTS = 3 * N_TRAIN
 
 
 def unpack(x):
-    alpha_mu = x[:N_TRAIN]
-    alpha_c = x[N_TRAIN : 2 * N_TRAIN]
-    alpha_k = x[2 * N_TRAIN : 3 * N_TRAIN]
-    c_0 = x[3 * N_TRAIN]
-    mu_0 = x[3 * N_TRAIN + 1]
-    return alpha_mu, alpha_c, alpha_k, c_0, mu_0
+    return {
+        "alpha_mu": x[:N_TRAIN],
+        "alpha_c": x[N_TRAIN : 2 * N_TRAIN],
+        "alpha_k": x[2 * N_TRAIN : 3 * N_TRAIN],
+        "c_0": x[3 * N_TRAIN],
+        "mu_0": x[3 * N_TRAIN + 1],
+    }
 
 
 @jax.jit
 def objective(x):
-    alpha_mu, alpha_c, alpha_k, _, _ = unpack(x)
-    return alpha_mu @ K @ alpha_mu + alpha_c @ K @ alpha_c + alpha_k @ K @ alpha_k
+    theta = unpack(x)
+    return (
+        theta["alpha_mu"] @ K @ theta["alpha_mu"]
+        + theta["alpha_c"] @ K @ theta["alpha_c"]
+        + theta["alpha_k"] @ K @ theta["alpha_k"]
+    )
 
 
 @jax.jit
 def constraints(x):
-    alpha_mu, alpha_c, alpha_k, c_0, mu_0 = unpack(x)
-    mu = mu_0 + K_tilde @ alpha_mu
-    dmu_dt = K @ alpha_mu
-    c = c_0 + K_tilde @ alpha_c
-    k = k_0 + K_tilde @ alpha_k
-    dk_dt = K @ alpha_k
-    k_positive = jnp.maximum(k, DOMAIN_EPS)
-    resource = dk_dt - (k_positive**a - delta * k - c)
-    costate = dmu_dt + mu * (a * k_positive ** (a - 1.0) - delta - rho_hat)
-    foc = mu * c**sigma_crra - 1.0
-    return jnp.concatenate([resource, costate, foc, k, c, mu])
+    return residual_fn(unpack(x), args, p)
 
 
 def lagrangian(x, objective_multiplier, multipliers):
@@ -148,12 +157,11 @@ lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
 
 ## The NLP setup
 
-Uno takes the problem in sparse-triplet form; with a dense kernel model the Jacobian is simply every (row, column) pair and the Hessian its lower triangle. The first $3n$ constraint rows are equalities at zero, the last $3n$ keep $(k, c, \mu) \ge \varepsilon$; the free scalars $(c_0, \mu_0)$ are bounded below at $\varepsilon$ and warm-start at the flat steady-flow guess.
+Uno takes the problem in sparse-triplet form; with a dense kernel model the Jacobian is simply every (row, column) pair and the Hessian its lower triangle. Every variable is free and every constraint row is an equality at zero; the free scalars $(c_0, \mu_0)$ warm-start at the flat steady-flow guess.
 
 ```{python}
 variable_lower_bounds = np.full(N_VARIABLES, -np.inf)
 variable_upper_bounds = np.full(N_VARIABLES, np.inf)
-variable_lower_bounds[3 * N_TRAIN :] = DOMAIN_EPS
 model = unopy.Model(
     unopy.PROBLEM_NONLINEAR,
     N_VARIABLES,
@@ -185,17 +193,11 @@ def jacobian_callback(x, jacobian_output):
     jacobian_output[:] = np.asarray(constraint_jacobian(jnp.asarray(x))).reshape(-1)
 
 
-constraint_lower_bounds = np.concatenate(
-    [np.zeros(3 * N_TRAIN), np.full(3 * N_TRAIN, DOMAIN_EPS)]
-)
-constraint_upper_bounds = np.concatenate(
-    [np.zeros(3 * N_TRAIN), np.full(3 * N_TRAIN, np.inf)]
-)
 model.set_constraints(
     N_CONSTRAINTS,
     constraints_callback,
-    constraint_lower_bounds,
-    constraint_upper_bounds,
+    np.zeros(N_CONSTRAINTS),
+    np.zeros(N_CONSTRAINTS),
     len(jacobian_rows),
     jacobian_rows,
     jacobian_columns,
@@ -247,8 +249,7 @@ start = time.perf_counter()
 result = solver.optimize(model)
 solve_time = time.perf_counter() - start
 
-x = jnp.asarray(np.array(result.primal_solution))[:N_VARIABLES]
-alpha_mu, alpha_c, alpha_k, c_0, mu_0 = unpack(x)
+theta = unpack(jnp.asarray(np.array(result.primal_solution))[:N_VARIABLES])
 ```
 
 ## Results
@@ -257,27 +258,28 @@ Identical diagnostics to the ridgeless notebook: the costate (Euler) residual on
 
 ```{python}
 K_test, K_tilde_test = kernel_matrices(t_test, t_train)
-mu_test = mu_0 + K_tilde_test @ alpha_mu
-dmu_test = K_test @ alpha_mu
-k_test = k_0 + K_tilde_test @ alpha_k
-costate_test = dmu_test + mu_test * (a * k_test ** (a - 1.0) - delta - rho_hat)
+mu_test = theta["mu_0"] + K_tilde_test @ theta["alpha_mu"]
+k_test = k_0 + K_tilde_test @ theta["alpha_k"]
+euler_test = K_test @ theta["alpha_mu"] + mu_test * (
+    a * k_test ** (a - 1.0) - delta - rho_hat
+)
 
 # Log transversality certificate at T: -rho_hat T - sigma log c(T) + log k(T).
 _, K_tilde_tvc = kernel_matrices(jnp.array([TVC_T]), t_train)
-c_T = c_0 + K_tilde_tvc @ alpha_c
-k_T = k_0 + K_tilde_tvc @ alpha_k
+c_T = theta["c_0"] + K_tilde_tvc @ theta["alpha_c"]
+k_T = k_0 + K_tilde_tvc @ theta["alpha_k"]
 log_tvc = -rho_hat * TVC_T - sigma_crra * jnp.log(c_T[0]) + jnp.log(k_T[0])
 
 print(f"solve: {result.solution_status.name} in {solve_time:.2f}s (incl. jit)")
-print(f"c_0 = {float(c_0):.6f}, mu_0 = {float(mu_0):.6f}")
-print(f"mean |Euler residual| test: {float(jnp.abs(costate_test).mean()):.3e}")
+print(f"c_0 = {float(theta["c_0"]):.6f}, mu_0 = {float(theta["mu_0"]):.6f}")
+print(f"mean |Euler residual| test: {float(jnp.abs(euler_test).mean()):.3e}")
 print(f"log-TVC at t={TVC_T:.0f}: {float(log_tvc):.1f}   (should be << 0)")
 ```
 
 Capital and consumption rise toward their steady states; the costate (Euler) residual sits on zero inside the training horizon (dotted) and degrades gracefully past it.
 
 ```{python}
-c_test = c_0 + K_tilde_test @ alpha_c
+c_test = theta["c_0"] + K_tilde_test @ theta["alpha_c"]
 
 fig, (ax_k, ax_r) = plt.subplots(1, 2, figsize=(10, 4))
 ax_k.plot(t_test, k_test, "C0", label="k(t)")
@@ -285,7 +287,7 @@ ax_k.plot(t_test, c_test, "C1", label="c(t)")
 ax_k.axvline(TRAIN_T, color="0.3", linestyle=":", label="train horizon")
 ax_k.set(xlabel="t", title="capital and consumption")
 ax_k.legend(fontsize=8)
-ax_r.plot(t_test, costate_test, "C0")
+ax_r.plot(t_test, euler_test, "C0")
 ax_r.axhline(0.0, color="k", linestyle="--", linewidth=0.8)
 ax_r.axvline(TRAIN_T, color="0.3", linestyle=":")
 ax_r.set(xlabel="t", ylabel="residual", title="Euler (costate) residual")

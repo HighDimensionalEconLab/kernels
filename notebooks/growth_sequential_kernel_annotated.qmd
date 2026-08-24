@@ -105,15 +105,6 @@ def kernel_matrices(t_i, t_j):
     K = SIGMA**2 * jnp.exp(-jnp.abs(s) / ELL)
     K_tilde = antiderivative(t_j)[None, :] + jnp.sign(s) * antiderivative(jnp.abs(s))
     return K, K_tilde
-
-
-def paths(theta, K, K_tilde, p):
-    mu = theta["mu_0"] + K_tilde @ theta["alpha_mu"]
-    dmu_dt = K @ theta["alpha_mu"]
-    c = theta["c_0"] + K_tilde @ theta["alpha_c"]
-    k = p["k_0"] + K_tilde @ theta["alpha_k"]
-    dk_dt = K @ theta["alpha_k"]
-    return mu, dmu_dt, c, k, dk_dt
 ```
 
 ## Ridgeless least squares
@@ -135,17 +126,16 @@ $$
 As $\lambda \to 0$ the minimizer converges to the interpolant of minimal summed norm with the free scalars $(c_0, \mu_0)$ unpenalized; we pin $\lambda$ tiny and fixed (`RIDGE`). The paths that violate transversality over-accumulate capital toward the consumption-free maximum — far steeper, hence far larger norm — so the minimum-norm interpolant is the saddle path.
 
 ```{python}
-def residuals(theta, K, K_tilde, p):
-    mu, dmu_dt, c, k, dk_dt = paths(theta, K, K_tilde, p)
-    resource = dk_dt - (k ** p["a"] - p["delta"] * k - c)
-    costate = dmu_dt + mu * (p["a"] * k ** (p["a"] - 1.0) - p["delta"] - p["rho_hat"])
-    foc = mu * c ** p["sigma_crra"] - 1.0
-    return resource, costate, foc
-
-
 def residual_fn(theta, args, p):
-    resource, costate, foc = residuals(theta, args["K"], args["K_tilde"], p)
-    residual = jnp.concatenate([resource, costate, foc])
+    mu = theta["mu_0"] + args["K_tilde"] @ theta["alpha_mu"]
+    dmu_dt = args["K"] @ theta["alpha_mu"]
+    c = theta["c_0"] + args["K_tilde"] @ theta["alpha_c"]
+    k = p["k_0"] + args["K_tilde"] @ theta["alpha_k"]
+    dk_dt = args["K"] @ theta["alpha_k"]
+    resource = dk_dt - (k ** p["a"] - p["delta"] * k - c)
+    euler = dmu_dt + mu * (p["a"] * k ** (p["a"] - 1.0) - p["delta"] - p["rho_hat"])
+    shadow_price = mu * c ** p["sigma_crra"] - 1.0
+    residual = jnp.concatenate([resource, euler, shadow_price])
     return residual / jnp.sqrt(residual.size)
 ```
 
@@ -192,23 +182,28 @@ Off-grid evaluation only needs fresh cross-kernel matrices against the training 
 
 ```{python}
 K_test, K_tilde_test = kernel_matrices(t_test, t_train)
-_, costate_test, _ = residuals(theta, K_test, K_tilde_test, p)
+mu_test = theta["mu_0"] + K_tilde_test @ theta["alpha_mu"]
+k_test = k_0 + K_tilde_test @ theta["alpha_k"]
+euler_test = K_test @ theta["alpha_mu"] + mu_test * (
+    a * k_test ** (a - 1.0) - delta - rho_hat
+)
 
 # Log transversality certificate at T: -rho_hat T - sigma log c(T) + log k(T).
-K_tvc, K_tilde_tvc = kernel_matrices(jnp.array([TVC_T]), t_train)
-_, _, c_T, k_T, _ = paths(theta, K_tvc, K_tilde_tvc, p)
+_, K_tilde_tvc = kernel_matrices(jnp.array([TVC_T]), t_train)
+c_T = theta["c_0"] + K_tilde_tvc @ theta["alpha_c"]
+k_T = k_0 + K_tilde_tvc @ theta["alpha_k"]
 log_tvc = -rho_hat * TVC_T - sigma_crra * jnp.log(c_T[0]) + jnp.log(k_T[0])
 
 print(f"solve: {int(result.steps)} steps in {solve_time:.2f}s (incl. jit)")
 print(f"c_0 = {float(theta["c_0"]):.6f}, mu_0 = {float(theta["mu_0"]):.6f}")
-print(f"mean |Euler residual| test: {float(jnp.abs(costate_test).mean()):.3e}")
+print(f"mean |Euler residual| test: {float(jnp.abs(euler_test).mean()):.3e}")
 print(f"log-TVC at t={TVC_T:.0f}: {float(log_tvc):.1f}   (should be << 0)")
 ```
 
 Capital rises from $k_0$ toward its steady state while consumption climbs to its own; the costate (Euler) residual sits on zero inside the training horizon (dotted) and degrades gracefully past it.
 
 ```{python}
-_, _, c_test, k_test, _ = paths(theta, K_test, K_tilde_test, p)
+c_test = theta["c_0"] + K_tilde_test @ theta["alpha_c"]
 
 fig, (ax_k, ax_r) = plt.subplots(1, 2, figsize=(10, 4))
 ax_k.plot(t_test, k_test, "C0", label="k(t)")
@@ -216,7 +211,7 @@ ax_k.plot(t_test, c_test, "C1", label="c(t)")
 ax_k.axvline(TRAIN_T, color="0.3", linestyle=":", label="train horizon")
 ax_k.set(xlabel="t", title="capital and consumption")
 ax_k.legend(fontsize=8)
-ax_r.plot(t_test, costate_test, "C0")
+ax_r.plot(t_test, euler_test, "C0")
 ax_r.axhline(0.0, color="k", linestyle="--", linewidth=0.8)
 ax_r.axvline(TRAIN_T, color="0.3", linestyle=":")
 ax_r.set(xlabel="t", ylabel="residual", title="Euler (costate) residual")

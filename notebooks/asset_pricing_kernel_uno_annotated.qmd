@@ -6,7 +6,7 @@ title: "Asset Pricing — Kernel, Constrained (Uno)"
 
 [JAX](https://docs.jax.dev) underlies everything below: array math via `jax.numpy`, [compilation](https://docs.jax.dev/en/latest/jit-compilation.html) via `jax.jit`, and exact derivatives via [automatic differentiation](https://docs.jax.dev/en/latest/automatic-differentiation.html) — the solver differentiates the residual program itself, so no derivative is coded by hand. JAX defaults to 32-bit floats, so we switch on 64-bit and the most accurate matmul *before* creating any array, then import everything we need.
 
-This notebook solves the same problem as the companion ridgeless notebook, but with a **constrained optimizer**: the interior-point solver [Uno](https://github.com/cvanaret/Uno) through `unopy`, with JAX supplying the gradient, Jacobian, and Hessian callbacks. Structural parameters stay plain module-level constants — the NLP solver is host-side C++, so nothing rides through a differentiable `p` here.
+This notebook solves the same problem as the companion ridgeless notebook, but with a **constrained optimizer**: the interior-point solver [Uno](https://github.com/cvanaret/Uno) through `unopy`, with JAX supplying the gradient, Jacobian, and Hessian callbacks. The model code — `p`, `dividends`, and `residual_fn` — is the ridgeless notebook's, retyped verbatim; here `p` is only a value container, since the NLP solver is host-side C++ and nothing differentiates through it.
 
 ```{python}
 import jax
@@ -29,6 +29,7 @@ r = 0.1  # interest rate
 c = 0.02  # dividend flow constant
 g = -0.2  # dividend growth rate
 x_0 = 0.01  # initial dividend
+p = {"r": r, "c": c, "g": g, "x_0": x_0}
 ```
 
 Parameters of the algorithm: the kernel hyperparameters and the collocation and test grids.
@@ -67,7 +68,7 @@ h(d) = \sigma^2 \ell \left(1 - e^{-d/\ell}\right),
 \tilde K(t_i, t_j) = h(t_j) + \operatorname{sign}(t_i - t_j)\, h(|t_i - t_j|),
 $$
 
-so that $p(t) = p_0 + \sum_j \alpha_j \tilde K(t, t_j)$ with the exact derivative $p'(t) = \sum_j \alpha_j k(t, t_j)$, and $\tilde K(0, \cdot) = 0$ makes $p_0$ the initial price.
+so that $p(t) = p_0 + \sum_j \alpha_j \tilde K(t, t_j)$ with the exact derivative $p'(t) = \sum_j \alpha_j k(t, t_j)$, and $\tilde K(0, \cdot) = 0$ makes $p_0$ the initial price. The stacked no-arbitrage residual $p'(t_i) - \big(r\, p(t_i) - x(t_i)\big)$ is the ridgeless notebook's `residual_fn`, verbatim.
 
 ```{python}
 def antiderivative(d):
@@ -81,8 +82,14 @@ def kernel_matrices(t_i, t_j):
     return K, K_tilde
 
 
-def dividends(t):
-    return (x_0 + c / g) * jnp.exp(g * t) - c / g
+def dividends(t, p):
+    return (p["x_0"] + p["c"] / p["g"]) * jnp.exp(p["g"] * t) - p["c"] / p["g"]
+
+
+def residual_fn(theta, args, p):
+    alpha, p_0 = theta["alpha"], theta["p_0"]
+    price = p_0 + args["K_tilde"] @ alpha
+    return args["K"] @ alpha - (p["r"] * price - dividends(args["t"], p))
 ```
 
 ## The constrained program
@@ -92,33 +99,32 @@ The ridgeless notebook reaches the minimum-norm interpolant as the $\lambda \to 
 $$
 \min_{\alpha,\, p_0}\ \alpha^\top K \alpha
 \quad \text{s.t.} \quad
-p'(t_i) - \big(r\, p(t_i) - x(t_i)\big) = 0 \quad \text{at every training date,}
+p'(t_i) - \big(r\, p(t_i) - x(t_i)\big) = 0 \quad \text{at every training date.}
 $$
 
-handing objective, constraints, and their derivatives — `jax.grad`, [`jax.jacfwd`](https://docs.jax.dev/en/latest/automatic-differentiation.html), and the Hessian of the Lagrangian via `jax.hessian` — to the interior-point solver as jitted callbacks.
+The equality constraints are `residual_fn` verbatim, with `unpack` rebuilding the ridgeless `theta` dict from Uno's flat vector; objective, constraints, and their derivatives — `jax.grad`, [`jax.jacfwd`](https://docs.jax.dev/en/latest/automatic-differentiation.html), and the Hessian of the Lagrangian via `jax.hessian` — reach the interior-point solver as jitted callbacks.
 
 ```{python}
 K, K_tilde = kernel_matrices(t_train, t_train)
+args = {"K": K, "K_tilde": K_tilde, "t": t_train}
 
 N_VARIABLES = N_TRAIN + 1
 N_CONSTRAINTS = N_TRAIN
 
 
 def unpack(x):
-    return x[:N_TRAIN], x[N_TRAIN]
+    return {"alpha": x[:N_TRAIN], "p_0": x[N_TRAIN]}
 
 
 @jax.jit
 def objective(x):
-    alpha, _ = unpack(x)
+    alpha = unpack(x)["alpha"]
     return alpha @ K @ alpha
 
 
 @jax.jit
 def constraints(x):
-    alpha, p_0 = unpack(x)
-    price = p_0 + K_tilde @ alpha
-    return K @ alpha - (r * price - dividends(t_train))
+    return residual_fn(unpack(x), args, p)
 
 
 def lagrangian(x, objective_multiplier, multipliers):
@@ -206,7 +212,7 @@ model.set_initial_primal_iterate(np.zeros(N_VARIABLES))
 
 ## Solve
 
-The `ipopt` preset reproduces the classic filter line-search interior-point method.
+The `ipopt` preset reproduces the classic filter line-search interior-point method. `primal_solution` appends solver-internal auxiliaries, so only the leading $n + 1$ block is ours.
 
 ```{python}
 solver = unopy.UnoSolver()
@@ -218,8 +224,8 @@ start = time.perf_counter()
 result = solver.optimize(model)
 solve_time = time.perf_counter() - start
 
-x = jnp.asarray(np.array(result.primal_solution))
-alpha, p_0 = unpack(x)
+theta = unpack(jnp.asarray(np.array(result.primal_solution)[:N_VARIABLES]))
+alpha, p_0 = theta["alpha"], theta["p_0"]
 ```
 
 ## Results
@@ -233,7 +239,7 @@ $$
 ```{python}
 K_test, K_tilde_test = kernel_matrices(t_test, t_train)
 price_test = p_0 + K_tilde_test @ alpha
-test_residual = K_test @ alpha - (r * price_test - dividends(t_test))
+test_residual = K_test @ alpha - (r * price_test - dividends(t_test, p))
 
 # Closed-form fundamental (no-bubble) price.
 price_fundamental = (x_0 + c / g) * jnp.exp(g * t_test) / (r - g) - c / (g * r)

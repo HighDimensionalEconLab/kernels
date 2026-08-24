@@ -14,6 +14,7 @@ delta = 0.1  # depreciation rate
 rho_hat = -4.0 * math.log(0.9896)  # continuous discount rate (quarterly beta anchor)
 sigma_crra = 2.0  # CRRA curvature
 k_0 = 1.0  # initial capital
+p = {"a": a, "delta": delta, "rho_hat": rho_hat, "sigma_crra": sigma_crra, "k_0": k_0}
 
 ELL = 10.0  # Matern-1/2 length scale
 SIGMA = 1.0  # kernel amplitude
@@ -22,7 +23,6 @@ N_TRAIN = 101
 TEST_T = 110.0
 N_TEST = 100
 TVC_T = 200.0
-DOMAIN_EPS = 1e-6  # domain floor for the interior point's infeasible iterates
 
 t_train = jnp.linspace(0.0, TRAIN_T, N_TRAIN)
 t_test = jnp.linspace(0.0, TEST_T, N_TEST)
@@ -43,46 +43,57 @@ def kernel_matrices(t_i, t_j):
     return K, K_tilde
 
 
+# Each path x(t) = x(0) + K_tilde alpha with exact derivative x'(t) = K alpha;
+# k(0) = k_0 is pinned while c(0), mu(0) are free scalars in theta. CRRA
+# first-order condition u'(c) = mu; the euler and resource residuals are
+# utility-free.
+def residual_fn(theta, args, p):
+    mu = theta["mu_0"] + args["K_tilde"] @ theta["alpha_mu"]
+    dmu_dt = args["K"] @ theta["alpha_mu"]
+    c = theta["c_0"] + args["K_tilde"] @ theta["alpha_c"]
+    k = p["k_0"] + args["K_tilde"] @ theta["alpha_k"]
+    dk_dt = args["K"] @ theta["alpha_k"]
+    resource = dk_dt - (k ** p["a"] - p["delta"] * k - c)
+    euler = dmu_dt + mu * (p["a"] * k ** (p["a"] - 1.0) - p["delta"] - p["rho_hat"])
+    shadow_price = mu * c ** p["sigma_crra"] - 1.0
+    residual = jnp.concatenate([resource, euler, shadow_price])
+    return residual / jnp.sqrt(residual.size)
+
+
 K, K_tilde = kernel_matrices(t_train, t_train)
+args = {"K": K, "K_tilde": K_tilde}
 
 N_VARIABLES = 3 * N_TRAIN + 2
-N_CONSTRAINTS = 6 * N_TRAIN
+N_CONSTRAINTS = 3 * N_TRAIN
 
 
+# unpack rebuilds the ridgeless theta dict from Uno's flat vector.
 def unpack(x):
-    alpha_mu = x[:N_TRAIN]
-    alpha_c = x[N_TRAIN : 2 * N_TRAIN]
-    alpha_k = x[2 * N_TRAIN : 3 * N_TRAIN]
-    c_0 = x[3 * N_TRAIN]
-    mu_0 = x[3 * N_TRAIN + 1]
-    return alpha_mu, alpha_c, alpha_k, c_0, mu_0
+    return {
+        "alpha_mu": x[:N_TRAIN],
+        "alpha_c": x[N_TRAIN : 2 * N_TRAIN],
+        "alpha_k": x[2 * N_TRAIN : 3 * N_TRAIN],
+        "c_0": x[3 * N_TRAIN],
+        "mu_0": x[3 * N_TRAIN + 1],
+    }
 
 
-# min sum_j alpha_j' K alpha_j over the three paths, subject to the Pontryagin
-# residuals vanishing at every training date and (k, c, mu) staying positive.
+# min sum_j alpha_j' K alpha_j over the three paths, subject to the NLLS
+# residual_fn vanishing at every training date; its constant 1/sqrt(3n) row
+# scale is immaterial to the constraint set.
 @jax.jit
 def objective(x):
-    alpha_mu, alpha_c, alpha_k, _, _ = unpack(x)
-    return alpha_mu @ K @ alpha_mu + alpha_c @ K @ alpha_c + alpha_k @ K @ alpha_k
+    theta = unpack(x)
+    return (
+        theta["alpha_mu"] @ K @ theta["alpha_mu"]
+        + theta["alpha_c"] @ K @ theta["alpha_c"]
+        + theta["alpha_k"] @ K @ theta["alpha_k"]
+    )
 
 
-# CRRA first-order condition u'(c) = mu; the costate and resource residuals
-# are utility-free. IPOPT's interior point evaluates infeasible trial
-# iterates, so k clamps at DOMAIN_EPS inside the model functions; the last
-# 3n rows keep (k, c, mu) >= DOMAIN_EPS as inequality constraints.
 @jax.jit
 def constraints(x):
-    alpha_mu, alpha_c, alpha_k, c_0, mu_0 = unpack(x)
-    mu = mu_0 + K_tilde @ alpha_mu
-    dmu_dt = K @ alpha_mu
-    c = c_0 + K_tilde @ alpha_c
-    k = k_0 + K_tilde @ alpha_k
-    dk_dt = K @ alpha_k
-    k_positive = jnp.maximum(k, DOMAIN_EPS)
-    resource = dk_dt - (k_positive**a - delta * k - c)
-    costate = dmu_dt + mu * (a * k_positive ** (a - 1.0) - delta - rho_hat)
-    foc = mu * c**sigma_crra - 1.0
-    return jnp.concatenate([resource, costate, foc, k, c, mu])
+    return residual_fn(unpack(x), args, p)
 
 
 def lagrangian(x, objective_multiplier, multipliers):
@@ -94,10 +105,9 @@ constraint_jacobian = jax.jit(jax.jacfwd(constraints))
 lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
 
 # Interior-point NLP: dense Jacobian and lower-triangle Lagrangian Hessian
-# callbacks; the free scalars (c_0, mu_0) are bounded below at DOMAIN_EPS.
+# callbacks; every variable is free and every constraint row is an equality.
 variable_lower_bounds = np.full(N_VARIABLES, -np.inf)
 variable_upper_bounds = np.full(N_VARIABLES, np.inf)
-variable_lower_bounds[3 * N_TRAIN :] = DOMAIN_EPS
 model = unopy.Model(
     unopy.PROBLEM_NONLINEAR,
     N_VARIABLES,
@@ -129,17 +139,11 @@ def jacobian_callback(x, jacobian_output):
     jacobian_output[:] = np.asarray(constraint_jacobian(jnp.asarray(x))).reshape(-1)
 
 
-constraint_lower_bounds = np.concatenate(
-    [np.zeros(3 * N_TRAIN), np.full(3 * N_TRAIN, DOMAIN_EPS)]
-)
-constraint_upper_bounds = np.concatenate(
-    [np.zeros(3 * N_TRAIN), np.full(3 * N_TRAIN, np.inf)]
-)
 model.set_constraints(
     N_CONSTRAINTS,
     constraints_callback,
-    constraint_lower_bounds,
-    constraint_upper_bounds,
+    np.zeros(N_CONSTRAINTS),
+    np.zeros(N_CONSTRAINTS),
     len(jacobian_rows),
     jacobian_rows,
     jacobian_columns,
@@ -187,22 +191,22 @@ solve_time = time.perf_counter() - start
 
 # primal_solution appends solver-internal auxiliaries; only the leading
 # 3 N_TRAIN + 2 block is ours.
-x = jnp.asarray(np.array(result.primal_solution))[:N_VARIABLES]
-alpha_mu, alpha_c, alpha_k, c_0, mu_0 = unpack(x)
+theta = unpack(jnp.asarray(np.array(result.primal_solution))[:N_VARIABLES])
 
 K_test, K_tilde_test = kernel_matrices(t_test, t_train)
-mu_test = mu_0 + K_tilde_test @ alpha_mu
-dmu_test = K_test @ alpha_mu
-k_test = k_0 + K_tilde_test @ alpha_k
-costate_test = dmu_test + mu_test * (a * k_test ** (a - 1.0) - delta - rho_hat)
+mu_test = theta["mu_0"] + K_tilde_test @ theta["alpha_mu"]
+k_test = k_0 + K_tilde_test @ theta["alpha_k"]
+euler_test = K_test @ theta["alpha_mu"] + mu_test * (
+    a * k_test ** (a - 1.0) - delta - rho_hat
+)
 
 # Log transversality certificate at T: -rho_hat T - sigma log c(T) + log k(T).
 _, K_tilde_tvc = kernel_matrices(jnp.array([TVC_T]), t_train)
-c_T = c_0 + K_tilde_tvc @ alpha_c
-k_T = k_0 + K_tilde_tvc @ alpha_k
+c_T = theta["c_0"] + K_tilde_tvc @ theta["alpha_c"]
+k_T = k_0 + K_tilde_tvc @ theta["alpha_k"]
 log_tvc = -rho_hat * TVC_T - sigma_crra * jnp.log(c_T[0]) + jnp.log(k_T[0])
 
 print(f"solve: {result.solution_status.name} in {solve_time:.2f}s (incl. jit)")
-print(f"c_0 = {float(c_0):.6f}, mu_0 = {float(mu_0):.6f}")
-print(f"mean |Euler residual| test: {float(jnp.abs(costate_test).mean()):.3e}")
+print(f"c_0 = {float(theta['c_0']):.6f}, mu_0 = {float(theta['mu_0']):.6f}")
+print(f"mean |Euler residual| test: {float(jnp.abs(euler_test).mean()):.3e}")
 print(f"log-TVC at t={TVC_T:.0f}: {float(log_tvc):.1f}   (should be << 0)")

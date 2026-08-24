@@ -12,6 +12,7 @@ r = 0.1  # interest rate
 c = 0.02  # dividend flow constant
 g = -0.2  # dividend growth rate
 x_0 = 0.01  # initial dividend
+p = {"r": r, "c": c, "g": g, "x_0": x_0}
 
 ELL = 10.0  # Matern-1/2 length scale
 SIGMA = 1.0  # kernel amplitude
@@ -39,34 +40,41 @@ def kernel_matrices(t_i, t_j):
     return K, K_tilde
 
 
-def dividends(t):
-    return (x_0 + c / g) * jnp.exp(g * t) - c / g
+def dividends(t, p):
+    return (p["x_0"] + p["c"] / p["g"]) * jnp.exp(p["g"] * t) - p["c"] / p["g"]
+
+
+# Price representation p(t) = p_0 + K_tilde alpha with exact derivative
+# p'(t) = K alpha; the no-arbitrage residual is p'(t) - (r p(t) - x(t)).
+def residual_fn(theta, args, p):
+    alpha, p_0 = theta["alpha"], theta["p_0"]
+    price = p_0 + args["K_tilde"] @ alpha
+    return args["K"] @ alpha - (p["r"] * price - dividends(args["t"], p))
 
 
 K, K_tilde = kernel_matrices(t_train, t_train)
+args = {"K": K, "K_tilde": K_tilde, "t": t_train}
 
 N_VARIABLES = N_TRAIN + 1
 N_CONSTRAINTS = N_TRAIN
 
 
+# unpack rebuilds the ridgeless theta dict from Uno's flat vector.
 def unpack(x):
-    return x[:N_TRAIN], x[N_TRAIN]
+    return {"alpha": x[:N_TRAIN], "p_0": x[N_TRAIN]}
 
 
-# min alpha' K alpha subject to the no-arbitrage residual p'(t) - (r p(t) - x(t))
-# vanishing at every training date, with p(t) = p_0 + K_tilde alpha and
-# p'(t) = K alpha.
+# min alpha' K alpha subject to the NLLS residual_fn vanishing at every
+# training date.
 @jax.jit
 def objective(x):
-    alpha, _ = unpack(x)
+    alpha = unpack(x)["alpha"]
     return alpha @ K @ alpha
 
 
 @jax.jit
 def constraints(x):
-    alpha, p_0 = unpack(x)
-    price = p_0 + K_tilde @ alpha
-    return K @ alpha - (r * price - dividends(t_train))
+    return residual_fn(unpack(x), args, p)
 
 
 def lagrangian(x, objective_multiplier, multipliers):
@@ -156,12 +164,14 @@ start = time.perf_counter()
 result = solver.optimize(model)
 solve_time = time.perf_counter() - start
 
-x = jnp.asarray(np.array(result.primal_solution))
-alpha, p_0 = unpack(x)
+# primal_solution appends solver-internal auxiliaries; only the leading
+# N_TRAIN + 1 block is ours.
+theta = unpack(jnp.asarray(np.array(result.primal_solution)[:N_VARIABLES]))
+alpha, p_0 = theta["alpha"], theta["p_0"]
 
 K_test, K_tilde_test = kernel_matrices(t_test, t_train)
 price_test = p_0 + K_tilde_test @ alpha
-test_residual = K_test @ alpha - (r * price_test - dividends(t_test))
+test_residual = K_test @ alpha - (r * price_test - dividends(t_test, p))
 
 # Closed-form fundamental (no-bubble) price.
 price_fundamental = (x_0 + c / g) * jnp.exp(g * t_test) / (r - g) - c / (g * r)

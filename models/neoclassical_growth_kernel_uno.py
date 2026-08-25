@@ -8,6 +8,7 @@ import jsonargparse
 import numpy as np
 import unopy
 from jax.flatten_util import ravel_pytree
+from jax.tree_util import Partial
 
 from models.kernels import (
     KernelSettings,
@@ -30,11 +31,9 @@ from models.neoclassical_growth_shared import (
 from models.utilities import Stopwatch, acceptance_fields, make_train_t_grid
 
 
-# The theta template in args maps IPOPT's flat float64 vector back to the
-# NLLS Theta; ravel_pytree's splits are static under jit.
 @jax.jit
 def objective(x, args):
-    theta = ravel_pytree(args["theta_like"])[1](x)
+    theta = args["unravel"](x)
     return (
         rkhs_norm_squared(theta.alpha_mu, args["K"])
         + rkhs_norm_squared(theta.alpha_c, args["K"])
@@ -44,7 +43,7 @@ def objective(x, args):
 
 @jax.jit
 def constraints(x, args, p):
-    theta = ravel_pytree(args["theta_like"])[1](x)
+    theta = args["unravel"](x)
     return residual_fn(theta, args, p)
 
 
@@ -157,7 +156,7 @@ def neoclassical_growth_kernel_uno(
         "t": None,
         "z_trend": 1.0,
         "g_hat": None,
-        "theta_like": theta_0,
+        "unravel": Partial(unravel),
     }
 
     n_variables = x_initial.size

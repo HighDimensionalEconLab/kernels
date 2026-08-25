@@ -50,9 +50,9 @@ class ToleranceSettings:
 
 @struct.dataclass
 class ResidualArgs:
+    batch: dict
     graphdef: nnx.GraphDef
     nondiff: nnx.State
-    train_t: jax.Array
 
 
 class PricePolicyNN(nnx.Module):
@@ -123,7 +123,7 @@ def path_values(model, t, p):
 
 def residual_fn(theta, args, p):
     model = nnx.merge(args.graphdef, theta, args.nondiff)
-    residual = path_values(model, args.train_t, p)["residual"]
+    residual = path_values(model, args.batch["t"], p)["residual"]
     return residual / jnp.sqrt(residual.size)
 
 
@@ -172,7 +172,9 @@ def asset_pricing_nn(
         rngs=nnx.Rngs(init_key),
     )
     graphdef, theta_0, nondiff = nnx.split(model, nnx.Param, ...)
-    residual_args = ResidualArgs(graphdef=graphdef, nondiff=nondiff, train_t=train_t)
+    residual_args = ResidualArgs(
+        batch={"t": train_t}, graphdef=graphdef, nondiff=nondiff
+    )
     p = {
         name: jnp.asarray(value, dtype=dtype)
         for name, value in {"r": r, "c": c, "g": g, "x_0": x_0}.items()

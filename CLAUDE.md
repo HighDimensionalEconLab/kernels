@@ -12,7 +12,7 @@ per-directory READMEs.
   `<model>_shared.py` holds everything used by more than one driver (model
   structure plus the kernel Theta/residual/evaluation); drivers never import
   other drivers. The `_uno` drivers map IPOPT's flat vector to the NLLS Theta
-  via `ravel_pytree` with the theta template riding in `args`.
+  via `ravel_pytree`'s unravel riding in `args` as a `tree_util.Partial`.
 - `replication/` — ensemble + figure drivers; `collect_json.py` writes
   `.results/all_results.json`, the only place paper numbers are selected and
   rounded. Generated JSON is gitignored; track one with a targeted `!path` rule.

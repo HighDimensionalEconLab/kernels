@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import unopy
 from jax.flatten_util import ravel_pytree
+from jax.tree_util import Partial
 
 from models.asset_pricing_benchmark import mu_f_array
 from models.asset_pricing_shared import (
@@ -28,17 +29,15 @@ from models.kernels import (
 from models.utilities import Stopwatch, acceptance_fields, make_train_t_grid
 
 
-# The theta template in args maps IPOPT's flat float64 vector back to the
-# NLLS Theta; ravel_pytree's splits are static under jit.
 @jax.jit
 def objective(x, args):
-    theta = ravel_pytree(args["theta_like"])[1](x)
+    theta = args["unravel"](x)
     return rkhs_norm_squared(theta.alpha, args["K"])
 
 
 @jax.jit
 def constraints(x, args, p):
-    theta = ravel_pytree(args["theta_like"])[1](x)
+    theta = args["unravel"](x)
     return residual_fn(theta, args, p)
 
 
@@ -95,7 +94,12 @@ def asset_pricing_kernel_uno(
         p_0=jnp.zeros((), dtype=jnp.float64),
     )
     x_initial, unravel = ravel_pytree(theta_0)
-    args = {"K": K_jax, "K_tilde": K_tilde_jax, "t": train_data, "theta_like": theta_0}
+    args = {
+        "K": K_jax,
+        "K_tilde": K_tilde_jax,
+        "t": train_data,
+        "unravel": Partial(unravel),
+    }
 
     n_variables = x_initial.size
     n_constraints = n_train

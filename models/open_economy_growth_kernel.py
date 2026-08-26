@@ -125,9 +125,9 @@ def residual_fn(theta, args, p):
 @dataclass(frozen=True)
 class ToleranceSettings:
     train_residual: float = 1e-5
-    # Validation and benchmark thresholds are HPO/quality diagnostics; they do
-    # not redefine convergence of a finite, feasible numerical solution.
     validation_residual: float = 1e-2
+    # The benchmark threshold is an HPO/quality diagnostic; it does not
+    # redefine convergence of a finite, feasible numerical solution.
     benchmark_match: float = 1e-3
 
 
@@ -410,6 +410,8 @@ def open_economy_growth_kernel(
     if max_train_residual > tolerance_set.train_residual:
         rejection_reasons.append("train_residual")
     validation_pass = max_validation_residual <= tolerance_set.validation_residual
+    if not validation_pass:
+        rejection_reasons.append("validation_residual")
 
     alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, log_c_0, log_mu_0, log_q_0 = theta
     rkhs_norm_mu = rkhs_norm_squared(alpha_mu, K)

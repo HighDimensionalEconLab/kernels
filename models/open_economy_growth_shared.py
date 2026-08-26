@@ -36,13 +36,6 @@ class StructuralParameters:
     k_0: jax.Array
     a_0: jax.Array
 
-    # chi = delta^(1 - eta) normalizes adjustment costs so the steady-state
-    # investment rate is exactly delta; a derived quantity, so tangents flow
-    # through delta and eta.
-    @property
-    def chi(self):
-        return self.delta ** (1.0 - self.eta)
-
     @classmethod
     def create(cls, dtype, **kwargs):
         return cls(

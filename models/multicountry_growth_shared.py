@@ -54,17 +54,6 @@ class StructuralParameters:
     k_0: jax.Array
     a_0: jax.Array
 
-    @property
-    def num_countries(self):
-        return self.populations.shape[-1]
-
-    # chi = delta^(1 - eta) normalizes adjustment costs so the steady-state
-    # investment rate is exactly delta; a derived quantity, so tangents flow
-    # through delta and eta.
-    @property
-    def chi(self):
-        return self.delta ** (1.0 - self.eta)
-
     @classmethod
     def create(cls, dtype, **kwargs):
         return cls(
@@ -156,9 +145,12 @@ def marginal_product(k, z, p):
     return p.alpha * z * k ** (p.alpha - 1.0)
 
 
+# chi = delta^(1 - eta) normalizes adjustment costs so investment equals
+# replacement (rate delta) exactly at q = 1/eta.
 def investment_rate_from_q(q, p):
     eta = p.eta
-    return (p.chi * eta * q) ** (1.0 / (1.0 - eta))
+    chi = p.delta ** (1.0 - eta)
+    return (chi * eta * q) ** (1.0 / (1.0 - eta))
 
 
 def investment_expenditure(k, q, p):
@@ -171,8 +163,9 @@ def consumption_from_mu(mu, p):
 
 
 def capital_drift(k, q, p):
+    chi = p.delta ** (1.0 - p.eta)
     investment_rate = investment_rate_from_q(q, p)
-    return k * (p.chi * investment_rate**p.eta - p.delta)
+    return k * (chi * investment_rate**p.eta - p.delta)
 
 
 def current_account(k, a, q, c, z, rate, p):
@@ -181,9 +174,10 @@ def current_account(k, a, q, c, z, rate, p):
 
 def q_drift(k, q, z, rate, p):
     eta = p.eta
+    chi = p.delta ** (1.0 - eta)
     investment_rate = investment_rate_from_q(q, p)
     return (
-        rate + p.delta - (1.0 - eta) * p.chi * investment_rate**eta
+        rate + p.delta - (1.0 - eta) * chi * investment_rate**eta
     ) * q - marginal_product(k, z, p)
 
 
@@ -221,7 +215,7 @@ def steady_state(p, dtype=jnp.float64):
     productivities = jnp.asarray(p.productivities, dtype=dtype)
     populations = jnp.asarray(p.populations, dtype=dtype)
     eta = p.eta
-    q = jnp.full(p.num_countries, 1.0 / eta, dtype=dtype)
+    q = jnp.full(p.populations.shape[-1], 1.0 / eta, dtype=dtype)
     marginal_product_ss = p.delta + p.r / eta
     k = (p.alpha * productivities / marginal_product_ss) ** (1.0 / (1.0 - p.alpha))
     output = production(k, productivities, p)
@@ -283,9 +277,10 @@ def path_residuals(
     gammas = jnp.asarray(p.gammas, dtype=c.dtype)
     populations = jnp.asarray(p.populations, dtype=a.dtype)
     rate_column = rate[..., None]
+    chi = p.delta ** (1.0 - p.eta)
     investment_rate = investment_rate_from_q(q, p)
     return {
-        "capital": dlog_k_dt - (p.chi * investment_rate**p.eta - p.delta),
+        "capital": dlog_k_dt - (chi * investment_rate**p.eta - p.delta),
         "assets": da_dt - current_account(k, a, q, c, z, rate_column, p),
         "tobin_q": dlog_q_dt - q_drift(k, q, z, rate_column, p) / q,
         "marginal_wealth": dlog_mu_dt - mu_drift(mu, rate_column, p) / mu,

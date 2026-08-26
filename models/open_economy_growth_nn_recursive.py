@@ -136,15 +136,14 @@ def policy_values(policy, k, a, p):
     investment_derivative, current_account_derivative = flow_derivatives
     investment_rate = investment / k
     eta = p.eta
-    q = investment_rate ** (1.0 - eta) / (p.chi * eta)
+    chi = p.delta ** (1.0 - eta)
+    q = investment_rate ** (1.0 - eta) / (chi * eta)
     output = production(k, 1.0, p)
     mpk = marginal_product(k, 1.0, p)
-    capital_drift = k * (p.chi * investment_rate**eta - p.delta)
+    capital_drift = k * (chi * investment_rate**eta - p.delta)
     log_q_derivative = (1.0 - eta) * (investment_derivative / investment - 1.0 / k)
     log_q_drift = log_q_derivative * capital_drift
-    q_equation = (
-        p.r_star + p.delta - (1.0 - eta) * p.chi * investment_rate**eta - mpk / q
-    )
+    q_equation = p.r_star + p.delta - (1.0 - eta) * chi * investment_rate**eta - mpk / q
     consumption = p.r_star * a + output - investment - current_account
     consumption_drift = (
         mpk - investment_derivative - current_account_derivative
@@ -173,7 +172,8 @@ def drift_field(state, _, args, p):
     k = k_0 * jnp.exp(state[0])
     investment, current_account = policy(k)
     investment_rate = investment / k
-    capital_drift = k * (args.chi * investment_rate**args.eta - args.delta)
+    chi = args.delta ** (1.0 - args.eta)
+    capital_drift = k * (chi * investment_rate**args.eta - args.delta)
     return jnp.stack(
         [
             capital_drift / k,

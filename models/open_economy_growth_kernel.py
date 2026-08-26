@@ -49,16 +49,17 @@ from models.utilities import (
 )
 
 
-# Alpha blocks first (the metric penalizes the leading flat coordinates).
+# Alpha blocks first (the metric penalizes the leading flat coordinates);
+# the trailing scalars are the free log-anchors of the jump variables.
 class Theta(NamedTuple):
     alpha_mu: jax.Array
     alpha_c: jax.Array
     alpha_k: jax.Array
     alpha_a: jax.Array
     alpha_q: jax.Array
-    c_offset: jax.Array
-    mu_offset: jax.Array
-    q_offset: jax.Array
+    log_c_0: jax.Array
+    log_mu_0: jax.Array
+    log_q_0: jax.Array
 
 
 @struct.dataclass
@@ -68,28 +69,19 @@ class ResidualArgs:
 
 
 def residual_fn(theta, args, p):
-    steady_p = steady_state(p)
-    # The asset block is the one path with no unpenalized offset, so its
+    # The asset block is the one path with no free scalar anchor, so its
     # scale enters the minimum-norm selection metric; the scale must be
     # differentiation-inert or every parameter sensitivity picks up a
-    # selection-drift term from the metric moving with p. The other
-    # normalizations are absorbed by their free offsets.
-    output_scale_p = jax.lax.stop_gradient(steady_p["output"])
-    log_consumption_scale_p = jnp.log(steady_p["g"])
+    # selection-drift term from the metric moving with p. Time-0 output
+    # sets it from the initial conditions alone.
+    output_scale_p = jax.lax.stop_gradient(production(p.k_0, 1.0, p))
     paths = integrated_kernel_paths(
         {
-            "log_mu": IntegratedPath(
-                theta.alpha_mu,
-                -p.gamma * log_consumption_scale_p + theta.mu_offset,
-            ),
-            "log_c": IntegratedPath(
-                theta.alpha_c, log_consumption_scale_p + theta.c_offset
-            ),
+            "log_mu": IntegratedPath(theta.alpha_mu, theta.log_mu_0),
+            "log_c": IntegratedPath(theta.alpha_c, theta.log_c_0),
             "log_k": IntegratedPath(theta.alpha_k, jnp.log(p.k_0)),
             "a_raw": IntegratedPath(theta.alpha_a, jnp.zeros((), theta.alpha_a.dtype)),
-            "log_q": IntegratedPath(
-                theta.alpha_q, jnp.log(steady_p["q"]) + theta.q_offset
-            ),
+            "log_q": IntegratedPath(theta.alpha_q, theta.log_q_0),
         },
         args.K,
         args.K_tilde,
@@ -221,17 +213,20 @@ def open_economy_growth_kernel(
 
     residual_args = ResidualArgs(K=K, K_tilde=K_tilde)
 
-    # The zero coordinate contains no saddle-path or present-value information:
-    # it is flat in the derivative RKHS at the model's scale normalizations.
+    # Flat alpha blocks carry no saddle-path or present-value information;
+    # the free anchors are seeded from the initial conditions alone:
+    # consumption at the flow sustainable at k_0 (mu consistent via the
+    # FOC), q at the replacement-investment price 1/eta.
+    log_c_seed = jnp.log(production(p.k_0, 1.0, p) - p.delta * p.k_0)
     theta_0 = Theta(
         alpha_mu=jnp.zeros(n_train, dtype=dtype),
         alpha_c=jnp.zeros(n_train, dtype=dtype),
         alpha_k=jnp.zeros(n_train, dtype=dtype),
         alpha_a=jnp.zeros(n_train, dtype=dtype),
         alpha_q=jnp.zeros(n_train, dtype=dtype),
-        c_offset=jnp.zeros((), dtype=dtype),
-        mu_offset=jnp.zeros((), dtype=dtype),
-        q_offset=jnp.zeros((), dtype=dtype),
+        log_c_0=log_c_seed,
+        log_mu_0=-p.gamma * log_c_seed,
+        log_q_0=-jnp.log(p.eta),
     )
 
     if ridge_set.ridge_init is None:
@@ -284,25 +279,16 @@ def open_economy_growth_kernel(
             kernel_set.sigma,
             kernel_set.ell,
         )
-        steady_p = steady_state(p)
-        output_scale_p = jax.lax.stop_gradient(steady_p["output"])
-        log_consumption_scale_p = jnp.log(steady_p["g"])
+        output_scale_p = jax.lax.stop_gradient(production(p.k_0, 1.0, p))
         paths = integrated_kernel_paths(
             {
-                "log_mu": IntegratedPath(
-                    theta.alpha_mu,
-                    -p.gamma * log_consumption_scale_p + theta.mu_offset,
-                ),
-                "log_c": IntegratedPath(
-                    theta.alpha_c, log_consumption_scale_p + theta.c_offset
-                ),
+                "log_mu": IntegratedPath(theta.alpha_mu, theta.log_mu_0),
+                "log_c": IntegratedPath(theta.alpha_c, theta.log_c_0),
                 "log_k": IntegratedPath(theta.alpha_k, jnp.log(p.k_0)),
                 "a_raw": IntegratedPath(
                     theta.alpha_a, jnp.zeros((), theta.alpha_a.dtype)
                 ),
-                "log_q": IntegratedPath(
-                    theta.alpha_q, jnp.log(steady_p["q"]) + theta.q_offset
-                ),
+                "log_q": IntegratedPath(theta.alpha_q, theta.log_q_0),
             },
             K_eval,
             K_tilde_eval,
@@ -425,7 +411,7 @@ def open_economy_growth_kernel(
         rejection_reasons.append("train_residual")
     validation_pass = max_validation_residual <= tolerance_set.validation_residual
 
-    alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, c_offset, mu_offset, q_offset = theta
+    alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, log_c_0, log_mu_0, log_q_0 = theta
     rkhs_norm_mu = rkhs_norm_squared(alpha_mu, K)
     rkhs_norm_c = rkhs_norm_squared(alpha_c, K)
     rkhs_norm_k = rkhs_norm_squared(alpha_k, K)
@@ -465,7 +451,7 @@ def open_economy_growth_kernel(
         "output_ss": float(output_scale),
         "g_ss": float(consumption_scale),
         "c": float(c),
-        "q_0": float(steady["q"] * jnp.exp(q_offset)),
+        "q_0": float(jnp.exp(log_q_0)),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
         "validation_pass": validation_pass,
@@ -515,8 +501,8 @@ def open_economy_growth_kernel(
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         **acceptance_fields(rejection_reasons),
-        "c_offset": float(c_offset),
-        "mu_offset": float(mu_offset),
+        "log_c_0": float(log_c_0),
+        "log_mu_0": float(log_mu_0),
     }
     if verbose:
         print(

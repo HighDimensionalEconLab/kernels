@@ -116,8 +116,8 @@ def snapshot(model, t, p):
             "residual": np.asarray(dprice_dt - (p.r * price - dividend_values)),
         }
     )
-    r, c, g, x_0 = (float(getattr(p, name)) for name in ("r", "c", "g", "x_0"))
-    benchmark = np.asarray(jax.device_get(mu_f_array(t, c, g, r, x_0)))
+    r = float(p.r)
+    benchmark = np.asarray(jax.device_get(mu_f_array(t, p)))
     frame["p_benchmark"] = benchmark
     frame["p_rel_error"] = np.abs(frame["p"] - benchmark) / np.abs(benchmark)
     frame["bubble_coefficient"] = np.exp(-r * frame["t"]) * (frame["p"] - benchmark)

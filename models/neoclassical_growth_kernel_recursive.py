@@ -23,6 +23,7 @@ from models.neoclassical_growth_shared import (
 from models.neoclassical_growth_shared import (
     InitialConditionSettings,
     RecursiveParameters,
+    StructuralParameters,
     euler_residuals,
     growth_initial_conditions,
     log_tvc_residual,
@@ -105,11 +106,11 @@ def state_lengthscales(kernel_set):
     )
 
 
-def build_residual_args(train_log_states, kernel_set, a, z_0=1.0, k_0=1.0):
+def build_residual_args(train_log_states, kernel_set, p, z_0=1.0, k_0=1.0):
     flat_states = train_log_states.reshape(-1, 2)
     dtype = flat_states.dtype
     state_offset = jnp.log(jnp.asarray([z_0, k_0], dtype))
-    z_detrend = jnp.asarray(1.0 / (1.0 - a), dtype)
+    z_detrend = jnp.asarray(1.0 / (1.0 - p.a), dtype)
     if kernel_set.homothetic_representation:
         centers = flat_states[:, 1] - z_detrend * flat_states[:, 0]
         gram = rbf_state_gram(
@@ -190,20 +191,16 @@ class KernelInvestmentPolicy:
 
 # Frozen collocation design: the exact benchmark paths of the training
 # initial conditions on the training date grid.
-def fixed_collocation_data(
-    a, delta, rho_hat, sigma_crra, g, initial_conditions, data_set, *, dtype
-):
+def fixed_collocation_data(p, initial_conditions, data_set, *, dtype):
     train_times = np.linspace(0.0, data_set.train_T, data_set.train_points)
     k = np.stack(
         [
-            neoclassical_growth_benchmark(
-                a, delta, rho_hat, sigma_crra, g=g, z_0=z_0, k_0=k_0
-            )(train_times)[0]
+            neoclassical_growth_benchmark(p.replace(z_0=z_0, k_0=k_0))(train_times)[0]
             for z_0, k_0 in np.asarray(initial_conditions, dtype=float)
         ]
     )
     z = np.asarray(initial_conditions)[:, :1] * np.exp(
-        (1.0 - a) * g * train_times[None, :]
+        (1.0 - float(p.a)) * float(p.g) * train_times[None, :]
     )
     log_states = np.stack([np.log(z), np.log(k)], axis=-1)
     return (
@@ -265,19 +262,26 @@ def neoclassical_growth_kernel_recursive(
         b_2=0.0,
         k_thr=float("inf"),
     )
+    p_bench = StructuralParameters.create(
+        jnp.float64,
+        a=a,
+        delta=delta,
+        rho_hat=rho_hat,
+        sigma_crra=sigma_crra,
+        z_0=1.0,
+        k_0=1.0,
+        g=g,
+        A=1.0,
+        b_1=1.0,
+        b_2=0.0,
+        k_thr=float("inf"),
+    )
 
     fit_timer = Stopwatch()
     train_times, train_log_states = fixed_collocation_data(
-        a,
-        delta,
-        rho_hat,
-        sigma_crra,
-        g,
-        train_initial_conditions,
-        data_set,
-        dtype=dtype,
+        p_bench, train_initial_conditions, data_set, dtype=dtype
     )
-    args = build_residual_args(train_log_states, kernel_set, a, z_0, k_0)
+    args = build_residual_args(train_log_states, kernel_set, p, z_0, k_0)
     n_centers = args.centers.shape[0]
     shifted_gram = args.gram + kernel_set.metric_epsilon * jnp.eye(
         n_centers, dtype=dtype
@@ -359,9 +363,7 @@ def neoclassical_growth_kernel_recursive(
     # per-trajectory benchmark paths concatenate into aligned columns.
     test_times = np.asarray(test_solution.ts[0])
     benchmark_paths = [
-        neoclassical_growth_benchmark(
-            a, delta, rho_hat, sigma_crra, g=g, z_0=z_0, k_0=k_0
-        )(test_times)
+        neoclassical_growth_benchmark(p_bench.replace(z_0=z_0, k_0=k_0))(test_times)
         for z_0, k_0 in test_initial
     ]
     test_df["k_benchmark"] = np.concatenate([k for k, _ in benchmark_paths])

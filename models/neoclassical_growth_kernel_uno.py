@@ -342,13 +342,7 @@ def neoclassical_growth_kernel_uno(
     validation_data = jnp.linspace(
         0, data_set.train_T, max(data_set.test_points, 801), dtype=jnp.float64
     )
-    test_benchmark = (
-        None
-        if use_kinked_production
-        else neoclassical_growth_benchmark(
-            a, delta, rho_hat, sigma_crra, g=0.0, z_0=z_0, k_0=k_0
-        )
-    )
+    test_benchmark = None if use_kinked_production else neoclassical_growth_benchmark(p)
     train_eval = evaluate_grid(train_data)
     validation_eval = evaluate_grid(validation_data)
     test_eval = evaluate_grid(test_data)

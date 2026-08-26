@@ -21,6 +21,7 @@ from models.neoclassical_growth_shared import (
 from models.neoclassical_growth_shared import (
     InitialConditionSettings,
     RecursiveParameters,
+    StructuralParameters,
     euler_residuals,
     growth_initial_conditions,
     log_state_drift_field,
@@ -590,10 +591,22 @@ def neoclassical_growth_nn_recursive(
     # long_df orders rows (trajectory, step) on the shared grid ts[0], so the
     # per-trajectory benchmark paths concatenate into aligned columns.
     test_times = np.asarray(test_solution.ts[0])
+    p_bench = StructuralParameters.create(
+        jnp.float64,
+        a=a,
+        delta=delta,
+        rho_hat=rho_hat,
+        sigma_crra=sigma_crra,
+        z_0=1.0,
+        k_0=1.0,
+        g=g,
+        A=1.0,
+        b_1=1.0,
+        b_2=0.0,
+        k_thr=float("inf"),
+    )
     benchmark_paths = [
-        neoclassical_growth_benchmark(
-            a, delta, rho_hat, sigma_crra, g=g, z_0=z_0, k_0=k_0
-        )(test_times)
+        neoclassical_growth_benchmark(p_bench.replace(z_0=z_0, k_0=k_0))(test_times)
         for z_0, k_0 in test_initial
     ]
     test_df["k_benchmark"] = np.concatenate([k for k, _ in benchmark_paths])

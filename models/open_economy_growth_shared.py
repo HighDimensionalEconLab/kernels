@@ -201,7 +201,7 @@ def tail_diagnostics(k, a, q, c, p):
     return {"stable": stable, "present_value": present_value}
 
 
-def present_value_gap(t, k, q, c, a_0, p):
+def present_value_gap(t, k, q, c, p):
     steady = steady_state(p)
     tail = stable_tail_terms(p)
     investment = investment_expenditure(k, q, p)
@@ -212,7 +212,7 @@ def present_value_gap(t, k, q, c, a_0, p):
         p.r_star - tail["stable_root"]
     )
     resource_wealth = (
-        a_0
+        p.a_0
         + jnp.trapezoid(discount * domestic_resources, t)
         + discount[-1] * continuation
     )

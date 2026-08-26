@@ -182,7 +182,7 @@ def drift_field(state, _, args, p):
     )
 
 
-def simulate(policy, T, budget, k_0, args, *, save_at):
+def simulate(policy, T, budget, k_0, p, *, save_at):
     return solve_ode(
         drift_field,
         RK4(),
@@ -193,7 +193,7 @@ def simulate(policy, T, budget, k_0, args, *, save_at):
         controller=ConstantStepSize(),
         max_steps=budget,
         save_at=save_at,
-        args=args,
+        args=p,
         p=(policy, k_0),
     )
 
@@ -223,9 +223,9 @@ def simulate_train(policy, initial_k, p, data_set):
 # Collocation states, the active-state mask, and the raw solution. Every step
 # of the fixed-step mesh is a collocation point, so the returned mask is full;
 # it is kept so the caller can assert that.
-def collocation_states(policy, k_0, a_0, p, data_set):
-    initial_k = jnp.reshape(k_0, (1,))
-    initial_a = jnp.reshape(a_0, (1,))
+def collocation_states(policy, p, data_set):
+    initial_k = jnp.reshape(p.k_0, (1,))
+    initial_a = jnp.reshape(p.a_0, (1,))
     solution = simulate_train(policy, initial_k, p, data_set)
     states = jax.vmap(states_from_solution, in_axes=(0, 0, 0, None))(
         solution,
@@ -243,13 +243,7 @@ def collocation_states(policy, k_0, a_0, p, data_set):
 
 def residual_fn(theta, args, p):
     policy = nnx.merge(args.graphdef, theta, args.nondiff)
-    states, active, solution = collocation_states(
-        policy,
-        p.k_0,
-        p.a_0,
-        p,
-        args.data_set,
-    )
+    states, active, solution = collocation_states(policy, p, args.data_set)
     values = path_values(policy, states.reshape(-1, 2), p)
     euler = jnp.stack([values["q_euler"], values["c_euler"]], axis=-1)
     euler = euler.reshape(active.shape + (2,))
@@ -265,33 +259,26 @@ def residual_fn(theta, args, p):
 
 
 @partial(jax.jit, static_argnames=("budget",))
-def evaluate_path_jit(policy, T, budget, k_0, a_0, args):
+def evaluate_path_jit(policy, T, budget, p):
     solution = solve_ode(
         drift_field,
         RK4(),
         0.0,
         T,
-        jnp.zeros(2, dtype=jnp.asarray(k_0).dtype),
+        jnp.zeros(2, dtype=p.k_0.dtype),
         dt_0=T / budget,
         max_steps=budget,
         save_at=SaveAt(steps=True),
-        args=args,
-        p=(policy, k_0),
+        args=p,
+        p=(policy, p.k_0),
     )
-    states = states_from_solution(solution, k_0, a_0, policy.flow_scale[...])
-    return {"t": solution.ts, **path_values(policy, states, args)}
+    states = states_from_solution(solution, p.k_0, p.a_0, policy.flow_scale[...])
+    return {"t": solution.ts, **path_values(policy, states, p)}
 
 
 # Evaluates along the integrator's own states: n_points from n - 1 steps.
-def evaluate_path(policy, T, n_points, k_0, a_0, p):
-    return evaluate_path_jit(
-        policy,
-        T,
-        n_points - 1,
-        k_0,
-        a_0,
-        p,
-    )
+def evaluate_path(policy, T, n_points, p):
+    return evaluate_path_jit(policy, T, n_points - 1, p)
 
 
 def open_economy_growth_nn_recursive(
@@ -324,7 +311,6 @@ def open_economy_growth_nn_recursive(
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
     k_0_jax = jnp.asarray(k_0, dtype=dtype)
-    a_0_jax = jnp.asarray(a_0, dtype=dtype)
     p = StructuralParameters.create(
         dtype,
         alpha=alpha,
@@ -382,29 +368,10 @@ def open_economy_growth_nn_recursive(
     attempt = int(result.multi_start.attempt) + 1
     policy = nnx.merge(graphdef, result.x, nondiff)
 
-    train_eval = evaluate_path(
-        policy,
-        data_set.train_T,
-        data_set.train_points,
-        k_0_jax,
-        a_0_jax,
-        p,
-    )
-    test_eval = evaluate_path(
-        policy,
-        data_set.test_T,
-        data_set.test_points,
-        k_0_jax,
-        a_0_jax,
-        p,
-    )
+    train_eval = evaluate_path(policy, data_set.train_T, data_set.train_points, p)
+    test_eval = evaluate_path(policy, data_set.test_T, data_set.test_points, p)
     diagnostic_eval = evaluate_path(
-        policy,
-        data_set.diagnostic_T,
-        data_set.diagnostic_points,
-        k_0_jax,
-        a_0_jax,
-        p,
+        policy, data_set.diagnostic_T, data_set.diagnostic_points, p
     )
     train_t = train_eval["t"]
     test_t = test_eval["t"]
@@ -487,7 +454,6 @@ def open_economy_growth_nn_recursive(
         diagnostic_eval["k"],
         diagnostic_eval["q"],
         diagnostic_eval["c"],
-        a_0_jax,
         p,
     )
     theta_initial, _ = ravel_pytree(theta_0)

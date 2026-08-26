@@ -152,7 +152,7 @@ def asset_pricing_kernel(
 
     p_test, dp_test = kernel_solution(test_data)
     test_residual = dp_test - (r * p_test - dividends(test_data, p))
-    p_benchmark = mu_f_array(test_data, c, g, r, x_0)
+    p_benchmark = mu_f_array(test_data, p)
     p_rel_error = jnp.abs(p_benchmark - p_test) / p_benchmark
 
     # Analytic finite-horizon bias of the dense-grid limit of the min-norm

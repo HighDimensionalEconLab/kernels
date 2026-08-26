@@ -9,6 +9,7 @@ import numpy as np
 from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 
 from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
+from models.neoclassical_growth_shared import StructuralParameters
 from replication.utilities import configure_process, style
 
 
@@ -52,8 +53,22 @@ def run(
     # Stable manifold from two saddle paths (one from each side of x_ss),
     # merged and sorted in x; mu = 1/c under log utility.
     times = np.linspace(0.0, 120.0, 400)
+    p_bench = StructuralParameters.create(
+        jnp.float64,
+        a=a,
+        delta=delta,
+        rho_hat=rho_hat,
+        sigma_crra=1.0,
+        z_0=1.0,
+        k_0=1.0,
+        g=0.0,
+        A=1.0,
+        b_1=1.0,
+        b_2=0.0,
+        k_thr=float("inf"),
+    )
     branches = [
-        neoclassical_growth_benchmark(a, delta, rho_hat, 1.0, k_0=x_0)(times)
+        neoclassical_growth_benchmark(p_bench.replace(k_0=x_0))(times)
         for x_0 in (x_lo, x_hi)
     ]
     branch_k = np.concatenate([k for k, _ in branches])

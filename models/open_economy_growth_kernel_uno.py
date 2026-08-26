@@ -455,7 +455,6 @@ def open_economy_growth_kernel_uno(
         validation_eval["k"],
         validation_eval["q"],
         validation_eval["c"],
-        a_0,
         p,
     )
     tvc = tvc_diagnostics(

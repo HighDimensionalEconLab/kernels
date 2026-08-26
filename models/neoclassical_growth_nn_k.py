@@ -289,13 +289,7 @@ def neoclassical_growth_nn_k(
     accepted = bool(result.multi_start.accepted)
 
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
-    benchmark = (
-        None
-        if use_kinked_production
-        else neoclassical_growth_benchmark(
-            a, delta, rho_hat, sigma_crra, g=g, z_0=z_0, k_0=k_0
-        )
-    )
+    benchmark = None if use_kinked_production else neoclassical_growth_benchmark(p)
     train_df = snapshot(model, t_train, p, benchmark)
     test_df = snapshot(model, test_t, p, benchmark)
 

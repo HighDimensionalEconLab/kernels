@@ -71,11 +71,20 @@ def residual_fn(theta, args, p):
     mu, dmu_dt = paths["mu"]
     c = paths["c"].value
     z = p.z_0 * args.batch["z_trend"]
-    resource = dk_dt - (production(z, k, p) - p.delta * k - c)
-    euler = dmu_dt + mu * (mpk(z, k, p) - p.delta - p.rho_hat)
-    shadow_price = mu * c**p.sigma_crra - 1.0
-    residual = jnp.concatenate([resource, euler, shadow_price])
-    return residual / jnp.sqrt(residual.size)
+    values = {
+        "k": k,
+        "c": c,
+        "mu": mu,
+        "dk_dt": dk_dt,
+        "dmu_dt": dmu_dt,
+        "resource": dk_dt - (production(z, k, p) - p.delta * k - c),
+        "euler": dmu_dt + mu * (mpk(z, k, p) - p.delta - p.rho_hat),
+        "shadow_price": mu * c**p.sigma_crra - 1.0,
+    }
+    residual = jnp.concatenate(
+        [values["resource"], values["euler"], values["shadow_price"]]
+    )
+    return residual / jnp.sqrt(residual.size), values
 
 
 @jax.jit
@@ -91,7 +100,7 @@ def objective(x, args):
 @jax.jit
 def constraints(x, args, p):
     theta = args.unravel(x)
-    return residual_fn(theta, args, p)
+    return residual_fn(theta, args, p)[0]
 
 
 def lagrangian(x, objective_multiplier, multipliers, args, p):
@@ -180,7 +189,7 @@ def neoclassical_growth_kernel_uno(
         k_thr=k_thr,
     )
 
-    c_flow_guess = steady_flow_consumption_guess(z_0, k_0, a, delta, A, b_1, b_2)
+    c_flow_guess = steady_flow_consumption_guess(p)
     if c_0_guess is not None:
         c_flow_guess = float(c_0_guess)
     theta_0 = Theta(
@@ -303,29 +312,20 @@ def neoclassical_growth_kernel_uno(
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             points, train_data, kernel, sigma, ell
         )
-        paths = integrated_kernel_paths(
-            {
-                "mu": IntegratedPath(theta.alpha_mu, theta.mu_0),
-                "c": IntegratedPath(theta.alpha_c, theta.c_0),
-                "k": IntegratedPath(theta.alpha_k, p.k_0),
-            },
-            K_eval,
-            K_tilde_eval,
-        )
-        k, dk_dt = paths["k"]
-        mu, dmu_dt = paths["mu"]
-        c = paths["c"].value
-        return {
-            "t": points,
-            "k": k,
-            "c": c,
-            "mu": mu,
-            "dk_dt": dk_dt,
-            "dmu_dt": dmu_dt,
-            "resource": dk_dt - (production(z_0, k, p) - p.delta * k - c),
-            "euler": dmu_dt + mu * (mpk(z_0, k, p) - p.delta - p.rho_hat),
-            "shadow_price": mu * c**p.sigma_crra - 1.0,
-        }
+        values = residual_fn(
+            theta,
+            args.replace(
+                K=K_eval,
+                K_tilde=K_tilde_eval,
+                batch={
+                    "t": points,
+                    "z_trend": jnp.ones_like(points),
+                    "g_hat": jnp.zeros((), dtype=jnp.float64),
+                },
+            ),
+            p,
+        )[1]
+        return {"t": points, **values}
 
     test_data = jnp.linspace(
         0, data_set.test_T, data_set.test_points, dtype=jnp.float64

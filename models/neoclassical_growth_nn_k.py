@@ -137,22 +137,24 @@ def residual_fn(theta, args, p):
     euler = jax.vmap(lambda t: euler_residual(model, t, p))(t_train)
     ic = model(jnp.asarray(0.0, dtype=t_train.dtype)) - p.k_0
     residual = jnp.concatenate([euler, jnp.atleast_1d(ic)])
-    return residual / jnp.sqrt(residual.size)
+    return residual / jnp.sqrt(residual.size), {"euler": euler}
 
 
 # Model paths and residuals on a time grid, with relative errors against the
 # benchmark when one exists (the smooth family). No resource column: it is
-# zero by construction.
-def snapshot(model, t, p, benchmark=None):
-    k = jax.vmap(model)(t)
-    c = jax.vmap(lambda s: substituted_consumption(model, s, p))(t)
-    euler = jax.vmap(lambda s: euler_residual(model, s, p))(t)
+# zero by construction; k and c are derived here, off the solve path.
+def snapshot(theta, args, p, benchmark=None):
+    model = nnx.merge(args.graphdef, theta, args.nondiff)
+    t = args.batch["t"]
+    values = residual_fn(theta, args, p)[1]
     df = pd.DataFrame(
         {
             "t": np.asarray(t),
-            "k": np.asarray(k),
-            "c": np.asarray(c),
-            "euler": np.asarray(euler),
+            "k": np.asarray(jax.vmap(model)(t)),
+            "c": np.asarray(
+                jax.vmap(lambda s: substituted_consumption(model, s, p))(t)
+            ),
+            "euler": np.asarray(values["euler"]),
         }
     )
     if benchmark is not None:
@@ -243,6 +245,7 @@ def neoclassical_growth_nn_k(
     # Multi-start Levenberg-Marquardt solve.
     solver = LevenbergMarquardt(
         residual_fn,
+        has_aux=True,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
@@ -284,8 +287,10 @@ def neoclassical_growth_nn_k(
 
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     benchmark = None if use_kinked_production else neoclassical_growth_benchmark(p)
-    train_df = snapshot(model, t_train, p, benchmark)
-    test_df = snapshot(model, test_t, p, benchmark)
+    train_df = snapshot(result.x, residual_args, p, benchmark)
+    test_df = snapshot(
+        result.x, residual_args.replace(batch={"t": test_t}), p, benchmark
+    )
 
     tvc_t = jnp.asarray(data_set.test_tvc_T, dtype=dtype)
     k_T = model(tvc_t)

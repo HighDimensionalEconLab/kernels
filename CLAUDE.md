@@ -12,9 +12,9 @@ per-directory READMEs.
   `<model>_shared.py` holds model structure only (constants, the flat
   `StructuralParameters` pytree — deep parameters plus initial conditions,
   subclassing `models/utilities.ParameterPyTree` for `create(dtype=...)` and
-  `to_dict()` — production/steady-state functions, diagnostics, shared
-  settings, and for the DAE models `path_residuals`, the equation system
-  every representation consumes); drivers never import other drivers.
+  `to_dict()`; IC fields may default to None for drivers that keep ICs in the
+  solver args, and to_dict skips None — production/steady-state functions,
+  diagnostics, and shared settings); drivers never import other drivers.
   `results` is the full serializable record: nested input blocks first
   (`"parameters": p.to_dict()` plus one `"<name>_set": asdict(...)` per
   settings object; recursive drivers add an `"initial_conditions"` block for
@@ -25,8 +25,13 @@ per-directory READMEs.
   dict-valued results entries into `<exp>_hyperparameters.json` and keeps the
   scalar rows for the DataFrame. Each kernel and kernel_uno
   driver owns its `Theta` and `residual_fn` — the residual rows written
-  inline — plus a post-solve `evaluate_grid(points)` closure for off-grid
-  paths and residual rows. Sequence-space drivers share the solver-args
+  inline. Sequence-space `residual_fn(theta, args, p)` returns
+  `(scaled flat residual, values)` where `values` is a dict of paths plus the
+  UNSCALED named residual rows; the NLLS solvers run with `has_aux=True`
+  (`_uno` `constraints` wrappers take `[0]`), and the post-solve
+  `evaluate_grid(points)` / `snapshot` closures build eval-grid args, consume
+  `residual_fn(...)[1]`, and add derived diagnostics on top — rows are never
+  written twice. Sequence-space drivers share the solver-args
   structs in `models/utilities.py`: `KernelResidualArgs` (K, K_tilde, the
   optional `batch` dict of standardized always-plain grid arrays — `t`,
   `z_trend`, `g_hat` — and, for the `_uno` drivers, `ravel_pytree`'s unravel

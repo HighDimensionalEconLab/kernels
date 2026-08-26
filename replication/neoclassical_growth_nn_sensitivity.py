@@ -84,13 +84,7 @@ def run(
                 )
         # The exact steady-state derivatives the large-T columns converge
         # to; the sigma_crra and k_0 rows converge to zero.
-        fields.update(
-            neoclassical_steady_state_sensitivities(
-                results["parameters"]["a"],
-                results["parameters"]["delta"],
-                results["parameters"]["rho_hat"],
-            )
-        )
+        fields.update(neoclassical_steady_state_sensitivities(spec["p"]))
         rows.append({**scalar_results(results), **fields, "seed": seed})
         if hyperparameters is None:
             hyperparameters = nested_results(results)

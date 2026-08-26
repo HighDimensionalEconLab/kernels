@@ -95,13 +95,7 @@ def run(
             fields[f"d_c_{suffix}_d_{name}"] = float(getattr(jacobian, name)[index, 1])
     # The exact steady-state derivatives the large-T columns converge
     # to; the sigma_crra and k_0 rows converge to zero.
-    fields.update(
-        neoclassical_steady_state_sensitivities(
-            results["parameters"]["a"],
-            results["parameters"]["delta"],
-            results["parameters"]["rho_hat"],
-        )
-    )
+    fields.update(neoclassical_steady_state_sensitivities(spec["p"]))
     save_experiment(
         "sensitivity",
         pd.DataFrame([{**scalar_results(results), **fields}]),

@@ -22,10 +22,12 @@ from models.open_economy_growth_shared import (
 from models.open_economy_growth_shared import (
     DataSettings,
     StructuralParameters,
+    current_account,
     investment_expenditure,
-    path_residuals,
+    investment_rate_from_q,
     present_value_gap,
     production,
+    q_drift,
     steady_state,
     tail_diagnostics,
     tvc_diagnostics,
@@ -141,27 +143,31 @@ class SequencePathNN(nnx.Module):
 def residual_fn(theta, args, p):
     model = nnx.merge(args.graphdef, theta, args.nondiff)
     t = args.batch["t"]
-    values, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
+    paths, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
         t
     )
-    k, a, q, c, mu = (values[:, index] for index in range(5))
-    residuals = path_residuals(
-        k,
-        a,
-        q,
-        c,
-        mu,
-        jnp.ones_like(k),
-        derivatives[:, 0] / k,
-        derivatives[:, 1],
-        derivatives[:, 2] / q,
-        derivatives[:, 4] / mu,
-        p,
-    )
+    k, a, q, c, mu = (paths[:, index] for index in range(5))
+    da_dt = derivatives[:, 1]
+    z = jnp.ones_like(k)
+    chi = p.delta ** (1.0 - p.eta)
+    values = {
+        "k": k,
+        "a": a,
+        "q": q,
+        "c": c,
+        "mu": mu,
+        "current_account": da_dt,
+        "capital": derivatives[:, 0] / k
+        - (chi * investment_rate_from_q(q, p) ** p.eta - p.delta),
+        "assets": da_dt - current_account(k, a, q, c, z, p),
+        "tobin_q": derivatives[:, 2] / q - q_drift(k, q, z, p) / q,
+        "marginal_wealth": derivatives[:, 4] / mu - (p.r - p.r_star),
+        "consumption_foc": mu * c**p.gamma - 1.0,
+    }
     at_zero = model(jnp.asarray(0.0, dtype=t.dtype))
     ic = jnp.stack([at_zero[0] - p.k_0, at_zero[1] - p.a_0])
-    residual = jnp.concatenate([*(residuals[name] for name in RESIDUAL_NAMES), ic])
-    return residual / jnp.sqrt(residual.size)
+    residual = jnp.concatenate([*(values[name] for name in RESIDUAL_NAMES), ic])
+    return residual / jnp.sqrt(residual.size), values
 
 
 def open_economy_growth_nn(
@@ -241,6 +247,7 @@ def open_economy_growth_nn(
 
     solver = LevenbergMarquardt(
         residual_fn,
+        has_aux=True,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
@@ -280,34 +287,12 @@ def open_economy_growth_nn(
     attempt = int(result.multi_start.attempt) + 1
 
     def evaluate_grid(points):
-        values, derivatives = jax.vmap(
-            lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),))
-        )(points)
-        k, a, q, c, mu = (values[:, index] for index in range(5))
-        residuals = path_residuals(
-            k,
-            a,
-            q,
-            c,
-            mu,
-            jnp.ones_like(k),
-            derivatives[:, 0] / k,
-            derivatives[:, 1],
-            derivatives[:, 2] / q,
-            derivatives[:, 4] / mu,
-            p,
-        )
+        values = residual_fn(result.x, residual_args.replace(batch={"t": points}), p)[1]
         return {
             "t": points,
-            "k": k,
-            "a": a,
-            "q": q,
-            "c": c,
-            "mu": mu,
-            "x": investment_expenditure(k, q, p),
-            "output": production(k, jnp.ones_like(k), p),
-            "current_account": derivatives[:, 1],
-            **residuals,
+            **values,
+            "x": investment_expenditure(values["k"], values["q"], p),
+            "output": production(values["k"], jnp.ones_like(values["k"]), p),
         }
 
     train_eval = evaluate_grid(train_t)

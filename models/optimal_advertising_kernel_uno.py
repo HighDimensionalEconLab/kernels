@@ -53,11 +53,9 @@ def objective(x, args):
     )
 
 
-# The unscaled residual rows are the IPOPT constraints; the NLLS driver
-# solves the 1/sqrt(count)-scaled version of the same stack.
-@jax.jit
-def constraints(x, args, p):
-    theta = args.unravel(x)
+# Unscaled residual rows: they are the IPOPT constraints directly (the NLLS
+# driver solves the 1/sqrt(count)-scaled version of the same stack).
+def residual_fn(theta, args, p):
     rho_hat, c, beta, kappa = p.rho_hat, p.c, p.beta, p.kappa
     gamma = (beta + rho_hat) / c
     control_power = (1.0 - kappa) / kappa
@@ -70,16 +68,26 @@ def constraints(x, args, p):
         args.K,
         args.K_tilde,
     )
-    x_path, dx_dt = paths["x"]
+    x, dx_dt = paths["x"]
     mu, dmu_dt = paths["mu"]
     u = paths["u"].value
-    return jnp.concatenate(
-        [
-            dx_dt - ((1.0 - x_path) * u - beta * x_path),
-            dmu_dt - (-gamma + (rho_hat + beta) * mu + mu * u),
-            u**control_power - kappa * mu * (1.0 - x_path),
-        ]
+    values = {
+        "x": x,
+        "mu": mu,
+        "u": u,
+        "state": dx_dt - ((1.0 - x) * u - beta * x),
+        "costate": dmu_dt - (-gamma + (rho_hat + beta) * mu + mu * u),
+        "shadow_price": u**control_power - kappa * mu * (1.0 - x),
+    }
+    residual = jnp.concatenate(
+        [values["state"], values["costate"], values["shadow_price"]]
     )
+    return residual, values
+
+
+@jax.jit
+def constraints(x, args, p):
+    return residual_fn(args.unravel(x), args, p)[0]
 
 
 def lagrangian(x, objective_multiplier, multipliers, args, p):
@@ -232,24 +240,13 @@ def optimal_advertising_kernel_uno(
     x = np.array(result.primal_solution, dtype=np.float64)[:n_variables]
     theta = unravel(jnp.asarray(x))
 
-    paths = integrated_kernel_paths(
-        {
-            "x": IntegratedPath(theta.alpha_x, p.x_0),
-            "mu": IntegratedPath(theta.alpha_mu, theta.mu_0),
-            "u": IntegratedPath(theta.alpha_u, theta.u_0),
-        },
-        K_jax,
-        K_tilde_jax,
-    )
-    x_train, dx_train_dt = paths["x"]
-    mu_train, dmu_train_dt = paths["mu"]
-    u_train = paths["u"].value
-    control_power = (1.0 - kappa) / kappa
-    state_res = dx_train_dt - ((1.0 - x_train) * u_train - beta * x_train)
-    costate_res = dmu_train_dt - (
-        -gamma + (rho_hat + beta) * mu_train + mu_train * u_train
-    )
-    shadow_res = u_train**control_power - kappa * mu_train * (1.0 - x_train)
+    train_values = residual_fn(theta, args, p)[1]
+    x_train = train_values["x"]
+    mu_train = train_values["mu"]
+    u_train = train_values["u"]
+    state_res = train_values["state"]
+    costate_res = train_values["costate"]
+    shadow_res = train_values["shadow_price"]
     max_train_residual = max(
         float(jnp.max(jnp.abs(residual)))
         for residual in (state_res, costate_res, shadow_res)

@@ -57,10 +57,6 @@ def investment_expenditure(k, q, p):
     return k * investment_rate_from_q(q, p)
 
 
-def consumption_from_mu(mu, p):
-    return mu ** (-1.0 / p.gamma)
-
-
 def capital_drift(k, q, p):
     chi = p.delta ** (1.0 - p.eta)
     investment_rate = investment_rate_from_q(q, p)
@@ -78,10 +74,6 @@ def q_drift(k, q, z, p):
     return (
         p.r_star + p.delta - (1.0 - eta) * chi * investment_rate**eta
     ) * q - marginal_product(k, z, p)
-
-
-def mu_drift(mu, p):
-    return (p.r - p.r_star) * mu
 
 
 def consumption_growth_rate(p):
@@ -133,30 +125,6 @@ def stable_tail_terms(p):
         "unstable_root": unstable_root,
         "stable_slope": stable_slope,
         "resource_loading": resource_loading,
-    }
-
-
-def path_residuals(
-    k,
-    a,
-    q,
-    c,
-    mu,
-    z,
-    dlog_k_dt,
-    da_dt,
-    dlog_q_dt,
-    dlog_mu_dt,
-    p,
-):
-    chi = p.delta ** (1.0 - p.eta)
-    investment_rate = investment_rate_from_q(q, p)
-    return {
-        "capital": dlog_k_dt - (chi * investment_rate**p.eta - p.delta),
-        "assets": da_dt - current_account(k, a, q, c, z, p),
-        "tobin_q": dlog_q_dt - q_drift(k, q, z, p) / q,
-        "marginal_wealth": dlog_mu_dt - mu_drift(mu, p) / mu,
-        "consumption_foc": mu * c**p.gamma - 1.0,
     }
 
 

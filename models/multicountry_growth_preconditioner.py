@@ -34,7 +34,12 @@ import jax.scipy.linalg as jsp_linalg
 import numpy as np
 from nlls_gram import AnnealRidge, LMAction, Preconditioner, register_pytree_dataclass
 
-from models.multicountry_growth_shared import path_residuals, production
+from models.multicountry_growth_shared import (
+    current_account,
+    investment_rate_from_q,
+    production,
+    q_drift,
+)
 
 
 # Flat position of every theta leaf, derived from the pytree itself, so the
@@ -189,34 +194,31 @@ def build_arrow_woodbury(theta, kernel_args, p, ridge, damping, num_countries):
 
     # The rows of one time as a function of that time's levels, derivatives,
     # and anchors. Must apply exactly the transforms of the driver's
-    # path_coordinates, or the arrowhead is no longer the exact off-clearing
-    # operator at the build point.
+    # path_coordinates and match its residual_fn rows exactly, or the
+    # arrowhead is no longer the exact off-clearing operator at the build
+    # point.
     def per_time_rows(w):
         lv = w[:num_blocks]
         dv = w[num_blocks : 2 * num_blocks]
         anchors = w[2 * num_blocks :]
-        residuals = path_residuals(
-            jnp.exp(log_k_0 + lv[0:N]),
-            a_0_p + output_scale_p * lv[N : 2 * N],
-            jnp.exp(anchors[:N] + lv[2 * N : 3 * N]),
-            jnp.exp(anchors[N : 2 * N] + lv[3 * N : 4 * N]),
-            jnp.exp(anchors[2 * N : 3 * N] + lv[4 * N : 5 * N]),
-            p.productivities,
-            jnp.exp(anchors[-1] + lv[5 * N]),
-            dv[0:N],
-            output_scale_p * dv[N : 2 * N],
-            dv[2 * N : 3 * N],
-            dv[4 * N : 5 * N],
-            p,
-        )
+        k = jnp.exp(log_k_0 + lv[0:N])
+        a = a_0_p + output_scale_p * lv[N : 2 * N]
+        q = jnp.exp(anchors[:N] + lv[2 * N : 3 * N])
+        c = jnp.exp(anchors[N : 2 * N] + lv[3 * N : 4 * N])
+        mu = jnp.exp(anchors[2 * N : 3 * N] + lv[4 * N : 5 * N])
+        rate_column = jnp.exp(anchors[-1] + lv[5 * N])[..., None]
+        gammas = jnp.asarray(p.gammas, dtype=c.dtype)
+        populations = jnp.asarray(p.populations, dtype=a.dtype)
+        chi = p.delta ** (1.0 - p.eta)
         return residual_scale * jnp.concatenate(
             [
-                residuals["capital"],
-                residuals["assets"],
-                residuals["tobin_q"],
-                residuals["marginal_wealth"],
-                residuals["consumption_foc"],
-                residuals["asset_clearing"][None],
+                dv[0:N] - (chi * investment_rate_from_q(q, p) ** p.eta - p.delta),
+                output_scale_p * dv[N : 2 * N]
+                - current_account(k, a, q, c, p.productivities, rate_column, p),
+                dv[2 * N : 3 * N] - q_drift(k, q, p.productivities, rate_column, p) / q,
+                dv[4 * N : 5 * N] - (p.r - rate_column),
+                mu * c**gammas - 1.0,
+                (jnp.sum(populations * a, axis=-1) / jnp.sum(populations))[None],
             ]
         )
 

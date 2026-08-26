@@ -38,11 +38,13 @@ from models.multicountry_growth_shared import (
     DataSettings,
     InitialConditionSettings,
     StructuralParameters,
+    current_account,
     draw_initial_conditions,
     investment_expenditure,
+    investment_rate_from_q,
     long_run_diagnostics,
-    path_residuals,
     production,
+    q_drift,
     relative_welfare_weights,
     resolved_steady_state,
     steady_state,
@@ -150,20 +152,26 @@ def path_coordinates(theta, K_eval, K_tilde_eval, p):
 # whitened factors its preconditioner rebuild needs).
 def residual_fn(theta, args, p):
     coordinates = path_coordinates(theta, args.K, args.K_tilde, p)
-    residuals = path_residuals(
-        coordinates["k"],
-        coordinates["a"],
-        coordinates["q"],
-        coordinates["c"],
-        coordinates["mu"],
-        p.productivities,
-        coordinates["interest_rate"],
-        coordinates["dlog_k_dt"],
-        coordinates["da_dt"],
-        coordinates["dlog_q_dt"],
-        coordinates["dlog_mu_dt"],
-        p,
-    )
+    k, a, q = coordinates["k"], coordinates["a"], coordinates["q"]
+    c, mu = coordinates["c"], coordinates["mu"]
+    rate_column = coordinates["interest_rate"][..., None]
+    gammas = jnp.asarray(p.gammas, dtype=c.dtype)
+    populations = jnp.asarray(p.populations, dtype=a.dtype)
+    chi = p.delta ** (1.0 - p.eta)
+    values = {
+        **coordinates,
+        "current_account": coordinates["da_dt"],
+        "capital": coordinates["dlog_k_dt"]
+        - (chi * investment_rate_from_q(q, p) ** p.eta - p.delta),
+        "assets": coordinates["da_dt"]
+        - current_account(k, a, q, c, p.productivities, rate_column, p),
+        "tobin_q": coordinates["dlog_q_dt"]
+        - q_drift(k, q, p.productivities, rate_column, p) / q,
+        "marginal_wealth": coordinates["dlog_mu_dt"] - (p.r - rate_column),
+        "consumption_foc": mu * c**gammas - 1.0,
+        # World bond clearing, per capita so the row size is N-free.
+        "asset_clearing": jnp.sum(populations * a, axis=-1) / jnp.sum(populations),
+    }
     # No algebraic row contains the rate (clearing is a stock condition
     # on the states, so the DAE has index > 1); the rate path is
     # disciplined by the assets and Euler rows, with the pointwise slack
@@ -171,53 +179,15 @@ def residual_fn(theta, args, p):
     # identically zero because a_0 clears, and is kept for uniformity.
     residual = jnp.concatenate(
         [
-            residuals["capital"].reshape(-1),
-            residuals["assets"].reshape(-1),
-            residuals["tobin_q"].reshape(-1),
-            residuals["marginal_wealth"].reshape(-1),
-            residuals["consumption_foc"].reshape(-1),
-            residuals["asset_clearing"],
+            values["capital"].reshape(-1),
+            values["assets"].reshape(-1),
+            values["tobin_q"].reshape(-1),
+            values["marginal_wealth"].reshape(-1),
+            values["consumption_foc"].reshape(-1),
+            values["asset_clearing"],
         ]
     )
-    return residual * (1.0 / jnp.sqrt(residual.size))
-
-
-def evaluate_coordinates(theta_value, K_eval, K_tilde_eval, p_value):
-    coordinates = path_coordinates(theta_value, K_eval, K_tilde_eval, p_value)
-    residuals = path_residuals(
-        coordinates["k"],
-        coordinates["a"],
-        coordinates["q"],
-        coordinates["c"],
-        coordinates["mu"],
-        p_value.productivities,
-        coordinates["interest_rate"],
-        coordinates["dlog_k_dt"],
-        coordinates["da_dt"],
-        coordinates["dlog_q_dt"],
-        coordinates["dlog_mu_dt"],
-        p_value,
-    )
-    x = investment_expenditure(coordinates["k"], coordinates["q"], p_value)
-    output = production(coordinates["k"], p_value.productivities, p_value)
-    resources = output - x
-    populations_p = p_value.populations
-    # Goods-market clearing is implied by the budgets and the clearing
-    # row (Walras), so the per-capita goods gap is a reported
-    # diagnostic, not a residual.
-    resource_gap = jnp.sum(
-        populations_p * (resources - coordinates["c"]), axis=-1
-    ) / jnp.sum(populations_p)
-    return {
-        **coordinates,
-        "x": x,
-        "output": output,
-        "resources": resources,
-        "current_account": coordinates["da_dt"],
-        "relative_welfare_weights": relative_welfare_weights(coordinates["mu"]),
-        "resource_gap": resource_gap,
-        **residuals,
-    }
+    return residual * (1.0 / jnp.sqrt(residual.size)), values
 
 
 # Numerical acceptance and ex-post quality thresholds, CLI-reachable so a
@@ -427,6 +397,7 @@ def multicountry_growth_kernel(
             continuation_options["user_state"] = anneal.init_state(dtype)
     solver = RidgeLevenbergMarquardt(
         residual_fn,
+        has_aux=True,
         metric=metric,
         ridge=initial_ridge,
         linear_solver=linear_solver,
@@ -452,6 +423,8 @@ def multicountry_growth_kernel(
     solve_time = timer.elapsed(result)
     theta = result.x
 
+    # Paths, model quantities, and DAE residuals on an evaluation grid
+    # through fresh cross-kernel matrices against the training grid.
     def evaluate_grid(points):
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             points,
@@ -460,9 +433,29 @@ def multicountry_growth_kernel(
             kernel_set.sigma,
             kernel_set.ell,
         )
-        values = evaluate_coordinates(theta, K_eval, K_tilde_eval, p)
-        values["t"] = points
-        return values
+        values = residual_fn(
+            theta, KernelResidualArgs(K=K_eval, K_tilde=K_tilde_eval), p
+        )[1]
+        x = investment_expenditure(values["k"], values["q"], p)
+        output = production(values["k"], p.productivities, p)
+        resources = output - x
+        # Goods-market clearing is implied by the budgets and the clearing
+        # row (Walras), so the per-capita goods gap is a reported
+        # diagnostic, not a residual.
+        resource_gap = jnp.sum(
+            p.populations * (resources - values["c"]), axis=-1
+        ) / jnp.sum(p.populations)
+        return {
+            "t": points,
+            **values,
+            "x": x,
+            "output": output,
+            "resources": resources,
+            "relative_welfare_weights": relative_welfare_weights(values["mu"]),
+            "resource_gap": resource_gap,
+        }
+
+    kernel_solution = jax.jit(evaluate_grid)
 
     train_eval = evaluate_grid(train_data)
     validation_eval = evaluate_grid(validation_data)
@@ -655,19 +648,6 @@ def multicountry_growth_kernel(
 
     if verbose:
         print(f"solve_time(s) = {solve_time}")
-
-    @jax.jit
-    def kernel_solution(points):
-        K_eval, K_tilde_eval = integrated_kernel_matrices(
-            points,
-            train_data,
-            kernel,
-            kernel_set.sigma,
-            kernel_set.ell,
-        )
-        values = evaluate_coordinates(theta, K_eval, K_tilde_eval, p)
-        values["t"] = points
-        return values
 
     return results, {
         "model": kernel_solution,

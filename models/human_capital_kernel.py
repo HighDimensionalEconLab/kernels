@@ -72,18 +72,26 @@ def residual_fn(theta, args, p):
     mu_k, dmu_k_dt = paths["mu_k"]
     mu_h, dmu_h_dt = paths["mu_h"]
     output, f_k, f_h = production_terms(k, h, p)
-    residual = jnp.concatenate(
-        [
-            dk_dt - (i_k - delta_k * k),
-            dh_dt - (i_h - delta_h * h),
-            dmu_k_dt + mu_k * (f_k - delta_k - rho_hat),
-            dmu_h_dt + mu_h * (f_h - delta_h - rho_hat),
-            c + i_h + i_k - output,
-            mu_k * c - 1.0,
-            mu_k - mu_h,
-        ]
-    )
-    return residual / jnp.sqrt(residual.size)
+    values = {
+        "k": k,
+        "h": h,
+        "i_k": i_k,
+        "i_h": i_h,
+        "c": c,
+        "mu_k": mu_k,
+        "mu_h": mu_h,
+        "physical_accumulation": dk_dt - (i_k - delta_k * k),
+        "human_accumulation": dh_dt - (i_h - delta_h * h),
+        "physical_euler": dmu_k_dt + mu_k * (f_k - delta_k - rho_hat),
+        "human_euler": dmu_h_dt + mu_h * (f_h - delta_h - rho_hat),
+        "feasibility": c + i_h + i_k - output,
+        "shadow_price": mu_k * c - 1.0,
+        "costate_gap": mu_k - mu_h,
+        "hidden_dae_residual": (f_k - delta_k) - (f_h - delta_h),
+        "Y": output,
+    }
+    residual = jnp.concatenate([values[name] for name in RESIDUAL_NAMES])
+    return residual / jnp.sqrt(residual.size), values
 
 
 def human_capital_kernel(
@@ -165,6 +173,7 @@ def human_capital_kernel(
     )
     solver = RidgeLevenbergMarquardt(
         residual_fn,
+        has_aux=True,
         metric=metric,
         ridge=ridge_set.ridge,
         init_damping=lm_set.init_damping,
@@ -202,44 +211,10 @@ def human_capital_kernel(
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             points, train_data, kernel, sigma, ell
         )
-        paths = integrated_kernel_paths(
-            {
-                "k": IntegratedPath(theta.alpha_k, p.k_0),
-                "h": IntegratedPath(theta.alpha_h, p.h_0),
-                "i_k": IntegratedPath(theta.alpha_i_k, theta.i_k_0),
-                "i_h": IntegratedPath(theta.alpha_i_h, theta.i_h_0),
-                "c": IntegratedPath(theta.alpha_c, theta.c_0),
-                "mu_k": IntegratedPath(theta.alpha_mu_k, theta.mu_k_0),
-                "mu_h": IntegratedPath(theta.alpha_mu_h, theta.mu_h_0),
-            },
-            K_eval,
-            K_tilde_eval,
-        )
-        k, dk_dt = paths["k"]
-        h, dh_dt = paths["h"]
-        i_k, i_h, c = paths["i_k"].value, paths["i_h"].value, paths["c"].value
-        mu_k, dmu_k_dt = paths["mu_k"]
-        mu_h, dmu_h_dt = paths["mu_h"]
-        output, f_k, f_h = production_terms(k, h, p)
-        return {
-            "t": points,
-            "k": k,
-            "h": h,
-            "i_k": i_k,
-            "i_h": i_h,
-            "c": c,
-            "mu_k": mu_k,
-            "mu_h": mu_h,
-            "physical_accumulation": dk_dt - (i_k - delta_k * k),
-            "human_accumulation": dh_dt - (i_h - delta_h * h),
-            "physical_euler": dmu_k_dt + mu_k * (f_k - delta_k - rho_hat),
-            "human_euler": dmu_h_dt + mu_h * (f_h - delta_h - rho_hat),
-            "feasibility": c + i_h + i_k - output,
-            "shadow_price": mu_k * c - 1.0,
-            "costate_gap": mu_k - mu_h,
-            "hidden_dae_residual": (f_k - delta_k) - (f_h - delta_h),
-            "Y": output,
-        }
+        values = residual_fn(
+            theta, KernelResidualArgs(K=K_eval, K_tilde=K_tilde_eval), p
+        )[1]
+        return {"t": points, **values}
 
     train_eval = evaluate_grid(train_data)
     validation_eval = evaluate_grid(validation_data)

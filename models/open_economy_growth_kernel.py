@@ -31,10 +31,12 @@ from models.open_economy_growth_shared import (
 from models.open_economy_growth_shared import (
     DataSettings,
     StructuralParameters,
+    current_account,
     investment_expenditure,
-    path_residuals,
+    investment_rate_from_q,
     present_value_gap,
     production,
+    q_drift,
     steady_state,
     tail_diagnostics,
     tvc_diagnostics,
@@ -85,33 +87,33 @@ def residual_fn(theta, args, p):
     q = jnp.exp(paths["log_q"].value)
     c = jnp.exp(paths["log_c"].value)
     mu = jnp.exp(paths["log_mu"].value)
-    dlog_k_dt = paths["log_k"].d_dt
     da_dt = output_scale_p * paths["a_raw"].d_dt
-    dlog_q_dt = paths["log_q"].d_dt
-    dlog_mu_dt = paths["log_mu"].d_dt
-    residuals = path_residuals(
-        k,
-        a,
-        q,
-        c,
-        mu,
-        jnp.ones_like(k),
-        dlog_k_dt,
-        da_dt,
-        dlog_q_dt,
-        dlog_mu_dt,
-        p,
-    )
+    z = jnp.ones_like(k)
+    chi = p.delta ** (1.0 - p.eta)
+    values = {
+        "k": k,
+        "a": a,
+        "q": q,
+        "c": c,
+        "mu": mu,
+        "current_account": da_dt,
+        "capital": paths["log_k"].d_dt
+        - (chi * investment_rate_from_q(q, p) ** p.eta - p.delta),
+        "assets": da_dt - current_account(k, a, q, c, z, p),
+        "tobin_q": paths["log_q"].d_dt - q_drift(k, q, z, p) / q,
+        "marginal_wealth": paths["log_mu"].d_dt - (p.r - p.r_star),
+        "consumption_foc": mu * c**p.gamma - 1.0,
+    }
     residual = jnp.concatenate(
         [
-            residuals["capital"],
-            residuals["assets"],
-            residuals["tobin_q"],
-            residuals["marginal_wealth"],
-            residuals["consumption_foc"],
+            values["capital"],
+            values["assets"],
+            values["tobin_q"],
+            values["marginal_wealth"],
+            values["consumption_foc"],
         ]
     )
-    return residual / jnp.sqrt(residual.size)
+    return residual / jnp.sqrt(residual.size), values
 
 
 # Numerical acceptance and ex-post quality thresholds, CLI-reachable so a
@@ -238,6 +240,7 @@ def open_economy_growth_kernel(
         }
     solver = RidgeLevenbergMarquardt(
         residual_fn,
+        has_aux=True,
         metric=metric,
         ridge=initial_ridge,
         linear_solver={"auto": Cholesky(), "cholesky": Cholesky(), "qr": QR()}[
@@ -272,54 +275,14 @@ def open_economy_growth_kernel(
             kernel_set.sigma,
             kernel_set.ell,
         )
-        output_scale_p = jax.lax.stop_gradient(production(p.k_0, 1.0, p))
-        paths = integrated_kernel_paths(
-            {
-                "log_mu": IntegratedPath(theta.alpha_mu, theta.log_mu_0),
-                "log_c": IntegratedPath(theta.alpha_c, theta.log_c_0),
-                "log_k": IntegratedPath(theta.alpha_k, jnp.log(p.k_0)),
-                "a_raw": IntegratedPath(
-                    theta.alpha_a, jnp.zeros((), theta.alpha_a.dtype)
-                ),
-                "log_q": IntegratedPath(theta.alpha_q, theta.log_q_0),
-            },
-            K_eval,
-            K_tilde_eval,
-        )
-        k = jnp.exp(paths["log_k"].value)
-        a = p.a_0 + output_scale_p * paths["a_raw"].value
-        q = jnp.exp(paths["log_q"].value)
-        c = jnp.exp(paths["log_c"].value)
-        mu = jnp.exp(paths["log_mu"].value)
-        dlog_k_dt = paths["log_k"].d_dt
-        da_dt = output_scale_p * paths["a_raw"].d_dt
-        dlog_q_dt = paths["log_q"].d_dt
-        dlog_mu_dt = paths["log_mu"].d_dt
-        z = jnp.ones_like(k)
-        residuals = path_residuals(
-            k,
-            a,
-            q,
-            c,
-            mu,
-            z,
-            dlog_k_dt,
-            da_dt,
-            dlog_q_dt,
-            dlog_mu_dt,
-            p,
-        )
+        values = residual_fn(
+            theta, KernelResidualArgs(K=K_eval, K_tilde=K_tilde_eval), p
+        )[1]
         return {
             "t": points,
-            "k": k,
-            "a": a,
-            "q": q,
-            "c": c,
-            "mu": mu,
-            "x": investment_expenditure(k, q, p),
-            "output": production(k, z, p),
-            "current_account": da_dt,
-            **residuals,
+            **values,
+            "x": investment_expenditure(values["k"], values["q"], p),
+            "output": production(values["k"], jnp.ones_like(values["k"]), p),
         }
 
     train_eval = evaluate_grid(train_data)

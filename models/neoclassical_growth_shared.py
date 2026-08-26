@@ -77,26 +77,15 @@ class StructuralParameters(ParameterPyTree):
     delta: jax.Array
     rho_hat: jax.Array
     sigma_crra: jax.Array
-    z_0: jax.Array
-    k_0: jax.Array
     g: jax.Array
     A: jax.Array
     b_1: jax.Array
     b_2: jax.Array
     k_thr: jax.Array
-
-
-# The initial conditions ride in the solver args, not here.
-class RecursiveParameters(ParameterPyTree):
-    a: jax.Array
-    delta: jax.Array
-    rho_hat: jax.Array
-    sigma_crra: jax.Array
-    g: jax.Array
-    A: jax.Array
-    b_1: jax.Array
-    b_2: jax.Array
-    k_thr: jax.Array
+    # The recursive drivers omit the initial conditions (they ride in the
+    # solver args); to_dict skips None fields.
+    z_0: jax.Array | None = None
+    k_0: jax.Array | None = None
 
 
 # Hicks-neutral technology: Y = z A max(k^a, b_1 k^a - b_2). Balanced growth
@@ -178,24 +167,28 @@ def euler_residuals(policy, log_states, p):
 
 
 # Flat steady-flow warm start c(0) = f(z_0, k_0) - delta k_0.
-def steady_flow_consumption_guess(z_0, k_0, a, delta, A, b_1, b_2):
-    base = k_0**a
-    return z_0 * A * max(base, b_1 * base - b_2) - delta * k_0
+def steady_flow_consumption_guess(p):
+    base = float(p.k_0) ** float(p.a)
+    return float(p.z_0) * float(p.A) * max(
+        base, float(p.b_1) * base - float(p.b_2)
+    ) - float(p.delta) * float(p.k_0)
 
 
 # Closed-form steady state of the static smooth model (z = 1, g = 0):
 # f'(k_ss) = delta + rho_hat with f(k) = k^a gives
 # k_ss = (a / (delta + rho_hat))^(1/(1 - a)) and c_ss = k_ss^a - delta k_ss.
-def steady_state(a, delta, rho_hat):
+def steady_state(p):
+    a, delta, rho_hat = float(p.a), float(p.delta), float(p.rho_hat)
     k_ss = (a / (delta + rho_hat)) ** (1.0 / (1.0 - a))
     return k_ss, k_ss**a - delta * k_ss
 
 
 # The AD-free target the solver sensitivities are checked against;
 # sigma_crra and k_0 do not enter, so those derivatives are exactly zero.
-def neoclassical_steady_state_sensitivities(a, delta, rho_hat):
+def neoclassical_steady_state_sensitivities(p):
+    a, delta, rho_hat = float(p.a), float(p.delta), float(p.rho_hat)
     mpk_ss = delta + rho_hat
-    k_ss, c_ss = steady_state(a, delta, rho_hat)
+    k_ss, c_ss = steady_state(p)
     d_k_ss_d_a = k_ss * (1.0 / (a * (1.0 - a)) + math.log(a / mpk_ss) / (1.0 - a) ** 2)
     d_k_ss_d_delta = -k_ss / ((1.0 - a) * mpk_ss)
     # a k_ss^(a-1) - delta = rho_hat collapses the chain rule for c_ss.

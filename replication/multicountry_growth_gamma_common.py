@@ -74,6 +74,7 @@ def run(output_dir: str = ".results"):
     primal_solver = spec["solver"]
     gamma_common_solver = RidgeLevenbergMarquardt(
         spec["residual_fn"],
+        has_aux=True,
         metric=primal_solver.initial_metric,
         ridge=float(result.lm_state.ridge),
         linear_solver=CG(

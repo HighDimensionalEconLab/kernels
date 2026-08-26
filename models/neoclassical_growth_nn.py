@@ -109,44 +109,42 @@ class GrowthPolicyNN(nnx.Module):
 def residual_fn(theta, args, p):
     model = nnx.merge(args.graphdef, theta, args.nondiff)
     t, z_trend = args.batch["t"], args.batch["z_trend"]
-    values, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
+    paths, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
         t
     )
-    k = values[:, 0]
-    c = values[:, 1]
+    k = paths[:, 0]
+    c = paths[:, 1]
     dk_dt = derivatives[:, 0]
     dc_dt = derivatives[:, 1]
     z = p.z_0 * z_trend
-    resource = dk_dt - (production(z, k, p) - p.delta * k - c)
-    euler = dc_dt - c * (mpk(z, k, p) - p.delta - p.rho_hat) / p.sigma_crra
+    values = {
+        "k": k,
+        "c": c,
+        "resource": dk_dt - (production(z, k, p) - p.delta * k - c),
+        "euler": dc_dt - c * (mpk(z, k, p) - p.delta - p.rho_hat) / p.sigma_crra,
+    }
     ic = model(jnp.asarray(0.0, dtype=t.dtype))[0] - p.k_0
-    residual = jnp.concatenate([resource, euler, jnp.atleast_1d(ic)])
-    return residual / jnp.sqrt(residual.size)
+    residual = jnp.concatenate(
+        [values["resource"], values["euler"], jnp.atleast_1d(ic)]
+    )
+    return residual / jnp.sqrt(residual.size), values
 
 
 # Model paths and residuals on a time grid, with relative errors against the
 # benchmark when one exists (the smooth family).
-def snapshot(model, t, p, benchmark=None, z=1.0):
-    values, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
-        t
-    )
-    k = values[:, 0]
-    c = values[:, 1]
-    dk_dt = derivatives[:, 0]
-    dc_dt = derivatives[:, 1]
+def snapshot(theta, args, p, benchmark=None):
+    values = residual_fn(theta, args, p)[1]
     df = pd.DataFrame(
         {
-            "t": np.asarray(t),
-            "k": np.asarray(k),
-            "c": np.asarray(c),
-            "resource": np.asarray(dk_dt - (production(z, k, p) - p.delta * k - c)),
-            "euler": np.asarray(
-                dc_dt - c * (mpk(z, k, p) - p.delta - p.rho_hat) / p.sigma_crra
-            ),
+            "t": np.asarray(args.batch["t"]),
+            "k": np.asarray(values["k"]),
+            "c": np.asarray(values["c"]),
+            "resource": np.asarray(values["resource"]),
+            "euler": np.asarray(values["euler"]),
         }
     )
     if benchmark is not None:
-        k_b, c_b = benchmark(t)
+        k_b, c_b = benchmark(args.batch["t"])
         df["k_benchmark"] = np.asarray(k_b)
         df["c_benchmark"] = np.asarray(c_b)
         df["k_rel_error"] = np.abs(df["k"] - df["k_benchmark"]) / np.abs(
@@ -218,7 +216,7 @@ def neoclassical_growth_nn(
 
     t_train = make_train_t_grid(data_set, dtype)
     z_trend_train = jnp.exp((1.0 - a) * g * t_train)
-    c_flow_guess = steady_flow_consumption_guess(z_0, k_0, a, delta, A, b_1, b_2)
+    c_flow_guess = steady_flow_consumption_guess(p)
     policy_settings = replace(nn_set, input_scale=max(float(data_set.train_T), 1.0))
     k_scale = float(k_0)
     c_scale = c_flow_guess
@@ -241,6 +239,7 @@ def neoclassical_growth_nn(
     # Multi-start Levenberg-Marquardt solve.
     solver = LevenbergMarquardt(
         residual_fn,
+        has_aux=True,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
@@ -284,8 +283,13 @@ def neoclassical_growth_nn(
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     z_trend_test = jnp.exp((1.0 - a) * g * test_t)
     benchmark = None if use_kinked_production else neoclassical_growth_benchmark(p)
-    train_df = snapshot(model, t_train, p, benchmark, z=z_0 * z_trend_train)
-    test_df = snapshot(model, test_t, p, benchmark, z=z_0 * z_trend_test)
+    train_df = snapshot(result.x, residual_args, p, benchmark)
+    test_df = snapshot(
+        result.x,
+        residual_args.replace(batch={"t": test_t, "z_trend": z_trend_test}),
+        p,
+        benchmark,
+    )
 
     tvc_t = jnp.asarray(data_set.test_tvc_T, dtype=dtype)
     k_T, c_T = model(tvc_t)

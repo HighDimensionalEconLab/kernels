@@ -152,12 +152,6 @@ def consumption_from_mu(mu, p):
     return mu ** (-1.0 / gammas)
 
 
-def capital_drift(k, q, p):
-    chi = p.delta ** (1.0 - p.eta)
-    investment_rate = investment_rate_from_q(q, p)
-    return k * (chi * investment_rate**p.eta - p.delta)
-
-
 def current_account(k, a, q, c, z, rate, p):
     return rate * a + production(k, z, p) - c - investment_expenditure(k, q, p)
 
@@ -169,10 +163,6 @@ def q_drift(k, q, z, rate, p):
     return (
         rate + p.delta - (1.0 - eta) * chi * investment_rate**eta
     ) * q - marginal_product(k, z, p)
-
-
-def mu_drift(mu, rate, p):
-    return (p.r - rate) * mu
 
 
 def relative_welfare_weights(mu):
@@ -247,36 +237,6 @@ def resolved_steady_state(mu, p):
         "relative_welfare_weights": relative_welfare_weights(mu),
         "resource_gap": jnp.sum(populations * (steady["g"] - consumption)),
         "asset_clearing_gap": jnp.sum(populations * assets),
-    }
-
-
-def path_residuals(
-    k,
-    a,
-    q,
-    c,
-    mu,
-    z,
-    rate,
-    dlog_k_dt,
-    da_dt,
-    dlog_q_dt,
-    dlog_mu_dt,
-    p,
-):
-    gammas = jnp.asarray(p.gammas, dtype=c.dtype)
-    populations = jnp.asarray(p.populations, dtype=a.dtype)
-    rate_column = rate[..., None]
-    chi = p.delta ** (1.0 - p.eta)
-    investment_rate = investment_rate_from_q(q, p)
-    return {
-        "capital": dlog_k_dt - (chi * investment_rate**p.eta - p.delta),
-        "assets": da_dt - current_account(k, a, q, c, z, rate_column, p),
-        "tobin_q": dlog_q_dt - q_drift(k, q, z, rate_column, p) / q,
-        "marginal_wealth": dlog_mu_dt - mu_drift(mu, rate_column, p) / mu,
-        "consumption_foc": mu * c**gammas - 1.0,
-        # World bond clearing, per capita so the row size is N-free.
-        "asset_clearing": jnp.sum(populations * a, axis=-1) / jnp.sum(populations),
     }
 
 

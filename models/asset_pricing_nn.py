@@ -93,21 +93,22 @@ def residual_fn(theta, args, p):
     t = args.batch["t"]
     price, dprice_dt = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(t)
     residual = dprice_dt - (p.r * price - dividends(t, p))
-    return residual / jnp.sqrt(residual.size)
+    values = {"p": price, "dp_dt": dprice_dt, "residual": residual}
+    return residual / jnp.sqrt(residual.size), values
 
 
 # Model paths and residuals on a time grid, with relative errors against the
 # closed-form benchmark.
-def snapshot(model, t, p):
-    price, dprice_dt = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(t)
-    dividend_values = dividends(t, p)
+def snapshot(theta, args, p):
+    t = args.batch["t"]
+    values = residual_fn(theta, args, p)[1]
     frame = pd.DataFrame(
         {
             "t": np.asarray(t),
-            "p": np.asarray(price),
-            "dp_dt": np.asarray(dprice_dt),
-            "dividends": np.asarray(dividend_values),
-            "residual": np.asarray(dprice_dt - (p.r * price - dividend_values)),
+            "p": np.asarray(values["p"]),
+            "dp_dt": np.asarray(values["dp_dt"]),
+            "dividends": np.asarray(dividends(t, p)),
+            "residual": np.asarray(values["residual"]),
         }
     )
     r = float(p.r)
@@ -162,6 +163,7 @@ def asset_pricing_nn(
 
     solver = LevenbergMarquardt(
         residual_fn,
+        has_aux=True,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
@@ -190,8 +192,8 @@ def asset_pricing_nn(
     solve_time = timer.elapsed(result)
     model = nnx.merge(graphdef, result.x, nondiff)
 
-    train_df = snapshot(model, train_t, p)
-    test_df = snapshot(model, test_t, p)
+    train_df = snapshot(result.x, residual_args, p)
+    test_df = snapshot(result.x, residual_args.replace(batch={"t": test_t}), p)
     max_train_residual = float(train_df["residual"].abs().max())
     solution_accepted = bool(result.multi_start.accepted)
 

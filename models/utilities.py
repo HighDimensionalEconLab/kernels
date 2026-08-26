@@ -26,7 +26,11 @@ class ParameterPyTree(struct.PyTreeNode):
 
     def to_dict(self):
         values = jax.device_get(
-            {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
+            {
+                f.name: getattr(self, f.name)
+                for f in dataclasses.fields(self)
+                if getattr(self, f.name) is not None
+            }
         )
         return {k: v.item() if v.ndim == 0 else v.tolist() for k, v in values.items()}
 

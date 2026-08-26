@@ -60,14 +60,18 @@ def residual_fn(theta, args, p):
     x, dx_dt = paths["x"]
     mu, dmu_dt = paths["mu"]
     u = paths["u"].value
+    values = {
+        "x": x,
+        "mu": mu,
+        "u": u,
+        "state": dx_dt - ((1.0 - x) * u - beta * x),
+        "costate": dmu_dt - (-gamma + (rho_hat + beta) * mu + mu * u),
+        "shadow_price": u**control_power - kappa * mu * (1.0 - x),
+    }
     residual = jnp.concatenate(
-        [
-            dx_dt - ((1.0 - x) * u - beta * x),
-            dmu_dt - (-gamma + (rho_hat + beta) * mu + mu * u),
-            u**control_power - kappa * mu * (1.0 - x),
-        ]
+        [values["state"], values["costate"], values["shadow_price"]]
     )
-    return residual / jnp.sqrt(residual.size)
+    return residual / jnp.sqrt(residual.size), values
 
 
 def optimal_advertising_kernel(
@@ -138,6 +142,7 @@ def optimal_advertising_kernel(
     )
     solver = RidgeLevenbergMarquardt(
         residual_fn,
+        has_aux=True,
         metric=metric,
         ridge=ridge_set.ridge,
         init_damping=lm_set.init_damping,
@@ -163,30 +168,10 @@ def optimal_advertising_kernel(
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             points, train_data, kernel, sigma, ell
         )
-        paths = integrated_kernel_paths(
-            {
-                "x": IntegratedPath(theta.alpha_x, p.x_0),
-                "mu": IntegratedPath(theta.alpha_mu, theta.mu_0),
-                "u": IntegratedPath(theta.alpha_u, theta.u_0),
-            },
-            K_eval,
-            K_tilde_eval,
-        )
-        rho_hat, c, beta, kappa = p.rho_hat, p.c, p.beta, p.kappa
-        gamma = (beta + rho_hat) / c
-        control_power = (1.0 - kappa) / kappa
-        x, dx_dt = paths["x"]
-        mu, dmu_dt = paths["mu"]
-        u = paths["u"].value
-        return {
-            "t": points,
-            "x": x,
-            "mu": mu,
-            "u": u,
-            "state": dx_dt - ((1.0 - x) * u - beta * x),
-            "costate": dmu_dt - (-gamma + (rho_hat + beta) * mu + mu * u),
-            "shadow_price": u**control_power - kappa * mu * (1.0 - x),
-        }
+        values = residual_fn(
+            theta, KernelResidualArgs(K=K_eval, K_tilde=K_tilde_eval), p
+        )[1]
+        return {"t": points, **values}
 
     train_eval = evaluate_grid(train_data)
     validation_eval = evaluate_grid(validation_data)

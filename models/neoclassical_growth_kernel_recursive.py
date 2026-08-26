@@ -22,7 +22,6 @@ from models.neoclassical_growth_shared import (
 )
 from models.neoclassical_growth_shared import (
     InitialConditionSettings,
-    RecursiveParameters,
     StructuralParameters,
     euler_residuals,
     growth_initial_conditions,
@@ -250,7 +249,7 @@ def neoclassical_growth_kernel_recursive(
     ic_draw = growth_initial_conditions(z_0, k_0, ic_set, dtype)
     train_initial_conditions = ic_draw.train_initial_conditions
     test_initial_conditions = ic_draw.test_initial_conditions
-    p = RecursiveParameters.create(
+    p = StructuralParameters.create(
         dtype=dtype,
         a=a,
         delta=delta,

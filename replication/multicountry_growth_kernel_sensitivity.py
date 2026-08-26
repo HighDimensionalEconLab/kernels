@@ -53,6 +53,7 @@ def sensitivity_row(options, mode):
     primal_solver = spec["solver"]
     sensitivity_solver = RidgeLevenbergMarquardt(
         spec["residual_fn"],
+        has_aux=True,
         metric=primal_solver.initial_metric,
         ridge=float(result.lm_state.ridge),
         linear_solver=primal_solver.linear_solver,

@@ -48,7 +48,8 @@ def residual_fn(theta, args, p):
         {"price": IntegratedPath(theta.alpha, theta.p_0)}, args.K, args.K_tilde
     )
     price, dprice_dt = paths["price"]
-    return dprice_dt - (p.r * price - dividends(args.batch["t"], p))
+    residual = dprice_dt - (p.r * price - dividends(args.batch["t"], p))
+    return residual, {"p": price, "dp_dt": dprice_dt, "residual": residual}
 
 
 @jax.jit
@@ -60,7 +61,7 @@ def objective(x, args):
 @jax.jit
 def constraints(x, args, p):
     theta = args.unravel(x)
-    return residual_fn(theta, args, p)
+    return residual_fn(theta, args, p)[0]
 
 
 def lagrangian(x, objective_multiplier, multipliers, args, p):
@@ -210,25 +211,27 @@ def asset_pricing_kernel_uno(
     x = np.array(result.primal_solution, dtype=np.float64)[:n_variables]
     theta = unravel(jnp.asarray(x))
     alpha, p_0 = theta.alpha, theta.p_0
-    paths = integrated_kernel_paths(
-        {"price": IntegratedPath(theta.alpha, theta.p_0)}, K_jax, K_tilde_jax
-    )
-    p_train, dp_train = paths["price"]
-    train_residual = dp_train - (r * p_train - dividends(train_data, p))
+    train_values = residual_fn(theta, args, p)[1]
+    p_train = train_values["p"]
+    train_residual = train_values["residual"]
     max_train_residual = float(jnp.max(jnp.abs(train_residual)))
 
+    # Paths and the no-arbitrage residual on an evaluation grid through fresh
+    # cross-kernel matrices against the training grid.
     @jax.jit
-    def kernel_solution(test_points_data):
-        K_test, K_tilde_test = integrated_kernel_matrices(
-            test_points_data, train_data, kernel, sigma, ell
+    def evaluate_grid(points):
+        K_eval, K_tilde_eval = integrated_kernel_matrices(
+            points, train_data, kernel, sigma, ell
         )
-        paths = integrated_kernel_paths(
-            {"price": IntegratedPath(theta.alpha, theta.p_0)}, K_test, K_tilde_test
-        )
-        return paths["price"].value, paths["price"].d_dt
+        return residual_fn(
+            theta,
+            KernelResidualArgs(batch={"t": points}, K=K_eval, K_tilde=K_tilde_eval),
+            p,
+        )[1]
 
-    p_test, dp_test = kernel_solution(test_data)
-    test_residual = dp_test - (r * p_test - dividends(test_data, p))
+    test_values = evaluate_grid(test_data)
+    p_test = test_values["p"]
+    test_residual = test_values["residual"]
     p_benchmark = mu_f_array(test_data, p)
     p_rel_error = jnp.abs(p_benchmark - p_test) / p_benchmark
 
@@ -291,7 +294,7 @@ def asset_pricing_kernel_uno(
         }
     )
     return results, {
-        "model": kernel_solution,
+        "model": evaluate_grid,
         "train_df": train_df,
         "test_df": test_df,
     }

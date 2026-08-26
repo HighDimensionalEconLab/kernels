@@ -22,11 +22,13 @@ from models.multicountry_growth_shared import (
     DataSettings,
     InitialConditionSettings,
     StructuralParameters,
+    current_account,
     draw_initial_conditions,
     investment_expenditure,
+    investment_rate_from_q,
     long_run_diagnostics,
-    path_residuals,
     production,
+    q_drift,
     relative_welfare_weights,
     resolved_steady_state,
     steady_state,
@@ -150,23 +152,29 @@ class SequencePathNN(nnx.Module):
 def residual_fn(theta, args, p):
     model = nnx.merge(args.graphdef, theta, args.nondiff)
     t = args.batch["t"]
-    values, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
+    paths, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
         t
     )
-    residuals = path_residuals(
-        values["k"],
-        values["a"],
-        values["q"],
-        values["c"],
-        values["mu"],
-        p.productivities,
-        values["interest_rate"],
-        derivatives["k"] / values["k"],
-        derivatives["a"],
-        derivatives["q"] / values["q"],
-        derivatives["mu"] / values["mu"],
-        p,
-    )
+    k, a, q = paths["k"], paths["a"], paths["q"]
+    c, mu = paths["c"], paths["mu"]
+    rate_column = paths["interest_rate"][..., None]
+    gammas = jnp.asarray(p.gammas, dtype=c.dtype)
+    populations = jnp.asarray(p.populations, dtype=a.dtype)
+    chi = p.delta ** (1.0 - p.eta)
+    values = {
+        **paths,
+        "current_account": derivatives["a"],
+        "capital": derivatives["k"] / k
+        - (chi * investment_rate_from_q(q, p) ** p.eta - p.delta),
+        "assets": derivatives["a"]
+        - current_account(k, a, q, c, p.productivities, rate_column, p),
+        "tobin_q": derivatives["q"] / q
+        - q_drift(k, q, p.productivities, rate_column, p) / q,
+        "marginal_wealth": derivatives["mu"] / mu - (p.r - rate_column),
+        "consumption_foc": mu * c**gammas - 1.0,
+        # World bond clearing, per capita so the row size is N-free.
+        "asset_clearing": jnp.sum(populations * a, axis=-1) / jnp.sum(populations),
+    }
     at_zero = model(jnp.asarray(0.0, dtype=t.dtype))
     # Population demeaning is a no-op at the primal point (the driver
     # anchors cleared positions) and projects AD perturbations of a_0 onto
@@ -175,16 +183,16 @@ def residual_fn(theta, args, p):
     ic = jnp.concatenate([at_zero["k"] - p.k_0, at_zero["a"] - a_0])
     residual = jnp.concatenate(
         [
-            residuals["capital"].reshape(-1),
-            residuals["assets"].reshape(-1),
-            residuals["tobin_q"].reshape(-1),
-            residuals["marginal_wealth"].reshape(-1),
-            residuals["consumption_foc"].reshape(-1),
-            residuals["asset_clearing"],
+            values["capital"].reshape(-1),
+            values["assets"].reshape(-1),
+            values["tobin_q"].reshape(-1),
+            values["marginal_wealth"].reshape(-1),
+            values["consumption_foc"].reshape(-1),
+            values["asset_clearing"],
             ic,
         ]
     )
-    return residual / jnp.sqrt(residual.size)
+    return residual / jnp.sqrt(residual.size), values
 
 
 def multicountry_growth_nn(
@@ -309,6 +317,7 @@ def multicountry_growth_nn(
 
     solver = LevenbergMarquardt(
         residual_fn,
+        has_aux=True,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
@@ -350,26 +359,9 @@ def multicountry_growth_nn(
     attempt = int(result.multi_start.attempt) + 1
 
     def evaluate_grid(points):
-        values, derivatives = jax.vmap(
-            lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),))
-        )(points)
-        k, q, mu = values["k"], values["q"], values["mu"]
-        residuals = path_residuals(
-            k,
-            values["a"],
-            q,
-            values["c"],
-            mu,
-            p.productivities,
-            values["interest_rate"],
-            derivatives["k"] / k,
-            derivatives["a"],
-            derivatives["q"] / q,
-            derivatives["mu"] / mu,
-            p,
-        )
-        x = investment_expenditure(k, q, p)
-        output = production(k, p.productivities, p)
+        values = residual_fn(result.x, residual_args.replace(batch={"t": points}), p)[1]
+        x = investment_expenditure(values["k"], values["q"], p)
+        output = production(values["k"], p.productivities, p)
         resources = output - x
         # Goods-market clearing is implied by the budgets and the clearing
         # row (Walras), so the per-capita goods gap is a reported
@@ -384,10 +376,8 @@ def multicountry_growth_nn(
             "x": x,
             "output": output,
             "resources": resources,
-            "current_account": derivatives["a"],
-            "relative_welfare_weights": relative_welfare_weights(mu),
+            "relative_welfare_weights": relative_welfare_weights(values["mu"]),
             "resource_gap": resource_gap,
-            **residuals,
         }
 
     train_eval = evaluate_grid(train_t)

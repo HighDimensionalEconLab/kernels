@@ -69,11 +69,20 @@ def residual_fn(theta, args, p):
     mu, dmu_dt = paths["mu"]
     c = paths["c"].value
     z = p.z_0 * args.batch["z_trend"]
-    resource = dk_dt - (production(z, k, p) - p.delta * k - c)
-    euler = dmu_dt + mu * (mpk(z, k, p) - p.delta - p.rho_hat)
-    shadow_price = mu * c**p.sigma_crra - 1.0
-    residual = jnp.concatenate([resource, euler, shadow_price])
-    return residual / jnp.sqrt(residual.size)
+    values = {
+        "k": k,
+        "c": c,
+        "mu": mu,
+        "dk_dt": dk_dt,
+        "dmu_dt": dmu_dt,
+        "resource": dk_dt - (production(z, k, p) - p.delta * k - c),
+        "euler": dmu_dt + mu * (mpk(z, k, p) - p.delta - p.rho_hat),
+        "shadow_price": mu * c**p.sigma_crra - 1.0,
+    }
+    residual = jnp.concatenate(
+        [values["resource"], values["euler"], values["shadow_price"]]
+    )
+    return residual / jnp.sqrt(residual.size), values
 
 
 # CLI-reachable bars; only train_residual gates acceptance.
@@ -163,10 +172,6 @@ def neoclassical_growth_kernel(
         train_data, kernel, sigma, ell, repeats=3
     )
 
-    def z_path(t_grid):
-        return z_0 * jnp.exp((1.0 - a) * g * t_grid)
-
-    g_hat_fixed = jnp.asarray(g, dtype=dtype) if g != 0.0 and not learn_g_hat else None
     residual_args = KernelResidualArgs(
         batch={
             "t": train_data,
@@ -177,7 +182,7 @@ def neoclassical_growth_kernel(
         K_tilde=K_tilde_jax,
     )
 
-    c_flow_guess = steady_flow_consumption_guess(z_0, k_0, a, delta, A, b_1, b_2)
+    c_flow_guess = steady_flow_consumption_guess(p)
     if c_0_guess is not None:
         c_flow_guess = float(c_0_guess)
     theta_0 = Theta(
@@ -192,6 +197,7 @@ def neoclassical_growth_kernel(
     # Ridge Levenberg-Marquardt solve.
     solver = RidgeLevenbergMarquardt(
         residual_fn,
+        has_aux=True,
         metric=metric,
         ridge=ridge_set.ridge,
         init_damping=lm_set.init_damping,
@@ -220,33 +226,20 @@ def neoclassical_growth_kernel(
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             points, train_data, kernel, sigma, ell
         )
-        g_hat = theta.g_hat if theta.g_hat is not None else g_hat_fixed
-        trend_mu = None if g_hat is None else -p.sigma_crra * g_hat
-        paths = integrated_kernel_paths(
-            {
-                "mu": IntegratedPath(theta.alpha_mu, theta.mu_0, trend_mu),
-                "c": IntegratedPath(theta.alpha_c, theta.c_0, g_hat),
-                "k": IntegratedPath(theta.alpha_k, p.k_0, g_hat),
-            },
-            K_eval,
-            K_tilde_eval,
-            points,
-        )
-        k, dk_dt = paths["k"]
-        mu, dmu_dt = paths["mu"]
-        c = paths["c"].value
-        z = z_path(points)
-        return {
-            "t": points,
-            "k": k,
-            "c": c,
-            "mu": mu,
-            "dk_dt": dk_dt,
-            "dmu_dt": dmu_dt,
-            "resource": dk_dt - (production(z, k, p) - p.delta * k - c),
-            "euler": dmu_dt + mu * (mpk(z, k, p) - p.delta - p.rho_hat),
-            "shadow_price": mu * c**p.sigma_crra - 1.0,
-        }
+        values = residual_fn(
+            theta,
+            residual_args.replace(
+                K=K_eval,
+                K_tilde=K_tilde_eval,
+                batch={
+                    "t": points,
+                    "z_trend": jnp.exp((1.0 - a) * g * points),
+                    "g_hat": jnp.asarray(g, dtype=dtype),
+                },
+            ),
+            p,
+        )[1]
+        return {"t": points, **values}
 
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
     test_benchmark = None if use_kinked_production else neoclassical_growth_benchmark(p)

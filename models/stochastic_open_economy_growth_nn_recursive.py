@@ -27,7 +27,6 @@ from models.stochastic_open_economy_growth_shared import (
     SequentialPolicySettings,
     StructuralParameters,
     euler_residual_terms,
-    make_sequential_policy,
     problem_cache_config,
     production,
     simulate,
@@ -45,7 +44,6 @@ from models.utilities import (
     Stopwatch,
     acceptance_fields,
     cache_key,
-    load_model,
     sample_trajectory_noise,
     save_model,
     standardized_initial_states,
@@ -284,8 +282,8 @@ def stochastic_open_economy_growth_nn_recursive(
     ),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     asset_shift_scale: float = 0.5,
-    # Content-addressed artifact dir: an existing artifact for this exact
-    # configuration loads instead of training; a fresh solve saves there.
+    # Directory for the content-addressed policy artifact the kernel
+    # distillation driver consumes; save_policy writes one explicit extra path.
     policy_cache: str | None = None,
     save_policy: str | None = None,
     verbose: bool = True,
@@ -486,88 +484,64 @@ def stochastic_open_economy_growth_nn_recursive(
         else pathlib.Path(policy_cache)
         / f"stochastic_open_economy_growth_nn_recursive_policy_{policy_key}.npz"
     )
-    cache_hit = cache_path is not None and cache_path.exists()
-    if cache_hit:
-        policy, cached_meta = load_model(cache_path, make_sequential_policy)
-        theta_final = nnx.split(policy, nnx.Param, ...)[1]
-        # The saved policy is the end of the ladder: diagnostics must run at
-        # full shock scale, never the fresh args' fractional scale.
-        solve_args = residual_args.replace(
-            shock_scale=jnp.asarray(1.0, dtype=dtype),
-            epoch=jnp.asarray(tolerance_set.num_epochs - 1, dtype=jnp.int32),
+    solver = LevenbergMarquardt(
+        residual_fn,
+        init_damping=lm_set.init_damping,
+        damping_decrease=lm_set.damping_decrease,
+        damping_increase=lm_set.damping_increase,
+        geodesic_acceleration=lm_set.geodesic_acceleration,
+        geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
+    )
+    callback = EpochCallback(
+        num_train_trajectories=ic_set.num_train_trajectories,
+        n_steps=n_train_steps,
+        dt=train_dt,
+        epoch_early_stopping=tolerance_set.epoch_early_stopping,
+        resample_initial_states=any(value > 0.0 for value in train_variances),
+    )
+    # Per-step atol is sound only for a never-changing batch; epochs are
+    # judged at the boundaries and by the acceptance test.
+    atol = (
+        math.sqrt(tolerance_set.train_loss_threshold)
+        if tolerance_set.num_epochs == 1
+        else 0.0
+    )
+    solve_timer = Stopwatch()
+    result = solver.solve(
+        theta_0,
+        residual_args,
+        p=p,
+        max_steps=tolerance_set.num_epochs * tolerance_set.max_steps,
+        atol=atol,
+        callback=callback,
+        multi_start=MultiStart(
+            key=multi_start_key,
+            num_starts=lm_set.num_attempts,
+            draw=DrawSequentialPolicy(nn_set, dtype),
+            accept=accept_training,
+        ),
+        max_steps_is_success=False,
+    )
+    solve_time = solve_timer.elapsed(result)
+    total_fit_time = fit_timer.elapsed()
+    setup_time = total_fit_time - solve_time
+    theta_final, solve_args = result.x, result.args
+    train_residual = residual_fn(theta_final, solve_args, p)
+    train_loss = float(jnp.sum(train_residual * train_residual))
+    steps = int(result.steps)
+    epochs_run = int(solve_args.epoch) + 1
+    attempt = int(result.multi_start.attempt) + 1
+    stopping_reason = STATUS_TO_REASON.get(int(result.status), "unknown")
+    final_damping = float(result.lm_state.damping)
+    solver_accepted = bool(result.multi_start.accepted)
+    if verbose:
+        print(
+            f"attempt {attempt}: {stopping_reason} after {steps} steps "
+            f"(epoch {epochs_run}/{tolerance_set.num_epochs}, shock scale "
+            f"{float(solve_args.shock_scale):.3f}), "
+            f"train_loss={train_loss:.3e} ({solve_time:.2f}s)"
         )
-        steps = 0
-        epochs_run = 0
-        attempt = 0
-        stopping_reason = "cached"
-        final_damping = float("nan")
-        solver_accepted = bool(cached_meta["solver_accepted"])
-        solve_time = 0.0
-        total_fit_time = fit_timer.elapsed()
-        setup_time = total_fit_time
-        train_residual = residual_fn(theta_final, solve_args, p)
-        train_loss = float(jnp.sum(train_residual * train_residual))
-        if verbose:
-            print(f"loaded {cache_path}, train_loss={train_loss:.3e}")
-    else:
-        solver = LevenbergMarquardt(
-            residual_fn,
-            init_damping=lm_set.init_damping,
-            damping_decrease=lm_set.damping_decrease,
-            damping_increase=lm_set.damping_increase,
-            geodesic_acceleration=lm_set.geodesic_acceleration,
-            geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
-        )
-        callback = EpochCallback(
-            num_train_trajectories=ic_set.num_train_trajectories,
-            n_steps=n_train_steps,
-            dt=train_dt,
-            epoch_early_stopping=tolerance_set.epoch_early_stopping,
-            resample_initial_states=any(value > 0.0 for value in train_variances),
-        )
-        # Per-step atol is sound only for a never-changing batch; epochs are
-        # judged at the boundaries and by the acceptance test.
-        atol = (
-            math.sqrt(tolerance_set.train_loss_threshold)
-            if tolerance_set.num_epochs == 1
-            else 0.0
-        )
-        solve_timer = Stopwatch()
-        result = solver.solve(
-            theta_0,
-            residual_args,
-            p=p,
-            max_steps=tolerance_set.num_epochs * tolerance_set.max_steps,
-            atol=atol,
-            callback=callback,
-            multi_start=MultiStart(
-                key=multi_start_key,
-                num_starts=lm_set.num_attempts,
-                draw=DrawSequentialPolicy(nn_set, dtype),
-                accept=accept_training,
-            ),
-            max_steps_is_success=False,
-        )
-        solve_time = solve_timer.elapsed(result)
-        total_fit_time = fit_timer.elapsed()
-        setup_time = total_fit_time - solve_time
-        theta_final, solve_args = result.x, result.args
-        train_residual = residual_fn(theta_final, solve_args, p)
-        train_loss = float(jnp.sum(train_residual * train_residual))
-        steps = int(result.steps)
-        epochs_run = int(solve_args.epoch) + 1
-        attempt = int(result.multi_start.attempt) + 1
-        stopping_reason = STATUS_TO_REASON.get(int(result.status), "unknown")
-        final_damping = float(result.lm_state.damping)
-        solver_accepted = bool(result.multi_start.accepted)
-        if verbose:
-            print(
-                f"attempt {attempt}: {stopping_reason} after {steps} steps "
-                f"(epoch {epochs_run}/{tolerance_set.num_epochs}, shock scale "
-                f"{float(solve_args.shock_scale):.3f}), "
-                f"train_loss={train_loss:.3e} ({solve_time:.2f}s)"
-            )
-        policy = nnx.merge(graphdef, theta_final, nondiff)
+    policy = nnx.merge(graphdef, theta_final, nondiff)
 
     # Training diagnostics use the batch the solution was returned on.
     train_stage_parameters = p.replace(
@@ -738,11 +712,7 @@ def stochastic_open_economy_growth_nn_recursive(
     test_terminal_capital_mean = float(jnp.mean(test_values["k"][:, -1]))
 
     rejection_reasons = []
-    # A cached policy trained on other batches: only its saved solver
-    # acceptance applies, never the fresh-batch loss.
-    if not solver_accepted or (
-        not cache_hit and not train_loss <= tolerance_set.train_loss_threshold
-    ):
+    if not solver_accepted or not train_loss <= tolerance_set.train_loss_threshold:
         rejection_reasons.append("train_loss")
     if not train_path_ok:
         rejection_reasons.append("train_path")
@@ -851,9 +821,7 @@ def stochastic_open_economy_growth_nn_recursive(
         "solve_time": solve_time,
         "setup_time": setup_time,
         "total_fit_time": total_fit_time,
-        "solve_time_success": (
-            solve_time if solver_accepted and not cache_hit else np.nan
-        ),
+        "solve_time_success": solve_time if solver_accepted else np.nan,
         "total_params": int(theta_flat.size),
         "residual_count": int(train_residual.size),
         "parameter_to_residual_ratio": float(theta_flat.size / train_residual.size),
@@ -905,7 +873,7 @@ def stochastic_open_economy_growth_nn_recursive(
         "initial_state": initial_state,
         **policy_extra,
     }
-    if cache_path is not None and not cache_hit:
+    if cache_path is not None:
         save_model(cache_path, policy, policy_meta)
     if save_policy is not None:
         save_model(save_policy, policy, policy_meta)

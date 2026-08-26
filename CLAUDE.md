@@ -74,17 +74,16 @@ per-directory READMEs.
   `i = delta * k * unit_softplus(h)` on the homothetic state; acceptance is
   solver convergence only — Euler residuals, transversality, and benchmark
   errors are reported, never gated.
-- Stochastic recursive NN drivers write content-addressed policy `.npz`
-  artifacts via `--policy_cache <dir>`; the kernel-recursive consumers read
-  them via `--policy_dir`. `stochastic_growth_nn_recursive` always trains
-  (the cache is a pure save target); the stochastic open-economy NN driver
-  still loads on a cache hit instead of training.
+- The stochastic recursive NN drivers always train and write
+  content-addressed policy `.npz` artifacts via `--policy_cache <dir>` (a
+  pure save target); the kernel-recursive consumers read them via
+  `--policy_dir`.
 
 ## Conventions
 
 - x64 + `jax_default_matmul_precision="highest"` set by every entrypoint
   before any array is created.
-- Seeds: 11 for sequence-space NN ensembles, 5 for recursive NN; each NN seed
-  gets up to 5 multi-start attempts.
+- Seeds: 7 for sequence-space NN ensembles, 5 for recursive NN; each NN seed
+  gets up to `lm_set.num_attempts` multi-start attempts.
 - Lint: `uv run ruff check .` and `uv run ruff format .`; enable the committed
   hook once per clone with `git config core.hooksPath .githooks`.

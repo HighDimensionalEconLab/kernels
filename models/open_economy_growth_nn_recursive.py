@@ -47,7 +47,6 @@ from models.utilities import (
 class ToleranceSettings:
     train_residual: float = 1e-5
     validation_residual: float = 5e-3
-    benchmark_match: float = 1e-3
 
 
 @dataclass(frozen=True)

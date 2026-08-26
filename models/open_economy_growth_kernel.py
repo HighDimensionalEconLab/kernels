@@ -122,7 +122,6 @@ class ToleranceSettings:
     validation_residual: float = 1e-2
     # The benchmark threshold is an HPO/quality diagnostic; it does not
     # redefine convergence of a finite, feasible numerical solution.
-    benchmark_match: float = 1e-3
 
 
 def open_economy_growth_kernel(

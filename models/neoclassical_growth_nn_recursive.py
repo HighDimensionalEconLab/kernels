@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import pathlib
 from dataclasses import asdict, dataclass, replace
 from functools import partial
 
@@ -35,10 +34,7 @@ from models.utilities import (
     OptimizerSettings,
     Stopwatch,
     acceptance_fields,
-    cache_key,
-    load_model,
     long_df,
-    save_model,
     standardized_initial_states,
     unit_softplus,
 )
@@ -353,12 +349,6 @@ def neoclassical_growth_nn_recursive(
         num_attempts=5,
     ),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
-    # Directory for content-addressed policy artifacts (e.g. ".results"): an
-    # existing artifact for this exact configuration is loaded instead of
-    # training, and a fresh solve is saved there. save_policy writes one
-    # explicit extra path.
-    policy_cache: str | None = None,
-    save_policy: str | None = None,
     verbose: bool = True,
 ):
     jax.config.update("jax_enable_x64", True)
@@ -410,144 +400,82 @@ def neoclassical_growth_nn_recursive(
         ),
         data_set=data_set,
     )
-    # Two-part artifact key <problem>-<run>: the problem hash covers the deep
-    # structural parameters, dtype, and the training initial-condition design
-    # shared by any solver of the same problem, so a consumer can glob
-    # *_policy_<problem>-*.npz for a reference solution; the run hash covers
-    # the training minutiae. Test/benchmark settings enter neither, so
-    # changing them still reuses a cached policy.
-    problem_config = {
-        "a": a,
-        "delta": delta,
-        "rho_hat": rho_hat,
-        "sigma_crra": sigma_crra,
-        "g": g,
-        "z_0": z_0,
-        "k_0": k_0,
-        "use_float64": use_float64,
-        "train_ic": {
-            "num_train_trajectories": ic_set.num_train_trajectories,
-            "train_log_z_variance": ic_set.train_log_z_variance,
-            "train_log_k_variance": ic_set.train_log_k_variance,
-        },
-    }
-    run_config = {
-        "seed": seed,
-        "data_seed": ic_set.data_seed,
-        "train_points": data_set.train_points,
-        "train_T": data_set.train_T,
-        "ode_solver": data_set.ode_solver,
-        "rtol": data_set.rtol,
-        "atol": data_set.atol,
-        "initial_dt": data_set.initial_dt,
-        "nn_set": asdict(nn_set),
-        "lm_set": asdict(lm_set),
-        "tolerance_set": asdict(tolerance_set),
-    }
-    problem_key = cache_key(problem_config)
-    run_key = cache_key(run_config)
-    policy_key = f"{problem_key}-{run_key}"
-    cache_path = (
-        None
-        if policy_cache is None
-        else pathlib.Path(policy_cache)
-        / f"neoclassical_growth_nn_recursive_policy_{policy_key}.npz"
+
+    # Multi-start Levenberg-Marquardt training.
+    solver = LevenbergMarquardt(
+        residual_fn,
+        init_damping=lm_set.init_damping,
+        damping_decrease=lm_set.damping_decrease,
+        damping_increase=lm_set.damping_increase,
+        geodesic_acceleration=lm_set.geodesic_acceleration,
+        geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
-    cache_hit = cache_path is not None and cache_path.exists()
+    _, theta_0, _ = nnx.split(
+        InvestmentPolicyNN(
+            nn_set, z_scale=z_0, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(init_key)
+        ),
+        nnx.Param,
+        ...,
+    )
+    callback = EpochCallback(
+        num_train_trajectories=ic_set.num_train_trajectories,
+        log_z_0=math.log(z_0),
+        log_k_0=math.log(k_0),
+        log_z_scale=math.sqrt(ic_set.train_log_z_variance),
+        log_k_scale=math.sqrt(ic_set.train_log_k_variance),
+        epoch_early_stopping=tolerance_set.epoch_early_stopping,
+    )
+    draw = DrawInvestmentPolicy(nn_set, z_scale=z_0, k_scale=k_0, dtype=dtype)
+    # The per-step tolerance is sound only while the training batch never
+    # changes; across epochs, convergence is judged at the boundaries
+    # instead.
+    atol = (
+        math.sqrt(tolerance_set.train_loss_threshold)
+        if tolerance_set.num_epochs == 1
+        else 0.0
+    )
+    multi_start = MultiStart(
+        key=multi_start_key,
+        num_starts=lm_set.num_attempts,
+        draw=draw,
+    )
+    solve_options = dict(
+        max_steps=tolerance_set.num_epochs * tolerance_set.max_steps,
+        atol=atol,
+        callback=callback,
+        max_steps_is_success=not tolerance_set.epoch_early_stopping,
+    )
 
-    # Multi-start Levenberg-Marquardt training (or a cache load).
-    if cache_hit:
-        policy, cached_meta = load_model(cache_path, make_investment_policy)
-        _, theta_final, _ = nnx.split(policy, nnx.Param, ...)
-        solve_args = residual_args
-        steps = 0
-        epochs_run = 0
-        attempt = 0
-        stopping_reason = "cached"
-        final_damping = float("nan")
-        solver_accepted = bool(cached_meta["solution_accepted"])
-        solve_time = 0.0
-        total_fit_time = fit_timer.elapsed()
-        setup_time = total_fit_time
-        r = residual_fn(theta_final, solve_args, p)
-        train_loss = float(jnp.sum(r * r))
-        if verbose:
-            print(f"loaded {cache_path}, train_loss={train_loss:.3e}")
-    else:
-        solver = LevenbergMarquardt(
-            residual_fn,
-            init_damping=lm_set.init_damping,
-            damping_decrease=lm_set.damping_decrease,
-            damping_increase=lm_set.damping_increase,
-            geodesic_acceleration=lm_set.geodesic_acceleration,
-            geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
+    setup_time = fit_timer.elapsed()
+    solve_timer = Stopwatch()
+    result = solver.solve(
+        theta_0,
+        residual_args,
+        p=p,
+        multi_start=multi_start,
+        **solve_options,
+    )
+    solve_time = solve_timer.elapsed(result)
+    total_fit_time = fit_timer.elapsed()
+    steps = int(result.steps)
+    # info.loss can describe the pre-swap batch when an epoch boundary
+    # stopped the solve, so the loss is recomputed at the returned
+    # (x, args).
+    theta_final, solve_args = result.x, result.args
+    r = residual_fn(theta_final, solve_args, p)
+    train_loss = float(jnp.sum(r * r))
+    epochs_run = -(-steps // tolerance_set.max_steps)
+    stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
+    attempt = int(result.multi_start.attempt) + 1
+    final_damping = float(result.lm_state.damping)
+    solver_accepted = bool(result.multi_start.accepted)
+    if verbose:
+        print(
+            f"attempt {attempt}: {stopping_reason} after {steps} steps "
+            f"(epoch {epochs_run}/{tolerance_set.num_epochs}), "
+            f"train_loss={train_loss:.3e} ({solve_time:.2f}s)"
         )
-        _, theta_0, _ = nnx.split(
-            InvestmentPolicyNN(
-                nn_set, z_scale=z_0, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(init_key)
-            ),
-            nnx.Param,
-            ...,
-        )
-        callback = EpochCallback(
-            num_train_trajectories=ic_set.num_train_trajectories,
-            log_z_0=math.log(z_0),
-            log_k_0=math.log(k_0),
-            log_z_scale=math.sqrt(ic_set.train_log_z_variance),
-            log_k_scale=math.sqrt(ic_set.train_log_k_variance),
-            epoch_early_stopping=tolerance_set.epoch_early_stopping,
-        )
-        draw = DrawInvestmentPolicy(nn_set, z_scale=z_0, k_scale=k_0, dtype=dtype)
-        # The per-step tolerance is sound only while the training batch never
-        # changes; across epochs, convergence is judged at the boundaries
-        # instead.
-        atol = (
-            math.sqrt(tolerance_set.train_loss_threshold)
-            if tolerance_set.num_epochs == 1
-            else 0.0
-        )
-        multi_start = MultiStart(
-            key=multi_start_key,
-            num_starts=lm_set.num_attempts,
-            draw=draw,
-        )
-        solve_options = dict(
-            max_steps=tolerance_set.num_epochs * tolerance_set.max_steps,
-            atol=atol,
-            callback=callback,
-            max_steps_is_success=not tolerance_set.epoch_early_stopping,
-        )
-
-        setup_time = fit_timer.elapsed()
-        solve_timer = Stopwatch()
-        result = solver.solve(
-            theta_0,
-            residual_args,
-            p=p,
-            multi_start=multi_start,
-            **solve_options,
-        )
-        solve_time = solve_timer.elapsed(result)
-        total_fit_time = fit_timer.elapsed()
-        steps = int(result.steps)
-        # info.loss can describe the pre-swap batch when an epoch boundary
-        # stopped the solve, so the loss is recomputed at the returned
-        # (x, args).
-        theta_final, solve_args = result.x, result.args
-        r = residual_fn(theta_final, solve_args, p)
-        train_loss = float(jnp.sum(r * r))
-        epochs_run = -(-steps // tolerance_set.max_steps)
-        stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
-        attempt = int(result.multi_start.attempt) + 1
-        final_damping = float(result.lm_state.damping)
-        solver_accepted = bool(result.multi_start.accepted)
-        if verbose:
-            print(
-                f"attempt {attempt}: {stopping_reason} after {steps} steps "
-                f"(epoch {epochs_run}/{tolerance_set.num_epochs}), "
-                f"train_loss={train_loss:.3e} ({solve_time:.2f}s)"
-            )
-        policy = nnx.merge(graphdef, theta_final, nondiff)
+    policy = nnx.merge(graphdef, theta_final, nondiff)
 
     # Training diagnostics use the batch the solution was returned on.
     train_batch_log_states = solve_args.initial_log_states
@@ -696,41 +624,16 @@ def neoclassical_growth_nn_recursive(
         "train_df": train_df,
         "test_df": test_df,
     }
-    # A cache hit loads the policy from disk instead of solving, so there is
-    # no primal solve to describe.
-    if not cache_hit:
-        extras["solve"] = {
-            "solver": solver,
-            "residual_fn": residual_fn,
-            "theta_0": theta_0,
-            "p": p,
-            "residual_args": residual_args,
-            "multi_start": multi_start,
-            "options": solve_options,
-        }
-        extras["result"] = result
-    structural = {
-        "a": a,
-        "delta": delta,
-        "rho_hat": rho_hat,
-        "sigma_crra": sigma_crra,
-        "g": g,
+    extras["solve"] = {
+        "solver": solver,
+        "residual_fn": residual_fn,
+        "theta_0": theta_0,
+        "p": p,
+        "residual_args": residual_args,
+        "multi_start": multi_start,
+        "options": solve_options,
     }
-    policy_extra = {
-        "model": "neoclassical_growth_nn_recursive",
-        "problem_key": problem_key,
-        "run_key": run_key,
-        "cache_key": policy_key,
-        "config": {"problem": problem_config, "run": run_config},
-        "solution_accepted": solver_accepted,
-        "train_loss": train_loss,
-        "test_euler_mean_abs": results["test_euler_mean_abs"],
-    }
-    policy_meta = {"settings": asdict(nn_set), "structural": structural, **policy_extra}
-    if cache_path is not None and not cache_hit:
-        save_model(cache_path, policy, policy_meta)
-    if save_policy is not None:
-        save_model(save_policy, policy, policy_meta)
+    extras["result"] = result
     return results, extras
 
 

@@ -55,7 +55,6 @@ RESIDUAL_NAMES = (
 class ToleranceSettings:
     train_residual: float = 1e-5
     validation_residual: float = 1e-2
-    benchmark_match: float = 1e-3
 
 
 @dataclass(frozen=True)

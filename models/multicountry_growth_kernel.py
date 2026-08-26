@@ -70,7 +70,8 @@ RESIDUAL_NAMES = (
 
 
 # Alpha blocks first (the metric penalizes the leading flat coordinates);
-# the (N, n_train) blocks ravel country-major.
+# the (N, n_train) blocks ravel country-major. The trailing entries are the
+# free log-anchors of the jump variables and the world rate.
 class Theta(NamedTuple):
     alpha_k: jax.Array
     alpha_a: jax.Array
@@ -78,10 +79,10 @@ class Theta(NamedTuple):
     alpha_c: jax.Array
     alpha_mu: jax.Array
     alpha_rate: jax.Array
-    q_offsets: jax.Array
-    c_offsets: jax.Array
-    mu_offsets: jax.Array
-    rate_offset: jax.Array
+    log_q_0s: jax.Array
+    log_c_0s: jax.Array
+    log_mu_0s: jax.Array
+    log_rate_0: jax.Array
 
 
 # The kernel matrices as traced data; the CG path adds the whitened factors
@@ -103,35 +104,29 @@ def path_coordinates(theta, K_eval, K_tilde_eval, p):
     # already clear) and projects AD perturbations of a_0 onto the
     # feasible clearing set, so every direction is meaningful.
     a_0_p = p.a_0 - jnp.sum(populations_p * p.a_0) / jnp.sum(populations_p)
-    steady_p = steady_state(p, k_0_p.dtype)
-    # The asset block is the one path with no unpenalized offset, so its
+    # The asset block is the one path with no free scalar anchor, so its
     # coefficient scale enters the minimum-norm selection metric; the
     # scale must be differentiation-inert or every parameter sensitivity
     # picks up a selection-drift term from the metric moving with p.
-    # The other normalizations are absorbed by their free offsets and
-    # need no such guard.
-    output_scale_p = jax.lax.stop_gradient(steady_p["output_scale"])
-    log_consumption_scale_p = jnp.log(steady_p["consumption_scale"])
+    # Population-weighted time-0 output sets it from the initial
+    # conditions alone.
+    output_scale_p = jax.lax.stop_gradient(
+        jnp.sum(populations_p * production(k_0_p, p.productivities, p))
+        / jnp.sum(populations_p)
+    )
     # Country-major (N, n_train) alpha blocks enter transposed so the
     # contraction K_tilde @ alpha.T yields (t_grid, N) paths; the (N,)
-    # offset anchors broadcast over rows.
+    # free anchors broadcast over rows.
     paths = integrated_kernel_paths(
         {
             "log_k": IntegratedPath(theta.alpha_k.T, jnp.log(k_0_p)),
             "a_raw": IntegratedPath(
                 theta.alpha_a.T, jnp.zeros((), theta.alpha_a.dtype)
             ),
-            "log_q": IntegratedPath(theta.alpha_q.T, -jnp.log(p.eta) + theta.q_offsets),
-            "log_c": IntegratedPath(
-                theta.alpha_c.T, log_consumption_scale_p + theta.c_offsets
-            ),
-            "log_mu": IntegratedPath(
-                theta.alpha_mu.T,
-                -p.gammas * log_consumption_scale_p + theta.mu_offsets,
-            ),
-            "log_rate": IntegratedPath(
-                theta.alpha_rate, jnp.log(p.r) + theta.rate_offset
-            ),
+            "log_q": IntegratedPath(theta.alpha_q.T, theta.log_q_0s),
+            "log_c": IntegratedPath(theta.alpha_c.T, theta.log_c_0s),
+            "log_mu": IntegratedPath(theta.alpha_mu.T, theta.log_mu_0s),
+            "log_rate": IntegratedPath(theta.alpha_rate, theta.log_rate_0),
         },
         K_eval,
         K_tilde_eval,
@@ -262,7 +257,7 @@ def multicountry_growth_kernel(
         gtol=5e-8,
     ),
     # The ridge keeps the minimizer O(ridge) from the pure RKHS-seminorm
-    # interpolant with the free offsets unpenalized; ridge_init enables
+    # interpolant with the free anchors unpenalized; ridge_init enables
     # continuation annealed down to the ridge floor by factors of
     # ridge_decrease on inner stationarity. linear_solver "auto" (whitened
     # cholesky) and "qr" solve dense whitened systems; "cg" is matrix-free
@@ -326,7 +321,7 @@ def multicountry_growth_kernel(
     # terminal equation is appended: the ridge penalty supplies the
     # (3N+1)-dimensional selection. Every linear solver works on the
     # whitened subproblem; the metric takes the upper Cholesky factor F with
-    # K = F'F and the trailing offsets stay in the unpenalized free block,
+    # K = F'F and the trailing anchors stay in the unpenalized free block,
     # untransformed.
     num_rkhs_functions = 5 * num_countries + 1
     num_initial_values = 3 * num_countries + 1
@@ -360,9 +355,12 @@ def multicountry_growth_kernel(
     steady = steady_state(p, dtype)
     output_scale = steady["output_scale"]
 
-    # The zero coordinate contains no saddle-path or present-value
-    # information: it is flat in the derivative RKHS at the model's scale
-    # normalizations.
+    # Flat alpha blocks carry no saddle-path or present-value information;
+    # the free anchors are seeded from the initial conditions alone:
+    # per-country consumption at the flow sustainable at k_0_i (mu
+    # consistent via the FOC), q at the replacement-investment price
+    # 1/eta, the world rate at r.
+    log_c_seed = jnp.log(production(p.k_0, p.productivities, p) - p.delta * p.k_0)
     theta_0 = Theta(
         alpha_k=jnp.zeros((num_countries, n_train), dtype=dtype),
         alpha_a=jnp.zeros((num_countries, n_train), dtype=dtype),
@@ -370,10 +368,10 @@ def multicountry_growth_kernel(
         alpha_c=jnp.zeros((num_countries, n_train), dtype=dtype),
         alpha_mu=jnp.zeros((num_countries, n_train), dtype=dtype),
         alpha_rate=jnp.zeros(n_train, dtype=dtype),
-        q_offsets=jnp.zeros(num_countries, dtype=dtype),
-        c_offsets=jnp.zeros(num_countries, dtype=dtype),
-        mu_offsets=jnp.zeros(num_countries, dtype=dtype),
-        rate_offset=jnp.zeros((), dtype=dtype),
+        log_q_0s=jnp.full(num_countries, -jnp.log(p.eta), dtype=dtype),
+        log_c_0s=log_c_seed,
+        log_mu_0s=-p.gammas * log_c_seed,
+        log_rate_0=jnp.log(p.r),
     )
 
     if ridge_set.ridge_init is None:
@@ -623,9 +621,9 @@ def multicountry_growth_kernel(
                 f"q_0_{suffix}": float(test_eval["q"][0, country]),
                 f"c_0_{suffix}": float(test_eval["c"][0, country]),
                 f"m_0_{suffix}": float(test_eval["mu"][0, country]),
-                f"q_offset_{suffix}": float(theta.q_offsets[country]),
-                f"c_offset_{suffix}": float(theta.c_offsets[country]),
-                f"mu_offset_{suffix}": float(theta.mu_offsets[country]),
+                f"log_q_0_{suffix}": float(theta.log_q_0s[country]),
+                f"log_c_0_{suffix}": float(theta.log_c_0s[country]),
+                f"log_mu_0_{suffix}": float(theta.log_mu_0s[country]),
                 f"relative_weight_{suffix}": float(relative_weights[country]),
                 f"log_relative_weight_{suffix}": float(log_relative_weights[country]),
                 f"terminal_a_{suffix}": float(validation_eval["a"][-1, country]),
@@ -641,7 +639,7 @@ def multicountry_growth_kernel(
             results[f"initial_wealth_{suffix}"] = float(
                 long_run["initial_wealth"][country]
             )
-    results["rate_offset"] = float(theta.rate_offset)
+    results["log_rate_0"] = float(theta.log_rate_0)
 
     def frame(values, points):
         data = {

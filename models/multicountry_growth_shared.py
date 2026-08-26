@@ -293,8 +293,8 @@ def path_residuals(
 # The world rate, three cross-sectional world statistics, and every country's
 # consumption and capital -- the observable stack both solvers' sensitivity
 # callers differentiate, so the two tables are comparable cell by cell. The
-# input dict needs the path_values/path_coordinates keys (interest_rate, a, k,
-# q, c); column order matches sensitivity_observable_labels.
+# input dict needs the solvers' path keys (interest_rate, a, k, q, c);
+# column order matches sensitivity_observable_labels.
 def sensitivity_observables(values, p):
     populations = p.populations
     weights = populations / jnp.sum(populations)

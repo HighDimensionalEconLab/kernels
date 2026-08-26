@@ -6,8 +6,8 @@
 # n_train asset-clearing rows, no residual row couples two countries, so the
 # off-clearing operator is exactly an ARROWHEAD over
 #   - per-country groups: the country's five whitened coefficient blocks
-#     (k, a, q, c, mu) plus its q/c/mu offsets (5 n_train + 3 each),
-#   - a border: the rate coefficient block plus the rate offset (n_train + 1),
+#     (k, a, q, c, mu) plus its q/c/mu anchors (5 n_train + 3 each),
+#   - a border: the rate coefficient block plus the rate anchor (n_train + 1),
 # and the clearing rows add U U' with U spanning n_train whitened columns
 # (rank one across countries -- the population-weighted a-direction -- times
 # the time modes). Block elimination of the arrowhead (batched per-country
@@ -18,8 +18,8 @@
 # Assembly never materializes the (5N+1)n x ((5N+1)n + 3N + 1) Jacobian:
 # every residual row is time-local given the per-time levels
 # y_b(t) = (K_tilde alpha_b)_t, derivatives (K alpha_b)_t, and the free
-# offsets, so one vmapped jacfwd of the pointwise rows yields per-time
-# weights C (level columns), D (derivative columns), and U_off (offset
+# anchors, so one vmapped jacfwd of the pointwise rows yields per-time
+# weights C (level columns), D (derivative columns), and U_off (anchor
 # columns), and every block of J~'J~ is a kernel quadratic in the two shared
 # n_t x n_t matrices K_check = K_tilde F^{-1} and K F^{-1} = F'.
 
@@ -34,7 +34,7 @@ import jax.scipy.linalg as jsp_linalg
 import numpy as np
 from nlls_gram import AnnealRidge, LMAction, Preconditioner, register_pytree_dataclass
 
-from models.multicountry_growth_shared import path_residuals, steady_state
+from models.multicountry_growth_shared import path_residuals, production
 
 
 # Flat position of every theta leaf, derived from the pytree itself, so the
@@ -54,7 +54,7 @@ def leaf_index_tree(theta):
 
 
 # Per-country groups: the country's five coefficient rows plus its q/c/mu
-# offsets; the border is the rate coefficient block plus the rate offset.
+# anchors; the border is the rate coefficient block plus the rate anchor.
 def arrow_woodbury_indices(theta):
     index = leaf_index_tree(theta)
     country_index = jnp.concatenate(
@@ -66,16 +66,16 @@ def arrow_woodbury_indices(theta):
             index.alpha_mu,
             jnp.stack(
                 [
-                    index.q_offsets,
-                    index.c_offsets,
-                    index.mu_offsets,
+                    index.log_q_0s,
+                    index.log_c_0s,
+                    index.log_mu_0s,
                 ],
                 axis=1,
             ),
         ],
         axis=1,
     )
-    border_index = jnp.concatenate([index.alpha_rate, index.rate_offset[None]])
+    border_index = jnp.concatenate([index.alpha_rate, index.log_rate_0[None]])
     return country_index, border_index
 
 
@@ -160,9 +160,9 @@ def build_arrow_woodbury(theta, kernel_args, p, ridge, damping, num_countries):
 
     populations_p = p.populations
     a_0_p = p.a_0 - jnp.sum(populations_p * p.a_0) / jnp.sum(populations_p)
-    steady_p = steady_state(p, dtype)
-    output_scale_p = steady_p["output_scale"]
-    log_consumption_scale_p = jnp.log(steady_p["consumption_scale"])
+    output_scale_p = jnp.sum(
+        populations_p * production(p.k_0, p.productivities, p)
+    ) / jnp.sum(populations_p)
     log_k_0 = jnp.log(p.k_0)
 
     coefficients = jnp.concatenate(
@@ -176,37 +176,33 @@ def build_arrow_woodbury(theta, kernel_args, p, ridge, damping, num_countries):
         ],
         axis=0,
     )
-    offsets_flat = jnp.concatenate(
+    anchors_flat = jnp.concatenate(
         [
-            theta.q_offsets,
-            theta.c_offsets,
-            theta.mu_offsets,
-            theta.rate_offset[None],
+            theta.log_q_0s,
+            theta.log_c_0s,
+            theta.log_mu_0s,
+            theta.log_rate_0[None],
         ]
     )
     levels = K_tilde @ coefficients.T
     derivatives = K @ coefficients.T
 
     # The rows of one time as a function of that time's levels, derivatives,
-    # and offsets. Must apply exactly the transforms of the driver's
+    # and anchors. Must apply exactly the transforms of the driver's
     # path_coordinates, or the arrowhead is no longer the exact off-clearing
     # operator at the build point.
     def per_time_rows(w):
         lv = w[:num_blocks]
         dv = w[num_blocks : 2 * num_blocks]
-        offsets = w[2 * num_blocks :]
+        anchors = w[2 * num_blocks :]
         residuals = path_residuals(
             jnp.exp(log_k_0 + lv[0:N]),
             a_0_p + output_scale_p * lv[N : 2 * N],
-            jnp.exp(-jnp.log(p.eta) + offsets[:N] + lv[2 * N : 3 * N]),
-            jnp.exp(log_consumption_scale_p + offsets[N : 2 * N] + lv[3 * N : 4 * N]),
-            jnp.exp(
-                -p.gammas * log_consumption_scale_p
-                + offsets[2 * N : 3 * N]
-                + lv[4 * N : 5 * N]
-            ),
+            jnp.exp(anchors[:N] + lv[2 * N : 3 * N]),
+            jnp.exp(anchors[N : 2 * N] + lv[3 * N : 4 * N]),
+            jnp.exp(anchors[2 * N : 3 * N] + lv[4 * N : 5 * N]),
             p.productivities,
-            jnp.exp(jnp.log(p.r) + offsets[-1] + lv[5 * N]),
+            jnp.exp(anchors[-1] + lv[5 * N]),
             dv[0:N],
             output_scale_p * dv[N : 2 * N],
             dv[2 * N : 3 * N],
@@ -225,7 +221,7 @@ def build_arrow_woodbury(theta, kernel_args, p, ridge, damping, num_countries):
         )
 
     w = jnp.concatenate(
-        [levels, derivatives, jnp.broadcast_to(offsets_flat, (n_train, num_offsets))],
+        [levels, derivatives, jnp.broadcast_to(anchors_flat, (n_train, num_offsets))],
         axis=1,
     )
     jacobian = jax.vmap(jax.jacfwd(per_time_rows))(w)

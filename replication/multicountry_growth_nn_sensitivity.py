@@ -9,7 +9,6 @@ from flax import nnx
 from nlls_gram import LMStatus
 
 from models import multicountry_growth_nn
-from models.multicountry_growth_nn import path_values
 from models.multicountry_growth_shared import (
     sensitivity_fields_frame,
     sensitivity_observable_labels,
@@ -58,7 +57,6 @@ def run(
             spec, result = extras["solve"], extras["result"]
             solver, residual_args = spec["solver"], spec["residual_args"]
             num_countries = int(results["num_countries"])
-            scales = residual_args.scales
 
             # Warm-started at the trained parameters and re-solved to the
             # same residual tolerance, so the stationary point the implicit
@@ -73,7 +71,7 @@ def run(
                 policy = nnx.merge(
                     residual_args.graphdef, solved.x, residual_args.nondiff
                 )
-                values = path_values(policy, t_sens, p_value, scales)
+                values = jax.vmap(policy)(t_sens)
                 return sensitivity_observables(values, p_value), solved.status
 
             # The full Jacobian: every observable against every parameter,
@@ -88,7 +86,7 @@ def run(
                 raise RuntimeError("the sensitivity re-solve did not converge")
             primal_observables = np.asarray(
                 sensitivity_observables(
-                    path_values(extras["model"], t_sens, spec["p"], scales),
+                    jax.vmap(extras["model"])(t_sens),
                     spec["p"],
                 )
             )

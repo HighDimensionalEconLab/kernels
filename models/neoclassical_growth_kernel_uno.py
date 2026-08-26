@@ -9,7 +9,6 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 import unopy
-from flax import struct
 from jax.flatten_util import ravel_pytree
 from jax.tree_util import Partial
 
@@ -33,6 +32,7 @@ from models.neoclassical_growth_shared import (
 )
 from models.utilities import (
     ACCEPTED_SOLUTION_STATUSES,
+    KernelResidualArgs,
     Stopwatch,
     UnoOptimizerSettings,
     acceptance_fields,
@@ -49,14 +49,6 @@ class Theta(NamedTuple):
     c_0: jax.Array
     mu_0: jax.Array
     g_hat: jax.Array | None = None
-
-
-@struct.dataclass
-class ResidualArgs:
-    batch: dict  # {"t", "z_trend", "g_hat"} -- always plain arrays
-    K: jax.Array
-    K_tilde: jax.Array
-    unravel: Partial
 
 
 # CRRA first-order condition u'(c) = mu; the costate and resource residuals
@@ -199,7 +191,7 @@ def neoclassical_growth_kernel_uno(
         mu_0=jnp.asarray(c_flow_guess**-sigma_crra),
     )
     x_initial, unravel = ravel_pytree(theta_0)
-    args = ResidualArgs(
+    args = KernelResidualArgs(
         batch={
             "t": train_data,
             "z_trend": jnp.ones_like(train_data),

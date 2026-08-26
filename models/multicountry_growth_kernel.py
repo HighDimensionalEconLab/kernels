@@ -52,6 +52,7 @@ from models.multicountry_growth_shared import (
 )
 from models.utilities import (
     CGSettings,
+    KernelResidualArgs,
     OptimizerSettings,
     RidgeSettings,
     Stopwatch,
@@ -85,14 +86,13 @@ class Theta(NamedTuple):
     log_rate_0: jax.Array
 
 
-# The kernel matrices as traced data; the CG path adds the whitened factors
-# its preconditioner rebuild needs (None on the dense path).
+# CG-path args: whitened factors for the preconditioner rebuild.
 @struct.dataclass
-class ResidualArgs:
+class PreconditionedKernelResidualArgs:
     K: jax.Array
     K_tilde: jax.Array
-    K_check: jax.Array | None = None
-    F_t: jax.Array | None = None
+    K_check: jax.Array
+    F_t: jax.Array
 
 
 # Module-level so callers can evaluate solved paths on their own kernel
@@ -388,7 +388,7 @@ def multicountry_growth_kernel(
         # The kernel matrices ride in the solver's args so the rebuild
         # callback stays a value-hashable static; the initial preconditioner
         # only seeds the state, the callback replaces it every step.
-        kernel_args = ResidualArgs(
+        kernel_args = PreconditionedKernelResidualArgs(
             K=K,
             K_tilde=K_tilde,
             K_check=jsp_linalg.solve_triangular(metric.F.T, K_tilde.T, lower=True).T,
@@ -413,7 +413,7 @@ def multicountry_growth_kernel(
             anneal=anneal,
         )
     else:
-        kernel_args = ResidualArgs(K=K, K_tilde=K_tilde)
+        kernel_args = KernelResidualArgs(K=K, K_tilde=K_tilde)
         init_damping = lm_set.init_damping
         linear_solver = {"auto": Cholesky(), "cholesky": Cholesky(), "qr": QR()}[
             ridge_set.linear_solver

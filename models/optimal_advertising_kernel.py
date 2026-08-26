@@ -8,7 +8,6 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from flax import struct
 from nlls_gram import (
     RidgeLevenbergMarquardt,
 )
@@ -27,6 +26,7 @@ from models.optimal_advertising_shared import (
     ToleranceSettings,
 )
 from models.utilities import (
+    KernelResidualArgs,
     OptimizerSettings,
     RidgeSettings,
     Stopwatch,
@@ -42,12 +42,6 @@ class Theta(NamedTuple):
     alpha_u: jax.Array
     mu_0: jax.Array
     u_0: jax.Array
-
-
-@struct.dataclass
-class ResidualArgs:
-    K: jax.Array
-    K_tilde: jax.Array
 
 
 def residual_fn(theta, args, p):
@@ -131,7 +125,7 @@ def optimal_advertising_kernel(
     p = StructuralParameters.create(
         dtype, rho_hat=rho_hat, c=c, beta=beta, kappa=kappa, x_0=x_0
     )
-    residual_args = ResidualArgs(K=K, K_tilde=K_tilde)
+    residual_args = KernelResidualArgs(K=K, K_tilde=K_tilde)
 
     u_0_guess = beta * x_0 / (1.0 - x_0)
     mu_0_guess = gamma / (rho_hat + beta + u_0_guess)

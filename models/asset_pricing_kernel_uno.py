@@ -9,7 +9,6 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 import unopy
-from flax import struct
 from jax.flatten_util import ravel_pytree
 from jax.tree_util import Partial
 
@@ -29,6 +28,7 @@ from models.kernels import (
 )
 from models.utilities import (
     ACCEPTED_SOLUTION_STATUSES,
+    KernelResidualArgs,
     Stopwatch,
     UnoOptimizerSettings,
     acceptance_fields,
@@ -40,14 +40,6 @@ from models.utilities import (
 class Theta(NamedTuple):
     alpha: jax.Array
     p_0: jax.Array
-
-
-@struct.dataclass
-class ResidualArgs:
-    batch: dict  # {"t"}
-    K: jax.Array
-    K_tilde: jax.Array
-    unravel: Partial
 
 
 # No-arbitrage residual dp/dt = r p - x along the dividend path.
@@ -117,7 +109,7 @@ def asset_pricing_kernel_uno(
         p_0=jnp.zeros((), dtype=jnp.float64),
     )
     x_initial, unravel = ravel_pytree(theta_0)
-    args = ResidualArgs(
+    args = KernelResidualArgs(
         batch={"t": train_data},
         K=K_jax,
         K_tilde=K_tilde_jax,

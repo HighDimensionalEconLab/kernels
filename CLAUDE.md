@@ -14,13 +14,16 @@ per-directory READMEs.
   production/steady-state functions, diagnostics, shared settings, and for
   the DAE models `path_residuals`, the equation system every representation
   consumes); drivers never import other drivers. Each kernel and kernel_uno
-  driver owns its `Theta`, `ResidualArgs`, and `residual_fn` — the residual
-  rows written inline — plus a post-solve `evaluate_grid(points)` closure for
-  off-grid paths and residual rows. Solver-inert data rides in
-  `ResidualArgs`, grid inputs inside its `batch` dict with standardized names
-  (`t`, `z_trend`, `g_hat`) as always-plain arrays. The `_uno` drivers map
-  IPOPT's flat vector to the NLLS Theta via `ravel_pytree`'s unravel riding
-  in their `ResidualArgs` as a `tree_util.Partial`.
+  driver owns its `Theta` and `residual_fn` — the residual rows written
+  inline — plus a post-solve `evaluate_grid(points)` closure for off-grid
+  paths and residual rows. Sequence-space drivers share the solver-args
+  structs in `models/utilities.py`: `KernelResidualArgs` (K, K_tilde, the
+  optional `batch` dict of standardized always-plain grid arrays — `t`,
+  `z_trend`, `g_hat` — and, for the `_uno` drivers, `ravel_pytree`'s unravel
+  as a `tree_util.Partial`) and `NNXResidualArgs` (batch, graphdef, nondiff);
+  the multicountry kernel's CG path keeps its own
+  `PreconditionedKernelResidualArgs` with the whitened preconditioner
+  factors, and the recursive drivers keep bespoke `ResidualArgs`.
 - `replication/` — ensemble + figure drivers; `collect_json.py` writes
   `.results/all_results.json`, the only place paper numbers are selected and
   rounded. Generated JSON is gitignored; track one with a targeted `!path` rule.

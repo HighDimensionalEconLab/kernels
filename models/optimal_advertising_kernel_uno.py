@@ -9,7 +9,6 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 import unopy
-from flax import struct
 from jax.flatten_util import ravel_pytree
 from jax.tree_util import Partial
 
@@ -27,6 +26,7 @@ from models.optimal_advertising_shared import (
 )
 from models.utilities import (
     ACCEPTED_SOLUTION_STATUSES,
+    KernelResidualArgs,
     Stopwatch,
     UnoOptimizerSettings,
     acceptance_fields,
@@ -41,13 +41,6 @@ class Theta(NamedTuple):
     alpha_u: jax.Array
     mu_0: jax.Array
     u_0: jax.Array
-
-
-@struct.dataclass
-class ResidualArgs:
-    K: jax.Array
-    K_tilde: jax.Array
-    unravel: Partial
 
 
 @jax.jit
@@ -143,7 +136,7 @@ def optimal_advertising_kernel_uno(
         u_0=jnp.asarray(u_0_guess, dtype=jnp.float64),
     )
     x_initial, unravel = ravel_pytree(theta_0)
-    args = ResidualArgs(K=K_jax, K_tilde=K_tilde_jax, unravel=Partial(unravel))
+    args = KernelResidualArgs(K=K_jax, K_tilde=K_tilde_jax, unravel=Partial(unravel))
 
     n_variables = x_initial.size
     n_constraints = 3 * n_train

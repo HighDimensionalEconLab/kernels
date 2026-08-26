@@ -8,7 +8,6 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from flax import struct
 from nlls_gram import RidgeLevenbergMarquardt
 
 from models.kernels import (
@@ -30,6 +29,7 @@ from models.neoclassical_growth_shared import (
     steady_flow_consumption_guess,
 )
 from models.utilities import (
+    KernelResidualArgs,
     OptimizerSettings,
     RidgeSettings,
     Stopwatch,
@@ -47,13 +47,6 @@ class Theta(NamedTuple):
     c_0: jax.Array
     mu_0: jax.Array
     g_hat: jax.Array | None = None
-
-
-@struct.dataclass
-class ResidualArgs:
-    batch: dict  # {"t", "z_trend", "g_hat"} -- always plain arrays
-    K: jax.Array
-    K_tilde: jax.Array
 
 
 # CRRA first-order condition u'(c) = mu; the costate and resource residuals
@@ -174,7 +167,7 @@ def neoclassical_growth_kernel(
         return z_0 * jnp.exp((1.0 - a) * g * t_grid)
 
     g_hat_fixed = jnp.asarray(g, dtype=dtype) if g != 0.0 and not learn_g_hat else None
-    residual_args = ResidualArgs(
+    residual_args = KernelResidualArgs(
         batch={
             "t": train_data,
             "z_trend": jnp.exp((1.0 - a) * g * train_data),

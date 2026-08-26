@@ -8,7 +8,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
-from flax import nnx
+from flax import nnx, struct
+from jax.tree_util import Partial
 from nlls_gram import LMStatus
 from tinydiffeq import SRA1, EulerMaruyama, Milstein
 
@@ -120,6 +121,22 @@ class UnoOptimizerSettings:
 
 
 ACCEPTED_SOLUTION_STATUSES = frozenset({"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"})
+
+
+# Sequence-space solver args; the recursive drivers keep bespoke ones.
+@struct.dataclass
+class KernelResidualArgs:
+    K: jax.Array
+    K_tilde: jax.Array
+    batch: dict | None = None
+    unravel: Partial | None = None
+
+
+@struct.dataclass
+class NNXResidualArgs:
+    batch: dict
+    graphdef: nnx.GraphDef
+    nondiff: nnx.State
 
 
 def make_train_t_grid(data_set, dtype):

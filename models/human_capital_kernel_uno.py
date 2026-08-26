@@ -9,7 +9,6 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 import unopy
-from flax import struct
 from jax.flatten_util import ravel_pytree
 from jax.tree_util import Partial
 
@@ -30,6 +29,7 @@ from models.kernels import (
 )
 from models.utilities import (
     ACCEPTED_SOLUTION_STATUSES,
+    KernelResidualArgs,
     Stopwatch,
     UnoOptimizerSettings,
     acceptance_fields,
@@ -51,13 +51,6 @@ class Theta(NamedTuple):
     c_0: jax.Array
     mu_k_0: jax.Array
     mu_h_0: jax.Array
-
-
-@struct.dataclass
-class ResidualArgs:
-    K: jax.Array
-    K_tilde: jax.Array
-    unravel: Partial
 
 
 @jax.jit
@@ -197,7 +190,7 @@ def human_capital_kernel_uno(
         mu_h_0=jnp.asarray(1.0 / c_0_init, dtype=jnp.float64),
     )
     x_initial, unravel = ravel_pytree(theta_0)
-    args = ResidualArgs(K=K_jax, K_tilde=K_tilde_jax, unravel=Partial(unravel))
+    args = KernelResidualArgs(K=K_jax, K_tilde=K_tilde_jax, unravel=Partial(unravel))
 
     n_variables = x_initial.size
     n_constraints = 7 * n_train

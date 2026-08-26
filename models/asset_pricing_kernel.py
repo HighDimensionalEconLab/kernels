@@ -8,7 +8,6 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from flax import struct
 from nlls_gram import (
     RidgeLevenbergMarquardt,
 )
@@ -29,6 +28,7 @@ from models.kernels import (
     rkhs_norm_squared,
 )
 from models.utilities import (
+    KernelResidualArgs,
     OptimizerSettings,
     RidgeSettings,
     Stopwatch,
@@ -41,13 +41,6 @@ from models.utilities import (
 class Theta(NamedTuple):
     alpha: jax.Array
     p_0: jax.Array
-
-
-@struct.dataclass
-class ResidualArgs:
-    batch: dict  # {"t"}
-    K: jax.Array
-    K_tilde: jax.Array
 
 
 # No-arbitrage residual dp/dt = r p - x along the dividend path.
@@ -104,7 +97,9 @@ def asset_pricing_kernel(
         train_data, kernel, sigma, ell, repeats=1
     )
     K_jax = K_metric
-    residual_args = ResidualArgs(batch={"t": train_data}, K=K_jax, K_tilde=K_tilde_jax)
+    residual_args = KernelResidualArgs(
+        batch={"t": train_data}, K=K_jax, K_tilde=K_tilde_jax
+    )
 
     solver = RidgeLevenbergMarquardt(
         residual_fn,

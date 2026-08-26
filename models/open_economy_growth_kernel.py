@@ -8,7 +8,6 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from flax import struct
 from nlls_gram import (
     QR,
     AnnealRidge,
@@ -41,6 +40,7 @@ from models.open_economy_growth_shared import (
     tvc_diagnostics,
 )
 from models.utilities import (
+    KernelResidualArgs,
     OptimizerSettings,
     RidgeSettings,
     Stopwatch,
@@ -60,12 +60,6 @@ class Theta(NamedTuple):
     log_c_0: jax.Array
     log_mu_0: jax.Array
     log_q_0: jax.Array
-
-
-@struct.dataclass
-class ResidualArgs:
-    K: jax.Array
-    K_tilde: jax.Array
 
 
 def residual_fn(theta, args, p):
@@ -211,7 +205,7 @@ def open_economy_growth_kernel(
         train_data, kernel, kernel_set.sigma, kernel_set.ell, repeats=5
     )
 
-    residual_args = ResidualArgs(K=K, K_tilde=K_tilde)
+    residual_args = KernelResidualArgs(K=K, K_tilde=K_tilde)
 
     # Flat alpha blocks carry no saddle-path or present-value information;
     # the free anchors are seeded from the initial conditions alone:

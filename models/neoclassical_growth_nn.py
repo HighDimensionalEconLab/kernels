@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from flax import nnx, struct
+from flax import nnx
 from jax.flatten_util import ravel_pytree
 from nlls_gram import (
     DrawNNXModule,
@@ -30,19 +30,13 @@ from models.neoclassical_growth_shared import (
 )
 from models.utilities import (
     ACTIVATIONS,
+    NNXResidualArgs,
     OptimizerSettings,
     Stopwatch,
     acceptance_fields,
     make_train_t_grid,
     unit_softplus,
 )
-
-
-@struct.dataclass
-class ResidualArgs:
-    batch: dict
-    graphdef: nnx.GraphDef
-    nondiff: nnx.State
 
 
 class GrowthPolicyNN(nnx.Module):
@@ -238,7 +232,7 @@ def neoclassical_growth_nn(
         rngs=nnx.Rngs(init_key),
     )
     graphdef, theta_0, nondiff = nnx.split(model, nnx.Param, ...)
-    residual_args = ResidualArgs(
+    residual_args = NNXResidualArgs(
         batch={"t": t_train, "z_trend": z_trend_train},
         graphdef=graphdef,
         nondiff=nondiff,

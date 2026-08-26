@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from flax import nnx, struct
+from flax import nnx
 from jax.flatten_util import ravel_pytree
 from nlls_gram import DrawNNXModule, LevenbergMarquardt, MultiStart
 
@@ -20,6 +20,7 @@ from models.asset_pricing_shared import (
 from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
+    NNXResidualArgs,
     OptimizerSettings,
     Stopwatch,
     make_train_t_grid,
@@ -34,13 +35,6 @@ class PricePolicySettings:
     hidden_bias: bool = True
     output_bias: bool = True
     input_scale: float = 40.0
-
-
-@struct.dataclass
-class ResidualArgs:
-    batch: dict
-    graphdef: nnx.GraphDef
-    nondiff: nnx.State
 
 
 class PricePolicyNN(nnx.Module):
@@ -161,7 +155,7 @@ def asset_pricing_nn(
         rngs=nnx.Rngs(init_key),
     )
     graphdef, theta_0, nondiff = nnx.split(model, nnx.Param, ...)
-    residual_args = ResidualArgs(
+    residual_args = NNXResidualArgs(
         batch={"t": train_t}, graphdef=graphdef, nondiff=nondiff
     )
     p = StructuralParameters.create(dtype, r=r, c=c, g=g, x_0=x_0)

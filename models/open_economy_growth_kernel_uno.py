@@ -9,7 +9,6 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 import unopy
-from flax import struct
 from jax.flatten_util import ravel_pytree
 from jax.tree_util import Partial
 
@@ -37,6 +36,7 @@ from models.open_economy_growth_shared import (
 )
 from models.utilities import (
     ACCEPTED_SOLUTION_STATUSES,
+    KernelResidualArgs,
     Stopwatch,
     UnoOptimizerSettings,
     acceptance_fields,
@@ -54,13 +54,6 @@ class Theta(NamedTuple):
     log_c_0: jax.Array
     log_mu_0: jax.Array
     log_q_0: jax.Array
-
-
-@struct.dataclass
-class ResidualArgs:
-    K: jax.Array
-    K_tilde: jax.Array
-    unravel: Partial
 
 
 def residual_fn(theta, args, p):
@@ -225,7 +218,7 @@ def open_economy_growth_kernel_uno(
         log_q_0=-jnp.log(p.eta),
     )
     x_initial, unravel = ravel_pytree(theta_0)
-    args = ResidualArgs(K=K, K_tilde=K_tilde, unravel=Partial(unravel))
+    args = KernelResidualArgs(K=K, K_tilde=K_tilde, unravel=Partial(unravel))
 
     n_variables = x_initial.size
     n_constraints = 5 * n_train

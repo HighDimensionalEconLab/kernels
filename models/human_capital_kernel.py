@@ -8,7 +8,6 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from flax import struct
 from nlls_gram import RidgeLevenbergMarquardt
 
 from models.human_capital_shared import (
@@ -27,6 +26,7 @@ from models.kernels import (
     integrated_metric_factorization,
 )
 from models.utilities import (
+    KernelResidualArgs,
     OptimizerSettings,
     RidgeSettings,
     Stopwatch,
@@ -49,12 +49,6 @@ class Theta(NamedTuple):
     c_0: jax.Array
     mu_k_0: jax.Array
     mu_h_0: jax.Array
-
-
-@struct.dataclass
-class ResidualArgs:
-    K: jax.Array
-    K_tilde: jax.Array
 
 
 def residual_fn(theta, args, p):
@@ -153,7 +147,7 @@ def human_capital_kernel(
         k_0=k_0,
         h_0=h_0,
     )
-    residual_args = ResidualArgs(K=K, K_tilde=K_tilde)
+    residual_args = KernelResidualArgs(K=K, K_tilde=K_tilde)
 
     theta_0 = Theta(
         alpha_k=jnp.zeros(n_train, dtype=dtype),

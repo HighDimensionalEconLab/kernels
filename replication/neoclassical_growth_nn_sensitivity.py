@@ -11,8 +11,10 @@ from models.neoclassical_growth_shared import neoclassical_steady_state_sensitiv
 from replication.neoclassical_growth_nn import PREFIX, SOLVER, SUMMARY_EXPERIMENTS
 from replication.utilities import (
     configure_process,
+    nested_results,
     run_solver,
     save_experiment,
+    scalar_results,
     write_summary,
 )
 
@@ -84,12 +86,14 @@ def run(
         # to; the sigma_crra and k_0 rows converge to zero.
         fields.update(
             neoclassical_steady_state_sensitivities(
-                results["a"], results["delta"], results["rho_hat"]
+                results["parameters"]["a"],
+                results["parameters"]["delta"],
+                results["parameters"]["rho_hat"],
             )
         )
-        rows.append({**results, **fields, "seed": seed})
+        rows.append({**scalar_results(results), **fields, "seed": seed})
         if hyperparameters is None:
-            hyperparameters = extras["hyperparameters"]
+            hyperparameters = nested_results(results)
         for key, value in extras.items():
             if isinstance(value, pd.DataFrame):
                 frames.setdefault(key, []).append(value.assign(seed=seed))

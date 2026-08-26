@@ -102,7 +102,7 @@ def asset_pricing_kernel_uno(
     K_jax = (K + K.T) / 2
     K_tilde_jax = jnp.asarray(K_tilde)
 
-    p = StructuralParameters.create(jnp.float64, r=r, c=c, g=g, x_0=x_0)
+    p = StructuralParameters.create(dtype=jnp.float64, r=r, c=c, g=g, x_0=x_0)
 
     theta_0 = Theta(
         alpha=jnp.zeros(n_train, dtype=jnp.float64),
@@ -249,17 +249,13 @@ def asset_pricing_kernel_uno(
         rejection_reasons.append("negative_p_0")
 
     results = {
-        "r": r,
-        "c": c,
-        "g": g,
-        "x_0": x_0,
-        "kernel": kernel,
-        "ell": ell,
-        "sigma": sigma,
+        "parameters": p.to_dict(),
+        "kernel_set": asdict(kernel_set),
+        "data_set": asdict(data_set),
+        "solver_set": asdict(solver_set),
+        "tolerance_set": asdict(tolerance_set),
         "train_T": float(train_data[-1]),
         "num_train_points": n_train,
-        "test_T": data_set.test_T,
-        "test_points": data_set.test_points,
         "p_0": float(p_0),
         "rkhs_norm_p": float(rkhs_norm_squared(alpha, K_jax)),
         "max_train_residual": max_train_residual,
@@ -294,19 +290,10 @@ def asset_pricing_kernel_uno(
             "residual": np.asarray(test_residual),
         }
     )
-    hyperparameters = {
-        "kernel_set": asdict(kernel_set),
-        "data_set": asdict(data_set),
-        "solver_set": asdict(solver_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": {"r": r, "c": c, "g": g},
-        "initial_conditions": {"x_0": x_0},
-    }
     return results, {
         "model": kernel_solution,
         "train_df": train_df,
         "test_df": test_df,
-        "hyperparameters": hyperparameters,
     }
 
 

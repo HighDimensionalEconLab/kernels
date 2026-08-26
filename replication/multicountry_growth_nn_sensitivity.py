@@ -21,8 +21,10 @@ from replication.multicountry_growth_kernel import (
 from replication.multicountry_growth_nn import PREFIX
 from replication.utilities import (
     configure_process,
+    nested_results,
     run_solver,
     save_experiment,
+    scalar_results,
 )
 
 SOLVER = multicountry_growth_nn.multicountry_growth_nn
@@ -56,7 +58,7 @@ def run(
             )
             spec, result = extras["solve"], extras["result"]
             solver, residual_args = spec["solver"], spec["residual_args"]
-            num_countries = int(results["num_countries"])
+            num_countries = len(results["parameters"]["populations"])
 
             # Warm-started at the trained parameters and re-solved to the
             # same residual tolerance, so the stationary point the implicit
@@ -125,9 +127,9 @@ def run(
                     np.max(np.abs(rate_a_0_gradient[index]))
                 )
             fields["rate_a_0_neutrality"] = float(np.max(np.abs(rate_a_0_gradient)))
-            rows.append({**results, **fields, "seed": seed})
+            rows.append({**scalar_results(results), **fields, "seed": seed})
             if hyperparameters is None:
-                hyperparameters = extras["hyperparameters"]
+                hyperparameters = nested_results(results)
             for key, value in extras.items():
                 if isinstance(value, pd.DataFrame):
                     frames.setdefault(key, []).append(value.assign(seed=seed))

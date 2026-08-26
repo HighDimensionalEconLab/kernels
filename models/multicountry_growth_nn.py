@@ -231,7 +231,7 @@ def multicountry_growth_nn(
             a_0 = drawn_a_0
     validate_initial_conditions(
         StructuralParameters.create(
-            jnp.float64,
+            dtype=jnp.float64,
             alpha=alpha,
             gammas=gammas,
             delta=delta,
@@ -261,7 +261,7 @@ def multicountry_growth_nn(
     a_0_array = a_0_array - jnp.sum(populations_array * a_0_array) / total_population
     a_0 = tuple(float(value) for value in a_0_array)
     p = StructuralParameters.create(
-        dtype,
+        dtype=dtype,
         alpha=alpha,
         gammas=gammas,
         delta=delta,
@@ -444,18 +444,15 @@ def multicountry_growth_nn(
     log_relative_weights = jnp.log(relative_weights)
 
     results = {
-        "alpha": alpha,
-        "delta": delta,
-        "r": r,
-        "eta": eta,
-        "num_countries": num_countries,
+        "parameters": p.to_dict(),
+        "nn_set": asdict(nn_set),
+        "data_set": asdict(data_set),
+        "initial_set": asdict(initial_set),
+        "lm_set": asdict(lm_set),
+        "tolerance_set": asdict(tolerance_set),
         "seed": seed,
-        # Measured, not requested: a float64 leak upstream shows up here.
-        "residual_dtype": str(train_eval["capital"].dtype),
         "train_T": float(train_t[-1]),
         "num_train_points": n_train,
-        "test_T": data_set.test_T,
-        "test_points": data_set.test_points,
         "output_scale": output_scale,
         "consumption_scale": float(steady["consumption_scale"]),
         "max_train_residual": max_train_residual,
@@ -465,8 +462,6 @@ def multicountry_growth_nn(
         "algebraic_residual_count": (num_countries + 1) * n_train,
         "dae_residual_count": (5 * num_countries + 1) * n_train,
         "free_initial_value_count": 3 * num_countries + 1,
-        "long_run_check_T": data_set.long_run_check_T,
-        "long_run_window": data_set.long_run_window,
         "long_run_c_flatness": float(long_run["c_flatness"]),
         "long_run_k_flatness": float(long_run["k_flatness"]),
         "long_run_a_flatness": float(long_run["a_flatness"]),
@@ -487,11 +482,6 @@ def multicountry_growth_nn(
         "solve_time": solve_time,
         "solve_time_success": solve_time if solution_accepted else np.nan,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
-        "nn_width": nn_set.width,
-        "nn_depth": nn_set.depth,
-        "initial_seed": initial_set.seed,
-        "k_0_log_sigma": initial_set.k_0_log_sigma,
-        "a_0_sigma": initial_set.a_0_sigma,
         **acceptance,
     }
     if long_run["common_gamma"]:
@@ -512,11 +502,6 @@ def multicountry_growth_nn(
         suffix = country + 1
         results.update(
             {
-                f"gamma_{suffix}": gammas[country],
-                f"population_{suffix}": populations[country],
-                f"productivity_{suffix}": productivities[country],
-                f"k_0_{suffix}": k_0[country],
-                f"a_0_{suffix}": a_0[country],
                 f"a_0_{suffix}_over_output_ss": a_0[country] / output_scale,
                 f"q_0_{suffix}": float(test_eval["q"][0, country]),
                 f"c_0_{suffix}": float(test_eval["c"][0, country]),
@@ -571,30 +556,11 @@ def multicountry_growth_nn(
     validation_df = frame(validation_eval, validation_t)
     test_df = frame(test_eval, test_t)
 
-    hyperparameters = {
-        "nn_set": asdict(nn_set),
-        "data_set": asdict(data_set),
-        "initial_set": asdict(initial_set),
-        "lm_set": asdict(lm_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": {
-            "alpha": alpha,
-            "gammas": list(gammas),
-            "delta": delta,
-            "r": r,
-            "eta": eta,
-            "populations": list(populations),
-            "productivities": list(productivities),
-        },
-        "initial_conditions": {"k_0": list(k_0), "a_0": list(a_0)},
-    }
-
     return results, {
         "model": model,
         "train_df": train_df,
         "validation_df": validation_df,
         "test_df": test_df,
-        "hyperparameters": hyperparameters,
         "solve": {
             "solver": solver,
             "residual_fn": residual_fn,

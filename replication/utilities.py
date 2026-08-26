@@ -46,6 +46,17 @@ def with_option(options, key, value):
     return result
 
 
+# Solver results mix flat measured scalars with nested input blocks
+# ("parameters", "<name>_set"); the scalars become DataFrame rows and the
+# blocks become the experiment's hyperparameters JSON.
+def scalar_results(results):
+    return {key: value for key, value in results.items() if not isinstance(value, dict)}
+
+
+def nested_results(results):
+    return {key: value for key, value in results.items() if isinstance(value, dict)}
+
+
 # One solver call with the CLI's option semantics: nested dicts are
 # instantiated into the driver's settings dataclasses by jsonargparse.
 def run_solver(func, options=None):
@@ -72,11 +83,15 @@ def ensemble(func, n_seeds, start_seed=0, options=None):
     for seed in seeds:
         run_options = {**options, "seed": seed} if stochastic else options
         results, extra = run_solver(func, run_options)
-        rows.append({**results, "seed": seed} if stochastic else dict(results))
-        # Required of every solver (collect_json depends on the saved file); identical
-        # across seeds (the runtime-folded settings), so the first suffices.
+        scalars = scalar_results(results)
+        rows.append({**scalars, "seed": seed} if stochastic else scalars)
+        # Required of every solver (collect_json depends on the saved file);
+        # identical across seeds (the runtime-folded settings), so the first
+        # suffices.
         if hyperparameters is None:
-            hyperparameters = extra.pop("hyperparameters")
+            hyperparameters = nested_results(results)
+            if not hyperparameters:
+                raise RuntimeError(f"{func.__name__} results carry no nested blocks")
         for key, value in extra.items():
             if isinstance(value, pd.DataFrame):
                 if stochastic:

@@ -7,7 +7,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
-from flax import struct
+
+from models.utilities import ParameterPyTree
 
 # Validity of the inputs, not an acceptance gate: checked in exact float64 on
 # the raw values, so it holds at any working dtype.
@@ -30,10 +31,6 @@ class MulticountryConstants:
     populations: tuple[float, ...] = (1.0, 1.0)
     productivities: tuple[float, ...] = (1.0, 1.0)
 
-    @property
-    def num_countries(self):
-        return len(self.populations)
-
 
 MULTICOUNTRY_GROWTH_CONSTANTS = MulticountryConstants()
 
@@ -42,8 +39,7 @@ MULTICOUNTRY_GROWTH_CONSTANTS = MulticountryConstants()
 # leaves over countries), all implicitly differentiable through the solver's
 # `p` argument. The country count is compile-time structure and stays
 # host-side (len(populations) at the drivers).
-@struct.dataclass
-class StructuralParameters:
+class StructuralParameters(ParameterPyTree):
     alpha: jax.Array
     gammas: jax.Array
     delta: jax.Array
@@ -53,12 +49,6 @@ class StructuralParameters:
     productivities: jax.Array
     k_0: jax.Array
     a_0: jax.Array
-
-    @classmethod
-    def create(cls, dtype, **kwargs):
-        return cls(
-            **{key: jnp.asarray(value, dtype=dtype) for key, value in kwargs.items()}
-        )
 
 
 @dataclass(frozen=True)
@@ -215,7 +205,7 @@ def steady_state(p, dtype=jnp.float64):
     productivities = jnp.asarray(p.productivities, dtype=dtype)
     populations = jnp.asarray(p.populations, dtype=dtype)
     eta = p.eta
-    q = jnp.full(p.populations.shape[-1], 1.0 / eta, dtype=dtype)
+    q = jnp.full(populations.shape[-1], 1.0 / eta, dtype=dtype)
     marginal_product_ss = p.delta + p.r / eta
     k = (p.alpha * productivities / marginal_product_ss) ** (1.0 / (1.0 - p.alpha))
     output = production(k, productivities, p)

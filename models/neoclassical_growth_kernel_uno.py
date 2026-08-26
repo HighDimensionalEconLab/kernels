@@ -166,7 +166,7 @@ def neoclassical_growth_kernel_uno(
     # Value container only: no p rides through IPOPT for implicit
     # differentiation.
     p = StructuralParameters.create(
-        jnp.float64,
+        dtype=jnp.float64,
         a=a,
         delta=delta,
         rho_hat=rho_hat,
@@ -439,22 +439,13 @@ def neoclassical_growth_kernel_uno(
         rejection_reasons.append("p_bound")
 
     results = {
-        "a": a,
-        "delta": delta,
-        "rho_hat": rho_hat,
-        "sigma_crra": sigma_crra,
-        "z_0": z_0,
-        "k_0": k_0,
-        "A": A,
-        "b_1": b_1,
-        "b_2": b_2,
-        "kernel": kernel,
-        "ell": ell,
-        "sigma": sigma,
+        "parameters": p.to_dict(),
+        "kernel_set": asdict(kernel_set),
+        "data_set": asdict(data_set),
+        "solver_set": asdict(solver_set),
+        "tolerance_set": asdict(tolerance_set),
         "train_T": float(train_data[-1]),
         "num_train_points": n_train,
-        "test_T": data_set.test_T,
-        "test_points": data_set.test_points,
         "c_0": float(c_0),
         "mu_0": float(mu_0),
         "max_train_residual": max_train_residual,
@@ -462,7 +453,6 @@ def neoclassical_growth_kernel_uno(
         "p_lower_violation": p_lower_violation,
         "p_upper_violation": p_upper_violation,
         "test_euler_mean_abs": float(test_df["euler"].abs().mean()),
-        "test_tvc_T": data_set.test_tvc_T,
         "log_tvc_residual": log_tvc,
         "transversality_ok": transversality_ok,
         "solve_time": solve_time,
@@ -489,28 +479,10 @@ def neoclassical_growth_kernel_uno(
         )
     else:
         print(f"solve_time(s) = {solve_time}")
-
-    hyperparameters = {
-        "kernel_set": asdict(kernel_set),
-        "data_set": asdict(data_set),
-        "solver_set": asdict(solver_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": {
-            "a": a,
-            "delta": delta,
-            "rho_hat": rho_hat,
-            "sigma_crra": sigma_crra,
-            "A": A,
-            "b_1": b_1,
-            "b_2": b_2,
-        },
-        "initial_conditions": {"z_0": z_0, "k_0": k_0},
-    }
     return results, {
         "model": kernel_solution,
         "train_df": train_df,
         "test_df": test_df,
-        "hyperparameters": hyperparameters,
     }
 
 

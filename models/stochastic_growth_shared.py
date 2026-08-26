@@ -7,11 +7,12 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 import numpy as np
-from flax import nnx, struct
+from flax import nnx
 from nlls_gram import DrawNNXModule
 from tinydiffeq import SaveAt, solve_sde
 
 from models.utilities import (
+    ParameterPyTree,
     unit_softplus,
 )
 
@@ -33,25 +34,13 @@ class StochasticGrowthConstants:
     quarterly_beta: float
     quarterly_tfp_rho: float
     quarterly_tfp_sigma: float
+    rho_hat: float
+    eta: float
+    z_ergodic_variance: float
+    sigma_z: float
     train_T: float
     test_T: float
     transversality_T: float
-
-    @property
-    def rho_hat(self):
-        return -4.0 * math.log(self.quarterly_beta)
-
-    @property
-    def eta(self):
-        return -4.0 * math.log(self.quarterly_tfp_rho)
-
-    @property
-    def z_ergodic_variance(self):
-        return self.quarterly_tfp_sigma**2 / (1.0 - self.quarterly_tfp_rho**2)
-
-    @property
-    def sigma_z(self):
-        return math.sqrt(2.0 * self.eta * self.z_ergodic_variance)
 
 
 # From Aruoba, Fernandez-Villaverde & Rubio-Ramirez (2006 JEDC, Tables 1-2):
@@ -67,14 +56,17 @@ STOCHASTIC_GROWTH_CONSTANTS = StochasticGrowthConstants(
     quarterly_beta=0.9896,
     quarterly_tfp_rho=0.95,
     quarterly_tfp_sigma=0.035,
+    rho_hat=-4.0 * math.log(0.9896),
+    eta=-4.0 * math.log(0.95),
+    z_ergodic_variance=0.035**2 / (1.0 - 0.95**2),
+    sigma_z=math.sqrt(2.0 * (-4.0 * math.log(0.95)) * (0.035**2 / (1.0 - 0.95**2))),
     train_T=100.0,
     test_T=40.0,
     transversality_T=200.0,
 )
 
 
-@struct.dataclass
-class StructuralParameters:
+class StructuralParameters(ParameterPyTree):
     a: jax.Array
     delta: jax.Array
     rho_hat: jax.Array
@@ -84,12 +76,6 @@ class StructuralParameters:
     log_z_bar: jax.Array
     z_0: jax.Array
     k_0: jax.Array
-
-    @classmethod
-    def create(cls, dtype, **kwargs):
-        return cls(
-            **{key: jnp.asarray(value, dtype=dtype) for key, value in kwargs.items()}
-        )
 
 
 @dataclass(frozen=True)

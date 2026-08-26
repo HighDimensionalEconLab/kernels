@@ -1,3 +1,4 @@
+import dataclasses
 import hashlib
 import json
 import pathlib
@@ -12,6 +13,23 @@ from flax import nnx, struct
 from jax.tree_util import Partial
 from nlls_gram import LMStatus
 from tinydiffeq import SRA1, EulerMaruyama, Milstein
+
+
+# Base for the structural-parameter pytrees: create casts every field to one
+# dtype; to_dict returns plain Python scalars/lists for the results record.
+class ParameterPyTree(struct.PyTreeNode):
+    @classmethod
+    def create(cls, *, dtype, **kwargs):
+        return cls(
+            **{key: jnp.asarray(value, dtype=dtype) for key, value in kwargs.items()}
+        )
+
+    def to_dict(self):
+        values = jax.device_get(
+            {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
+        )
+        return {k: v.item() if v.ndim == 0 else v.tolist() for k, v in values.items()}
+
 
 STATUS_TO_REASON = {
     LMStatus.CONVERGED: "converged",

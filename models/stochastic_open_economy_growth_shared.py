@@ -8,11 +8,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
-from flax import nnx, struct
+from flax import nnx
 from tinydiffeq import SaveAt, solve_sde
 
 from models.utilities import (
     ACTIVATIONS,
+    ParameterPyTree,
     unit_softplus,
 )
 
@@ -31,25 +32,10 @@ class ProcessConstants:
     quarterly_tfp_sigma: float
     annual_rate_rho: float
     annual_rate_innovation_sd: float
-
-    @property
-    def kappa_z(self):
-        return -4.0 * math.log(self.quarterly_tfp_rho)
-
-    @property
-    def sigma_z(self):
-        variance = self.quarterly_tfp_sigma**2 / (1.0 - self.quarterly_tfp_rho**2)
-        return math.sqrt(2.0 * self.kappa_z * variance)
-
-    @property
-    def kappa_r(self):
-        return -math.log(self.annual_rate_rho)
-
-    @property
-    def sigma_r(self):
-        return self.annual_rate_innovation_sd * math.sqrt(
-            2.0 * self.kappa_r / (1.0 - self.annual_rate_rho**2)
-        )
+    kappa_z: float
+    sigma_z: float
+    kappa_r: float
+    sigma_r: float
 
 
 # Productivity duplicates the neoclassical family's quarterly TFP anchors
@@ -69,6 +55,10 @@ PROCESS_CONSTANTS = ProcessConstants(
     quarterly_tfp_sigma=0.035,
     annual_rate_rho=0.83**4,
     annual_rate_innovation_sd=0.0115,
+    kappa_z=-4.0 * math.log(0.95),
+    sigma_z=math.sqrt(2.0 * (-4.0 * math.log(0.95)) * (0.035**2 / (1.0 - 0.95**2))),
+    kappa_r=-math.log(0.83**4),
+    sigma_r=0.0115 * math.sqrt(2.0 * (-math.log(0.83**4)) / (1.0 - (0.83**4) ** 2)),
 )
 
 
@@ -92,8 +82,7 @@ def marginal_product(k, z, p):
     return p.alpha * z * k ** (p.alpha - 1.0)
 
 
-@struct.dataclass
-class StructuralParameters:
+class StructuralParameters(ParameterPyTree):
     alpha: jax.Array
     gamma: jax.Array
     delta: jax.Array
@@ -108,12 +97,6 @@ class StructuralParameters:
     sigma_r: jax.Array
     corr_zr: jax.Array
     output_scale: jax.Array
-
-    @classmethod
-    def create(cls, dtype, **kwargs):
-        return cls(
-            **{key: jnp.asarray(value, dtype=dtype) for key, value in kwargs.items()}
-        )
 
 
 @dataclass(frozen=True)

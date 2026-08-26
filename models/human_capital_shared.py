@@ -4,12 +4,12 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
-from flax import struct
 from nlls_gram import LevenbergMarquardt
 
+from models.utilities import ParameterPyTree
 
-@struct.dataclass
-class StructuralParameters:
+
+class StructuralParameters(ParameterPyTree):
     a_k: jax.Array
     a_h: jax.Array
     delta_k: jax.Array
@@ -17,12 +17,6 @@ class StructuralParameters:
     rho_hat: jax.Array
     k_0: jax.Array
     h_0: jax.Array
-
-    @classmethod
-    def create(cls, dtype, **kwargs):
-        return cls(
-            **{key: jnp.asarray(value, dtype=dtype) for key, value in kwargs.items()}
-        )
 
 
 RESIDUAL_NAMES = (

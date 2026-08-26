@@ -312,7 +312,7 @@ def open_economy_growth_nn_recursive(
     dtype = jnp.float64 if use_float64 else jnp.float32
     k_0_jax = jnp.asarray(k_0, dtype=dtype)
     p = StructuralParameters.create(
-        dtype,
+        dtype=dtype,
         alpha=alpha,
         gamma=gamma,
         delta=delta,
@@ -479,18 +479,13 @@ def open_economy_growth_nn_recursive(
     policy_q = policy_s ** (1.0 - eta) / (policy_chi * eta)
 
     results = {
-        "alpha": alpha,
-        "gamma": gamma,
-        "delta": delta,
-        "r": r,
-        "eta": eta,
-        "r_star": r_star,
+        "parameters": p.to_dict(),
+        "nn_set": asdict(nn_set),
+        "data_set": asdict(data_set),
+        "lm_set": asdict(lm_set),
+        "tolerance_set": asdict(tolerance_set),
         "r_star_resolved": r_star,
-        "k_0": k_0,
-        "a_0": a_0,
         "seed": seed,
-        # Measured, not requested: a float64 leak upstream shows up here.
-        "residual_dtype": str(train_eval["q_euler"].dtype),
         "dae_residual_count": 2 * int(train_t.size),
         "domain_residual_count": int(train_t.size),
         "residual_count": 3 * int(train_t.size),
@@ -499,7 +494,6 @@ def open_economy_growth_nn_recursive(
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
         "max_benchmark_error": max_benchmark_error,
-        "benchmark_match_tolerance": tolerance_set.benchmark_match,
         "k_relative_error_max": float(jnp.max(k_relative_error)),
         "q_relative_error_max": float(jnp.max(q_relative_error)),
         "c_relative_error_max": float(jnp.max(c_relative_error)),
@@ -523,18 +517,9 @@ def open_economy_growth_nn_recursive(
         "solve_time_success": solve_time if solution_accepted else np.nan,
         "total_params": int(theta_final.size),
         "unknown_count": int(theta_final.size),
-        "parameter_norm_initial": float(jnp.linalg.norm(theta_initial)),
-        "parameter_norm_final": float(jnp.linalg.norm(theta_final)),
-        "parameter_step_norm": float(jnp.linalg.norm(theta_final - theta_initial)),
-        "nn_width": nn_set.width,
-        "nn_depth": nn_set.depth,
-        "train_T": data_set.train_T,
         "num_train_points": int(train_t.size),
         "num_training_trajectories": 1,
-        "test_T": data_set.test_T,
-        "diagnostic_T": data_set.diagnostic_T,
         "ode_solver": "rk4",
-        "train_steps": data_set.train_points - 1,
         **acceptance,
     }
     if verbose:
@@ -576,21 +561,6 @@ def open_economy_growth_nn_recursive(
             "q": np.asarray(policy_q),
         }
     )
-    hyperparameters = {
-        "nn_set": asdict(nn_set),
-        "data_set": asdict(data_set),
-        "lm_set": asdict(lm_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": {
-            "alpha": alpha,
-            "gamma": gamma,
-            "delta": delta,
-            "r": r,
-            "eta": eta,
-            "r_star": r_star,
-        },
-        "initial_conditions": {"k_0": k_0, "a_0": a_0},
-    }
     jax.block_until_ready(nnx.state(policy))
     return results, {
         "policy": policy,
@@ -598,7 +568,6 @@ def open_economy_growth_nn_recursive(
         "test_df": test_df,
         "diagnostic_df": diagnostic_df,
         "policy_df": policy_df,
-        "hyperparameters": hyperparameters,
         "solve": {
             "solver": solver,
             "residual_fn": residual_fn,

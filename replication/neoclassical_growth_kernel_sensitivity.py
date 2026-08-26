@@ -15,8 +15,10 @@ from models.neoclassical_growth_shared import neoclassical_steady_state_sensitiv
 from replication.neoclassical_growth_kernel import PREFIX, SOLVER
 from replication.utilities import (
     configure_process,
+    nested_results,
     run_solver,
     save_experiment,
+    scalar_results,
     write_summary,
 )
 
@@ -42,7 +44,11 @@ def run(
     t_sens = jnp.asarray(SENSITIVITY_TIMES, dtype=jnp.float64)
     train_data = jnp.asarray(extras["train_df"]["t"].to_numpy())
     K_sens, K_tilde_sens = integrated_kernel_matrices(
-        t_sens, train_data, results["kernel"], results["sigma"], results["ell"]
+        t_sens,
+        train_data,
+        results["kernel_set"]["kernel"],
+        results["kernel_set"]["sigma"],
+        results["kernel_set"]["ell"],
     )
 
     # One reverse-mode pass through the re-solve yields d[k(t), c(t)]/dp
@@ -91,12 +97,14 @@ def run(
     # to; the sigma_crra and k_0 rows converge to zero.
     fields.update(
         neoclassical_steady_state_sensitivities(
-            results["a"], results["delta"], results["rho_hat"]
+            results["parameters"]["a"],
+            results["parameters"]["delta"],
+            results["parameters"]["rho_hat"],
         )
     )
     save_experiment(
         "sensitivity",
-        pd.DataFrame([{**results, **fields}]),
+        pd.DataFrame([{**scalar_results(results), **fields}]),
         {
             key: value
             for key, value in extras.items()
@@ -105,7 +113,7 @@ def run(
         output_dir,
         dict(n_seeds=1, residual_dtype="float64"),
         prefix=PREFIX,
-        hyperparameters=extras["hyperparameters"],
+        hyperparameters=nested_results(results),
     )
     write_summary(output_dir, PREFIX)
 

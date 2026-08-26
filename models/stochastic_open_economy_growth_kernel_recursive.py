@@ -276,7 +276,7 @@ def stochastic_open_economy_growth_kernel_recursive(
     train_scales = jnp.sqrt(jnp.asarray(train_variances, dtype=dtype))
     test_scales = jnp.sqrt(jnp.asarray(test_variances, dtype=dtype))
     p = StructuralParameters.create(
-        dtype,
+        dtype=dtype,
         alpha=parameters.alpha,
         gamma=parameters.gamma,
         delta=parameters.delta,
@@ -561,39 +561,30 @@ def stochastic_open_economy_growth_kernel_recursive(
         rejection_reasons.append("reference_path")
     acceptance = acceptance_fields(rejection_reasons)
 
-    gram_eigenvalues = jnp.linalg.eigvalsh(args.gram)
     lengthscales = state_lengthscales(kernel_set)
     free_parameter_count = (2 if kernel_set.free_constant else 0) + (
         8 if kernel_set.linear_mean else 0
     )
     results = {
+        "parameters": p.to_dict(),
+        "initial_conditions": {
+            "k_0": k_0,
+            "a_0": a_0,
+            "z_0": z_0,
+            "rate_gap_0": rate_gap_0,
+        },
+        "kernel_set": asdict(kernel_set),
+        "data_set": asdict(data_set),
+        "ic_set": asdict(ic_set),
+        "lm_set": asdict(lm_set),
+        "ridge_set": asdict(ridge_set),
+        "tolerance_set": asdict(tolerance_set),
         "reference_test_euler_mean_abs": float(reference_meta["test_euler_mean_abs"]),
-        **asdict(parameters),
-        "k_0": k_0,
-        "a_0": a_0,
-        "z_0": z_0,
-        "rate_gap_0": rate_gap_0,
-        "kappa_z": kappa_z,
-        "sigma_z": sigma_z,
-        "z_bar": z_bar,
-        "kappa_r": kappa_r,
-        "sigma_r": sigma_r,
-        "corr_zr": corr_zr,
-        "data_seed": ic_set.data_seed,
-        # Measured, not requested: a float64 leak upstream shows up here.
-        "residual_dtype": str(train_values["c_euler"].dtype),
         "sde_solver": sde_solver,
-        "kernel": kernel_set.state_kernel,
-        "amplitude": kernel_set.amplitude,
         "log_z_lengthscale": lengthscales[0],
         "log_k_lengthscale": lengthscales[1],
         "asset_lengthscale": lengthscales[2],
         "rate_lengthscale": lengthscales[3],
-        "metric_epsilon": kernel_set.metric_epsilon,
-        "ridge": ridge_set.ridge,
-        "ridge_init": ridge_set.ridge_init,
-        "ridge_decrease": ridge_set.ridge_decrease,
-        "ridge_grad_rtol": ridge_set.ridge_grad_rtol,
         "train_loss": train_loss,
         "train_euler_mean_abs": float(jnp.mean(jnp.abs(train_euler))),
         "train_euler_max_abs": float(jnp.max(jnp.abs(train_euler))),
@@ -618,21 +609,10 @@ def stochastic_open_economy_growth_kernel_recursive(
         "setup_time": setup_time,
         "solve_time": solve_time,
         "total_fit_time": total_fit_time,
-        "num_train_trajectories": ic_set.num_train_trajectories,
-        "num_test_trajectories": ic_set.num_test_trajectories,
         "rkhs_coefficients": 2 * n_train,
         "free_parameter_count": free_parameter_count,
-        "gram_min_eigenvalue": float(gram_eigenvalues[0]),
-        "gram_max_eigenvalue": float(gram_eigenvalues[-1]),
         "observed_asset_center_min": float(jnp.min(args.centers[:, 2])),
         "observed_asset_center_max": float(jnp.max(args.centers[:, 2])),
-        "train_points": data_set.train_points,
-        "train_T": data_set.train_T,
-        "test_points": data_set.test_points,
-        "test_T": data_set.test_T,
-        "tvc_T": data_set.tvc_T,
-        "tvc_points": data_set.tvc_points,
-        "num_tvc_trajectories": ic_set.num_tvc_trajectories,
         "ex_post_expected_absolute_asset_tvc": float(
             tvc_statistics["expected_absolute_asset_tvc"]
         ),
@@ -650,29 +630,6 @@ def stochastic_open_economy_growth_kernel_recursive(
         **acceptance,
     }
 
-    hyperparameters = {
-        "kernel_set": asdict(kernel_set),
-        "data_set": asdict(data_set),
-        "ic_set": asdict(ic_set),
-        "lm_set": asdict(lm_set),
-        "ridge_set": asdict(ridge_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": asdict(parameters),
-        "shocks": {
-            "kappa_z": kappa_z,
-            "sigma_z": sigma_z,
-            "z_bar": z_bar,
-            "kappa_r": kappa_r,
-            "sigma_r": sigma_r,
-            "corr_zr": corr_zr,
-        },
-        "initial_conditions": {
-            "k_0": k_0,
-            "a_0": a_0,
-            "z_0": z_0,
-            "rate_gap_0": rate_gap_0,
-        },
-    }
     if verbose:
         print("\nFinal results:")
         for name, value in results.items():
@@ -688,7 +645,6 @@ def stochastic_open_economy_growth_kernel_recursive(
         "test_df": test_df,
         "tvc_df": tvc_df,
         "expected_tvc_df": expected_tvc_df,
-        "hyperparameters": hyperparameters,
     }
 
 

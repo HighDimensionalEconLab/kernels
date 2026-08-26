@@ -54,7 +54,7 @@ def run(
     # merged and sorted in x; mu = 1/c under log utility.
     times = np.linspace(0.0, 120.0, 400)
     p_bench = StructuralParameters.create(
-        jnp.float64,
+        dtype=jnp.float64,
         a=a,
         delta=delta,
         rho_hat=rho_hat,

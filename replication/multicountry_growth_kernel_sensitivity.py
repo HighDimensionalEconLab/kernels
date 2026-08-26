@@ -22,8 +22,10 @@ from replication.multicountry_growth_kernel import (
 )
 from replication.utilities import (
     configure_process,
+    nested_results,
     run_solver,
     save_experiment,
+    scalar_results,
 )
 
 
@@ -38,11 +40,15 @@ def sensitivity_row(options, mode):
     results, extras = run_solver(SOLVER, options)
     spec, result = extras["solve"], extras["result"]
     theta = result.x
-    num_countries = int(results["num_countries"])
+    num_countries = len(results["parameters"]["populations"])
     t_sens = jnp.asarray(SENSITIVITY_TIMES, dtype=jnp.float64)
     train_data = jnp.asarray(extras["train_df"]["t"].to_numpy())
     K_sens, K_tilde_sens = integrated_kernel_matrices(
-        t_sens, train_data, results["kernel"], results["sigma"], results["ell"]
+        t_sens,
+        train_data,
+        results["kernel_set"]["kernel"],
+        results["kernel_set"]["sigma"],
+        results["kernel_set"]["ell"],
     )
     primal_solver = spec["solver"]
     sensitivity_solver = RidgeLevenbergMarquardt(
@@ -145,7 +151,7 @@ def sensitivity_row(options, mode):
             np.max(np.abs(rate_a_0_gradient[index]))
         )
     fields["rate_a_0_neutrality"] = float(np.max(np.abs(rate_a_0_gradient)))
-    return {**results, **fields}, extras
+    return {**scalar_results(results), **fields}, nested_results(results), extras
 
 
 # Implicit-AD sensitivity tables for the supplement's sensitivity appendix:
@@ -159,7 +165,7 @@ def run(output_dir: str = ".results"):
 
     def go(name, mode, **experiment):
         print(f"{name} -> {output_dir}/")
-        row, extras = sensitivity_row(experiment, mode)
+        row, hyperparameters, extras = sensitivity_row(experiment, mode)
         save_experiment(
             name,
             pd.DataFrame([row]),
@@ -171,7 +177,7 @@ def run(output_dir: str = ".results"):
             output_dir,
             dict(n_seeds=1, residual_dtype="float64"),
             prefix=PREFIX,
-            hyperparameters=extras["hyperparameters"],
+            hyperparameters=hyperparameters,
         )
 
     go("sensitivity", "reverse")

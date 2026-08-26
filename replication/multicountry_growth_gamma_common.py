@@ -20,7 +20,13 @@ from replication.multicountry_growth_scaling import (
     rung_lm_overrides,
     rung_parameters,
 )
-from replication.utilities import configure_process, run_solver, save_experiment
+from replication.utilities import (
+    configure_process,
+    nested_results,
+    run_solver,
+    save_experiment,
+    scalar_results,
+)
 
 # The gamma-common tangent is published from N=40, where its value sits in
 # one line with the N=2/N=10 sensitivity tables and the production
@@ -59,7 +65,11 @@ def run(output_dir: str = ".results"):
     t_common = jnp.asarray(GAMMA_COMMON_TIMES, dtype=jnp.float64)
     train_data = jnp.asarray(extras["train_df"]["t"].to_numpy())
     K_common, K_tilde_common = integrated_kernel_matrices(
-        t_common, train_data, results["kernel"], results["sigma"], results["ell"]
+        t_common,
+        train_data,
+        results["kernel_set"]["kernel"],
+        results["kernel_set"]["sigma"],
+        results["kernel_set"]["ell"],
     )
     primal_solver = spec["solver"]
     gamma_common_solver = RidgeLevenbergMarquardt(
@@ -118,7 +128,7 @@ def run(output_dir: str = ".results"):
     fields["gamma_common_sensitivity_time"] = statistics.median(tangent_times[1:])
     save_experiment(
         "gamma_common",
-        pd.DataFrame([{**results, **fields}]),
+        pd.DataFrame([{**scalar_results(results), **fields}]),
         {
             key: value
             for key, value in extras.items()
@@ -131,7 +141,7 @@ def run(output_dir: str = ".results"):
             warm_timing_repetitions=WARM_TIMING_REPETITIONS,
         ),
         prefix=PREFIX,
-        hyperparameters=extras["hyperparameters"],
+        hyperparameters=nested_results(results),
     )
 
 

@@ -3,23 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import jax
-import jax.numpy as jnp
-from flax import struct
+
+from models.utilities import ParameterPyTree
 
 
-@struct.dataclass
-class StructuralParameters:
+class StructuralParameters(ParameterPyTree):
     rho_hat: jax.Array
     c: jax.Array
     beta: jax.Array
     kappa: jax.Array
     x_0: jax.Array
-
-    @classmethod
-    def create(cls, dtype, **kwargs):
-        return cls(
-            **{key: jnp.asarray(value, dtype=dtype) for key, value in kwargs.items()}
-        )
 
 
 @dataclass(frozen=True)

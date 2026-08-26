@@ -5,7 +5,8 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
-from flax import struct
+
+from models.utilities import ParameterPyTree
 
 
 # Shared calibration: every open economy driver defaults to the instance
@@ -25,8 +26,7 @@ OPEN_ECONOMY_GROWTH_CONSTANTS = OpenEconomyConstants()
 
 # Deep structural parameters and the initial conditions together, all
 # implicitly differentiable through the solver's `p` argument.
-@struct.dataclass
-class StructuralParameters:
+class StructuralParameters(ParameterPyTree):
     alpha: jax.Array
     gamma: jax.Array
     delta: jax.Array
@@ -35,12 +35,6 @@ class StructuralParameters:
     r_star: jax.Array
     k_0: jax.Array
     a_0: jax.Array
-
-    @classmethod
-    def create(cls, dtype, **kwargs):
-        return cls(
-            **{key: jnp.asarray(value, dtype=dtype) for key, value in kwargs.items()}
-        )
 
 
 def production(k, z, p):

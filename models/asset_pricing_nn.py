@@ -158,7 +158,7 @@ def asset_pricing_nn(
     residual_args = NNXResidualArgs(
         batch={"t": train_t}, graphdef=graphdef, nondiff=nondiff
     )
-    p = StructuralParameters.create(dtype, r=r, c=c, g=g, x_0=x_0)
+    p = StructuralParameters.create(dtype=dtype, r=r, c=c, g=g, x_0=x_0)
 
     solver = LevenbergMarquardt(
         residual_fn,
@@ -196,18 +196,13 @@ def asset_pricing_nn(
     solution_accepted = bool(result.multi_start.accepted)
 
     results = {
-        "r": r,
-        "c": c,
-        "g": g,
-        "x_0": x_0,
+        "parameters": p.to_dict(),
+        "nn_set": asdict(nn_set),
+        "data_set": asdict(data_set),
+        "lm_set": asdict(lm_set),
         "seed": seed,
-        # Measured from the trained parameters, not requested: a float64 leak
-        # in the solve promotes them.
-        "residual_dtype": str(ravel_pytree(nnx.state(model, nnx.Param))[0].dtype),
         "num_train_points": int(train_t.size),
         "train_T": float(train_t[-1]),
-        "test_T": data_set.test_T,
-        "test_points": data_set.test_points,
         "p_0": float(test_df["p"].iloc[0]),
         "train_loss": float(result.info.loss),
         "final_damping": float(result.lm_state.damping),
@@ -223,8 +218,6 @@ def asset_pricing_nn(
         "solve_time": solve_time,
         "solve_time_success": solve_time if solution_accepted else np.nan,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
-        "nn_width": nn_set.width,
-        "nn_depth": nn_set.depth,
         "solution_accepted": solution_accepted,
         "rejection_reason": (
             "accepted"
@@ -241,13 +234,6 @@ def asset_pricing_nn(
         "model": model,
         "train_df": train_df,
         "test_df": test_df,
-        "hyperparameters": {
-            "nn_set": asdict(nn_set),
-            "data_set": asdict(data_set),
-            "lm_set": asdict(lm_set),
-            "parameters": {"r": r, "c": c, "g": g},
-            "initial_conditions": {"x_0": x_0},
-        },
         "solve": {
             "solver": solver,
             "residual_fn": residual_fn,

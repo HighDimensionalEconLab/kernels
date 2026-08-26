@@ -371,7 +371,7 @@ def neoclassical_growth_nn_recursive(
     train_initial_conditions = ic_draw.train_initial_conditions
     test_initial_conditions = ic_draw.test_initial_conditions
     p = RecursiveParameters.create(
-        dtype,
+        dtype=dtype,
         a=a,
         delta=delta,
         rho_hat=rho_hat,
@@ -549,9 +549,6 @@ def neoclassical_growth_nn_recursive(
             )
         policy = nnx.merge(graphdef, theta_final, nondiff)
 
-    # Measured, not requested: a float64 leak anywhere upstream shows up here.
-    residual_dtype = str(r.dtype)
-
     # Training diagnostics use the batch the solution was returned on.
     train_batch_log_states = solve_args.initial_log_states
     train_batch_initial_conditions = jnp.exp(train_batch_log_states)
@@ -592,7 +589,7 @@ def neoclassical_growth_nn_recursive(
     # per-trajectory benchmark paths concatenate into aligned columns.
     test_times = np.asarray(test_solution.ts[0])
     p_bench = StructuralParameters.create(
-        jnp.float64,
+        dtype=jnp.float64,
         a=a,
         delta=delta,
         rho_hat=rho_hat,
@@ -646,18 +643,16 @@ def neoclassical_growth_nn_recursive(
     if not solver_accepted:
         rejection_reasons.append("train_loss")
     results = {
-        "a": a,
-        "delta": delta,
-        "rho_hat": rho_hat,
-        "sigma_crra": sigma_crra,
-        "g": g,
-        "z_0": z_0,
-        "k_0": k_0,
+        "parameters": p.to_dict(),
+        "initial_conditions": {"z_0": z_0, "k_0": k_0},
+        "nn_set": asdict(nn_set),
+        "data_set": asdict(data_set),
+        "ic_set": asdict(ic_set),
+        "lm_set": asdict(lm_set),
+        "tolerance_set": asdict(tolerance_set),
         "test_z_0": ic_draw.test_z_center,
         "test_k_0": ic_draw.test_k_center,
         "seed": seed,
-        "data_seed": ic_set.data_seed,
-        "residual_dtype": residual_dtype,
         "train_loss": train_loss,
         "max_train_euler": max_train_euler,
         "max_test_euler": max_test_euler,
@@ -674,7 +669,6 @@ def neoclassical_growth_nn_recursive(
         "transversality_ok": transversality_ok,
         "min_test_c": float(jnp.min(test_values["c"])),
         "steps": steps,
-        "num_epochs": tolerance_set.num_epochs,
         "epochs_run": epochs_run,
         "attempt": attempt,
         "solve_time": solve_time,
@@ -683,45 +677,13 @@ def neoclassical_growth_nn_recursive(
         "solve_time_success": solve_time if solver_accepted else np.nan,
         "total_params": int(ravel_pytree(nnx.state(policy, nnx.Param))[0].size),
         **acceptance_fields(rejection_reasons),
-        "num_train_trajectories": ic_set.num_train_trajectories,
-        "num_test_trajectories": ic_set.num_test_trajectories,
         "num_simulation_states": num_simulation_states,
         "train_path_ok": bool(jnp.all(train_solution.ok)),
-        "train_log_z_variance": ic_set.train_log_z_variance,
-        "train_log_k_variance": ic_set.train_log_k_variance,
         "test_log_z_variance": ic_draw.test_log_z_variance,
         "test_log_k_variance": ic_draw.test_log_k_variance,
-        "ode_solver": data_set.ode_solver,
-        "rtol": data_set.rtol,
-        "atol": data_set.atol,
-        "initial_dt": data_set.initial_dt,
-        "train_points": data_set.train_points,
-        "train_steps": data_set.train_points - 1,
-        "test_points": data_set.test_points,
-        "train_T": data_set.train_T,
-        "test_T": test_T,
-        "train_tvc_T": data_set.train_tvc_T,
         **error_fields,
     }
 
-    hyperparameters = {
-        "nn_set": asdict(nn_set),
-        "data_set": asdict(data_set),
-        "ic_set": asdict(ic_set),
-        "lm_set": asdict(lm_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": {
-            "a": a,
-            "delta": delta,
-            "rho_hat": rho_hat,
-            "sigma_crra": sigma_crra,
-            "g": g,
-        },
-        "initial_conditions": {
-            "z_0": np.asarray(train_initial_conditions[:, 0]).tolist(),
-            "k_0": np.asarray(train_initial_conditions[:, 1]).tolist(),
-        },
-    }
     if verbose:
         print("\nFinal results:")
         for name, value in results.items():
@@ -733,7 +695,6 @@ def neoclassical_growth_nn_recursive(
         "test_initial_conditions": test_initial_conditions,
         "train_df": train_df,
         "test_df": test_df,
-        "hyperparameters": hyperparameters,
     }
     # A cache hit loads the policy from disk instead of solving, so there is
     # no primal solve to describe.

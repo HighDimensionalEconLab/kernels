@@ -210,7 +210,7 @@ def neoclassical_growth_nn_k(
 
     dtype = jnp.float64 if use_float64 else jnp.float32
     p = StructuralParameters.create(
-        dtype,
+        dtype=dtype,
         a=a,
         delta=delta,
         rho_hat=rho_hat,
@@ -296,21 +296,14 @@ def neoclassical_growth_nn_k(
     g_hat_value = float(model.g_hat[...])
 
     results = {
-        "a": a,
-        "delta": delta,
-        "rho_hat": rho_hat,
-        "sigma_crra": sigma_crra,
-        "z_0": z_0,
-        "k_0": k_0,
-        "g": g,
+        "parameters": p.to_dict(),
+        "nn_set": asdict(policy_settings),
+        "data_set": asdict(data_set),
+        "lm_set": asdict(lm_set),
+        "tolerance_set": asdict(tolerance_set),
         "g_hat": g_hat_value,
         "g_hat_error": g_hat_value - g,
-        "A": A,
-        "b_1": b_1,
-        "b_2": b_2,
         "seed": seed,
-        # Measured, not requested: a float64 leak upstream shows up here.
-        "residual_dtype": str(k_T.dtype),
         "train_loss": train_loss,
         "final_damping": float(result.lm_state.damping),
         "test_euler_mean_abs": float(test_df["euler"].abs().mean()),
@@ -322,13 +315,9 @@ def neoclassical_growth_nn_k(
         "solve_time": solve_time,
         "solve_time_success": solve_time if accepted else np.nan,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
-        "nn_width": policy_settings.width,
-        "nn_depth": policy_settings.depth,
         "solution_accepted": bool(accepted),
         "train_T": float(t_train[-1]),
         "num_train_points": int(t_train.shape[0]),
-        "test_T": data_set.test_T,
-        "test_tvc_T": data_set.test_tvc_T,
     }
     if not use_kinked_production:
         results.update(
@@ -343,29 +332,10 @@ def neoclassical_growth_nn_k(
         for name, value in results.items():
             print(f"  {name}: {value}")
 
-    hyperparameters = {
-        "nn_set": asdict(policy_settings),
-        "data_set": asdict(data_set),
-        "lm_set": asdict(lm_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": {
-            "a": a,
-            "delta": delta,
-            "rho_hat": rho_hat,
-            "sigma_crra": sigma_crra,
-            "g": g,
-            "A": A,
-            "b_1": b_1,
-            "b_2": b_2,
-        },
-        "initial_conditions": {"z_0": z_0, "k_0": k_0},
-    }
-
     return results, {
         "model": model,
         "train_df": train_df,
         "test_df": test_df,
-        "hyperparameters": hyperparameters,
         "solve": {
             "solver": solver,
             "residual_fn": residual_fn,

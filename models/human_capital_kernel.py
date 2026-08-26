@@ -138,7 +138,7 @@ def human_capital_kernel(
     # differentiable through the solve (nlls-gram's implicit JVP/VJP at the
     # ridge stationary point).
     p = StructuralParameters.create(
-        dtype,
+        dtype=dtype,
         a_k=a_k,
         a_h=a_h,
         delta_k=delta_k,
@@ -306,22 +306,14 @@ def human_capital_kernel(
         name: float(alpha @ K @ alpha) for name, alpha in alpha_by_name.items()
     }
     results = {
-        "a_k": a_k,
-        "a_h": a_h,
-        "delta_k": delta_k,
-        "delta_h": delta_h,
-        "rho_hat": rho_hat,
-        "k_0": k_0,
-        "h_0": h_0,
-        # Measured, not requested: a float64 leak upstream shows up here.
-        "residual_dtype": str(train_eval["feasibility"].dtype),
-        "kernel": kernel,
-        "ell": ell,
-        "sigma": sigma,
+        "parameters": p.to_dict(),
+        "kernel_set": asdict(kernel_set),
+        "data_set": asdict(data_set),
+        "lm_set": asdict(lm_set),
+        "ridge_set": asdict(ridge_set),
+        "tolerance_set": asdict(tolerance_set),
         "train_T": float(train_data[-1]),
         "num_train_points": n_train,
-        "test_T": data_set.test_T,
-        "test_points": data_set.test_points,
         "c_0": float(c_0),
         "i_k_0": float(i_k_0),
         "i_h_0": float(i_h_0),
@@ -339,10 +331,7 @@ def human_capital_kernel(
             jnp.max(jnp.abs(test_eval["hidden_dae_residual"]))
         ),
         "solve_time": elapsed,
-        "ridge": ridge_set.ridge,
-        "gtol": lm_set.gtol,
         "train_loss": float(result.info.resid_loss),
-        "final_grad_norm": float(result.info.grad_norm),
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         **acceptance_fields(rejection_reasons),
@@ -368,26 +357,10 @@ def human_capital_kernel(
     test_df = pd.DataFrame(
         {name: np.asarray(test_eval[name]) for name in frame_columns}
     )
-    hyperparameters = {
-        "kernel_set": asdict(kernel_set),
-        "data_set": asdict(data_set),
-        "lm_set": asdict(lm_set),
-        "ridge_set": asdict(ridge_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": {
-            "a_k": a_k,
-            "a_h": a_h,
-            "delta_k": delta_k,
-            "delta_h": delta_h,
-            "rho_hat": rho_hat,
-        },
-        "initial_conditions": {"k_0": k_0, "h_0": h_0},
-    }
     return results, {
         "model": kernel_solution,
         "train_df": train_df,
         "test_df": test_df,
-        "hyperparameters": hyperparameters,
         "solve": {
             "solver": solver,
             "residual_fn": residual_fn,

@@ -6,8 +6,10 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
-from flax import nnx, struct
+from flax import nnx
 from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
+
+from models.utilities import ParameterPyTree
 
 
 # Shared calibration: every deterministic solver variant defaults to the
@@ -22,14 +24,11 @@ class GrowthConstants:
     delta: float
     sigma_crra: float
     quarterly_beta: float
+    rho_hat: float
     train_T: float
     test_T: float
     sequence_test_T: float
     transversality_T: float
-
-    @property
-    def rho_hat(self):
-        return -4.0 * math.log(self.quarterly_beta)
 
 
 # Neoclassical growth, from Aruoba, Fernandez-Villaverde & Rubio-Ramirez
@@ -44,6 +43,7 @@ NEOCLASSICAL_GROWTH_CONSTANTS = GrowthConstants(
     delta=0.1,
     sigma_crra=2.0,
     quarterly_beta=0.9896,
+    rho_hat=-4.0 * math.log(0.9896),
     train_T=100.0,
     test_T=40.0,
     sequence_test_T=110.0,
@@ -72,8 +72,7 @@ KINKED_CALIBRATION = KinkedCalibration()
 # z_trend data rather than p.g; only drivers that need z(t) analytically
 # (consumption substituted from the resource constraint) differentiate
 # through g.
-@struct.dataclass
-class StructuralParameters:
+class StructuralParameters(ParameterPyTree):
     a: jax.Array
     delta: jax.Array
     rho_hat: jax.Array
@@ -86,16 +85,9 @@ class StructuralParameters:
     b_2: jax.Array
     k_thr: jax.Array
 
-    @classmethod
-    def create(cls, dtype, **kwargs):
-        return cls(
-            **{key: jnp.asarray(value, dtype=dtype) for key, value in kwargs.items()}
-        )
-
 
 # The initial conditions ride in the solver args, not here.
-@struct.dataclass
-class RecursiveParameters:
+class RecursiveParameters(ParameterPyTree):
     a: jax.Array
     delta: jax.Array
     rho_hat: jax.Array
@@ -105,12 +97,6 @@ class RecursiveParameters:
     b_1: jax.Array
     b_2: jax.Array
     k_thr: jax.Array
-
-    @classmethod
-    def create(cls, dtype, **kwargs):
-        return cls(
-            **{key: jnp.asarray(value, dtype=dtype) for key, value in kwargs.items()}
-        )
 
 
 # Hicks-neutral technology: Y = z A max(k^a, b_1 k^a - b_2). Balanced growth

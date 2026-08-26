@@ -294,7 +294,7 @@ def multicountry_growth_kernel(
             a_0 = drawn_a_0
     validate_initial_conditions(
         StructuralParameters.create(
-            jnp.float64,
+            dtype=jnp.float64,
             alpha=alpha,
             gammas=gammas,
             delta=delta,
@@ -341,7 +341,7 @@ def multicountry_growth_kernel(
     a_0_array = a_0_array - jnp.sum(populations_array * a_0_array) / total_population
     a_0 = tuple(float(value) for value in a_0_array)
     p = StructuralParameters.create(
-        dtype,
+        dtype=dtype,
         alpha=alpha,
         gammas=gammas,
         delta=delta,
@@ -528,20 +528,16 @@ def multicountry_growth_kernel(
     rkhs_norm_total = sum(rkhs_norms.values()) + rkhs_norm_rate
 
     results = {
-        "alpha": alpha,
-        "delta": delta,
-        "r": r,
-        "eta": eta,
-        "num_countries": num_countries,
-        # Measured, not requested: a float64 leak upstream shows up here.
-        "residual_dtype": str(train_eval["capital"].dtype),
-        "kernel": kernel,
-        "ell": kernel_set.ell,
-        "sigma": kernel_set.sigma,
+        "parameters": p.to_dict(),
+        "kernel_set": asdict(kernel_set),
+        "data_set": asdict(data_set),
+        "initial_set": asdict(initial_set),
+        "lm_set": asdict(lm_set),
+        "ridge_set": asdict(ridge_set),
+        "cg_set": asdict(cg_set),
+        "tolerance_set": asdict(tolerance_set),
         "train_T": float(train_data[-1]),
         "num_train_points": n_train,
-        "test_T": data_set.test_T,
-        "test_points": data_set.test_points,
         "output_scale": float(output_scale),
         "consumption_scale": float(steady["consumption_scale"]),
         "max_train_residual": max_train_residual,
@@ -557,8 +553,6 @@ def multicountry_growth_kernel(
         "algebraic_rkhs_function_count": num_countries + 1,
         "free_initial_value_count": num_initial_values,
         "metric_selection_dimension": num_initial_values,
-        "long_run_check_T": data_set.long_run_check_T,
-        "long_run_window": data_set.long_run_window,
         "long_run_c_flatness": float(long_run["c_flatness"]),
         "long_run_k_flatness": float(long_run["k_flatness"]),
         "long_run_a_flatness": float(long_run["a_flatness"]),
@@ -575,21 +569,11 @@ def multicountry_growth_kernel(
         "rkhs_norm_total": float(rkhs_norm_total),
         "rkhs_norm_interest_rate": float(rkhs_norm_rate),
         "solve_time": solve_time,
-        "cg_tol": cg_set.tol,
-        "cg_maxiter": cg_set.maxiter,
-        "cg_damping_floor": cg_set.damping_floor,
-        "initial_seed": initial_set.seed,
-        "k_0_log_sigma": initial_set.k_0_log_sigma,
-        "a_0_sigma": initial_set.a_0_sigma,
         # Measured, not requested: under ridge continuation the implicit
         # dual is solved at the achieved ridge, which can sit above the
         # configured floor if the anneal stops early.
         "ridge": float(result.lm_state.ridge),
-        "ridge_floor": ridge_set.ridge,
-        "gtol": lm_set.gtol,
-        "atol": lm_set.atol,
         "train_loss": float(result.info.resid_loss),
-        "final_grad_norm": float(result.info.grad_norm),
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         **acceptance_fields(rejection_reasons),
@@ -612,11 +596,6 @@ def multicountry_growth_kernel(
         suffix = country + 1
         results.update(
             {
-                f"gamma_{suffix}": gammas[country],
-                f"population_{suffix}": populations[country],
-                f"productivity_{suffix}": productivities[country],
-                f"k_0_{suffix}": k_0[country],
-                f"a_0_{suffix}": a_0[country],
                 f"a_0_{suffix}_over_output_ss": a_0[country] / float(output_scale),
                 f"q_0_{suffix}": float(test_eval["q"][0, country]),
                 f"c_0_{suffix}": float(test_eval["c"][0, country]),
@@ -677,26 +656,6 @@ def multicountry_growth_kernel(
     if verbose:
         print(f"solve_time(s) = {solve_time}")
 
-    hyperparameters = {
-        "kernel_set": asdict(kernel_set),
-        "data_set": asdict(data_set),
-        "initial_set": asdict(initial_set),
-        "lm_set": asdict(lm_set),
-        "ridge_set": asdict(ridge_set),
-        "cg_set": asdict(cg_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": {
-            "alpha": alpha,
-            "gammas": list(gammas),
-            "delta": delta,
-            "r": r,
-            "eta": eta,
-            "populations": list(populations),
-            "productivities": list(productivities),
-        },
-        "initial_conditions": {"k_0": list(k_0), "a_0": list(a_0)},
-    }
-
     @jax.jit
     def kernel_solution(points):
         K_eval, K_tilde_eval = integrated_kernel_matrices(
@@ -715,7 +674,6 @@ def multicountry_growth_kernel(
         "train_df": train_df,
         "validation_df": validation_df,
         "test_df": test_df,
-        "hyperparameters": hyperparameters,
         "solve": {
             "solver": solver,
             "residual_fn": residual_fn,

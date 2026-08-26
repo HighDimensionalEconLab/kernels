@@ -10,10 +10,20 @@ per-directory READMEs.
   kernel filenames are the NLLS formulation; `_uno` is the constrained IPOPT
   comparison (host-side float64 only — NLLS/NN are the float32/GPU methods).
   `<model>_shared.py` holds model structure only (constants, the flat
-  `StructuralParameters` struct — deep parameters plus initial conditions —
-  production/steady-state functions, diagnostics, shared settings, and for
-  the DAE models `path_residuals`, the equation system every representation
-  consumes); drivers never import other drivers. Each kernel and kernel_uno
+  `StructuralParameters` pytree — deep parameters plus initial conditions,
+  subclassing `models/utilities.ParameterPyTree` for `create(dtype=...)` and
+  `to_dict()` — production/steady-state functions, diagnostics, shared
+  settings, and for the DAE models `path_residuals`, the equation system
+  every representation consumes); drivers never import other drivers.
+  `results` is the full serializable record: nested input blocks first
+  (`"parameters": p.to_dict()` plus one `"<name>_set": asdict(...)` per
+  settings object; recursive drivers add an `"initial_conditions"` block for
+  draw centers not on `p`), then flat measured outcomes only — never plain
+  copies of settings fields or parameters. `extras` carries live objects
+  (solve spec, DataFrames, model, result); there is no
+  `extras["hyperparameters"]` — `replication.utilities.ensemble` splits the
+  dict-valued results entries into `<exp>_hyperparameters.json` and keeps the
+  scalar rows for the DataFrame. Each kernel and kernel_uno
   driver owns its `Theta` and `residual_fn` — the residual rows written
   inline — plus a post-solve `evaluate_grid(points)` closure for off-grid
   paths and residual rows. Sequence-space drivers share the solver-args
@@ -64,10 +74,11 @@ per-directory READMEs.
   `i = delta * k * unit_softplus(h)` on the homothetic state; acceptance is
   solver convergence only — Euler residuals, transversality, and benchmark
   errors are reported, never gated.
-- Stochastic recursive NN drivers accept `--policy_cache <dir>`
-  (content-addressed `.npz`); the kernel-recursive consumers read it via
-  `--policy_dir`. Replication drivers never pass `--policy_cache` — cached
-  runs would corrupt the timing tables.
+- Stochastic recursive NN drivers write content-addressed policy `.npz`
+  artifacts via `--policy_cache <dir>`; the kernel-recursive consumers read
+  them via `--policy_dir`. `stochastic_growth_nn_recursive` always trains
+  (the cache is a pure save target); the stochastic open-economy NN driver
+  still loads on a cache hit instead of training.
 
 ## Conventions
 

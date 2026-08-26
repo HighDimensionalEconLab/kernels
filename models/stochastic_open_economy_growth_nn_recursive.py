@@ -345,7 +345,7 @@ def stochastic_open_economy_growth_nn_recursive(
         current_account_anchor=current_account_anchor,
     )
     p = StructuralParameters.create(
-        dtype,
+        dtype=dtype,
         alpha=parameters.alpha,
         gamma=parameters.gamma,
         delta=parameters.delta,
@@ -768,24 +768,21 @@ def stochastic_open_economy_growth_nn_recursive(
     observed_rates = np.asarray(test_values["interest_rate"]).reshape(-1)
     test_asset_change = test_values["a"][:, -1] - test_values["a"][:, 0]
     results = {
-        **asdict(parameters),
-        "k_0": k_0,
-        "a_0": a_0,
-        "z_0": z_0,
-        "rate_gap_0": rate_gap_0,
-        "interest_rate_mean": parameters.r_star,
-        "kappa_z": kappa_z,
-        "sigma_z": sigma_z,
-        "z_bar": z_bar,
-        "kappa_r": kappa_r,
-        "sigma_r": sigma_r,
-        "corr_zr": corr_zr,
+        "parameters": p.to_dict(),
+        "initial_conditions": {
+            "k_0": k_0,
+            "a_0": a_0,
+            "z_0": z_0,
+            "rate_gap_0": rate_gap_0,
+        },
+        "nn_set": asdict(nn_set),
+        "data_set": asdict(data_set),
+        "ic_set": asdict(ic_set),
+        "lm_set": asdict(lm_set),
+        "tolerance_set": asdict(tolerance_set),
         "z_ergodic_sd": math.sqrt(z_ergodic_variance),
         "rate_ergodic_sd": math.sqrt(rate_ergodic_variance),
         "seed": seed,
-        "data_seed": ic_set.data_seed,
-        # Measured, not requested: a float64 leak upstream shows up here.
-        "residual_dtype": str(train_residual.dtype),
         "sde_solver": sde_solver,
         "train_loss": train_loss,
         "train_euler_mean_abs": float(jnp.mean(jnp.abs(train_euler))),
@@ -820,9 +817,6 @@ def stochastic_open_economy_growth_nn_recursive(
         "test_terminal_current_account_mean": float(
             jnp.mean(test_values["current_account"][:, -1])
         ),
-        "tvc_T": data_set.tvc_T,
-        "tvc_points": data_set.tvc_points,
-        "num_tvc_trajectories": ic_set.num_tvc_trajectories,
         "ex_post_expected_absolute_asset_tvc": float(
             tvc_statistics["expected_absolute_asset_tvc"]
         ),
@@ -847,7 +841,6 @@ def stochastic_open_economy_growth_nn_recursive(
         "hysteresis_euler_mean_abs": hysteresis_euler_mean_abs,
         "hysteresis_euler_max_abs": hysteresis_euler_max_abs,
         "steps": steps,
-        "num_epochs": tolerance_set.num_epochs,
         "epochs_run": epochs_run,
         "shock_continuation_scales": tuple(
             float(value) for value in np.asarray(shock_scales)
@@ -864,43 +857,15 @@ def stochastic_open_economy_growth_nn_recursive(
         "total_params": int(theta_flat.size),
         "residual_count": int(train_residual.size),
         "parameter_to_residual_ratio": float(theta_flat.size / train_residual.size),
-        "num_train_trajectories": ic_set.num_train_trajectories,
-        "num_test_trajectories": ic_set.num_test_trajectories,
         "train_log_z_variance": train_variances[0],
         "train_log_k_variance": train_variances[1],
         "train_asset_variance": train_variances[2],
         "train_rate_variance": train_variances[3],
-        "train_points": data_set.train_points,
-        "test_points": data_set.test_points,
-        "train_T": data_set.train_T,
-        "test_T": data_set.test_T,
         "train_path_ok": train_path_ok,
         "solver_accepted": solver_accepted,
         **acceptance,
     }
 
-    hyperparameters = {
-        "nn_set": asdict(nn_set),
-        "data_set": asdict(data_set),
-        "ic_set": asdict(ic_set),
-        "lm_set": asdict(lm_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": asdict(parameters),
-        "shocks": {
-            "kappa_z": kappa_z,
-            "sigma_z": sigma_z,
-            "z_bar": z_bar,
-            "kappa_r": kappa_r,
-            "sigma_r": sigma_r,
-            "corr_zr": corr_zr,
-        },
-        "initial_conditions": {
-            "k_0": k_0,
-            "a_0": a_0,
-            "z_0": z_0,
-            "rate_gap_0": rate_gap_0,
-        },
-    }
     if verbose:
         print("\nFinal results:")
         for name, value in results.items():
@@ -955,7 +920,6 @@ def stochastic_open_economy_growth_nn_recursive(
         "expected_tvc_df": expected_tvc_df,
         "asset_low_df": trajectory_frame(low_values, low_solution.ts),
         "asset_high_df": trajectory_frame(high_values, high_solution.ts),
-        "hyperparameters": hyperparameters,
     }
 
 

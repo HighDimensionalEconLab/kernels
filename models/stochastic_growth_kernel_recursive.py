@@ -231,7 +231,7 @@ def stochastic_growth_kernel_recursive(
     train_initial_conditions = ic_draw.train_initial_conditions
     test_initial_conditions = ic_draw.test_initial_conditions
     p = StructuralParameters.create(
-        dtype,
+        dtype=dtype,
         a=a,
         delta=delta,
         rho_hat=rho_hat,
@@ -459,37 +459,24 @@ def stochastic_growth_kernel_recursive(
         (grid_values["c"] - reference_grid_values["c"]) / reference_grid_values["c"]
     )
 
-    gram_eigenvalues = jnp.linalg.eigvalsh(args.gram)
     rejection_reasons = []
     if not solver_converged:
         rejection_reasons.append("solver")
     if not test_path_ok:
         rejection_reasons.append("test_path")
     results = {
+        "parameters": p.to_dict(),
+        "initial_conditions": {"z_0": z_0, "k_0": k_0},
+        "kernel_set": asdict(kernel_set),
+        "data_set": asdict(data_set),
+        "ic_set": asdict(ic_set),
+        "lm_set": asdict(lm_set),
+        "ridge_set": asdict(ridge_set),
+        "tolerance_set": asdict(tolerance_set),
         "reference_test_euler_mean_abs": float(reference_meta["test_euler_mean_abs"]),
-        "a": a,
-        "delta": delta,
-        "rho_hat": rho_hat,
-        "sigma_crra": sigma_crra,
-        "eta": eta,
-        "sigma_z": sigma_z,
-        "z_bar": z_bar,
-        "z_0": z_0,
-        "k_0": k_0,
         "test_z_0": ic_draw.test_z_center,
         "test_k_0": ic_draw.test_k_center,
-        "data_seed": ic_set.data_seed,
-        # Measured, not requested: a float64 leak upstream shows up here.
-        "residual_dtype": str(train_values["euler_residual"].dtype),
         "sde_solver": sde_solver,
-        "amplitude": kernel_set.amplitude,
-        "ray_slope": kernel_set.ray_slope,
-        "ray_amplitude": kernel_set.ray_amplitude,
-        "ray_lengthscale": kernel_set.ray_lengthscale,
-        "log_z_lengthscale": kernel_set.log_z_lengthscale,
-        "log_k_lengthscale": kernel_set.log_k_lengthscale,
-        "metric_epsilon": kernel_set.metric_epsilon,
-        "ridge": ridge_set.ridge,
         "train_loss": train_loss,
         "max_train_euler": max_train_euler,
         "max_test_euler": max_test_euler,
@@ -511,11 +498,7 @@ def stochastic_growth_kernel_recursive(
         "setup_time": setup_time,
         "solve_time": solve_time,
         "total_fit_time": total_fit_time,
-        "num_train_trajectories": ic_set.num_train_trajectories,
-        "num_test_trajectories": ic_set.num_test_trajectories,
         "num_centers": n_train,
-        "gram_min_eigenvalue": float(gram_eigenvalues[0]),
-        "gram_max_eigenvalue": float(gram_eigenvalues[-1]),
         "rkhs_norm_ray": rkhs_norm_ray,
         "rkhs_norm_2d": rkhs_norm_2d,
         "test_mean_abs_k_rel_error": float(np.mean(np.abs(k_error))),
@@ -528,34 +511,8 @@ def stochastic_growth_kernel_recursive(
         "observed_log_z_max": float(observed_log_z.max()),
         "observed_log_k_min": float(observed_log_k.min()),
         "observed_log_k_max": float(observed_log_k.max()),
-        "train_points": data_set.train_points,
-        "train_T": data_set.train_T,
-        "test_points": data_set.test_points,
-        "test_T": test_T,
-        "train_tvc_T": data_set.train_tvc_T,
     }
 
-    hyperparameters = {
-        "kernel_set": asdict(kernel_set),
-        "data_set": asdict(data_set),
-        "ic_set": asdict(ic_set),
-        "lm_set": asdict(lm_set),
-        "ridge_set": asdict(ridge_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": {
-            "a": a,
-            "delta": delta,
-            "rho_hat": rho_hat,
-            "sigma_crra": sigma_crra,
-            "eta": eta,
-            "sigma_z": sigma_z,
-            "z_bar": z_bar,
-        },
-        "initial_conditions": {
-            "z_0": np.asarray(train_initial_conditions[:, 0]).tolist(),
-            "k_0": np.asarray(train_initial_conditions[:, 1]).tolist(),
-        },
-    }
     if verbose:
         print("\nFinal results:")
         for name, value in results.items():
@@ -569,7 +526,6 @@ def stochastic_growth_kernel_recursive(
         "test_initial_conditions": test_initial_conditions,
         "train_df": train_df,
         "test_df": test_df,
-        "hyperparameters": hyperparameters,
     }
     return results, extras
 

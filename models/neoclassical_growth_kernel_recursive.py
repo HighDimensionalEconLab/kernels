@@ -251,7 +251,7 @@ def neoclassical_growth_kernel_recursive(
     train_initial_conditions = ic_draw.train_initial_conditions
     test_initial_conditions = ic_draw.test_initial_conditions
     p = RecursiveParameters.create(
-        dtype,
+        dtype=dtype,
         a=a,
         delta=delta,
         rho_hat=rho_hat,
@@ -263,7 +263,7 @@ def neoclassical_growth_kernel_recursive(
         k_thr=float("inf"),
     )
     p_bench = StructuralParameters.create(
-        jnp.float64,
+        dtype=jnp.float64,
         a=a,
         delta=delta,
         rho_hat=rho_hat,
@@ -402,40 +402,30 @@ def neoclassical_growth_kernel_recursive(
     max_train_euler = float(jnp.max(jnp.abs(train_values["euler_residual"])))
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
     test_trajectory_euler = jnp.mean(jnp.abs(test_values["euler_residual"]), axis=1)
-    gram_eigenvalues = jnp.linalg.eigvalsh(args.gram)
 
     rejection_reasons = []
     if not solver_converged:
         rejection_reasons.append("solver")
     results = {
-        "a": a,
-        "delta": delta,
-        "rho_hat": rho_hat,
-        "sigma_crra": sigma_crra,
-        "g": g,
-        "z_0": z_0,
-        "k_0": k_0,
+        "parameters": p.to_dict(),
+        "initial_conditions": {"z_0": z_0, "k_0": k_0},
+        "kernel_set": asdict(kernel_set),
+        "data_set": asdict(data_set),
+        "ic_set": asdict(ic_set),
+        "lm_set": asdict(lm_set),
+        "ridge_set": asdict(ridge_set),
+        "tolerance_set": asdict(tolerance_set),
         "test_z_0": ic_draw.test_z_center,
         "test_k_0": ic_draw.test_k_center,
-        "data_seed": ic_set.data_seed,
-        # Measured, not requested: a float64 leak upstream shows up here.
-        "residual_dtype": str(train_values["euler_residual"].dtype),
         "kernel": (
             "rbf" if kernel_set.homothetic_representation else kernel_set.state_kernel
         ),
-        "amplitude": kernel_set.amplitude,
-        "lengthscale": kernel_set.lengthscale,
-        "metric_epsilon": kernel_set.metric_epsilon,
-        "ridge": ridge_set.ridge,
         "h_const": h_const,
         "rkhs_norm": float(rkhs_norm_squared(alpha, args.gram)),
         "shifted_metric_norm": float(rkhs_norm_squared(alpha, shifted_gram)),
         "penalized_parameter_count": n_centers,
         "unpenalized_parameter_count": (1 if kernel_set.free_constant else 0)
         + (2 if kernel_set.linear_mean else 0),
-        "gram_min_eigenvalue": float(gram_eigenvalues[0]),
-        "gram_max_eigenvalue": float(gram_eigenvalues[-1]),
-        "shifted_gram_condition": float(jnp.linalg.cond(shifted_gram)),
         "train_loss": train_loss,
         "max_train_euler": max_train_euler,
         "max_test_euler": max_test_euler,
@@ -456,46 +446,11 @@ def neoclassical_growth_kernel_recursive(
         "setup_time": setup_time,
         "total_fit_time": total_fit_time,
         **acceptance_fields(rejection_reasons),
-        "num_train_trajectories": ic_set.num_train_trajectories,
-        "num_test_trajectories": ic_set.num_test_trajectories,
         "num_centers": n_centers,
-        "train_log_z_variance": ic_set.train_log_z_variance,
-        "train_log_k_variance": ic_set.train_log_k_variance,
         "test_log_z_variance": ic_draw.test_log_z_variance,
         "test_log_k_variance": ic_draw.test_log_k_variance,
-        "train_point_dt": data_set.train_T / (data_set.train_points - 1),
-        "test_points": data_set.test_points,
-        "train_T": data_set.train_T,
-        "test_T": test_T,
-        "train_tvc_T": data_set.train_tvc_T,
     }
-    if not kernel_set.homothetic_representation:
-        ell_z, ell_k = state_lengthscales(kernel_set)
-        results.update(
-            state_kernel=kernel_set.state_kernel,
-            log_z_lengthscale=ell_z,
-            log_k_lengthscale=ell_k,
-        )
 
-    hyperparameters = {
-        "kernel_set": asdict(kernel_set),
-        "data_set": asdict(data_set),
-        "ic_set": asdict(ic_set),
-        "lm_set": asdict(lm_set),
-        "ridge_set": asdict(ridge_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": {
-            "a": a,
-            "delta": delta,
-            "rho_hat": rho_hat,
-            "sigma_crra": sigma_crra,
-            "g": g,
-        },
-        "initial_conditions": {
-            "z_0": np.asarray(train_initial_conditions[:, 0]).tolist(),
-            "k_0": np.asarray(train_initial_conditions[:, 1]).tolist(),
-        },
-    }
     if verbose:
         print("\nFinal results:")
         for name, value in results.items():
@@ -509,7 +464,6 @@ def neoclassical_growth_kernel_recursive(
         "test_initial_conditions": test_initial_conditions,
         "train_df": train_df,
         "test_df": test_df,
-        "hyperparameters": hyperparameters,
     }
 
 

@@ -12,8 +12,10 @@ from models import multicountry_growth_kernel
 from models.multicountry_growth_shared import InitialConditionSettings
 from replication.utilities import (
     configure_process,
+    nested_results,
     run_solver,
     save_experiment,
+    scalar_results,
     write_summary,
 )
 
@@ -120,13 +122,13 @@ def run(
                 },
             }
             results, extras = run_solver(SOLVER, options)
-            compile_results = pd.DataFrame([results])
+            compile_results = pd.DataFrame([scalar_results(results)])
             frames = {
                 key: value
                 for key, value in extras.items()
                 if isinstance(value, pd.DataFrame)
             }
-            hyperparameters = extras["hyperparameters"]
+            hyperparameters = nested_results(results)
             if not compile_results["solution_accepted"].all():
                 raise RuntimeError(
                     f"{name} was rejected: {compile_results['rejection_reason'].iloc[0]}"
@@ -149,8 +151,8 @@ def run(
             warm_results = []
             for timing_run in range(1, WARM_TIMING_REPETITIONS + 1):
                 timed_row, timed_extras = run_solver(SOLVER, options)
-                timed_results = pd.DataFrame([timed_row])
-                timed_hyperparameters = timed_extras["hyperparameters"]
+                timed_results = pd.DataFrame([scalar_results(timed_row)])
+                timed_hyperparameters = nested_results(timed_row)
                 if timed_hyperparameters != hyperparameters:
                     raise RuntimeError(
                         f"{name} changed hyperparameters across timing runs"

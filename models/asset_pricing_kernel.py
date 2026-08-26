@@ -87,7 +87,7 @@ def asset_pricing_kernel(
     train_data = make_train_t_grid(data_set, dtype)
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
     n_train = len(train_data)
-    p = StructuralParameters.create(dtype, r=r, c=c, g=g, x_0=x_0)
+    p = StructuralParameters.create(dtype=dtype, r=r, c=c, g=g, x_0=x_0)
 
     # The residual is affine in theta, so each ridge-LM step is an exact
     # kernel ridge solve converging to the minimizer of ||r||^2 + ridge * a'Ka
@@ -190,19 +190,14 @@ def asset_pricing_kernel(
         rejection_reasons.append("negative_p_0")
 
     results = {
-        "r": r,
-        "c": c,
-        "g": g,
-        "x_0": x_0,
-        # Measured, not requested: a float64 leak upstream shows up here.
-        "residual_dtype": str(train_residual.dtype),
-        "kernel": kernel,
-        "ell": ell,
-        "sigma": sigma,
+        "parameters": p.to_dict(),
+        "kernel_set": asdict(kernel_set),
+        "data_set": asdict(data_set),
+        "lm_set": asdict(lm_set),
+        "ridge_set": asdict(ridge_set),
+        "tolerance_set": asdict(tolerance_set),
         "train_T": float(train_data[-1]),
         "num_train_points": n_train,
-        "test_T": data_set.test_T,
-        "test_points": data_set.test_points,
         "p_0": float(p_0),
         "horizon_bias_p0": horizon_bias_p0,
         # Unshifted alpha' K alpha (the metric norm includes the epsilon shift).
@@ -215,8 +210,6 @@ def asset_pricing_kernel(
         "p_rel_error_max": float(p_rel_error[1:].max()),
         "p_rel_error_min": float(p_rel_error[1:].min()),
         "solve_time": elapsed,
-        "ridge": ridge_set.ridge,
-        "gtol": lm_set.gtol,
         "train_loss": float(result.info.resid_loss),
         "final_damping": float(result.lm_state.damping),
         "steps": steps,
@@ -244,20 +237,10 @@ def asset_pricing_kernel(
             "residual": np.asarray(test_residual),
         }
     )
-    hyperparameters = {
-        "kernel_set": asdict(kernel_set),
-        "data_set": asdict(data_set),
-        "lm_set": asdict(lm_set),
-        "ridge_set": asdict(ridge_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": {"r": r, "c": c, "g": g},
-        "initial_conditions": {"x_0": x_0},
-    }
     return results, {
         "model": kernel_solution,
         "train_df": train_df,
         "test_df": test_df,
-        "hyperparameters": hyperparameters,
         "solve": {
             "solver": solver,
             "residual_fn": residual_fn,

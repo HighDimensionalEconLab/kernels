@@ -141,7 +141,7 @@ def neoclassical_growth_kernel(
     # differentiable through the solve (nlls-gram's implicit JVP/VJP at the
     # ridge stationary point).
     p = StructuralParameters.create(
-        dtype,
+        dtype=dtype,
         a=a,
         delta=delta,
         rho_hat=rho_hat,
@@ -301,38 +301,23 @@ def neoclassical_growth_kernel(
     g_hat_value = float(theta.g_hat) if learn_g_hat else float(g)
 
     results = {
-        "a": a,
-        "delta": delta,
-        "rho_hat": rho_hat,
-        "sigma_crra": sigma_crra,
-        "z_0": z_0,
-        "k_0": k_0,
-        "g": g,
+        "parameters": {**p.to_dict(), "learn_g_hat": learn_g_hat},
+        "kernel_set": asdict(kernel_set),
+        "data_set": asdict(data_set),
+        "lm_set": asdict(lm_set),
+        "ridge_set": asdict(ridge_set),
+        "tolerance_set": asdict(tolerance_set),
         "g_hat": g_hat_value,
         "g_hat_error": g_hat_value - g,
-        "A": A,
-        "b_1": b_1,
-        "b_2": b_2,
-        # Measured, not requested: a float64 leak upstream shows up here.
-        "residual_dtype": str(result.x.alpha_mu.dtype),
-        "kernel": kernel,
-        "ell": ell,
-        "sigma": sigma,
         "train_T": float(train_data[-1]),
         "num_train_points": n_train,
-        "test_T": data_set.test_T,
-        "test_points": data_set.test_points,
         "c_0": float(c_0),
         "mu_0": float(mu_0),
         "max_train_residual": max_train_residual,
-        "train_residual_tolerance": tolerance_set.train_residual,
         "test_euler_mean_abs": float(test_df["euler"].abs().mean()),
-        "test_tvc_T": data_set.test_tvc_T,
         "log_tvc_residual": log_tvc,
         "transversality_ok": transversality_ok,
         "solve_time": elapsed,
-        "ridge": ridge_set.ridge,
-        "gtol": lm_set.gtol,
         "train_loss": float(result.info.resid_loss),
         "final_damping": float(result.lm_state.damping),
         "steps": steps,
@@ -360,26 +345,6 @@ def neoclassical_growth_kernel(
     elif verbose:
         print(f"solve_time(s) = {elapsed}")
 
-    hyperparameters = {
-        "kernel_set": asdict(kernel_set),
-        "data_set": asdict(data_set),
-        "lm_set": asdict(lm_set),
-        "ridge_set": asdict(ridge_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": {
-            "a": a,
-            "delta": delta,
-            "rho_hat": rho_hat,
-            "sigma_crra": sigma_crra,
-            "g": g,
-            "learn_g_hat": learn_g_hat,
-            "A": A,
-            "b_1": b_1,
-            "b_2": b_2,
-        },
-        "initial_conditions": {"z_0": z_0, "k_0": k_0},
-    }
-
     @jax.jit
     def kernel_solution(t_grid):
         values = evaluate_grid(t_grid)
@@ -395,7 +360,6 @@ def neoclassical_growth_kernel(
         "model": kernel_solution,
         "train_df": train_df,
         "test_df": test_df,
-        "hyperparameters": hyperparameters,
         "solve": {
             "solver": solver,
             "residual_fn": residual_fn,

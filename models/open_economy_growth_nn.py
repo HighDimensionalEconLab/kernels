@@ -203,7 +203,7 @@ def open_economy_growth_nn(
         0.0, float(train_t[-1]), data_set.validation_points, dtype=dtype
     )
     p = StructuralParameters.create(
-        dtype,
+        dtype=dtype,
         alpha=alpha,
         gamma=gamma,
         delta=delta,
@@ -394,23 +394,16 @@ def open_economy_growth_nn(
 
     n_train = len(train_t)
     results = {
-        "alpha": alpha,
-        "gamma": gamma,
-        "delta": delta,
-        "r": r,
-        "eta": eta,
-        "r_star": r_star,
+        "parameters": p.to_dict(),
+        "nn_set": asdict(nn_set),
+        "data_set": asdict(data_set),
+        "lm_set": asdict(lm_set),
+        "tolerance_set": asdict(tolerance_set),
         "r_star_resolved": r_star,
-        "k_0": k_0,
-        "a_0": a_0,
         "a_0_over_output_ss": a_0 / output_scale,
         "seed": seed,
-        # Measured, not requested: a float64 leak upstream shows up here.
-        "residual_dtype": str(train_eval["capital"].dtype),
         "train_T": float(train_t[-1]),
         "num_train_points": n_train,
-        "test_T": data_set.test_T,
-        "test_points": data_set.test_points,
         "k_ss": float(steady["k"]),
         "q_ss": float(steady["q"]),
         "output_ss": output_scale,
@@ -451,8 +444,6 @@ def open_economy_growth_nn(
         "solve_time": solve_time,
         "solve_time_success": solve_time if solution_accepted else np.nan,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
-        "nn_width": nn_set.width,
-        "nn_depth": nn_set.depth,
         **acceptance,
     }
 
@@ -485,27 +476,10 @@ def open_economy_growth_nn(
     test_df["q_relative_error"] = np.asarray(q_relative_error)
     test_df["c_relative_error"] = np.asarray(c_relative_error)
     test_df["a_scaled_error"] = np.asarray(a_scaled_error)
-
-    hyperparameters = {
-        "nn_set": asdict(nn_set),
-        "data_set": asdict(data_set),
-        "lm_set": asdict(lm_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": {
-            "alpha": alpha,
-            "gamma": gamma,
-            "delta": delta,
-            "r": r,
-            "eta": eta,
-            "r_star": r_star,
-        },
-        "initial_conditions": {"k_0": k_0, "a_0": a_0},
-    }
     return results, {
         "model": model,
         "train_df": train_df,
         "test_df": test_df,
-        "hyperparameters": hyperparameters,
         "solve": {
             "solver": solver,
             "residual_fn": residual_fn,

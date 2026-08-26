@@ -124,7 +124,7 @@ def optimal_advertising_kernel_uno(
 
     gamma = (beta + rho_hat) / c
     p = StructuralParameters.create(
-        jnp.float64, rho_hat=rho_hat, c=c, beta=beta, kappa=kappa, x_0=x_0
+        dtype=jnp.float64, rho_hat=rho_hat, c=c, beta=beta, kappa=kappa, x_0=x_0
     )
     u_0_guess = beta * x_0 / (1.0 - x_0)
     mu_0_guess = gamma / (rho_hat + beta + u_0_guess)
@@ -293,19 +293,13 @@ def optimal_advertising_kernel_uno(
         rejection_reasons.append("train_residual")
 
     results = {
-        "rho_hat": rho_hat,
-        "c": c,
-        "beta": beta,
-        "kappa": kappa,
-        "x_0": x_0,
-        "gamma": gamma,
-        "kernel": kernel,
-        "ell": ell,
-        "sigma": sigma,
+        "parameters": {**p.to_dict(), "gamma": gamma},
+        "kernel_set": asdict(kernel_set),
+        "data_set": asdict(data_set),
+        "solver_set": asdict(solver_set),
+        "tolerance_set": asdict(tolerance_set),
         "train_T": float(train_data[-1]),
         "num_train_points": n_train,
-        "test_T": data_set.test_T,
-        "test_points": data_set.test_points,
         "mu_0": float(theta.mu_0),
         "u_0": float(theta.u_0),
         "rkhs_norm_x": float(rkhs_norm_squared(theta.alpha_x, K_jax)),
@@ -338,25 +332,10 @@ def optimal_advertising_kernel_uno(
             "u": np.asarray(u_test),
         }
     )
-    hyperparameters = {
-        "kernel_set": asdict(kernel_set),
-        "data_set": asdict(data_set),
-        "solver_set": asdict(solver_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": {
-            "rho_hat": rho_hat,
-            "c": c,
-            "beta": beta,
-            "kappa": kappa,
-            "gamma": gamma,
-        },
-        "initial_conditions": {"x_0": x_0},
-    }
     return results, {
         "model": kernel_solution,
         "train_df": train_df,
         "test_df": test_df,
-        "hyperparameters": hyperparameters,
     }
 
 

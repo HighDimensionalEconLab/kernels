@@ -179,7 +179,7 @@ def open_economy_growth_kernel_uno(
     # Value container only: no p rides through IPOPT for implicit
     # differentiation.
     p = StructuralParameters.create(
-        jnp.float64,
+        dtype=jnp.float64,
         alpha=alpha,
         gamma=gamma,
         delta=delta,
@@ -475,23 +475,15 @@ def open_economy_growth_kernel_uno(
         return values["k"], values["a"], values["q"], values["c"]
 
     results = {
-        "alpha": alpha,
-        "gamma": gamma,
-        "delta": delta,
-        "r": r,
-        "eta": eta,
-        "r_star": r_star,
+        "parameters": p.to_dict(),
+        "kernel_set": asdict(kernel_set),
+        "data_set": asdict(data_set),
+        "solver_set": asdict(solver_set),
+        "tolerance_set": asdict(tolerance_set),
         "r_star_resolved": r_star,
-        "k_0": k_0,
-        "a_0": a_0,
         "a_0_over_output_ss": a_0 / float(output_scale),
-        "kernel": kernel,
-        "ell": kernel_set.ell,
-        "sigma": kernel_set.sigma,
         "train_T": float(train_data[-1]),
         "num_train_points": n_train,
-        "test_T": data_set.test_T,
-        "test_points": data_set.test_points,
         "k_ss": float(steady["k"]),
         "q_ss": float(steady["q"]),
         "output_ss": float(output_scale),
@@ -574,27 +566,10 @@ def open_economy_growth_kernel_uno(
     test_df["q_relative_error"] = np.asarray(q_relative_error)
     test_df["c_relative_error"] = np.asarray(c_relative_error)
     test_df["a_scaled_error"] = np.asarray(a_scaled_error)
-
-    hyperparameters = {
-        "kernel_set": asdict(kernel_set),
-        "data_set": asdict(data_set),
-        "solver_set": asdict(solver_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": {
-            "alpha": alpha,
-            "gamma": gamma,
-            "delta": delta,
-            "r": r,
-            "eta": eta,
-            "r_star": r_star,
-        },
-        "initial_conditions": {"k_0": k_0, "a_0": a_0},
-    }
     return results, {
         "model": kernel_solution,
         "train_df": train_df,
         "test_df": test_df,
-        "hyperparameters": hyperparameters,
     }
 
 

@@ -123,7 +123,7 @@ def optimal_advertising_kernel(
     # Everything in p is implicitly differentiable through the solve
     # (nlls-gram's implicit JVP/VJP at the ridge stationary point).
     p = StructuralParameters.create(
-        dtype, rho_hat=rho_hat, c=c, beta=beta, kappa=kappa, x_0=x_0
+        dtype=dtype, rho_hat=rho_hat, c=c, beta=beta, kappa=kappa, x_0=x_0
     )
     residual_args = KernelResidualArgs(K=K, K_tilde=K_tilde)
 
@@ -241,21 +241,14 @@ def optimal_advertising_kernel(
         "u": rkhs_norm_squared(alpha_u, K),
     }
     results = {
-        "rho_hat": rho_hat,
-        "c": c,
-        "beta": beta,
-        "kappa": kappa,
-        "x_0": x_0,
-        "gamma": gamma,
-        # Measured, not requested: a float64 leak upstream shows up here.
-        "residual_dtype": str(train_eval["state"].dtype),
-        "kernel": kernel,
-        "ell": ell,
-        "sigma": sigma,
+        "parameters": {**p.to_dict(), "gamma": gamma},
+        "kernel_set": asdict(kernel_set),
+        "data_set": asdict(data_set),
+        "lm_set": asdict(lm_set),
+        "ridge_set": asdict(ridge_set),
+        "tolerance_set": asdict(tolerance_set),
         "train_T": float(train_data[-1]),
         "num_train_points": n_train,
-        "test_T": data_set.test_T,
-        "test_points": data_set.test_points,
         "mu_0": float(mu_0),
         "u_0": float(u_0),
         **{f"rkhs_norm_{name}": float(value) for name, value in rkhs_norms.items()},
@@ -263,8 +256,6 @@ def optimal_advertising_kernel(
         "train_residual_tolerance": train_residual_tolerance,
         "max_validation_residual": max_validation_residual,
         "solve_time": elapsed,
-        "ridge": ridge_set.ridge,
-        "gtol": lm_set.gtol,
         "train_loss": float(result.info.resid_loss),
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
@@ -280,26 +271,10 @@ def optimal_advertising_kernel(
     test_df = pd.DataFrame(
         {name: np.asarray(test_eval[name]) for name in frame_columns}
     )
-    hyperparameters = {
-        "kernel_set": asdict(kernel_set),
-        "data_set": asdict(data_set),
-        "lm_set": asdict(lm_set),
-        "ridge_set": asdict(ridge_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": {
-            "rho_hat": rho_hat,
-            "c": c,
-            "beta": beta,
-            "kappa": kappa,
-            "gamma": gamma,
-        },
-        "initial_conditions": {"x_0": x_0},
-    }
     return results, {
         "model": kernel_solution,
         "train_df": train_df,
         "test_df": test_df,
-        "hyperparameters": hyperparameters,
         "solve": {
             "solver": solver,
             "residual_fn": residual_fn,

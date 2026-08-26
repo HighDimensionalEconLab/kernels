@@ -165,7 +165,7 @@ def human_capital_kernel_uno(
     # Value container only: no p rides through IPOPT for implicit
     # differentiation.
     p = StructuralParameters.create(
-        jnp.float64,
+        dtype=jnp.float64,
         a_k=a_k,
         a_h=a_h,
         delta_k=delta_k,
@@ -400,20 +400,13 @@ def human_capital_kernel_uno(
         rejection_reasons.append("train_residual")
 
     results = {
-        "a_k": a_k,
-        "a_h": a_h,
-        "delta_k": delta_k,
-        "delta_h": delta_h,
-        "rho_hat": rho_hat,
-        "k_0": k_0,
-        "h_0": h_0,
-        "kernel": kernel,
-        "ell": ell,
-        "sigma": sigma,
+        "parameters": p.to_dict(),
+        "kernel_set": asdict(kernel_set),
+        "data_set": asdict(data_set),
+        "solver_set": asdict(solver_set),
+        "tolerance_set": asdict(tolerance_set),
         "train_T": float(train_data[-1]),
         "num_train_points": n_train,
-        "test_T": data_set.test_T,
-        "test_points": data_set.test_points,
         "c_0": float(theta.c_0),
         "i_k_0": float(theta.i_k_0),
         "i_h_0": float(theta.i_h_0),
@@ -454,25 +447,10 @@ def human_capital_kernel_uno(
     test_df = pd.DataFrame(
         {name: np.asarray(test_eval[name]) for name in frame_columns}
     )
-    hyperparameters = {
-        "kernel_set": asdict(kernel_set),
-        "data_set": asdict(data_set),
-        "solver_set": asdict(solver_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": {
-            "a_k": a_k,
-            "a_h": a_h,
-            "delta_k": delta_k,
-            "delta_h": delta_h,
-            "rho_hat": rho_hat,
-        },
-        "initial_conditions": {"k_0": k_0, "h_0": h_0},
-    }
     return results, {
         "model": kernel_solution,
         "train_df": train_df,
         "test_df": test_df,
-        "hyperparameters": hyperparameters,
     }
 
 

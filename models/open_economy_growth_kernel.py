@@ -182,7 +182,7 @@ def open_economy_growth_kernel(
     # Everything in p is implicitly differentiable through the solve
     # (nlls-gram's implicit JVP/VJP at the ridge stationary point).
     p = StructuralParameters.create(
-        dtype,
+        dtype=dtype,
         alpha=alpha,
         gamma=gamma,
         delta=delta,
@@ -423,25 +423,16 @@ def open_economy_growth_kernel(
         return values["k"], values["a"], values["q"], values["c"]
 
     results = {
-        "alpha": alpha,
-        "gamma": gamma,
-        "delta": delta,
-        "r": r,
-        "eta": eta,
-        "r_star": r_star,
+        "parameters": p.to_dict(),
+        "kernel_set": asdict(kernel_set),
+        "data_set": asdict(data_set),
+        "lm_set": asdict(lm_set),
+        "ridge_set": asdict(ridge_set),
+        "tolerance_set": asdict(tolerance_set),
         "r_star_resolved": r_star,
-        "k_0": k_0,
-        "a_0": a_0,
         "a_0_over_output_ss": a_0 / float(output_scale),
-        # Measured, not requested: a float64 leak upstream shows up here.
-        "residual_dtype": str(train_eval["capital"].dtype),
-        "kernel": kernel,
-        "ell": kernel_set.ell,
-        "sigma": kernel_set.sigma,
         "train_T": float(train_data[-1]),
         "num_train_points": n_train,
-        "test_T": data_set.test_T,
-        "test_points": data_set.test_points,
         "k_ss": float(steady["k"]),
         "q_ss": float(steady["q"]),
         "output_ss": float(output_scale),
@@ -490,10 +481,7 @@ def open_economy_growth_kernel(
         "rkhs_norm_q": float(rkhs_norm_q),
         "rkhs_norm_total": float(rkhs_norm_total),
         "solve_time": solve_time,
-        "ridge": ridge_set.ridge,
-        "gtol": lm_set.gtol,
         "train_loss": float(result.info.resid_loss),
-        "final_grad_norm": float(result.info.grad_norm),
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         **acceptance_fields(rejection_reasons),
@@ -532,28 +520,10 @@ def open_economy_growth_kernel(
     test_df["q_relative_error"] = np.asarray(q_relative_error)
     test_df["c_relative_error"] = np.asarray(c_relative_error)
     test_df["a_scaled_error"] = np.asarray(a_scaled_error)
-
-    hyperparameters = {
-        "kernel_set": asdict(kernel_set),
-        "data_set": asdict(data_set),
-        "lm_set": asdict(lm_set),
-        "ridge_set": asdict(ridge_set),
-        "tolerance_set": asdict(tolerance_set),
-        "parameters": {
-            "alpha": alpha,
-            "gamma": gamma,
-            "delta": delta,
-            "r": r,
-            "eta": eta,
-            "r_star": r_star,
-        },
-        "initial_conditions": {"k_0": k_0, "a_0": a_0},
-    }
     return results, {
         "model": kernel_solution,
         "train_df": train_df,
         "test_df": test_df,
-        "hyperparameters": hyperparameters,
         "solve": {
             "solver": solver,
             "residual_fn": residual_fn,

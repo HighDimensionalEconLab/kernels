@@ -53,6 +53,10 @@ def med(block):
     return block["median"] if isinstance(block, dict) else block
 
 
+def select(mapping, *keys):
+    return {key: mapping[key] for key in keys}
+
+
 def final_damping(j):
     return {"final_damping": sig(med(j["final_damping"]), 4)}
 
@@ -693,19 +697,20 @@ def neoclassical_growth_kernel(out):
 
     sparse = load(out, f"{prefix}_sparse")
     far = load(out, f"{prefix}_far_steady_state")
+    far_hp = load(out, f"{prefix}_far_steady_state_hyperparameters")
     experiments = {
         "baseline": {
             "parameters": {
-                "a": sig(med(baseline["a"]), 6),
-                "delta": med(baseline["delta"]),
-                "rho_hat": med(baseline["rho_hat"]),
-                "k_0": med(baseline["k_0"]),
+                "a": sig(hp["parameters"]["a"], 6),
+                "delta": hp["parameters"]["delta"],
+                "rho_hat": hp["parameters"]["rho_hat"],
+                "k_0": hp["parameters"]["k_0"],
             },
             "data": {
                 "num_train_points": int(med(baseline["num_train_points"])),
                 "train_T": med(baseline["train_T"]),
-                "test_T": med(baseline["test_T"]),
-                "test_points": int(med(baseline["test_points"])),
+                "test_T": hp["data_set"]["test_T"],
+                "test_points": int(hp["data_set"]["test_points"]),
             },
             **errors(baseline),
         },
@@ -717,7 +722,7 @@ def neoclassical_growth_kernel(out):
         "far_steady_state": {
             "train_T": med(far["train_T"]),
             "num_train_points": int(med(far["num_train_points"])),
-            "test_T": med(far["test_T"]),
+            "test_T": far_hp["data_set"]["test_T"],
             **errors(far),
         },
     }
@@ -725,7 +730,7 @@ def neoclassical_growth_kernel(out):
         j = load(out, f"{prefix}_{name}")
         g02_hp = load(out, f"{prefix}_{name}_hyperparameters")
         experiments[name] = {
-            "g": med(j["g"]),
+            "g": g02_hp["parameters"]["g"],
             "learn_g_hat": g02_hp["parameters"]["learn_g_hat"],
             "g_hat": sig(med(j["g_hat"]), 4),
             "g_hat_error": sci(med(j["g_hat_error"]), 3),
@@ -880,7 +885,7 @@ def asset_pricing_kernel(out, prefix="asset_pricing_kernel"):
     j = load(out, f"{prefix}_baseline")
     hp = load(out, f"{prefix}_baseline_hyperparameters")
     r, c, g = (hp["parameters"][key] for key in ("r", "c", "g"))
-    x_0 = hp["initial_conditions"]["x_0"]
+    x_0 = hp["parameters"]["x_0"]
     return {
         "experiments": {
             "baseline": {
@@ -888,7 +893,7 @@ def asset_pricing_kernel(out, prefix="asset_pricing_kernel"):
                 "data": {
                     "num_train_points": int(med(j["num_train_points"])),
                     "train_T": med(j["train_T"]),
-                    "test_T": med(j["test_T"]),
+                    "test_T": hp["data_set"]["test_T"],
                 },
                 "solution_accepted": bool(j["n_accepted"] == 1),
                 "p_0": sig(med(j["p_0"]), 4),
@@ -920,7 +925,7 @@ def asset_pricing_nn(out):
     if accepted.empty:
         raise RuntimeError("asset-pricing NN has no accepted seeds")
     return {
-        "parameters": hp["parameters"],
+        "parameters": select(hp["parameters"], "r", "c", "g"),
         "data": hp["data_set"],
         "architecture": {
             "width": hp["nn_set"]["width"],
@@ -970,7 +975,7 @@ def optimal_advertising_kernel(out):
             "beta": hp["parameters"]["beta"],
             "kappa": hp["parameters"]["kappa"],
             "gamma": sig(hp["parameters"]["gamma"], 4),
-            "x_0": hp["initial_conditions"]["x_0"],
+            "x_0": hp["parameters"]["x_0"],
         },
         # ell differs from the headline ell = 10 used elsewhere.
         "kernel": {
@@ -1002,16 +1007,16 @@ def human_capital_kernel(out):
             "delta_k": hp["parameters"]["delta_k"],
             "delta_h": hp["parameters"]["delta_h"],
             "rho_hat": hp["parameters"]["rho_hat"],
-            "k_0": hp["initial_conditions"]["k_0"],
+            "k_0": hp["parameters"]["k_0"],
         },
         "data": {
             "num_train_points": int(med(j["num_train_points"])),
             "train_T": med(j["train_T"]),
-            "test_T": med(j["test_T"]),
+            "test_T": hp["data_set"]["test_T"],
         },
         "solution_accepted": True,
         # QE prose cites x_h0; solved from the initial-condition system.
-        "h_0": sig(med(j["h_0"]), 6),
+        "h_0": sig(hp["parameters"]["h_0"], 6),
         "c_0": sig(med(j["c_0"]), 4),
         "max_train_residual": sci(med(j["max_train_residual"]), 2),
         "max_validation_residual": sci(med(j["max_validation_residual"]), 2),
@@ -1034,8 +1039,18 @@ def neoclassical_growth_nn(out):
     hp = load(out, f"{prefix}_baseline_hyperparameters")
 
     payload = {
-        "parameters": hp["parameters"],
-        "initial_conditions": hp["initial_conditions"],
+        "parameters": select(
+            hp["parameters"],
+            "a",
+            "delta",
+            "rho_hat",
+            "sigma_crra",
+            "g",
+            "A",
+            "b_1",
+            "b_2",
+        ),
+        "initial_conditions": select(hp["parameters"], "z_0", "k_0"),
         "data": hp["data_set"],
         "architecture": {
             "width": hp["nn_set"]["width"],
@@ -1089,7 +1104,7 @@ def neoclassical_growth_nn(out):
         df = pd.read_parquet(out / f"{prefix}_{name}_results.parquet")
         accepted_sample = df[df["solution_accepted"]]
         payload["experiments"][name] = {
-            "g": med(j["g"]),
+            "g": g02_hp["parameters"]["g"],
             "learn_g_hat": g02_hp["nn_set"]["learn_g_hat"],
             "frac_accepted": sig(j["frac_accepted"]),
             # Medians over accepted seeds; a wholesale-rejected experiment
@@ -1140,6 +1155,7 @@ def neoclassical_growth_nn_recursive(out):
     # are reported diagnostics, never gates.
     def experiment(name):
         j = load(out, f"{prefix}_{name}")
+        experiment_hp = load(out, f"{prefix}_{name}_hyperparameters")
         df = pd.read_parquet(out / f"{prefix}_{name}_results.parquet")
         accepted = df[df["solution_accepted"]]
         sample = accepted if not accepted.empty else df
@@ -1163,13 +1179,15 @@ def neoclassical_growth_nn_recursive(out):
             "steps_median": sig(float(sample["steps"].median())),
             **final_damping_summary(sample),
             "num_simulation_states": int(med(j["num_simulation_states"])),
-            "ode_solver": str(sample["ode_solver"].iloc[0]),
-            "num_train_trajectories": int(med(j["num_train_trajectories"])),
-            "num_test_trajectories": int(med(j["num_test_trajectories"])),
+            "ode_solver": experiment_hp["data_set"]["ode_solver"],
+            "num_train_trajectories": experiment_hp["ic_set"]["num_train_trajectories"],
+            "num_test_trajectories": experiment_hp["ic_set"]["num_test_trajectories"],
         }
 
     return {
-        "parameters": hp["parameters"],
+        "parameters": select(
+            hp["parameters"], "a", "delta", "rho_hat", "sigma_crra", "g"
+        ),
         "data": hp["data_set"],
         "architecture": {
             "width": hp["nn_set"]["mlp_width"],
@@ -1198,8 +1216,19 @@ def stochastic_growth_nn_recursive(out):
         raise RuntimeError("stochastic growth recursive NN has no accepted seeds")
 
     return {
-        "parameters": hp["parameters"],
-        "initial_conditions": hp["initial_conditions"],
+        "parameters": {
+            **select(
+                hp["parameters"],
+                "a",
+                "delta",
+                "rho_hat",
+                "sigma_crra",
+                "eta",
+                "sigma_z",
+            ),
+            "z_bar": math.exp(hp["parameters"]["log_z_bar"]),
+        },
+        "initial_conditions": select(hp["parameters"], "z_0", "k_0"),
         "data": hp["data_set"],
         "architecture": {
             "width": hp["nn_set"]["mlp_width"],
@@ -1229,8 +1258,8 @@ def stochastic_growth_nn_recursive(out):
                 **final_damping_summary(accepted),
                 "sde_solver": str(accepted["sde_solver"].iloc[0]),
                 "num_simulation_states": int(med(j["num_simulation_states"])),
-                "num_train_trajectories": int(med(j["num_train_trajectories"])),
-                "num_test_trajectories": int(med(j["num_test_trajectories"])),
+                "num_train_trajectories": hp["ic_set"]["num_train_trajectories"],
+                "num_test_trajectories": hp["ic_set"]["num_test_trajectories"],
             }
         },
     }
@@ -1242,6 +1271,7 @@ def neoclassical_growth_kernel_recursive(out):
 
     def experiment(name):
         j = load(out, f"{prefix}_{name}")
+        experiment_hp = load(out, f"{prefix}_{name}_hyperparameters")
         return {
             "frac_accepted": sig(j["frac_accepted"]),
             "test_mean_abs_k_rel_error": sci(med(j["test_mean_abs_k_rel_error"])),
@@ -1255,12 +1285,14 @@ def neoclassical_growth_kernel_recursive(out):
             "num_centers": int(med(j["num_centers"])),
             "penalized_parameter_count": int(med(j["penalized_parameter_count"])),
             "rkhs_norm": sig(med(j["rkhs_norm"])),
-            "num_train_trajectories": int(med(j["num_train_trajectories"])),
-            "num_test_trajectories": int(med(j["num_test_trajectories"])),
+            "num_train_trajectories": experiment_hp["ic_set"]["num_train_trajectories"],
+            "num_test_trajectories": experiment_hp["ic_set"]["num_test_trajectories"],
         }
 
     return {
-        "parameters": hp["parameters"],
+        "parameters": select(
+            hp["parameters"], "a", "delta", "rho_hat", "sigma_crra", "g"
+        ),
         "data": hp["data_set"],
         "kernel": hp["kernel_set"],
         "solver": {"ridge": hp["ridge_set"]["ridge"]},
@@ -1300,6 +1332,7 @@ def open_economy_growth_kernel(
 
     def experiment(name):
         j = load(out, f"{prefix}_{name}")
+        experiment_hp = load(out, f"{prefix}_{name}_hyperparameters")
         results = pd.read_parquet(out / f"{prefix}_{name}_results.parquet")
         return {
             "solution_accepted": bool(j["frac_accepted"] == 1.0),
@@ -1309,8 +1342,8 @@ def open_economy_growth_kernel(
                 else {}
             ),
             "r_star": sig(med(j["r_star_resolved"]), 5),
-            "k_0": sig(med(j["k_0"]), 5),
-            "a_0": sig(med(j["a_0"]), 5),
+            "k_0": sig(experiment_hp["parameters"]["k_0"], 5),
+            "a_0": sig(experiment_hp["parameters"]["a_0"], 5),
             "num_train_points": int(med(j["num_train_points"])),
             "train_T": sig(med(j["train_T"]), 5),
             "max_train_residual": sci(med(j["max_train_residual"])),
@@ -1334,7 +1367,9 @@ def open_economy_growth_kernel(
         }
 
     return {
-        "parameters": hp["parameters"],
+        "parameters": select(
+            hp["parameters"], "alpha", "gamma", "delta", "r", "eta", "r_star"
+        ),
         "kernel": hp["kernel_set"],
         "selection": selection,
         **(
@@ -1370,14 +1405,15 @@ def open_economy_growth_nn_recursive(out, prefix="open_economy_growth_nn_recursi
 
     def experiment(name):
         j = load(out, f"{prefix}_{name}")
+        experiment_hp = load(out, f"{prefix}_{name}_hyperparameters")
         frame = pd.read_parquet(out / f"{prefix}_{name}_results.parquet")
         accepted = frame[frame["solution_accepted"]]
         if accepted.empty:
             return {"frac_accepted": sig(j["frac_accepted"])}
         return {
             "frac_accepted": sig(j["frac_accepted"]),
-            "k_0": sig(float(accepted["k_0"].median()), 5),
-            "a_0": sig(float(accepted["a_0"].median()), 5),
+            "k_0": sig(experiment_hp["parameters"]["k_0"], 5),
+            "a_0": sig(experiment_hp["parameters"]["a_0"], 5),
             "max_train_residual_median": sci(
                 float(accepted["max_train_residual"].median())
             ),
@@ -1401,7 +1437,9 @@ def open_economy_growth_nn_recursive(out, prefix="open_economy_growth_nn_recursi
         }
 
     return {
-        "parameters": hp["parameters"],
+        "parameters": select(
+            hp["parameters"], "alpha", "gamma", "delta", "r", "eta", "r_star"
+        ),
         "architecture": {
             "width": hp["nn_set"]["width"],
             "depth": hp["nn_set"]["depth"],
@@ -1433,7 +1471,7 @@ def multicountry_growth_kernel(out):
             "num_countries": len(hp["parameters"]["populations"]),
             "initial_conditions": {
                 field: [sig(value, 6) for value in values]
-                for field, values in hp["initial_conditions"].items()
+                for field, values in select(hp["parameters"], "k_0", "a_0").items()
             },
             "solution_accepted": bool(j["frac_accepted"] == 1.0),
             "validation_pass": bool(results["validation_pass"].all()),
@@ -1477,7 +1515,16 @@ def multicountry_growth_kernel(out):
         },
     }
     payload = {
-        "parameters": baseline_hp["parameters"],
+        "parameters": select(
+            baseline_hp["parameters"],
+            "alpha",
+            "gammas",
+            "delta",
+            "r",
+            "eta",
+            "populations",
+            "productivities",
+        ),
         "kernel": baseline_hp["kernel_set"],
         "selection": "minimum_rkhs_norm_ridge",
         "training_information": {"terminal_residual_count": 0},
@@ -1631,8 +1678,17 @@ def multicountry_growth_nn(out):
         experiments[name] = {
             "scenario": summary["scenario"],
             "num_countries": len(hp["parameters"]["populations"]),
-            "parameters": hp["parameters"],
-            "initial_conditions": hp["initial_conditions"],
+            "parameters": select(
+                hp["parameters"],
+                "alpha",
+                "gammas",
+                "delta",
+                "r",
+                "eta",
+                "populations",
+                "productivities",
+            ),
+            "initial_conditions": select(hp["parameters"], "k_0", "a_0"),
             "architecture": {
                 "width": hp["nn_set"]["width"],
                 "depth": hp["nn_set"]["depth"],
@@ -1659,7 +1715,16 @@ def multicountry_growth_nn(out):
 
     baseline_summary, baseline_hp, _ = experiment_data["baseline"]
     payload = {
-        "parameters": baseline_hp["parameters"],
+        "parameters": select(
+            baseline_hp["parameters"],
+            "alpha",
+            "gammas",
+            "delta",
+            "r",
+            "eta",
+            "populations",
+            "productivities",
+        ),
         "architecture": experiments["baseline"]["architecture"],
         "selection": "minimum_identity_metric_parameter_step",
         "training_information": {

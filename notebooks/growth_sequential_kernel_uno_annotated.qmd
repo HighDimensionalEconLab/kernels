@@ -6,7 +6,7 @@ title: "Growth Sequential — Kernel, Constrained (Uno)"
 
 [JAX](https://docs.jax.dev) underlies everything below: array math via `jax.numpy`, [compilation](https://docs.jax.dev/en/latest/jit-compilation.html) via `jax.jit`, and exact derivatives via [automatic differentiation](https://docs.jax.dev/en/latest/automatic-differentiation.html) — the solver differentiates the residual program itself, so no derivative is coded by hand. JAX defaults to 32-bit floats, so we switch on 64-bit and the most accurate matmul *before* creating any array, then import everything we need.
 
-This notebook solves the same problem as the companion ridgeless notebook, but with a **constrained optimizer**: the interior-point solver [Uno](https://github.com/cvanaret/Uno) through `unopy`, with JAX supplying the gradient, Jacobian, and Hessian callbacks. The model code — `p`, the kernel matrices, and `residual_fn` — is the ridgeless notebook's, retyped verbatim; here `p` is only a value container, since the NLP solver is host-side C++ and nothing differentiates through it.
+This notebook solves the same problem as the companion ridgeless notebook, but with a **constrained optimizer**: the interior-point solver [Uno](https://github.com/cvanaret/Uno) through `unopy`, with JAX supplying the gradient, Jacobian, and Hessian callbacks. The model code — `p`, the kernel matrices, `residual_fn`, and the warm-started `theta_0` — is the ridgeless notebook's, retyped verbatim; here `p` is only a value container, since the NLP solver is host-side C++ and nothing differentiates through it.
 
 ```{python}
 import jax
@@ -21,6 +21,7 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import unopy
+from jax.flatten_util import ravel_pytree
 ```
 
 Structural parameters: the Aruoba–Fernández-Villaverde–Rubio-Ramírez calibration, with the continuous discount rate mapped from the quarterly anchor $e^{-\hat\rho/4} = \beta$.
@@ -111,29 +112,28 @@ $$
 \end{aligned}
 $$
 
-at every training date. The equality constraints are `residual_fn` verbatim — its constant $1/\sqrt{3n}$ scale is immaterial to the constraint set — with `unpack` rebuilding the ridgeless `theta` dict from Uno's flat vector. JAX supplies `jax.grad`, [`jax.jacfwd`](https://docs.jax.dev/en/latest/automatic-differentiation.html), and the Lagrangian Hessian via `jax.hessian` as jitted callbacks.
+at every training date. The equality constraints are `residual_fn` verbatim — its constant $1/\sqrt{3n}$ scale is immaterial to the constraint set — with `ravel_pytree` flattening the ridgeless `theta_0` dict (sorted keys) into Uno's flat vector and returning the inverse `unravel`; the free scalars $(c_0, \mu_0)$ warm-start at the flat steady-flow guess, exactly as in the ridgeless notebook. JAX supplies `jax.grad`, [`jax.jacfwd`](https://docs.jax.dev/en/latest/automatic-differentiation.html), and the Lagrangian Hessian via `jax.hessian` as jitted callbacks.
 
 ```{python}
 K, K_tilde = kernel_matrices(t_train, t_train)
 args = {"K": K, "K_tilde": K_tilde}
 
-N_VARIABLES = 3 * N_TRAIN + 2
+c_flow = k_0**a - delta * k_0  # flat steady-flow warm start
+theta_0 = {
+    "alpha_mu": jnp.zeros(N_TRAIN),
+    "alpha_c": jnp.zeros(N_TRAIN),
+    "alpha_k": jnp.zeros(N_TRAIN),
+    "c_0": jnp.asarray(c_flow),
+    "mu_0": jnp.asarray(c_flow**-sigma_crra),
+}
+x_initial, unravel = ravel_pytree(theta_0)
+N_VARIABLES = x_initial.size
 N_CONSTRAINTS = 3 * N_TRAIN
-
-
-def unpack(x):
-    return {
-        "alpha_mu": x[:N_TRAIN],
-        "alpha_c": x[N_TRAIN : 2 * N_TRAIN],
-        "alpha_k": x[2 * N_TRAIN : 3 * N_TRAIN],
-        "c_0": x[3 * N_TRAIN],
-        "mu_0": x[3 * N_TRAIN + 1],
-    }
 
 
 @jax.jit
 def objective(x):
-    theta = unpack(x)
+    theta = unravel(x)
     return (
         theta["alpha_mu"] @ K @ theta["alpha_mu"]
         + theta["alpha_c"] @ K @ theta["alpha_c"]
@@ -143,7 +143,7 @@ def objective(x):
 
 @jax.jit
 def constraints(x):
-    return residual_fn(unpack(x), args, p)
+    return residual_fn(unravel(x), args, p)
 
 
 def lagrangian(x, objective_multiplier, multipliers):
@@ -157,7 +157,7 @@ lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
 
 ## The NLP setup
 
-Uno takes the problem in sparse-triplet form; with a dense kernel model the Jacobian is simply every (row, column) pair and the Hessian its lower triangle. Every variable is free and every constraint row is an equality at zero; the free scalars $(c_0, \mu_0)$ warm-start at the flat steady-flow guess.
+Uno takes the problem in sparse-triplet form; with a dense kernel model the Jacobian is simply every (row, column) pair and the Hessian its lower triangle. Every variable is free, every constraint row is an equality at zero, and the initial primal iterate is the flattened `theta_0`.
 
 ```{python}
 variable_lower_bounds = np.full(N_VARIABLES, -np.inf)
@@ -226,13 +226,7 @@ model.set_lagrangian_hessian(
     hessian_callback,
 )
 model.set_lagrangian_sign_convention(unopy.MULTIPLIER_POSITIVE)
-
-# Flat steady-flow warm start for the free scalars.
-c_flow = k_0**a - delta * k_0
-x_initial = np.zeros(N_VARIABLES)
-x_initial[3 * N_TRAIN] = c_flow
-x_initial[3 * N_TRAIN + 1] = c_flow**-sigma_crra
-model.set_initial_primal_iterate(x_initial)
+model.set_initial_primal_iterate(np.asarray(x_initial))
 ```
 
 ## Solve
@@ -249,7 +243,7 @@ start = time.perf_counter()
 result = solver.optimize(model)
 solve_time = time.perf_counter() - start
 
-theta = unpack(jnp.asarray(np.array(result.primal_solution))[:N_VARIABLES])
+theta = unravel(jnp.asarray(np.array(result.primal_solution))[:N_VARIABLES])
 ```
 
 ## Results

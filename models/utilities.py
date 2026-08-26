@@ -1,6 +1,5 @@
 import hashlib
 import json
-import math
 import pathlib
 import time
 from dataclasses import dataclass
@@ -28,55 +27,6 @@ def acceptance_fields(rejection_reasons):
         "solution_accepted": accepted,
         "rejection_reason": "accepted" if accepted else ",".join(rejection_reasons),
     }
-
-
-# Directional derivative d/dtau f(x + tau v) at tau = 0 by central
-# differences, for double-checking implicit-AD sensitivities. Host-side and
-# jit-free: f maps a concrete pytree to a pytree of concrete arrays. eps_f
-# is the measured noise floor of f -- an iterative inner solver's stopping
-# tolerance usually sets it, far above machine eps -- and the step balances
-# that noise against the stencil's truncation order: h ~ eps_f^(1/5) for
-# the five-point order-4 stencil, h ~ (3 eps_f)^(1/3) for the two-point
-# order-2 one, scaled by the magnitude of x along the direction when that
-# exceeds one. Steps are taken along the unit direction, so h is the actual
-# perturbation size in x space. Returns (derivative, h).
-def finite_difference_directional(f, x, v, eps_f, order=4):
-    x_leaves = jax.tree_util.tree_leaves(x)
-    v_leaves = jax.tree_util.tree_leaves(v)
-    v_norm = math.sqrt(sum(float(jnp.sum(jnp.square(leaf))) for leaf in v_leaves))
-    x_along_v = (
-        sum(
-            float(jnp.sum(x_leaf * v_leaf))
-            for x_leaf, v_leaf in zip(x_leaves, v_leaves, strict=True)
-        )
-        / v_norm
-    )
-    scale = max(1.0, abs(x_along_v))
-    if order == 4:
-        h = eps_f ** (1.0 / 5.0) * scale
-        stencil = ((-2.0, 1.0), (-1.0, -8.0), (1.0, 8.0), (2.0, -1.0))
-    elif order == 2:
-        h = (3.0 * eps_f) ** (1.0 / 3.0) * scale
-        stencil = ((-1.0, -1.0), (1.0, 1.0))
-    else:
-        raise ValueError("order must be 2 or 4")
-    outputs = [
-        f(
-            jax.tree_util.tree_map(
-                lambda x_leaf, v_leaf: x_leaf + (offset * h / v_norm) * v_leaf, x, v
-            )
-        )
-        for offset, _ in stencil
-    ]
-    # The stencil runs in tau with step h / v_norm, so the weighted sum over
-    # a denominator of (12 or 2) * (h / v_norm) is d f / d tau directly.
-    denominator = (12.0 if order == 4 else 2.0) * h / v_norm
-    weights = [weight / denominator for _, weight in stencil]
-    derivative = jax.tree_util.tree_map(
-        lambda *values: sum(w * value for w, value in zip(weights, values)),
-        *outputs,
-    )
-    return derivative, h
 
 
 # Long-format DataFrame from a dict of same-shaped arrays: one row per
@@ -123,8 +73,9 @@ def standardized_initial_states(key, center, scales, num_trajectories):
     return center[None, :] + scales[None, :] * standardized
 
 
-# Gram-form Levenberg-Marquardt settings shared across solvers; each solver
-# pins its tuned values inline in its lm_set signature default.
+# Levenberg-Marquardt settings shared across solvers -- exactly the
+# constructor and solve() kwargs; each solver pins its tuned values inline in
+# its lm_set signature default and threads only the fields it uses.
 @dataclass(frozen=True)
 class OptimizerSettings:
     init_damping: float = 1e-5
@@ -132,6 +83,43 @@ class OptimizerSettings:
     damping_increase: float = 8.0
     geodesic_acceleration: bool = True
     geodesic_acceptance_ratio: float = 0.8
+    max_steps: int = 100
+    atol: float = 1e-9
+    gtol: float = 1e-9
+    num_attempts: int = 5  # MultiStart num_starts; multi-start drivers only
+
+
+# RidgeLevenbergMarquardt extras: the ridge weight, optional ridge
+# continuation (ridge_init=None solves at the fixed ridge), and the linear
+# solver for the whitened subproblem.
+@dataclass(frozen=True)
+class RidgeSettings:
+    ridge: float = 1e-10
+    ridge_init: float | None = None
+    ridge_decrease: float = 0.01
+    ridge_grad_rtol: float = 1e-2
+    linear_solver: str = "auto"  # "auto" | "cholesky" | "qr" | "cg"
+
+
+# Matrix-free CG configuration, read only when linear_solver == "cg".
+@dataclass(frozen=True)
+class CGSettings:
+    tol: float = 1e-10
+    maxiter: int = 40
+    damping_floor: float = 1e-10
+
+
+# Uno/IPOPT options, applied via solver.set_option gated on `is not None`.
+@dataclass(frozen=True)
+class UnoOptimizerSettings:
+    preset: str = "ipopt"
+    max_iterations: int | None = None
+    time_limit: float | None = None
+    primal_tolerance: float | None = None
+    dual_tolerance: float | None = None
+
+
+ACCEPTED_SOLUTION_STATUSES = frozenset({"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"})
 
 
 def make_train_t_grid(data_set, dtype):

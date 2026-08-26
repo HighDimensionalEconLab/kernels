@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import unopy
+from jax.flatten_util import ravel_pytree
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
@@ -55,26 +56,25 @@ def residual_fn(theta, args, p):
 K, K_tilde = kernel_matrices(t_train, t_train)
 args = {"K": K, "K_tilde": K_tilde, "t": t_train}
 
-N_VARIABLES = N_TRAIN + 1
+theta_0 = {"alpha": jnp.zeros(N_TRAIN), "p_0": jnp.zeros(())}
+# ravel_pytree flattens the ridgeless theta dict (sorted keys) into Uno's
+# vector and returns the inverse unravel.
+x_initial, unravel = ravel_pytree(theta_0)
+N_VARIABLES = x_initial.size
 N_CONSTRAINTS = N_TRAIN
-
-
-# unpack rebuilds the ridgeless theta dict from Uno's flat vector.
-def unpack(x):
-    return {"alpha": x[:N_TRAIN], "p_0": x[N_TRAIN]}
 
 
 # min alpha' K alpha subject to the NLLS residual_fn vanishing at every
 # training date.
 @jax.jit
 def objective(x):
-    alpha = unpack(x)["alpha"]
+    alpha = unravel(x)["alpha"]
     return alpha @ K @ alpha
 
 
 @jax.jit
 def constraints(x):
-    return residual_fn(unpack(x), args, p)
+    return residual_fn(unravel(x), args, p)
 
 
 def lagrangian(x, objective_multiplier, multipliers):
@@ -153,7 +153,7 @@ model.set_lagrangian_hessian(
     hessian_callback,
 )
 model.set_lagrangian_sign_convention(unopy.MULTIPLIER_POSITIVE)
-model.set_initial_primal_iterate(np.zeros(N_VARIABLES))
+model.set_initial_primal_iterate(np.asarray(x_initial))
 
 solver = unopy.UnoSolver()
 solver.set_preset("ipopt")
@@ -166,7 +166,7 @@ solve_time = time.perf_counter() - start
 
 # primal_solution appends solver-internal auxiliaries; only the leading
 # N_TRAIN + 1 block is ours.
-theta = unpack(jnp.asarray(np.array(result.primal_solution)[:N_VARIABLES]))
+theta = unravel(jnp.asarray(np.array(result.primal_solution)[:N_VARIABLES]))
 alpha, p_0 = theta["alpha"], theta["p_0"]
 
 K_test, K_tilde_test = kernel_matrices(t_test, t_train)

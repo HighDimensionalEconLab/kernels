@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
+from flax import struct
 from nlls_gram import (
     QR,
     AnnealRidge,
@@ -16,32 +18,118 @@ from nlls_gram import (
 )
 
 from models.kernels import (
+    IntegratedPath,
     KernelSettings,
+    integrated_kernel_matrices,
+    integrated_kernel_paths,
     integrated_metric_factorization,
     rkhs_norm_squared,
 )
 from models.open_economy_growth_benchmark import open_economy_growth_benchmark
 from models.open_economy_growth_shared import (
+    OPEN_ECONOMY_GROWTH_CONSTANTS as CONSTANTS,
+)
+from models.open_economy_growth_shared import (
     DataSettings,
-    ModelParameters,
-    Theta,
-    evaluate_grid,
-    model_parameter_values,
+    StructuralParameters,
+    investment_expenditure,
+    path_residuals,
     present_value_gap,
-    residual_fn,
+    production,
     steady_state,
     tail_diagnostics,
     tvc_diagnostics,
 )
 from models.utilities import (
+    OptimizerSettings,
+    RidgeSettings,
     Stopwatch,
     acceptance_fields,
     make_sampled_train_grid,
 )
 
 
+# Alpha blocks first (the metric penalizes the leading flat coordinates).
+class Theta(NamedTuple):
+    alpha_mu: jax.Array
+    alpha_c: jax.Array
+    alpha_k: jax.Array
+    alpha_a: jax.Array
+    alpha_q: jax.Array
+    c_offset: jax.Array
+    mu_offset: jax.Array
+    q_offset: jax.Array
+
+
+@struct.dataclass
+class ResidualArgs:
+    K: jax.Array
+    K_tilde: jax.Array
+
+
+def residual_fn(theta, args, p):
+    steady_p = steady_state(p)
+    # The asset block is the one path with no unpenalized offset, so its
+    # scale enters the minimum-norm selection metric; the scale must be
+    # differentiation-inert or every parameter sensitivity picks up a
+    # selection-drift term from the metric moving with p. The other
+    # normalizations are absorbed by their free offsets.
+    output_scale_p = jax.lax.stop_gradient(steady_p["output"])
+    log_consumption_scale_p = jnp.log(steady_p["g"])
+    paths = integrated_kernel_paths(
+        {
+            "log_mu": IntegratedPath(
+                theta.alpha_mu,
+                -p.gamma * log_consumption_scale_p + theta.mu_offset,
+            ),
+            "log_c": IntegratedPath(
+                theta.alpha_c, log_consumption_scale_p + theta.c_offset
+            ),
+            "log_k": IntegratedPath(theta.alpha_k, jnp.log(p.k_0)),
+            "a_raw": IntegratedPath(theta.alpha_a, jnp.zeros((), theta.alpha_a.dtype)),
+            "log_q": IntegratedPath(
+                theta.alpha_q, jnp.log(steady_p["q"]) + theta.q_offset
+            ),
+        },
+        args.K,
+        args.K_tilde,
+    )
+    k = jnp.exp(paths["log_k"].value)
+    a = p.a_0 + output_scale_p * paths["a_raw"].value
+    q = jnp.exp(paths["log_q"].value)
+    c = jnp.exp(paths["log_c"].value)
+    mu = jnp.exp(paths["log_mu"].value)
+    dlog_k_dt = paths["log_k"].d_dt
+    da_dt = output_scale_p * paths["a_raw"].d_dt
+    dlog_q_dt = paths["log_q"].d_dt
+    dlog_mu_dt = paths["log_mu"].d_dt
+    residuals = path_residuals(
+        k,
+        a,
+        q,
+        c,
+        mu,
+        jnp.ones_like(k),
+        dlog_k_dt,
+        da_dt,
+        dlog_q_dt,
+        dlog_mu_dt,
+        p,
+    )
+    residual = jnp.concatenate(
+        [
+            residuals["capital"],
+            residuals["assets"],
+            residuals["tobin_q"],
+            residuals["marginal_wealth"],
+            residuals["consumption_foc"],
+        ]
+    )
+    return residual / jnp.sqrt(residual.size)
+
+
 # Numerical acceptance and ex-post quality thresholds, CLI-reachable so a
-# float32 caller can pass its own bars (the float32 replication driver does).
+# lower-precision caller can pass its own bars.
 @dataclass(frozen=True)
 class ToleranceSettings:
     train_residual: float = 1e-5
@@ -51,48 +139,46 @@ class ToleranceSettings:
     benchmark_match: float = 1e-3
 
 
-@dataclass(frozen=True)
-class SolverSettings:
-    init_damping: float = 1e-8
-    damping_decrease: float = 0.1
-    damping_increase: float = 4.0
-    max_steps: int = 100
-    # Conjunctive stopping in the whitened variable y = F_bar theta the
-    # solver works in: gtol bounds the whitened stationarity
-    # ||J~'r + ridge [y_m; 0]||, residual_atol additionally demands the
-    # scaled residual norm solved (the converged residual floors at
-    # O(ridge * ||dual||), so residual_atol sits above it). The ridge keeps
-    # the minimizer O(ridge) from the pure RKHS-seminorm interpolant with
-    # the free offsets unpenalized (no epsilon shift anywhere).
-    residual_atol: float = 5e-7
-    ridge: float = 3e-12
-    gtol: float = 5e-8
-    # ridge_init=None solves at the fixed ridge above; a value enables ridge
-    # continuation annealed from ridge_init down to `ridge` (the floor) by
-    # factors of `ridge_decrease` on inner stationarity. The metric's
-    # factorization never involves the ridge, so the anneal composes
-    # unchanged.
-    ridge_init: float | None = 1e-7
-    ridge_decrease: float = 0.01
-    # Relative stationarity threshold that triggers the next ridge level:
-    # looser anneals faster (fewer steps per level), tighter solves each
-    # level out more completely before descending.
-    ridge_grad_rtol: float = 1e-2
-    # "auto" (whitened cholesky): the whitened normal matrix has its
-    # spectral floor at the ridge, so the DAE Jacobian's scale spread stays
-    # within float64. "qr" and "cholesky" remain valid (all paths run
-    # whitened).
-    linear_solver: str = "auto"
-
-
 def open_economy_growth_kernel(
+    alpha: float = CONSTANTS.alpha,
+    gamma: float = CONSTANTS.gamma,
+    delta: float = CONSTANTS.delta,
+    r: float = CONSTANTS.r,
+    eta: float = CONSTANTS.eta,
+    r_star: float = CONSTANTS.r_star,
     k_0: float = 1.0,
     a_0: float = 0.0,
-    parameters: ModelParameters = ModelParameters(),
     use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(ell=20.0),
     data_set: DataSettings = DataSettings(),
-    lm_set: SolverSettings = SolverSettings(),
+    # Conjunctive stopping in the whitened variable y = F_bar theta the
+    # solver works in: gtol bounds the whitened stationarity
+    # ||J~'r + ridge [y_m; 0]||, atol additionally demands the scaled
+    # residual norm solved (the converged residual floors at
+    # O(ridge * ||dual||), so atol sits above it).
+    lm_set: OptimizerSettings = OptimizerSettings(
+        init_damping=1e-8,
+        damping_decrease=0.1,
+        damping_increase=4.0,
+        max_steps=100,
+        atol=5e-7,
+        gtol=5e-8,
+    ),
+    # The ridge keeps the minimizer O(ridge) from the pure RKHS-seminorm
+    # interpolant with the free offsets unpenalized (no epsilon shift
+    # anywhere). ridge_init enables continuation annealed down to the ridge
+    # floor by factors of ridge_decrease on inner stationarity; the metric's
+    # factorization never involves the ridge, so the anneal composes
+    # unchanged. linear_solver "auto" is the whitened cholesky: the whitened
+    # normal matrix has its spectral floor at the ridge, so the DAE
+    # Jacobian's scale spread stays within float64 ("qr"/"cholesky" remain
+    # valid; all paths run whitened).
+    ridge_set: RidgeSettings = RidgeSettings(
+        ridge=3e-12,
+        ridge_init=1e-7,
+        ridge_decrease=0.01,
+        ridge_grad_rtol=1e-2,
+    ),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = False,
 ):
@@ -107,7 +193,20 @@ def open_economy_growth_kernel(
         0.0, float(train_data[-1]), data_set.validation_points, dtype=dtype
     )
     n_train = len(train_data)
-    steady = steady_state(parameters)
+    # Everything in p is implicitly differentiable through the solve
+    # (nlls-gram's implicit JVP/VJP at the ridge stationary point).
+    p = StructuralParameters.create(
+        dtype,
+        alpha=alpha,
+        gamma=gamma,
+        delta=delta,
+        r=r,
+        eta=eta,
+        r_star=r_star,
+        k_0=k_0,
+        a_0=a_0,
+    )
+    steady = steady_state(p)
     output_scale = steady["output"]
     consumption_scale = steady["g"]
 
@@ -120,14 +219,7 @@ def open_economy_growth_kernel(
         train_data, kernel, kernel_set.sigma, kernel_set.ell, repeats=5
     )
 
-    # Everything in p is implicitly differentiable through the solve
-    # (nlls-gram's implicit JVP/VJP at the ridge stationary point).
-    p = {
-        "parameters": model_parameter_values(parameters, dtype),
-        "k_0": jnp.asarray(k_0, dtype=dtype),
-        "a_0": jnp.asarray(a_0, dtype=dtype),
-    }
-    residual_args = {"K": K, "K_tilde": K_tilde}
+    residual_args = ResidualArgs(K=K, K_tilde=K_tilde)
 
     # The zero coordinate contains no saddle-path or present-value information:
     # it is flat in the derivative RKHS at the model's scale normalizations.
@@ -142,15 +234,15 @@ def open_economy_growth_kernel(
         q_offset=jnp.zeros((), dtype=dtype),
     )
 
-    if lm_set.ridge_init is None:
-        initial_ridge = lm_set.ridge
+    if ridge_set.ridge_init is None:
+        initial_ridge = ridge_set.ridge
         continuation_options = {}
     else:
-        initial_ridge = lm_set.ridge_init
+        initial_ridge = ridge_set.ridge_init
         callback = AnnealRidge(
-            ridge_floor=lm_set.ridge,
-            decrease=lm_set.ridge_decrease,
-            grad_rtol=lm_set.ridge_grad_rtol,
+            ridge_floor=ridge_set.ridge,
+            decrease=ridge_set.ridge_decrease,
+            grad_rtol=ridge_set.ridge_grad_rtol,
         )
         continuation_options = {
             "callback": callback,
@@ -161,7 +253,7 @@ def open_economy_growth_kernel(
         metric=metric,
         ridge=initial_ridge,
         linear_solver={"auto": Cholesky(), "cholesky": Cholesky(), "qr": QR()}[
-            lm_set.linear_solver
+            ridge_set.linear_solver
         ],
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
@@ -171,7 +263,7 @@ def open_economy_growth_kernel(
     solve_options = dict(
         max_steps=lm_set.max_steps,
         gtol=lm_set.gtol,
-        atol=lm_set.residual_atol,
+        atol=lm_set.atol,
         max_steps_is_success=False,
     )
 
@@ -182,15 +274,84 @@ def open_economy_growth_kernel(
     solve_time = timer.elapsed(result)
     theta = result.x
 
-    train_eval = evaluate_grid(theta, train_data, train_data, kernel_set, p)
-    validation_eval = evaluate_grid(theta, validation_data, train_data, kernel_set, p)
-    test_eval = evaluate_grid(theta, test_data, train_data, kernel_set, p)
+    # Paths, model quantities, and DAE residuals on an evaluation grid
+    # through fresh cross-kernel matrices against the training grid.
+    def evaluate_grid(points):
+        K_eval, K_tilde_eval = integrated_kernel_matrices(
+            points,
+            train_data,
+            kernel_set.kernel,
+            kernel_set.sigma,
+            kernel_set.ell,
+        )
+        steady_p = steady_state(p)
+        output_scale_p = jax.lax.stop_gradient(steady_p["output"])
+        log_consumption_scale_p = jnp.log(steady_p["g"])
+        paths = integrated_kernel_paths(
+            {
+                "log_mu": IntegratedPath(
+                    theta.alpha_mu,
+                    -p.gamma * log_consumption_scale_p + theta.mu_offset,
+                ),
+                "log_c": IntegratedPath(
+                    theta.alpha_c, log_consumption_scale_p + theta.c_offset
+                ),
+                "log_k": IntegratedPath(theta.alpha_k, jnp.log(p.k_0)),
+                "a_raw": IntegratedPath(
+                    theta.alpha_a, jnp.zeros((), theta.alpha_a.dtype)
+                ),
+                "log_q": IntegratedPath(
+                    theta.alpha_q, jnp.log(steady_p["q"]) + theta.q_offset
+                ),
+            },
+            K_eval,
+            K_tilde_eval,
+        )
+        k = jnp.exp(paths["log_k"].value)
+        a = p.a_0 + output_scale_p * paths["a_raw"].value
+        q = jnp.exp(paths["log_q"].value)
+        c = jnp.exp(paths["log_c"].value)
+        mu = jnp.exp(paths["log_mu"].value)
+        dlog_k_dt = paths["log_k"].d_dt
+        da_dt = output_scale_p * paths["a_raw"].d_dt
+        dlog_q_dt = paths["log_q"].d_dt
+        dlog_mu_dt = paths["log_mu"].d_dt
+        z = jnp.ones_like(k)
+        residuals = path_residuals(
+            k,
+            a,
+            q,
+            c,
+            mu,
+            z,
+            dlog_k_dt,
+            da_dt,
+            dlog_q_dt,
+            dlog_mu_dt,
+            p,
+        )
+        return {
+            "t": points,
+            "k": k,
+            "a": a,
+            "q": q,
+            "c": c,
+            "mu": mu,
+            "x": investment_expenditure(k, q, p),
+            "output": production(k, z, p),
+            "current_account": da_dt,
+            **residuals,
+        }
+
+    train_eval = evaluate_grid(train_data)
+    validation_eval = evaluate_grid(validation_data)
+    test_eval = evaluate_grid(test_data)
     tail = tail_diagnostics(
         train_eval["k"][-1],
         train_eval["a"][-1],
         train_eval["q"][-1],
         train_eval["c"][-1],
-        parameters,
+        p,
     )
     residual_names = (
         "capital",
@@ -206,9 +367,7 @@ def open_economy_growth_kernel(
         float(jnp.max(jnp.abs(validation_eval[name]))) for name in residual_names
     )
 
-    benchmark, benchmark_diagnostics = open_economy_growth_benchmark(
-        k_0, a_0, parameters=parameters
-    )
+    benchmark, benchmark_diagnostics = open_economy_growth_benchmark(p)
     benchmark_values = benchmark(np.asarray(test_data))
     k_relative_error = jnp.abs(
         test_eval["k"] - jnp.asarray(benchmark_values["k"])
@@ -247,7 +406,7 @@ def open_economy_growth_kernel(
         validation_eval["q"],
         validation_eval["c"],
         a_0,
-        parameters,
+        p,
     )
     tvc = tvc_diagnostics(
         train_eval["k"][-1],
@@ -255,7 +414,7 @@ def open_economy_growth_kernel(
         train_eval["q"][-1],
         train_eval["c"][-1],
         train_eval["t"][-1],
-        parameters,
+        p,
     )
 
     rejection_reasons = []
@@ -279,12 +438,17 @@ def open_economy_growth_kernel(
 
     @jax.jit
     def kernel_solution(points):
-        values = evaluate_grid(theta, points, train_data, kernel_set, p)
+        values = evaluate_grid(points)
         return values["k"], values["a"], values["q"], values["c"]
 
     results = {
-        **asdict(parameters),
-        "r_star_resolved": parameters.r_star,
+        "alpha": alpha,
+        "gamma": gamma,
+        "delta": delta,
+        "r": r,
+        "eta": eta,
+        "r_star": r_star,
+        "r_star_resolved": r_star,
         "k_0": k_0,
         "a_0": a_0,
         "a_0_over_output_ss": a_0 / float(output_scale),
@@ -345,7 +509,7 @@ def open_economy_growth_kernel(
         "rkhs_norm_q": float(rkhs_norm_q),
         "rkhs_norm_total": float(rkhs_norm_total),
         "solve_time": solve_time,
-        "ridge": lm_set.ridge,
+        "ridge": ridge_set.ridge,
         "gtol": lm_set.gtol,
         "train_loss": float(result.info.resid_loss),
         "final_grad_norm": float(result.info.grad_norm),
@@ -392,8 +556,16 @@ def open_economy_growth_kernel(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
+        "ridge_set": asdict(ridge_set),
         "tolerance_set": asdict(tolerance_set),
-        "parameters": asdict(parameters),
+        "parameters": {
+            "alpha": alpha,
+            "gamma": gamma,
+            "delta": delta,
+            "r": r,
+            "eta": eta,
+            "r_star": r_star,
+        },
         "initial_conditions": {"k_0": k_0, "a_0": a_0},
     }
     return results, {

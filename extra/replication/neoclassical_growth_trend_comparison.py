@@ -13,6 +13,7 @@ from models import (
     neoclassical_growth_nn,
     neoclassical_growth_nn_recursive,
 )
+from models.utilities import OptimizerSettings
 from replication.utilities import configure_process, style
 
 PREFIX = "neoclassical_growth_trend_comparison"
@@ -54,8 +55,13 @@ def run(
                 test_T=test_T, test_points=test_points
             ),
             nn_set=neoclassical_growth_nn.GrowthPolicySettings(learn_g_hat=True),
-            tolerance_set=neoclassical_growth_nn.ToleranceSettings(
-                train_loss_threshold=1e-14
+            lm_set=OptimizerSettings(
+                init_damping=1e-5,
+                damping_decrease=0.5,
+                damping_increase=2.0,
+                max_steps=250,
+                atol=1e-07,
+                num_attempts=5,
             ),
             verbose=verbose,
         )

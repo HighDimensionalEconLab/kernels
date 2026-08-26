@@ -3,7 +3,10 @@ from __future__ import annotations
 import jsonargparse
 
 from models import open_economy_growth_nn
-from models.open_economy_growth_shared import ModelParameters, steady_state
+from models.open_economy_growth_shared import (
+    OPEN_ECONOMY_GROWTH_CONSTANTS,
+    steady_state,
+)
 from replication.utilities import (
     configure_process,
     ensemble,
@@ -21,8 +24,7 @@ def run(
     verbose: bool = False,
 ):
     configure_process()
-    parameters = ModelParameters()
-    output_ss = float(steady_state(parameters)["output"])
+    output_ss = float(steady_state(OPEN_ECONOMY_GROWTH_CONSTANTS)["output"])
 
     def go(name, experiment_n_seeds, **experiment):
         print(f"{name}: {experiment_n_seeds} seeds -> {output_dir}/")

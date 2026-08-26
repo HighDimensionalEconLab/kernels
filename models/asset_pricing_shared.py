@@ -1,31 +1,36 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+from flax import struct
 
-from models.kernels import IntegratedPath, integrated_kernel_paths
 
+@struct.dataclass
+class StructuralParameters:
+    r: jax.Array
+    c: jax.Array
+    g: jax.Array
+    x_0: jax.Array
 
-# Alpha first (the metric penalizes the leading flat coordinates).
-class Theta(NamedTuple):
-    alpha: jax.Array
-    p_0: jax.Array
+    @classmethod
+    def create(cls, dtype, **kwargs):
+        return cls(
+            **{key: jnp.asarray(value, dtype=dtype) for key, value in kwargs.items()}
+        )
 
 
 def dividends(t, p):
-    return (p["x_0"] + p["c"] / p["g"]) * jnp.exp(p["g"] * t) - p["c"] / p["g"]
+    return (p.x_0 + p.c / p.g) * jnp.exp(p.g * t) - p.c / p.g
 
 
-# No-arbitrage residual dp/dt = r p - x along the dividend path.
-def residual_fn(theta, args, p):
-    paths = integrated_kernel_paths(
-        {"price": IntegratedPath(theta.alpha, theta.p_0)}, args["K"], args["K_tilde"]
-    )
-    price, dprice_dt = paths["price"]
-    return dprice_dt - (p["r"] * price - dividends(args["t"], p))
+# No-bubble fundamental price for the linear asset-pricing ODE
+#   mu'(t) = r mu(t) - x(t),  x(t) = (x_0 + c/g) e^{g t} - c/g,
+# with r > g. The general solution is mu(t) = mu_f(t) + zeta e^{r t}; the
+# transversality (no-bubble) condition selects zeta = 0.
+def mu_f_array(t, c, g, r, x_0):
+    return (x_0 + c / g) * jnp.exp(g * t) / (r - g) - c / (g * r)
 
 
 @dataclass(frozen=True)
@@ -37,8 +42,8 @@ class DataSettings:
     test_points: int = 100
 
 
-# Acceptance gates, CLI-reachable so a float32 caller can pass its own bar
-# (the float32 replication driver does).
+# Acceptance gates, CLI-reachable so a lower-precision caller can pass its
+# own bars.
 @dataclass(frozen=True)
 class ToleranceSettings:
     train_residual: float = 1e-8

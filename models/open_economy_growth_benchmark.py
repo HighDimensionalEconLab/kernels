@@ -7,7 +7,6 @@ from flax import struct
 from tinydiffeq import solve_bvp
 
 from models.open_economy_growth_shared import (
-    ModelParameters,
     consumption_annuity_rate,
     consumption_growth_rate,
 )
@@ -115,19 +114,14 @@ def solve_transition_bvp(args, bench_set):
     )
 
 
-def open_economy_growth_benchmark(
-    k_0,
-    a_0,
-    parameters=ModelParameters(),
-    bench_set=BenchmarkParameters(),
-):
-    alpha = parameters.alpha
-    delta = parameters.delta
-    r_star = parameters.r_star
-    eta = parameters.eta
-    chi = parameters.delta ** (1.0 - parameters.eta)
-    consumption_growth = consumption_growth_rate(parameters)
-    annuity_rate = consumption_annuity_rate(parameters)
+def open_economy_growth_benchmark(p, bench_set=BenchmarkParameters()):
+    alpha = p.alpha
+    delta = p.delta
+    r_star = p.r_star
+    eta = p.eta
+    chi = p.delta ** (1.0 - p.eta)
+    consumption_growth = consumption_growth_rate(p)
+    annuity_rate = consumption_annuity_rate(p)
 
     args = {
         "alpha": alpha,
@@ -135,10 +129,10 @@ def open_economy_growth_benchmark(
         "r_star": r_star,
         "eta": eta,
         "chi": chi,
-        "r": parameters.r,
-        "gamma": parameters.gamma,
-        "k_0": k_0,
-        "a_0": a_0,
+        "r": p.r,
+        "gamma": p.gamma,
+        "k_0": p.k_0,
+        "a_0": p.a_0,
         "T": bench_set.T,
     }
     solution = solve_transition_bvp(args, bench_set)

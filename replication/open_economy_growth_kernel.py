@@ -7,7 +7,10 @@ import jsonargparse
 import numpy as np
 
 from models import open_economy_growth_kernel
-from models.open_economy_growth_shared import ModelParameters, steady_state
+from models.open_economy_growth_shared import (
+    OPEN_ECONOMY_GROWTH_CONSTANTS,
+    steady_state,
+)
 from replication.utilities import (
     configure_process,
     ensemble,
@@ -22,8 +25,7 @@ ASSET_CONFIGURATIONS = ("initial_debt", "baseline", "initial_assets")
 
 def run(output_dir: str = ".results"):
     configure_process()
-    parameters = ModelParameters()
-    output_ss = float(steady_state(parameters)["output"])
+    output_ss = float(steady_state(OPEN_ECONOMY_GROWTH_CONSTANTS)["output"])
     meta = dict(n_seeds=1, residual_dtype="float64")
     test_frames = {}
     initial_assets = {}
@@ -50,7 +52,7 @@ def run(output_dir: str = ".results"):
         resolved_rates[name] = float(results_df["r_star_resolved"].iloc[0])
 
     go("baseline")
-    go("r_star_005", parameters=dict(r_star=0.05))
+    go("r_star_005", r_star=0.05)
     go("initial_debt", a_0=-0.5 * output_ss)
     go("initial_assets", a_0=0.5 * output_ss)
     write_summary(output_dir, PREFIX)

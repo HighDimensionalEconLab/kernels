@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -8,16 +9,16 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 import unopy
+from flax import struct
 from jax.flatten_util import ravel_pytree
 from jax.tree_util import Partial
 
-from models.asset_pricing_benchmark import mu_f_array
 from models.asset_pricing_shared import (
     DataSettings,
-    Theta,
+    StructuralParameters,
     ToleranceSettings,
     dividends,
-    residual_fn,
+    mu_f_array,
 )
 from models.kernels import (
     IntegratedPath,
@@ -26,18 +27,47 @@ from models.kernels import (
     integrated_kernel_paths,
     rkhs_norm_squared,
 )
-from models.utilities import Stopwatch, acceptance_fields, make_train_t_grid
+from models.utilities import (
+    ACCEPTED_SOLUTION_STATUSES,
+    Stopwatch,
+    UnoOptimizerSettings,
+    acceptance_fields,
+    make_train_t_grid,
+)
+
+
+# Alpha first (the metric penalizes the leading flat coordinates).
+class Theta(NamedTuple):
+    alpha: jax.Array
+    p_0: jax.Array
+
+
+@struct.dataclass
+class ResidualArgs:
+    batch: dict  # {"t"}
+    K: jax.Array
+    K_tilde: jax.Array
+    unravel: Partial
+
+
+# No-arbitrage residual dp/dt = r p - x along the dividend path.
+def residual_fn(theta, args, p):
+    paths = integrated_kernel_paths(
+        {"price": IntegratedPath(theta.alpha, theta.p_0)}, args.K, args.K_tilde
+    )
+    price, dprice_dt = paths["price"]
+    return dprice_dt - (p.r * price - dividends(args.batch["t"], p))
 
 
 @jax.jit
 def objective(x, args):
-    theta = args["unravel"](x)
-    return rkhs_norm_squared(theta.alpha, args["K"])
+    theta = args.unravel(x)
+    return rkhs_norm_squared(theta.alpha, args.K)
 
 
 @jax.jit
 def constraints(x, args, p):
-    theta = args["unravel"](x)
+    theta = args.unravel(x)
     return residual_fn(theta, args, p)
 
 
@@ -54,13 +84,6 @@ constraint_jacobian = jax.jit(jax.jacfwd(constraints))
 lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
 
 
-@dataclass(frozen=True)
-class SolverSettings:
-    preset: str = "ipopt"
-    max_iterations: int | None = None
-    time_limit: float | None = None
-
-
 def asset_pricing_kernel_uno(
     r: float = 0.1,
     c: float = 0.02,
@@ -68,7 +91,7 @@ def asset_pricing_kernel_uno(
     x_0: float = 0.01,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
-    solver_set: SolverSettings = SolverSettings(),
+    solver_set: UnoOptimizerSettings = UnoOptimizerSettings(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = False,
 ):
@@ -87,19 +110,19 @@ def asset_pricing_kernel_uno(
     K_jax = (K + K.T) / 2
     K_tilde_jax = jnp.asarray(K_tilde)
 
-    p = {"r": r, "c": c, "g": g, "x_0": x_0}
+    p = StructuralParameters.create(jnp.float64, r=r, c=c, g=g, x_0=x_0)
 
     theta_0 = Theta(
         alpha=jnp.zeros(n_train, dtype=jnp.float64),
         p_0=jnp.zeros((), dtype=jnp.float64),
     )
     x_initial, unravel = ravel_pytree(theta_0)
-    args = {
-        "K": K_jax,
-        "K_tilde": K_tilde_jax,
-        "t": train_data,
-        "unravel": Partial(unravel),
-    }
+    args = ResidualArgs(
+        batch={"t": train_data},
+        K=K_jax,
+        K_tilde=K_tilde_jax,
+        unravel=Partial(unravel),
+    )
 
     n_variables = x_initial.size
     n_constraints = n_train
@@ -181,6 +204,10 @@ def asset_pricing_kernel_uno(
         solver.set_option("max_iterations", solver_set.max_iterations)
     if solver_set.time_limit is not None:
         solver.set_option("time_limit", solver_set.time_limit)
+    if solver_set.primal_tolerance is not None:
+        solver.set_option("primal_tolerance", solver_set.primal_tolerance)
+    if solver_set.dual_tolerance is not None:
+        solver.set_option("dual_tolerance", solver_set.dual_tolerance)
 
     timer = Stopwatch()
     result = solver.optimize(model)
@@ -220,7 +247,7 @@ def asset_pricing_kernel_uno(
     rejection_reasons = []
     if solver_status != "SUCCESS":
         rejection_reasons.append("solver_status")
-    if solution_status not in {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}:
+    if solution_status not in ACCEPTED_SOLUTION_STATUSES:
         rejection_reasons.append("solution_status")
     if not finite:
         rejection_reasons.append("nonfinite")

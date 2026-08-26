@@ -69,7 +69,6 @@ class ToleranceSettings:
     # each interior epoch boundary, so num_epochs = 1 never resamples.
     max_steps: int = 250
     train_loss_threshold: float = 1e-14
-    num_attempts: int = 5
     log_tvc_threshold: float = 0.0
     num_epochs: int = 1
     epoch_early_stopping: bool = True
@@ -350,6 +349,7 @@ def neoclassical_growth_nn_recursive(
         damping_increase=2.71,
         geodesic_acceleration=True,
         geodesic_acceptance_ratio=0.541,
+        num_attempts=5,
     ),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     # Directory for content-addressed policy artifacts (e.g. ".results"): an
@@ -507,7 +507,7 @@ def neoclassical_growth_nn_recursive(
         )
         multi_start = MultiStart(
             key=multi_start_key,
-            num_starts=tolerance_set.num_attempts,
+            num_starts=lm_set.num_attempts,
             draw=draw,
         )
         solve_options = dict(

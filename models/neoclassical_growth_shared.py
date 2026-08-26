@@ -3,20 +3,11 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from functools import partial
-from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-import numpy as np
-import pandas as pd
 from flax import nnx, struct
 from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
-
-from models.kernels import (
-    IntegratedPath,
-    integrated_kernel_matrices,
-    integrated_kernel_paths,
-)
 
 
 # Shared calibration: every deterministic solver variant defaults to the
@@ -77,7 +68,10 @@ KINKED_CALIBRATION = KinkedCalibration()
 
 # (A, b_1, b_2, k_thr) = (1, 1, 0, inf) is smooth Cobb-Douglas; the kinked
 # family sets all four, with k_thr = (b_2 / (b_1 - 1))^{1/a} the branch
-# switch.
+# switch. The sequential kernel/NN residuals read the trend through batch
+# z_trend data rather than p.g; only drivers that need z(t) analytically
+# (consumption substituted from the resource constraint) differentiate
+# through g.
 @struct.dataclass
 class StructuralParameters:
     a: jax.Array
@@ -86,6 +80,7 @@ class StructuralParameters:
     sigma_crra: jax.Array
     z_0: jax.Array
     k_0: jax.Array
+    g: jax.Array
     A: jax.Array
     b_1: jax.Array
     b_2: jax.Array
@@ -133,96 +128,6 @@ def mpk(z, k, p):
     return z * p.A * p.a * branch * k ** (p.a - 1.0)
 
 
-# Alpha blocks first (the metric penalizes the leading flat coordinates);
-# g_hat is the trend rate of the approximation class, None unless learned.
-class Theta(NamedTuple):
-    alpha_mu: jax.Array
-    alpha_c: jax.Array
-    alpha_k: jax.Array
-    c_0: jax.Array
-    mu_0: jax.Array
-    g_hat: jax.Array | None = None
-
-
-# CRRA first-order condition u'(c) = mu; the costate and resource residuals
-# are utility-free.
-def residual_fn(theta, args, p):
-    g_hat = theta.g_hat if theta.g_hat is not None else args["g_hat"]
-    trend_mu = None if g_hat is None else -p.sigma_crra * g_hat
-    paths = integrated_kernel_paths(
-        {
-            "mu": IntegratedPath(theta.alpha_mu, theta.mu_0, trend_mu),
-            "c": IntegratedPath(theta.alpha_c, theta.c_0, g_hat),
-            "k": IntegratedPath(theta.alpha_k, p.k_0, g_hat),
-        },
-        args["K"],
-        args["K_tilde"],
-        args["t"],
-    )
-    k, dk_dt = paths["k"]
-    mu, dmu_dt = paths["mu"]
-    c = paths["c"].value
-    z = p.z_0 * args["z_trend"]
-    resource = dk_dt - (production(z, k, p) - p.delta * k - c)
-    euler = dmu_dt + mu * (mpk(z, k, p) - p.delta - p.rho_hat)
-    shadow_price = mu * c**p.sigma_crra - 1.0
-    residual = jnp.concatenate([resource, euler, shadow_price])
-    return residual / jnp.sqrt(residual.size)
-
-
-# Paths on t_grid through fresh cross-kernel matrices against the training
-# grid.
-def evaluate_paths(theta, t_grid, train_data, kernel_set, p, g_hat=None):
-    K_eval, K_tilde_eval = integrated_kernel_matrices(
-        t_grid,
-        train_data,
-        kernel_set.kernel,
-        kernel_set.sigma,
-        kernel_set.ell,
-    )
-    g_hat = theta.g_hat if theta.g_hat is not None else g_hat
-    trend_mu = None if g_hat is None else -p.sigma_crra * g_hat
-    return integrated_kernel_paths(
-        {
-            "mu": IntegratedPath(theta.alpha_mu, theta.mu_0, trend_mu),
-            "c": IntegratedPath(theta.alpha_c, theta.c_0, g_hat),
-            "k": IntegratedPath(theta.alpha_k, p.k_0, g_hat),
-        },
-        K_eval,
-        K_tilde_eval,
-        t_grid,
-    )
-
-
-def snapshot(theta, t, p, train_data, kernel_set, g_hat=None, benchmark=None, z=1.0):
-    paths = evaluate_paths(theta, t, train_data, kernel_set, p, g_hat)
-    k, dk_dt = paths["k"]
-    mu, dmu_dt = paths["mu"]
-    c = paths["c"].value
-    df = pd.DataFrame(
-        {
-            "t": np.asarray(t),
-            "k": np.asarray(k),
-            "c": np.asarray(c),
-            "mu": np.asarray(mu),
-            "resource": np.asarray(dk_dt - (production(z, k, p) - p.delta * k - c)),
-            "euler": np.asarray(dmu_dt + mu * (mpk(z, k, p) - p.delta - p.rho_hat)),
-            "shadow_price": np.asarray(mu * c**p.sigma_crra - 1.0),
-        }
-    )
-    if benchmark is not None:
-        k_b, c_b = benchmark(t)
-        df["k_benchmark"] = np.asarray(k_b)
-        df["c_benchmark"] = np.asarray(c_b)
-        df["k_rel_error"] = np.abs(df["k"] - df["k_benchmark"]) / np.abs(
-            df["k_benchmark"]
-        )
-        df["c_rel_error"] = np.abs(df["c"] - df["c_benchmark"]) / np.abs(
-            df["c_benchmark"]
-        )
-    return df
-
-
 @dataclass(frozen=True)
 class DataSettings:
     train_T: float = NEOCLASSICAL_GROWTH_CONSTANTS.train_T
@@ -231,6 +136,26 @@ class DataSettings:
     test_T: float = NEOCLASSICAL_GROWTH_CONSTANTS.sequence_test_T
     test_points: int = 100
     test_tvc_T: float = NEOCLASSICAL_GROWTH_CONSTANTS.transversality_T
+
+
+# The sequential NN drivers' acceptance gate.
+@dataclass(frozen=True)
+class ToleranceSettings:
+    log_tvc_threshold: float = 0.0
+
+
+@dataclass(frozen=True)
+class GrowthPolicySettings:
+    width: int = 32
+    depth: int = 3
+    hidden_activation: str = "tanh"
+    hidden_bias: bool = True
+    output_bias: bool = True
+    input_scale: float = 40.0
+    # Trend e^{g_hat t} on the output heads: a learned Param (init g_hat_init)
+    # or fixed at the constructor's g_hat.
+    learn_g_hat: bool = False
+    g_hat_init: float = 0.0
 
 
 def consumption(policy, log_state, p):

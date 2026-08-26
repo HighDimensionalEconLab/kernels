@@ -17,13 +17,15 @@ from nlls_gram import (
 )
 
 from models.multicountry_growth_shared import (
+    MULTICOUNTRY_GROWTH_CONSTANTS as CONSTANTS,
+)
+from models.multicountry_growth_shared import (
+    DataSettings,
     InitialConditionSettings,
-    MulticountryParameters,
-    MulticountryParameterValues,
+    StructuralParameters,
     draw_initial_conditions,
     investment_expenditure,
     long_run_diagnostics,
-    multicountry_parameter_values,
     path_residuals,
     production,
     relative_welfare_weights,
@@ -51,35 +53,12 @@ RESIDUAL_NAMES = (
 )
 
 
-# Acceptance gates (CLI-reachable so a float32 caller can pass its own bar;
-# the float32 replication driver does) plus the solve budget.
+# Acceptance gates, CLI-reachable so a lower-precision caller can pass its
+# own bars.
 @dataclass(frozen=True)
 class ToleranceSettings:
     train_residual: float = 1e-5
     validation_residual: float = 1e-2
-    max_steps: int = 400
-    train_loss_threshold: float = 1e-14
-    # frac_accepted measures acceptance within the restart budget, not
-    # first-try robustness: a seed that stalls short of the loss threshold
-    # is redrawn.
-    num_attempts: int = 5
-
-
-@dataclass(frozen=True)
-class DataSettings:
-    train_T: float = 160.0
-    train_points: int = 96
-    train_points_list: list[float] | None = None
-    sampling: str = "front_loaded"
-    dense_T: float = 40.0
-    tail_points: int = 15
-    test_T: float = 50.0
-    test_points: int = 201
-    validation_points: int = 401
-    # Long-run validity checks are evaluated at t ~ long_run_check_T, with
-    # flatness measured against t = long_run_check_T - long_run_window.
-    long_run_check_T: float = 100.0
-    long_run_window: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -100,17 +79,10 @@ class PathScales:
 
 
 @struct.dataclass
-class ResidualParameters:
-    k_0: jax.Array
-    a_0: jax.Array
-    structural: MulticountryParameterValues
-
-
-@struct.dataclass
 class ResidualArgs:
+    batch: dict  # {"t"}
     graphdef: nnx.GraphDef
     nondiff: nnx.State
-    t: jax.Array
     scales: PathScales = struct.field(pytree_node=False)
 
 
@@ -182,14 +154,14 @@ def path_values(model, t, p, scales):
     # Population demeaning is a no-op at the primal point (the driver
     # anchors cleared positions) and projects AD perturbations of a_0 onto
     # the feasible clearing set, so every direction is meaningful.
-    populations = p.structural.populations
+    populations = p.populations
     a_0 = p.a_0 - jnp.sum(populations * p.a_0) / jnp.sum(populations)
     log_k = jnp.log(p.k_0) + (blocks[:, 0] - blocks_at_zero[0])
     a = a_0 + scales.output * (blocks[:, 1] - blocks_at_zero[1])
     log_q = scales.log_q_ss + blocks[:, 2]
     log_c = scales.log_consumption + blocks[:, 3]
-    log_mu = -p.structural.gammas * scales.log_consumption + blocks[:, 4]
-    log_rate = jnp.log(p.structural.r) + raw[:, -1]
+    log_mu = -p.gammas * scales.log_consumption + blocks[:, 4]
+    log_rate = jnp.log(p.r) + raw[:, -1]
 
     return {
         "t": t,
@@ -225,9 +197,9 @@ def dae_residuals(values, p):
 
 def residual_fn(theta, args, p):
     values = path_values(
-        nnx.merge(args.graphdef, theta, args.nondiff), args.t, p, args.scales
+        nnx.merge(args.graphdef, theta, args.nondiff), args.batch["t"], p, args.scales
     )
-    residuals = dae_residuals(values, p.structural)
+    residuals = dae_residuals(values, p)
     residual = jnp.concatenate(
         [
             residuals["capital"].reshape(-1),
@@ -242,18 +214,30 @@ def residual_fn(theta, args, p):
 
 
 def multicountry_growth_nn(
+    alpha: float = CONSTANTS.alpha,
+    gammas: tuple[float, ...] = CONSTANTS.gammas,
+    delta: float = CONSTANTS.delta,
+    r: float = CONSTANTS.r,
+    eta: float = CONSTANTS.eta,
+    populations: tuple[float, ...] = CONSTANTS.populations,
+    productivities: tuple[float, ...] = CONSTANTS.productivities,
     k_0: tuple[float, ...] | None = None,
     a_0: tuple[float, ...] | None = None,
-    parameters: MulticountryParameters = MulticountryParameters(),
     seed: int = 0,
     use_float64: bool = True,
     initial_set: InitialConditionSettings = InitialConditionSettings(),
-    data_set: DataSettings = DataSettings(),
+    # The kernel driver's front-loaded collocation design on the same
+    # [0, 160] span at half its density (96 vs 192 points).
+    data_set: DataSettings = DataSettings(train_points=96),
     nn_set: SequencePathSettings = SequencePathSettings(),
+    # atol is on the residual norm (the loss stops at atol^2).
     lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=1e-5,
         damping_decrease=0.5,
         damping_increase=2.0,
+        max_steps=400,
+        atol=1e-07,
+        num_attempts=5,
     ),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
@@ -261,17 +245,30 @@ def multicountry_growth_nn(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    num_countries = parameters.num_countries
+    num_countries = len(populations)
     # Identical initial conditions are degenerate (no cross-country
     # variation), so unspecified k_0/a_0 are DRAWN from the seeded
     # initial_set distributions rather than defaulted to symmetric values.
     if k_0 is None or a_0 is None:
-        drawn_k_0, drawn_a_0 = draw_initial_conditions(initial_set, parameters)
+        drawn_k_0, drawn_a_0 = draw_initial_conditions(initial_set, populations)
         if k_0 is None:
             k_0 = drawn_k_0
         if a_0 is None:
             a_0 = drawn_a_0
-    validate_initial_conditions(k_0, a_0, parameters)
+    validate_initial_conditions(
+        StructuralParameters.create(
+            jnp.float64,
+            alpha=alpha,
+            gammas=gammas,
+            delta=delta,
+            r=r,
+            eta=eta,
+            populations=populations,
+            productivities=productivities,
+            k_0=k_0,
+            a_0=a_0,
+        )
+    )
 
     train_t = make_sampled_train_grid(data_set, dtype)
 
@@ -281,33 +278,40 @@ def multicountry_growth_nn(
     )
     n_train = len(train_t)
 
-    populations = jnp.asarray(parameters.populations, dtype=dtype)
-    total_population = jnp.sum(populations)
-    steady = steady_state(parameters, dtype)
-    output_scale = float(steady["output_scale"])
-    scales = PathScales(
-        output=output_scale,
-        log_consumption=math.log(float(steady["consumption_scale"])),
-        log_q_ss=math.log(1.0 / parameters.eta),
-    )
-    nn_set = replace(nn_set, input_scale=max(float(train_t[-1]), 1.0))
+    populations_array = jnp.asarray(populations, dtype=dtype)
+    total_population = jnp.sum(populations_array)
     # Demeaning clears the sub-tolerance clearing residue the validation
     # admits; the demeaned values are what the paths anchor to, so they are
     # also what the results and hyperparameters report.
     a_0_array = jnp.asarray(a_0, dtype=dtype)
-    a_0_array = a_0_array - jnp.sum(populations * a_0_array) / total_population
+    a_0_array = a_0_array - jnp.sum(populations_array * a_0_array) / total_population
     a_0 = tuple(float(value) for value in a_0_array)
-    residual_parameters = ResidualParameters(
-        k_0=jnp.asarray(k_0, dtype=dtype),
+    p = StructuralParameters.create(
+        dtype,
+        alpha=alpha,
+        gammas=gammas,
+        delta=delta,
+        r=r,
+        eta=eta,
+        populations=populations,
+        productivities=productivities,
+        k_0=k_0,
         a_0=a_0_array,
-        structural=multicountry_parameter_values(parameters, dtype),
     )
+    steady = steady_state(p, dtype)
+    output_scale = float(steady["output_scale"])
+    scales = PathScales(
+        output=output_scale,
+        log_consumption=math.log(float(steady["consumption_scale"])),
+        log_q_ss=math.log(1.0 / eta),
+    )
+    nn_set = replace(nn_set, input_scale=max(float(train_t[-1]), 1.0))
 
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     model = SequencePathNN(num_countries, nn_set, dtype=dtype, rngs=nnx.Rngs(init_key))
     graphdef, theta_0, nondiff = nnx.split(model, nnx.Param, ...)
     residual_args = ResidualArgs(
-        graphdef=graphdef, nondiff=nondiff, t=train_t, scales=scales
+        batch={"t": train_t}, graphdef=graphdef, nondiff=nondiff, scales=scales
     )
 
     solver = LevenbergMarquardt(
@@ -318,17 +322,14 @@ def multicountry_growth_nn(
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
-    # solve()'s atol is on the residual norm; the settings threshold is on
-    # the sum of squared residuals.
-    atol = math.sqrt(tolerance_set.train_loss_threshold)
     solve_options = dict(
-        max_steps=tolerance_set.max_steps,
-        atol=atol,
+        max_steps=lm_set.max_steps,
+        atol=lm_set.atol,
         max_steps_is_success=False,
     )
     multi_start = MultiStart(
         key=multi_start_key,
-        num_starts=tolerance_set.num_attempts,
+        num_starts=lm_set.num_attempts,
         draw=DrawNNXModule(SequencePathNN, num_countries, nn_set, dtype=dtype),
     )
 
@@ -336,7 +337,7 @@ def multicountry_growth_nn(
     result = solver.solve(
         theta_0,
         residual_args,
-        p=residual_parameters,
+        p=p,
         multi_start=multi_start,
         **solve_options,
     )
@@ -345,17 +346,17 @@ def multicountry_growth_nn(
     attempt = int(result.multi_start.attempt) + 1
 
     def evaluate_grid(points):
-        values = path_values(model, points, residual_parameters, scales)
-        parameters_p = residual_parameters.structural
-        residuals = dae_residuals(values, parameters_p)
-        x = investment_expenditure(values["k"], values["q"], parameters_p)
-        output = production(values["k"], parameters_p.productivities, parameters_p)
+        values = path_values(model, points, p, scales)
+        residuals = dae_residuals(values, p)
+        x = investment_expenditure(values["k"], values["q"], p)
+        output = production(values["k"], p.productivities, p)
         resources = output - x
         # Goods-market clearing is implied by the budgets and the clearing
         # row (Walras), so the per-capita goods gap is a reported
         # diagnostic, not a residual.
         resource_gap = (
-            jnp.sum(populations * (resources - values["c"]), axis=-1) / total_population
+            jnp.sum(populations_array * (resources - values["c"]), axis=-1)
+            / total_population
         )
         return {
             **values,
@@ -405,14 +406,14 @@ def multicountry_growth_nn(
     acceptance = acceptance_fields(rejection_reasons)
     solution_accepted = acceptance["solution_accepted"]
 
-    resolved_steady = resolved_steady_state(validation_eval["mu"][-1], parameters)
-    tail = tail_diagnostics(validation_eval, parameters)
-    tvc = tvc_diagnostics(validation_t, validation_eval, parameters)
+    resolved_steady = resolved_steady_state(validation_eval["mu"][-1], p)
+    tail = tail_diagnostics(validation_eval, p)
+    tvc = tvc_diagnostics(validation_t, validation_eval, p)
     long_run = long_run_diagnostics(
         validation_t,
         validation_eval,
         a_0_array,
-        parameters,
+        p,
         check_T=data_set.long_run_check_T,
         window=data_set.long_run_window,
     )
@@ -420,10 +421,10 @@ def multicountry_growth_nn(
     log_relative_weights = jnp.log(relative_weights)
 
     results = {
-        "alpha": parameters.alpha,
-        "delta": parameters.delta,
-        "r": parameters.r,
-        "eta": parameters.eta,
+        "alpha": alpha,
+        "delta": delta,
+        "r": r,
+        "eta": eta,
         "num_countries": num_countries,
         "seed": seed,
         # Measured, not requested: a float64 leak upstream shows up here.
@@ -488,9 +489,9 @@ def multicountry_growth_nn(
         suffix = country + 1
         results.update(
             {
-                f"gamma_{suffix}": parameters.gammas[country],
-                f"population_{suffix}": parameters.populations[country],
-                f"productivity_{suffix}": parameters.productivities[country],
+                f"gamma_{suffix}": gammas[country],
+                f"population_{suffix}": populations[country],
+                f"productivity_{suffix}": productivities[country],
                 f"k_0_{suffix}": k_0[country],
                 f"a_0_{suffix}": a_0[country],
                 f"a_0_{suffix}_over_output_ss": a_0[country] / output_scale,
@@ -553,7 +554,15 @@ def multicountry_growth_nn(
         "initial_set": asdict(initial_set),
         "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),
-        "parameters": asdict(parameters),
+        "parameters": {
+            "alpha": alpha,
+            "gammas": list(gammas),
+            "delta": delta,
+            "r": r,
+            "eta": eta,
+            "populations": list(populations),
+            "productivities": list(productivities),
+        },
         "initial_conditions": {"k_0": list(k_0), "a_0": list(a_0)},
     }
 
@@ -567,7 +576,7 @@ def multicountry_growth_nn(
             "solver": solver,
             "residual_fn": residual_fn,
             "theta_0": theta_0,
-            "p": residual_parameters,
+            "p": p,
             "residual_args": residual_args,
             "multi_start": multi_start,
             "options": solve_options,

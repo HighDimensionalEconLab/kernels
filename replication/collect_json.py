@@ -1044,9 +1044,9 @@ def neoclassical_growth_nn(out):
             "total_params": int(med(baseline_json["total_params"])),
         },
         "stopping": {
-            "train_loss_threshold": hp["tolerance_set"]["train_loss_threshold"],
-            "max_steps": hp["tolerance_set"]["max_steps"],
-            "num_attempts": hp["tolerance_set"]["num_attempts"],
+            "atol": hp["lm_set"]["atol"],
+            "max_steps": hp["lm_set"]["max_steps"],
+            "num_attempts": hp["lm_set"]["num_attempts"],
             "log_tvc_threshold": hp["tolerance_set"]["log_tvc_threshold"],
         },
         "n_seeds": int(baseline_json["n_seeds"]),
@@ -1180,7 +1180,7 @@ def neoclassical_growth_nn_recursive(out):
         "stopping": {
             "train_loss_threshold": hp["tolerance_set"]["train_loss_threshold"],
             "max_steps": hp["tolerance_set"]["max_steps"],
-            "num_attempts": hp["tolerance_set"]["num_attempts"],
+            "num_attempts": hp["lm_set"]["num_attempts"],
             "log_tvc_threshold": hp["tolerance_set"]["log_tvc_threshold"],
         },
         "n_seeds": int(single_json["n_seeds"]),
@@ -1207,7 +1207,10 @@ def stochastic_growth_nn_recursive(out):
             "hidden_activation": "gelu",
             "total_params": int(med(j["total_params"])),
         },
-        "stopping": hp["tolerance_set"],
+        "stopping": {
+            **hp["tolerance_set"],
+            "num_attempts": hp["lm_set"]["num_attempts"],
+        },
         "n_seeds": int(j["n_seeds"]),
         "experiments": {
             "baseline": {
@@ -1260,7 +1263,7 @@ def neoclassical_growth_kernel_recursive(out):
         "parameters": hp["parameters"],
         "data": hp["data_set"],
         "kernel": hp["kernel_set"],
-        "solver": {"ridge": hp["tolerance_set"]["ridge"]},
+        "solver": {"ridge": hp["ridge_set"]["ridge"]},
         "experiments": {name: experiment(name) for name in RECURSIVE_EXPERIMENTS},
     }
 
@@ -1533,14 +1536,14 @@ def multicountry_growth_scaling(out):
         train_gates.add(hp["tolerance_set"]["train_residual"])
         validation_diagnostics.add(hp["tolerance_set"]["validation_residual"])
         kernel_settings.add((hp["kernel_set"]["kernel"], hp["kernel_set"]["ell"]))
-        residual_atols[str(count)] = hp["lm_set"]["residual_atol"]
+        residual_atols[str(count)] = hp["lm_set"]["atol"]
         if count <= MULTICOUNTRY_SCALING_DENSE_MAX:
             dense_hp = load(
                 out, f"multicountry_growth_scaling_dense_N{count}_hyperparameters"
             )
             if dense_hp != hp | {
-                "lm_set": {
-                    **hp["lm_set"],
+                "ridge_set": {
+                    **hp["ridge_set"],
                     "linear_solver": "cholesky",
                 }
             }:

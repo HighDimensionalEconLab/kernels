@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import jsonargparse
 
-from extra import optimal_advertising_kernel_uno
+from models import optimal_advertising_kernel_uno
 from replication.utilities import (
     configure_process,
     ensemble,

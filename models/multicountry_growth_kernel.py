@@ -9,6 +9,7 @@ import jax.scipy.linalg as jsp_linalg
 import jsonargparse
 import numpy as np
 import pandas as pd
+from flax import struct
 from nlls_gram import (
     CG,
     QR,
@@ -31,12 +32,15 @@ from models.multicountry_growth_preconditioner import (
     build_arrow_woodbury,
 )
 from models.multicountry_growth_shared import (
+    MULTICOUNTRY_GROWTH_CONSTANTS as CONSTANTS,
+)
+from models.multicountry_growth_shared import (
+    DataSettings,
     InitialConditionSettings,
-    MulticountryParameters,
+    StructuralParameters,
     draw_initial_conditions,
     investment_expenditure,
     long_run_diagnostics,
-    multicountry_parameter_values,
     path_residuals,
     production,
     relative_welfare_weights,
@@ -47,6 +51,9 @@ from models.multicountry_growth_shared import (
     validate_initial_conditions,
 )
 from models.utilities import (
+    CGSettings,
+    OptimizerSettings,
+    RidgeSettings,
     Stopwatch,
     acceptance_fields,
     make_sampled_train_grid,
@@ -77,17 +84,26 @@ class Theta(NamedTuple):
     rate_offset: jax.Array
 
 
+# The kernel matrices as traced data; the CG path adds the whitened factors
+# its preconditioner rebuild needs (None on the dense path).
+@struct.dataclass
+class ResidualArgs:
+    K: jax.Array
+    K_tilde: jax.Array
+    K_check: jax.Array | None = None
+    F_t: jax.Array | None = None
+
+
 # Module-level so callers can evaluate solved paths on their own kernel
 # matrices.
 def path_coordinates(theta, K_eval, K_tilde_eval, p):
-    parameters_p = p["parameters"]
-    populations_p = parameters_p.populations
-    k_0_p = p["k_0"]
+    populations_p = p.populations
+    k_0_p = p.k_0
     # Population demeaning is a no-op at the primal point (the inputs
     # already clear) and projects AD perturbations of a_0 onto the
     # feasible clearing set, so every direction is meaningful.
-    a_0_p = p["a_0"] - jnp.sum(populations_p * p["a_0"]) / jnp.sum(populations_p)
-    steady_p = steady_state(parameters_p, k_0_p.dtype)
+    a_0_p = p.a_0 - jnp.sum(populations_p * p.a_0) / jnp.sum(populations_p)
+    steady_p = steady_state(p, k_0_p.dtype)
     # The asset block is the one path with no unpenalized offset, so its
     # coefficient scale enters the minimum-norm selection metric; the
     # scale must be differentiation-inert or every parameter sensitivity
@@ -105,18 +121,16 @@ def path_coordinates(theta, K_eval, K_tilde_eval, p):
             "a_raw": IntegratedPath(
                 theta.alpha_a.T, jnp.zeros((), theta.alpha_a.dtype)
             ),
-            "log_q": IntegratedPath(
-                theta.alpha_q.T, -jnp.log(parameters_p.eta) + theta.q_offsets
-            ),
+            "log_q": IntegratedPath(theta.alpha_q.T, -jnp.log(p.eta) + theta.q_offsets),
             "log_c": IntegratedPath(
                 theta.alpha_c.T, log_consumption_scale_p + theta.c_offsets
             ),
             "log_mu": IntegratedPath(
                 theta.alpha_mu.T,
-                -parameters_p.gammas * log_consumption_scale_p + theta.mu_offsets,
+                -p.gammas * log_consumption_scale_p + theta.mu_offsets,
             ),
             "log_rate": IntegratedPath(
-                theta.alpha_rate, jnp.log(parameters_p.r) + theta.rate_offset
+                theta.alpha_rate, jnp.log(p.r) + theta.rate_offset
             ),
         },
         K_eval,
@@ -136,29 +150,25 @@ def path_coordinates(theta, K_eval, K_tilde_eval, p):
     }
 
 
-def coordinate_residuals(coordinates, parameters_p):
-    return path_residuals(
+# p carries the structural parameters and initial conditions for implicit
+# differentiation; args carries the kernel matrices (the CG path adds the
+# whitened factors its preconditioner rebuild needs).
+def residual_fn(theta, args, p):
+    coordinates = path_coordinates(theta, args.K, args.K_tilde, p)
+    residuals = path_residuals(
         coordinates["k"],
         coordinates["a"],
         coordinates["q"],
         coordinates["c"],
         coordinates["mu"],
-        parameters_p.productivities,
+        p.productivities,
         coordinates["interest_rate"],
         coordinates["dlog_k_dt"],
         coordinates["da_dt"],
         coordinates["dlog_q_dt"],
         coordinates["dlog_mu_dt"],
-        parameters_p,
+        p,
     )
-
-
-# p carries the structural parameters and initial conditions for implicit
-# differentiation; args carries the kernel matrices (the CG path adds the
-# whitened factors its preconditioner rebuild needs).
-def residual_fn(theta, args, p):
-    coordinates = path_coordinates(theta, args["K"], args["K_tilde"], p)
-    residuals = coordinate_residuals(coordinates, p["parameters"])
     # No algebraic row contains the rate (clearing is a stock condition
     # on the states, so the DAE has index > 1); the rate path is
     # disciplined by the assets and Euler rows, with the pointwise slack
@@ -179,12 +189,24 @@ def residual_fn(theta, args, p):
 
 def evaluate_coordinates(theta_value, K_eval, K_tilde_eval, p_value):
     coordinates = path_coordinates(theta_value, K_eval, K_tilde_eval, p_value)
-    parameters_p = p_value["parameters"]
-    residuals = coordinate_residuals(coordinates, parameters_p)
-    x = investment_expenditure(coordinates["k"], coordinates["q"], parameters_p)
-    output = production(coordinates["k"], parameters_p.productivities, parameters_p)
+    residuals = path_residuals(
+        coordinates["k"],
+        coordinates["a"],
+        coordinates["q"],
+        coordinates["c"],
+        coordinates["mu"],
+        p_value.productivities,
+        coordinates["interest_rate"],
+        coordinates["dlog_k_dt"],
+        coordinates["da_dt"],
+        coordinates["dlog_q_dt"],
+        coordinates["dlog_mu_dt"],
+        p_value,
+    )
+    x = investment_expenditure(coordinates["k"], coordinates["q"], p_value)
+    output = production(coordinates["k"], p_value.productivities, p_value)
     resources = output - x
-    populations_p = parameters_p.populations
+    populations_p = p_value.populations
     # Goods-market clearing is implied by the budgets and the clearing
     # row (Walras), so the per-capita goods gap is a reported
     # diagnostic, not a residual.
@@ -204,7 +226,7 @@ def evaluate_coordinates(theta_value, K_eval, K_tilde_eval, p_value):
 
 
 # Numerical acceptance and ex-post quality thresholds, CLI-reachable so a
-# float32 caller can pass its own bars (the float32 replication driver does).
+# lower-precision caller can pass its own bars.
 @dataclass(frozen=True)
 class ToleranceSettings:
     train_residual: float = 1e-5
@@ -213,90 +235,82 @@ class ToleranceSettings:
     validation_residual: float = 1e-2
 
 
-@dataclass(frozen=True)
-class DataSettings:
-    train_T: float = 160.0
-    train_points: int = 192
-    train_points_list: list[float] | None = None
-    sampling: str = "front_loaded"
-    dense_T: float = 40.0
-    tail_points: int = 15
-    test_T: float = 50.0
-    test_points: int = 201
-    validation_points: int = 401
-    # Long-run validity checks are evaluated at t ~ long_run_check_T (flat
-    # consumption/capital/debt, capital at the theory steady state, interest
-    # rate ~ r), with flatness measured against
-    # t = long_run_check_T - long_run_window.
-    long_run_check_T: float = 100.0
-    long_run_window: float = 10.0
-
-
-@dataclass(frozen=True)
-class SolverSettings:
-    init_damping: float = 1e-8
-    damping_decrease: float = 0.1
-    damping_increase: float = 4.0
-    max_steps: int = 100
-    # Conjunctive stopping in the whitened variable y = F_bar theta the
-    # solver works in: gtol bounds the whitened stationarity, residual_atol
-    # additionally demands the scaled residual norm solved (the converged
-    # residual floors at O(ridge * ||dual||), so residual_atol sits above
-    # it). The ridge keeps the minimizer O(ridge) from the pure
-    # RKHS-seminorm interpolant with the free offsets unpenalized.
-    residual_atol: float = 5e-7
-    ridge: float = 3e-12
-    gtol: float = 5e-8
-    # ridge_init=None solves at the fixed ridge above; a value enables ridge
-    # continuation annealed from ridge_init down to `ridge` (the floor) by
-    # factors of `ridge_decrease` on inner stationarity.
-    ridge_init: float | None = 1e-7
-    ridge_decrease: float = 0.01
-    # Relative stationarity threshold that triggers the next ridge level:
-    # looser anneals faster (fewer steps per level), tighter solves each
-    # level out more completely before descending.
-    ridge_grad_rtol: float = 1e-2
-    # "auto" (whitened cholesky) and "qr" solve dense whitened systems; "cg"
-    # is matrix-free preconditioned CG on the whitened normal operator with
-    # the arrow+Woodbury preconditioner rebuilt every LM step (derivation in
-    # models/multicountry_growth_preconditioner.py). Implicit-AD re-solves
-    # stay dense-only: the undamped system sits at the float64 conditioning
-    # plateau, where CG would silently degrade the tangents.
-    linear_solver: str = "auto"
-    # cg_tol is unreachable in the endgame, so cg_maxiter is the effective
-    # budget there; cg_damping_floor keeps the preconditioner's block
-    # Cholesky positive definite while the live LM damping anneals freely.
-    cg_tol: float = 1e-10
-    cg_maxiter: int = 40
-    cg_damping_floor: float = 1e-10
-
-
 def multicountry_growth_kernel(
+    alpha: float = CONSTANTS.alpha,
+    gammas: tuple[float, ...] = CONSTANTS.gammas,
+    delta: float = CONSTANTS.delta,
+    r: float = CONSTANTS.r,
+    eta: float = CONSTANTS.eta,
+    populations: tuple[float, ...] = CONSTANTS.populations,
+    productivities: tuple[float, ...] = CONSTANTS.productivities,
     k_0: tuple[float, ...] | None = None,
     a_0: tuple[float, ...] | None = None,
-    parameters: MulticountryParameters = MulticountryParameters(),
     use_float64: bool = True,
     initial_set: InitialConditionSettings = InitialConditionSettings(),
     kernel_set: KernelSettings = KernelSettings(ell=20.0),
     data_set: DataSettings = DataSettings(),
-    lm_set: SolverSettings = SolverSettings(),
+    # Conjunctive stopping in the whitened variable y = F_bar theta the
+    # solver works in: gtol bounds the whitened stationarity, atol
+    # additionally demands the scaled residual norm solved (the converged
+    # residual floors at O(ridge * ||dual||), so atol sits above it).
+    lm_set: OptimizerSettings = OptimizerSettings(
+        init_damping=1e-8,
+        damping_decrease=0.1,
+        damping_increase=4.0,
+        max_steps=100,
+        atol=5e-7,
+        gtol=5e-8,
+    ),
+    # The ridge keeps the minimizer O(ridge) from the pure RKHS-seminorm
+    # interpolant with the free offsets unpenalized; ridge_init enables
+    # continuation annealed down to the ridge floor by factors of
+    # ridge_decrease on inner stationarity. linear_solver "auto" (whitened
+    # cholesky) and "qr" solve dense whitened systems; "cg" is matrix-free
+    # preconditioned CG on the whitened normal operator with the
+    # arrow+Woodbury preconditioner rebuilt every LM step (derivation in
+    # models/multicountry_growth_preconditioner.py). Implicit-AD re-solves
+    # stay dense-only: the undamped system sits at the float64 conditioning
+    # plateau, where CG would silently degrade the tangents.
+    ridge_set: RidgeSettings = RidgeSettings(
+        ridge=3e-12,
+        ridge_init=1e-7,
+        ridge_decrease=0.01,
+        ridge_grad_rtol=1e-2,
+    ),
+    # cg tol is unreachable in the endgame, so maxiter is the effective
+    # budget there; damping_floor keeps the preconditioner's block Cholesky
+    # positive definite while the live LM damping anneals freely.
+    cg_set: CGSettings = CGSettings(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = False,
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    num_countries = parameters.num_countries
+    num_countries = len(populations)
     # Identical initial conditions are degenerate (no cross-country
     # variation), so unspecified k_0/a_0 are DRAWN from the seeded
     # initial_set distributions rather than defaulted to symmetric values.
     if k_0 is None or a_0 is None:
-        drawn_k_0, drawn_a_0 = draw_initial_conditions(initial_set, parameters)
+        drawn_k_0, drawn_a_0 = draw_initial_conditions(initial_set, populations)
         if k_0 is None:
             k_0 = drawn_k_0
         if a_0 is None:
             a_0 = drawn_a_0
-    validate_initial_conditions(k_0, a_0, parameters)
+    validate_initial_conditions(
+        StructuralParameters.create(
+            jnp.float64,
+            alpha=alpha,
+            gammas=gammas,
+            delta=delta,
+            r=r,
+            eta=eta,
+            populations=populations,
+            productivities=productivities,
+            k_0=k_0,
+            a_0=a_0,
+        )
+    )
 
     kernel = kernel_set.kernel
     train_data = make_sampled_train_grid(data_set, dtype)
@@ -305,10 +319,8 @@ def multicountry_growth_kernel(
         0.0, float(train_data[-1]), data_set.validation_points, dtype=dtype
     )
     n_train = len(train_data)
-    populations = jnp.asarray(parameters.populations, dtype=dtype)
-    total_population = jnp.sum(populations)
-    steady = steady_state(parameters, dtype)
-    output_scale = steady["output_scale"]
+    populations_array = jnp.asarray(populations, dtype=dtype)
+    total_population = jnp.sum(populations_array)
 
     # There are (5N+1)n DAE equations in (5N+1)n + 3N + 1 unknowns. No
     # terminal equation is appended: the ridge penalty supplies the
@@ -331,13 +343,22 @@ def multicountry_growth_kernel(
     # admits; the demeaned values are what the paths anchor to, so they are
     # also what the benchmark, results, and hyperparameters report.
     a_0_array = jnp.asarray(a_0, dtype=dtype)
-    a_0_array = a_0_array - jnp.sum(populations * a_0_array) / total_population
+    a_0_array = a_0_array - jnp.sum(populations_array * a_0_array) / total_population
     a_0 = tuple(float(value) for value in a_0_array)
-    p = {
-        "parameters": multicountry_parameter_values(parameters, dtype),
-        "k_0": jnp.asarray(k_0, dtype=dtype),
-        "a_0": a_0_array,
-    }
+    p = StructuralParameters.create(
+        dtype,
+        alpha=alpha,
+        gammas=gammas,
+        delta=delta,
+        r=r,
+        eta=eta,
+        populations=populations,
+        productivities=productivities,
+        k_0=k_0,
+        a_0=a_0_array,
+    )
+    steady = steady_state(p, dtype)
+    output_scale = steady["output_scale"]
 
     # The zero coordinate contains no saddle-path or present-value
     # information: it is flat in the derivative RKHS at the model's scale
@@ -355,26 +376,26 @@ def multicountry_growth_kernel(
         rate_offset=jnp.zeros((), dtype=dtype),
     )
 
-    if lm_set.ridge_init is None:
-        initial_ridge = lm_set.ridge
+    if ridge_set.ridge_init is None:
+        initial_ridge = ridge_set.ridge
         anneal = None
     else:
-        initial_ridge = lm_set.ridge_init
+        initial_ridge = ridge_set.ridge_init
         anneal = AnnealRidge(
-            ridge_floor=lm_set.ridge,
-            decrease=lm_set.ridge_decrease,
-            grad_rtol=lm_set.ridge_grad_rtol,
+            ridge_floor=ridge_set.ridge,
+            decrease=ridge_set.ridge_decrease,
+            grad_rtol=ridge_set.ridge_grad_rtol,
         )
-    if lm_set.linear_solver == "cg":
+    if ridge_set.linear_solver == "cg":
         # The kernel matrices ride in the solver's args so the rebuild
         # callback stays a value-hashable static; the initial preconditioner
         # only seeds the state, the callback replaces it every step.
-        kernel_args = {
-            "K": K,
-            "K_tilde": K_tilde,
-            "K_check": jsp_linalg.solve_triangular(metric.F.T, K_tilde.T, lower=True).T,
-            "F_t": metric.F.T,
-        }
+        kernel_args = ResidualArgs(
+            K=K,
+            K_tilde=K_tilde,
+            K_check=jsp_linalg.solve_triangular(metric.F.T, K_tilde.T, lower=True).T,
+            F_t=metric.F.T,
+        )
         init_damping = lm_set.init_damping
         linear_solver = CG(
             build_arrow_woodbury(
@@ -382,22 +403,22 @@ def multicountry_growth_kernel(
                 kernel_args,
                 p,
                 initial_ridge,
-                max(init_damping, lm_set.cg_damping_floor),
+                max(init_damping, cg_set.damping_floor),
                 num_countries,
             ),
-            tol=lm_set.cg_tol,
-            maxiter=lm_set.cg_maxiter,
+            tol=cg_set.tol,
+            maxiter=cg_set.maxiter,
         )
         callback = ArrowWoodburyCallback(
             num_countries=num_countries,
-            damping_floor=lm_set.cg_damping_floor,
+            damping_floor=cg_set.damping_floor,
             anneal=anneal,
         )
     else:
-        kernel_args = {"K": K, "K_tilde": K_tilde}
+        kernel_args = ResidualArgs(K=K, K_tilde=K_tilde)
         init_damping = lm_set.init_damping
         linear_solver = {"auto": Cholesky(), "cholesky": Cholesky(), "qr": QR()}[
-            lm_set.linear_solver
+            ridge_set.linear_solver
         ]
         callback = anneal
     if callback is None:
@@ -418,7 +439,7 @@ def multicountry_growth_kernel(
     solve_options = dict(
         max_steps=lm_set.max_steps,
         gtol=lm_set.gtol,
-        atol=lm_set.residual_atol,
+        atol=lm_set.atol,
         max_steps_is_success=False,
     )
 
@@ -480,14 +501,14 @@ def multicountry_growth_kernel(
         rejection_reasons.append("train_residual")
     validation_pass = max_validation_residual <= tolerance_set.validation_residual
 
-    resolved_steady = resolved_steady_state(validation_eval["mu"][-1], parameters)
-    tail = tail_diagnostics(validation_eval, parameters)
-    tvc = tvc_diagnostics(validation_data, validation_eval, parameters)
+    resolved_steady = resolved_steady_state(validation_eval["mu"][-1], p)
+    tail = tail_diagnostics(validation_eval, p)
+    tvc = tvc_diagnostics(validation_data, validation_eval, p)
     long_run = long_run_diagnostics(
         validation_data,
         validation_eval,
         a_0_array,
-        parameters,
+        p,
         check_T=data_set.long_run_check_T,
         window=data_set.long_run_window,
     )
@@ -509,10 +530,10 @@ def multicountry_growth_kernel(
     rkhs_norm_total = sum(rkhs_norms.values()) + rkhs_norm_rate
 
     results = {
-        "alpha": parameters.alpha,
-        "delta": parameters.delta,
-        "r": parameters.r,
-        "eta": parameters.eta,
+        "alpha": alpha,
+        "delta": delta,
+        "r": r,
+        "eta": eta,
         "num_countries": num_countries,
         # Measured, not requested: a float64 leak upstream shows up here.
         "residual_dtype": str(train_eval["capital"].dtype),
@@ -556,9 +577,9 @@ def multicountry_growth_kernel(
         "rkhs_norm_total": float(rkhs_norm_total),
         "rkhs_norm_interest_rate": float(rkhs_norm_rate),
         "solve_time": solve_time,
-        "cg_tol": lm_set.cg_tol,
-        "cg_maxiter": lm_set.cg_maxiter,
-        "cg_damping_floor": lm_set.cg_damping_floor,
+        "cg_tol": cg_set.tol,
+        "cg_maxiter": cg_set.maxiter,
+        "cg_damping_floor": cg_set.damping_floor,
         "initial_seed": initial_set.seed,
         "k_0_log_sigma": initial_set.k_0_log_sigma,
         "a_0_sigma": initial_set.a_0_sigma,
@@ -566,9 +587,9 @@ def multicountry_growth_kernel(
         # dual is solved at the achieved ridge, which can sit above the
         # configured floor if the anneal stops early.
         "ridge": float(result.lm_state.ridge),
-        "ridge_floor": lm_set.ridge,
+        "ridge_floor": ridge_set.ridge,
         "gtol": lm_set.gtol,
-        "residual_atol": lm_set.residual_atol,
+        "atol": lm_set.atol,
         "train_loss": float(result.info.resid_loss),
         "final_grad_norm": float(result.info.grad_norm),
         "final_damping": float(result.lm_state.damping),
@@ -593,9 +614,9 @@ def multicountry_growth_kernel(
         suffix = country + 1
         results.update(
             {
-                f"gamma_{suffix}": parameters.gammas[country],
-                f"population_{suffix}": parameters.populations[country],
-                f"productivity_{suffix}": parameters.productivities[country],
+                f"gamma_{suffix}": gammas[country],
+                f"population_{suffix}": populations[country],
+                f"productivity_{suffix}": productivities[country],
                 f"k_0_{suffix}": k_0[country],
                 f"a_0_{suffix}": a_0[country],
                 f"a_0_{suffix}_over_output_ss": a_0[country] / float(output_scale),
@@ -663,8 +684,18 @@ def multicountry_growth_kernel(
         "data_set": asdict(data_set),
         "initial_set": asdict(initial_set),
         "lm_set": asdict(lm_set),
+        "ridge_set": asdict(ridge_set),
+        "cg_set": asdict(cg_set),
         "tolerance_set": asdict(tolerance_set),
-        "parameters": asdict(parameters),
+        "parameters": {
+            "alpha": alpha,
+            "gammas": list(gammas),
+            "delta": delta,
+            "r": r,
+            "eta": eta,
+            "populations": list(populations),
+            "productivities": list(productivities),
+        },
         "initial_conditions": {"k_0": list(k_0), "a_0": list(a_0)},
     }
 

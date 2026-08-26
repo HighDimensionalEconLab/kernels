@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -8,6 +9,9 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 import unopy
+from flax import struct
+from jax.flatten_util import ravel_pytree
+from jax.tree_util import Partial
 
 from models.kernels import (
     IntegratedPath,
@@ -16,88 +20,86 @@ from models.kernels import (
     integrated_kernel_paths,
     rkhs_norm_squared,
 )
-from models.utilities import Stopwatch, acceptance_fields
-
-ACCEPTED_SOLUTION_STATUSES = {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
-
-
-def unpack(z):
-    n_train = (z.shape[0] - 2) // 3
-    alpha_x = z[:n_train]
-    alpha_mu = z[n_train : 2 * n_train]
-    alpha_u = z[2 * n_train : 3 * n_train]
-    mu_0 = z[3 * n_train]
-    u_0 = z[3 * n_train + 1]
-    return alpha_x, alpha_mu, alpha_u, mu_0, u_0
-
-
-def objective(z, K):
-    alpha_x, alpha_mu, alpha_u, _, _ = unpack(z)
-    return alpha_x @ K @ alpha_x + alpha_mu @ K @ alpha_mu + alpha_u @ K @ alpha_u
+from models.optimal_advertising_shared import (
+    DataSettings,
+    StructuralParameters,
+    ToleranceSettings,
+)
+from models.utilities import (
+    ACCEPTED_SOLUTION_STATUSES,
+    Stopwatch,
+    UnoOptimizerSettings,
+    acceptance_fields,
+    make_train_t_grid,
+)
 
 
-def residuals(x, mu, u, dx_dt, dmu_dt, p):
-    rho_hat, c, beta, kappa = p["rho_hat"], p["c"], p["beta"], p["kappa"]
+# Alpha blocks first (the metric penalizes the leading flat coordinates).
+class Theta(NamedTuple):
+    alpha_x: jax.Array
+    alpha_mu: jax.Array
+    alpha_u: jax.Array
+    mu_0: jax.Array
+    u_0: jax.Array
+
+
+@struct.dataclass
+class ResidualArgs:
+    K: jax.Array
+    K_tilde: jax.Array
+    unravel: Partial
+
+
+@jax.jit
+def objective(x, args):
+    theta = args.unravel(x)
+    return (
+        rkhs_norm_squared(theta.alpha_x, args.K)
+        + rkhs_norm_squared(theta.alpha_mu, args.K)
+        + rkhs_norm_squared(theta.alpha_u, args.K)
+    )
+
+
+# The unscaled residual rows are the IPOPT constraints; the NLLS driver
+# solves the 1/sqrt(count)-scaled version of the same stack.
+@jax.jit
+def constraints(x, args, p):
+    theta = args.unravel(x)
+    rho_hat, c, beta, kappa = p.rho_hat, p.c, p.beta, p.kappa
     gamma = (beta + rho_hat) / c
     control_power = (1.0 - kappa) / kappa
-    state = dx_dt - ((1.0 - x) * u - beta * x)
-    costate = dmu_dt - (-gamma + (rho_hat + beta) * mu + mu * u)
-    shadow_price = u**control_power - kappa * mu * (1.0 - x)
-    return state, costate, shadow_price
-
-
-def constraints(z, K, K_tilde, p):
-    alpha_x, alpha_mu, alpha_u, mu_0, u_0 = unpack(z)
     paths = integrated_kernel_paths(
         {
-            "x": IntegratedPath(alpha_x, p["x_0"]),
-            "mu": IntegratedPath(alpha_mu, mu_0),
-            "u": IntegratedPath(alpha_u, u_0),
+            "x": IntegratedPath(theta.alpha_x, p.x_0),
+            "mu": IntegratedPath(theta.alpha_mu, theta.mu_0),
+            "u": IntegratedPath(theta.alpha_u, theta.u_0),
         },
-        K,
-        K_tilde,
+        args.K,
+        args.K_tilde,
     )
-    x, mu, u = paths["x"].value, paths["mu"].value, paths["u"].value
-    state, costate, shadow_price = residuals(
-        x, mu, u, paths["x"].d_dt, paths["mu"].d_dt, p
+    x_path, dx_dt = paths["x"]
+    mu, dmu_dt = paths["mu"]
+    u = paths["u"].value
+    return jnp.concatenate(
+        [
+            dx_dt - ((1.0 - x_path) * u - beta * x_path),
+            dmu_dt - (-gamma + (rho_hat + beta) * mu + mu * u),
+            u**control_power - kappa * mu * (1.0 - x_path),
+        ]
     )
-    return jnp.concatenate([state, costate, shadow_price])
 
 
-def lagrangian(z, objective_multiplier, multipliers, K, K_tilde, p):
-    return objective_multiplier * objective(z, K) + jnp.dot(
-        multipliers, constraints(z, K, K_tilde, p)
+def lagrangian(x, objective_multiplier, multipliers, args, p):
+    return objective_multiplier * objective(x, args) + jnp.dot(
+        multipliers, constraints(x, args, p)
     )
 
 
 # Module level: per-call grad/jacfwd/hessian closures would retrace on
 # every solve.
-objective_value = jax.jit(objective)
 objective_gradient = jax.jit(jax.grad(objective))
-constraint_values = jax.jit(constraints)
 constraint_jacobian = jax.jit(jax.jacfwd(constraints))
 lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
-
-
-@dataclass(frozen=True)
-class DataSettings:
-    train_T: float = 40.0
-    train_points: int = 41
-    train_points_list: list[float] | None = None
-    test_T: float = 50.0
-    test_points: int = 100
-
-
-@dataclass(frozen=True)
-class ToleranceSettings:
-    train_residual: float = 1e-8
-
-
-@dataclass(frozen=True)
-class SolverSettings:
-    preset: str = "ipopt"
-    max_iterations: int | None = None
-    time_limit: float | None = None
 
 
 def optimal_advertising_kernel_uno(
@@ -108,56 +110,43 @@ def optimal_advertising_kernel_uno(
     x_0: float = 0.4,
     kernel_set: KernelSettings = KernelSettings(ell=15.0),
     data_set: DataSettings = DataSettings(),
-    solver_set: SolverSettings = SolverSettings(),
+    solver_set: UnoOptimizerSettings = UnoOptimizerSettings(),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = False,
 ):
+    # IPOPT works in float64 C arrays, so this solver is float64-only.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     kernel = kernel_set.kernel
     ell, sigma = kernel_set.ell, kernel_set.sigma
-    if data_set.train_points_list is None:
-        train_data = jnp.linspace(0, data_set.train_T, data_set.train_points)
-    else:
-        train_data = jnp.array(data_set.train_points_list)
-    test_data = jnp.linspace(0, data_set.test_T, data_set.test_points)
+    train_data = make_train_t_grid(data_set, jnp.float64)
+    test_data = jnp.linspace(
+        0.0, data_set.test_T, data_set.test_points, dtype=jnp.float64
+    )
 
     n_train = len(train_data)
     K, K_tilde = integrated_kernel_matrices(train_data, train_data, kernel, sigma, ell)
-    K = np.asarray((K + K.T) / 2)
-    K_tilde = np.asarray(K_tilde)
-    K_jax = jnp.asarray(K)
+    K_jax = (K + K.T) / 2
     K_tilde_jax = jnp.asarray(K_tilde)
 
-    n_variables = 3 * n_train + 2
-    n_constraints = 3 * n_train
     gamma = (beta + rho_hat) / c
-    p = {
-        name: jnp.asarray(value, dtype=jnp.float64)
-        for name, value in {
-            "rho_hat": rho_hat,
-            "c": c,
-            "beta": beta,
-            "kappa": kappa,
-            "x_0": x_0,
-        }.items()
-    }
+    p = StructuralParameters.create(
+        jnp.float64, rho_hat=rho_hat, c=c, beta=beta, kappa=kappa, x_0=x_0
+    )
     u_0_guess = beta * x_0 / (1.0 - x_0)
     mu_0_guess = gamma / (rho_hat + beta + u_0_guess)
-    x_initial = np.zeros(n_variables, dtype=np.float64)
-    x_initial[3 * n_train] = mu_0_guess
-    x_initial[3 * n_train + 1] = u_0_guess
-
-    x_initial_jax = jnp.asarray(x_initial)
-    zero_multipliers = jnp.zeros(n_constraints, dtype=jnp.float64)
-    jax.block_until_ready(objective_value(x_initial_jax, K_jax))
-    jax.block_until_ready(objective_gradient(x_initial_jax, K_jax))
-    jax.block_until_ready(constraint_values(x_initial_jax, K_jax, K_tilde_jax, p))
-    jax.block_until_ready(constraint_jacobian(x_initial_jax, K_jax, K_tilde_jax, p))
-    jax.block_until_ready(
-        lagrangian_hessian(x_initial_jax, 1.0, zero_multipliers, K_jax, K_tilde_jax, p)
+    theta_0 = Theta(
+        alpha_x=jnp.zeros(n_train, dtype=jnp.float64),
+        alpha_mu=jnp.zeros(n_train, dtype=jnp.float64),
+        alpha_u=jnp.zeros(n_train, dtype=jnp.float64),
+        mu_0=jnp.asarray(mu_0_guess, dtype=jnp.float64),
+        u_0=jnp.asarray(u_0_guess, dtype=jnp.float64),
     )
+    x_initial, unravel = ravel_pytree(theta_0)
+    args = ResidualArgs(K=K_jax, K_tilde=K_tilde_jax, unravel=Partial(unravel))
 
+    n_variables = x_initial.size
+    n_constraints = 3 * n_train
     variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
     variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
     constraint_lower_bounds = np.zeros(n_constraints, dtype=np.float64)
@@ -171,25 +160,23 @@ def optimal_advertising_kernel_uno(
         unopy.ZERO_BASED_INDEXING,
     )
 
-    def objective_callback(z):
-        return float(objective_value(jnp.asarray(z), K_jax))
+    def objective_callback(x):
+        return float(objective(jnp.asarray(x), args))
 
-    def objective_gradient_callback(z, gradient):
-        gradient[:] = np.asarray(objective_gradient(jnp.asarray(z), K_jax))
+    def objective_gradient_callback(x, gradient):
+        gradient[:] = np.asarray(objective_gradient(jnp.asarray(x), args))
 
     model.set_objective(unopy.MINIMIZE, objective_callback, objective_gradient_callback)
 
     jacobian_rows = np.repeat(np.arange(n_constraints, dtype=np.int32), n_variables)
     jacobian_columns = np.tile(np.arange(n_variables, dtype=np.int32), n_constraints)
 
-    def constraints_callback(z, constraint_output):
-        constraint_output[:] = np.asarray(
-            constraint_values(jnp.asarray(z), K_jax, K_tilde_jax, p)
-        )
+    def constraints_callback(x, constraint_output):
+        constraint_output[:] = np.asarray(constraints(jnp.asarray(x), args, p))
 
-    def jacobian_callback(z, jacobian_output):
+    def jacobian_callback(x, jacobian_output):
         jacobian_output[:] = np.asarray(
-            constraint_jacobian(jnp.asarray(z), K_jax, K_tilde_jax, p)
+            constraint_jacobian(jnp.asarray(x), args, p)
         ).reshape(-1)
 
     model.set_constraints(
@@ -207,14 +194,13 @@ def optimal_advertising_kernel_uno(
     hessian_rows = hessian_rows.astype(np.int32)
     hessian_columns = hessian_columns.astype(np.int32)
 
-    def hessian_callback(z, objective_multiplier, multipliers, hessian_output):
+    def hessian_callback(x, objective_multiplier, multipliers, hessian_output):
         hessian = np.asarray(
             lagrangian_hessian(
-                jnp.asarray(z),
+                jnp.asarray(x),
                 float(objective_multiplier),
                 jnp.asarray(multipliers),
-                K_jax,
-                K_tilde_jax,
+                args,
                 p,
             )
         )
@@ -228,7 +214,7 @@ def optimal_advertising_kernel_uno(
         hessian_callback,
     )
     model.set_lagrangian_sign_convention(unopy.MULTIPLIER_POSITIVE)
-    model.set_initial_primal_iterate(x_initial)
+    model.set_initial_primal_iterate(np.asarray(x_initial))
 
     solver = unopy.UnoSolver()
     solver.set_preset(solver_set.preset)
@@ -239,51 +225,56 @@ def optimal_advertising_kernel_uno(
         solver.set_option("max_iterations", solver_set.max_iterations)
     if solver_set.time_limit is not None:
         solver.set_option("time_limit", solver_set.time_limit)
+    if solver_set.primal_tolerance is not None:
+        solver.set_option("primal_tolerance", solver_set.primal_tolerance)
+    if solver_set.dual_tolerance is not None:
+        solver.set_option("dual_tolerance", solver_set.dual_tolerance)
 
     timer = Stopwatch()
     result = solver.optimize(model)
     elapsed = timer.elapsed()
 
     # primal_solution appends solver-internal auxiliaries; only the leading
-    # primal block is the solution.
-    z = jnp.asarray(np.array(result.primal_solution, dtype=np.float64))[:n_variables]
-    alpha_x, alpha_mu, alpha_u, mu_0, u_0 = unpack(z)
+    # 3n + 2 block is ours.
+    x = np.array(result.primal_solution, dtype=np.float64)[:n_variables]
+    theta = unravel(jnp.asarray(x))
 
     paths = integrated_kernel_paths(
         {
-            "x": IntegratedPath(alpha_x, p["x_0"]),
-            "mu": IntegratedPath(alpha_mu, mu_0),
-            "u": IntegratedPath(alpha_u, u_0),
+            "x": IntegratedPath(theta.alpha_x, p.x_0),
+            "mu": IntegratedPath(theta.alpha_mu, theta.mu_0),
+            "u": IntegratedPath(theta.alpha_u, theta.u_0),
         },
         K_jax,
         K_tilde_jax,
     )
-    x_train, mu_train, u_train = (
-        paths["x"].value,
-        paths["mu"].value,
-        paths["u"].value,
+    x_train, dx_train_dt = paths["x"]
+    mu_train, dmu_train_dt = paths["mu"]
+    u_train = paths["u"].value
+    control_power = (1.0 - kappa) / kappa
+    state_res = dx_train_dt - ((1.0 - x_train) * u_train - beta * x_train)
+    costate_res = dmu_train_dt - (
+        -gamma + (rho_hat + beta) * mu_train + mu_train * u_train
     )
-    state_res, costate_res, shadow_res = residuals(
-        x_train, mu_train, u_train, paths["x"].d_dt, paths["mu"].d_dt, p
-    )
+    shadow_res = u_train**control_power - kappa * mu_train * (1.0 - x_train)
     max_train_residual = max(
         float(jnp.max(jnp.abs(residual)))
         for residual in (state_res, costate_res, shadow_res)
     )
 
     @jax.jit
-    def kernel_solution(test_points_data):
-        K_test, K_tilde_test = integrated_kernel_matrices(
-            test_points_data, train_data, kernel, sigma, ell
+    def kernel_solution(points):
+        K_eval, K_tilde_eval = integrated_kernel_matrices(
+            points, train_data, kernel, sigma, ell
         )
         paths = integrated_kernel_paths(
             {
-                "x": IntegratedPath(alpha_x, p["x_0"]),
-                "mu": IntegratedPath(alpha_mu, mu_0),
-                "u": IntegratedPath(alpha_u, u_0),
+                "x": IntegratedPath(theta.alpha_x, p.x_0),
+                "mu": IntegratedPath(theta.alpha_mu, theta.mu_0),
+                "u": IntegratedPath(theta.alpha_u, theta.u_0),
             },
-            K_test,
-            K_tilde_test,
+            K_eval,
+            K_tilde_eval,
         )
         return paths["x"].value, paths["mu"].value, paths["u"].value
 
@@ -322,11 +313,11 @@ def optimal_advertising_kernel_uno(
         "num_train_points": n_train,
         "test_T": data_set.test_T,
         "test_points": data_set.test_points,
-        "mu_0": float(mu_0),
-        "u_0": float(u_0),
-        "rkhs_norm_x": float(rkhs_norm_squared(alpha_x, K)),
-        "rkhs_norm_mu": float(rkhs_norm_squared(alpha_mu, K)),
-        "rkhs_norm_u": float(rkhs_norm_squared(alpha_u, K)),
+        "mu_0": float(theta.mu_0),
+        "u_0": float(theta.u_0),
+        "rkhs_norm_x": float(rkhs_norm_squared(theta.alpha_x, K_jax)),
+        "rkhs_norm_mu": float(rkhs_norm_squared(theta.alpha_mu, K_jax)),
+        "rkhs_norm_u": float(rkhs_norm_squared(theta.alpha_u, K_jax)),
         "max_train_residual": max_train_residual,
         "solve_time": solve_time,
         "stationarity": result.solution_stationarity,

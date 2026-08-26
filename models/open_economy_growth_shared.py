@@ -2,20 +2,16 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-
-from models.kernels import (
-    IntegratedPath,
-    integrated_kernel_matrices,
-    integrated_kernel_paths,
-)
+from flax import struct
 
 
+# Shared calibration: every open economy driver defaults to the instance
+# below so all solve the identical model.
 @dataclass(frozen=True)
-class ModelParameters:
+class OpenEconomyConstants:
     alpha: float = 0.33
     gamma: float = 2.0
     delta: float = -math.log(0.94)
@@ -24,30 +20,34 @@ class ModelParameters:
     r_star: float = -math.log(0.96)
 
 
-# Differentiable duck-type of ModelParameters: a pytree whose leaves can
-# carry tracers, for implicit-AD comparative statics through the solver's
-# `p` argument. The model functions only use attribute access, so either
-# container works.
-@jax.tree_util.register_dataclass
-@dataclass(frozen=True)
-class ModelParameterValues:
+OPEN_ECONOMY_GROWTH_CONSTANTS = OpenEconomyConstants()
+
+
+# Deep structural parameters and the initial conditions together, all
+# implicitly differentiable through the solver's `p` argument.
+@struct.dataclass
+class StructuralParameters:
     alpha: jax.Array
     gamma: jax.Array
     delta: jax.Array
     r: jax.Array
     eta: jax.Array
     r_star: jax.Array
+    k_0: jax.Array
+    a_0: jax.Array
 
+    # chi = delta^(1 - eta) normalizes adjustment costs so the steady-state
+    # investment rate is exactly delta; a derived quantity, so tangents flow
+    # through delta and eta.
+    @property
+    def chi(self):
+        return self.delta ** (1.0 - self.eta)
 
-def model_parameter_values(p, dtype=jnp.float64):
-    return ModelParameterValues(
-        alpha=jnp.asarray(p.alpha, dtype=dtype),
-        gamma=jnp.asarray(p.gamma, dtype=dtype),
-        delta=jnp.asarray(p.delta, dtype=dtype),
-        r=jnp.asarray(p.r, dtype=dtype),
-        eta=jnp.asarray(p.eta, dtype=dtype),
-        r_star=jnp.asarray(p.r_star, dtype=dtype),
-    )
+    @classmethod
+    def create(cls, dtype, **kwargs):
+        return cls(
+            **{key: jnp.asarray(value, dtype=dtype) for key, value in kwargs.items()}
+        )
 
 
 def production(k, z, p):
@@ -170,149 +170,6 @@ def path_residuals(
         "tobin_q": dlog_q_dt - q_drift(k, q, z, p) / q,
         "marginal_wealth": dlog_mu_dt - mu_drift(mu, p) / mu,
         "consumption_foc": mu * c**p.gamma - 1.0,
-    }
-
-
-# Alpha blocks first (the metric penalizes the leading flat coordinates).
-class Theta(NamedTuple):
-    alpha_mu: jax.Array
-    alpha_c: jax.Array
-    alpha_k: jax.Array
-    alpha_a: jax.Array
-    alpha_q: jax.Array
-    c_offset: jax.Array
-    mu_offset: jax.Array
-    q_offset: jax.Array
-
-
-def residual_fn(theta, args, p):
-    parameters_p = p["parameters"]
-    steady_p = steady_state(parameters_p)
-    # The asset block is the one path with no unpenalized offset, so its
-    # scale enters the minimum-norm selection metric; the scale must be
-    # differentiation-inert or every parameter sensitivity picks up a
-    # selection-drift term from the metric moving with p. The other
-    # normalizations are absorbed by their free offsets.
-    output_scale_p = jax.lax.stop_gradient(steady_p["output"])
-    log_consumption_scale_p = jnp.log(steady_p["g"])
-    paths = integrated_kernel_paths(
-        {
-            "log_mu": IntegratedPath(
-                theta.alpha_mu,
-                -parameters_p.gamma * log_consumption_scale_p + theta.mu_offset,
-            ),
-            "log_c": IntegratedPath(
-                theta.alpha_c, log_consumption_scale_p + theta.c_offset
-            ),
-            "log_k": IntegratedPath(theta.alpha_k, jnp.log(p["k_0"])),
-            "a_raw": IntegratedPath(theta.alpha_a, jnp.zeros((), theta.alpha_a.dtype)),
-            "log_q": IntegratedPath(
-                theta.alpha_q, jnp.log(steady_p["q"]) + theta.q_offset
-            ),
-        },
-        args["K"],
-        args["K_tilde"],
-    )
-    k = jnp.exp(paths["log_k"].value)
-    a = p["a_0"] + output_scale_p * paths["a_raw"].value
-    q = jnp.exp(paths["log_q"].value)
-    c = jnp.exp(paths["log_c"].value)
-    mu = jnp.exp(paths["log_mu"].value)
-    dlog_k_dt = paths["log_k"].d_dt
-    da_dt = output_scale_p * paths["a_raw"].d_dt
-    dlog_q_dt = paths["log_q"].d_dt
-    dlog_mu_dt = paths["log_mu"].d_dt
-    residuals = path_residuals(
-        k,
-        a,
-        q,
-        c,
-        mu,
-        jnp.ones_like(k),
-        dlog_k_dt,
-        da_dt,
-        dlog_q_dt,
-        dlog_mu_dt,
-        p["parameters"],
-    )
-    residual = jnp.concatenate(
-        [
-            residuals["capital"],
-            residuals["assets"],
-            residuals["tobin_q"],
-            residuals["marginal_wealth"],
-            residuals["consumption_foc"],
-        ]
-    )
-    return residual / jnp.sqrt(residual.size)
-
-
-# Paths, model quantities, and DAE residuals on an evaluation grid through
-# fresh cross-kernel matrices against the training grid.
-def evaluate_grid(theta, points, train_data, kernel_set, p):
-    K_eval, K_tilde_eval = integrated_kernel_matrices(
-        points,
-        train_data,
-        kernel_set.kernel,
-        kernel_set.sigma,
-        kernel_set.ell,
-    )
-    parameters_p = p["parameters"]
-    steady_p = steady_state(parameters_p)
-    output_scale_p = jax.lax.stop_gradient(steady_p["output"])
-    log_consumption_scale_p = jnp.log(steady_p["g"])
-    paths = integrated_kernel_paths(
-        {
-            "log_mu": IntegratedPath(
-                theta.alpha_mu,
-                -parameters_p.gamma * log_consumption_scale_p + theta.mu_offset,
-            ),
-            "log_c": IntegratedPath(
-                theta.alpha_c, log_consumption_scale_p + theta.c_offset
-            ),
-            "log_k": IntegratedPath(theta.alpha_k, jnp.log(p["k_0"])),
-            "a_raw": IntegratedPath(theta.alpha_a, jnp.zeros((), theta.alpha_a.dtype)),
-            "log_q": IntegratedPath(
-                theta.alpha_q, jnp.log(steady_p["q"]) + theta.q_offset
-            ),
-        },
-        K_eval,
-        K_tilde_eval,
-    )
-    k = jnp.exp(paths["log_k"].value)
-    a = p["a_0"] + output_scale_p * paths["a_raw"].value
-    q = jnp.exp(paths["log_q"].value)
-    c = jnp.exp(paths["log_c"].value)
-    mu = jnp.exp(paths["log_mu"].value)
-    dlog_k_dt = paths["log_k"].d_dt
-    da_dt = output_scale_p * paths["a_raw"].d_dt
-    dlog_q_dt = paths["log_q"].d_dt
-    dlog_mu_dt = paths["log_mu"].d_dt
-    z = jnp.ones_like(k)
-    residuals = path_residuals(
-        k,
-        a,
-        q,
-        c,
-        mu,
-        z,
-        dlog_k_dt,
-        da_dt,
-        dlog_q_dt,
-        dlog_mu_dt,
-        parameters_p,
-    )
-    return {
-        "t": points,
-        "k": k,
-        "a": a,
-        "q": q,
-        "c": c,
-        "mu": mu,
-        "x": investment_expenditure(k, q, parameters_p),
-        "output": production(k, z, parameters_p),
-        "current_account": da_dt,
-        **residuals,
     }
 
 

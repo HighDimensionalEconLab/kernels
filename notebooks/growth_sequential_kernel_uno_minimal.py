@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import unopy
+from jax.flatten_util import ravel_pytree
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
@@ -63,19 +64,19 @@ def residual_fn(theta, args, p):
 K, K_tilde = kernel_matrices(t_train, t_train)
 args = {"K": K, "K_tilde": K_tilde}
 
-N_VARIABLES = 3 * N_TRAIN + 2
+c_flow = k_0**a - delta * k_0  # flat steady-flow warm start
+theta_0 = {
+    "alpha_mu": jnp.zeros(N_TRAIN),
+    "alpha_c": jnp.zeros(N_TRAIN),
+    "alpha_k": jnp.zeros(N_TRAIN),
+    "c_0": jnp.asarray(c_flow),
+    "mu_0": jnp.asarray(c_flow**-sigma_crra),
+}
+# ravel_pytree flattens the ridgeless theta dict (sorted keys) into Uno's
+# vector and returns the inverse unravel.
+x_initial, unravel = ravel_pytree(theta_0)
+N_VARIABLES = x_initial.size
 N_CONSTRAINTS = 3 * N_TRAIN
-
-
-# unpack rebuilds the ridgeless theta dict from Uno's flat vector.
-def unpack(x):
-    return {
-        "alpha_mu": x[:N_TRAIN],
-        "alpha_c": x[N_TRAIN : 2 * N_TRAIN],
-        "alpha_k": x[2 * N_TRAIN : 3 * N_TRAIN],
-        "c_0": x[3 * N_TRAIN],
-        "mu_0": x[3 * N_TRAIN + 1],
-    }
 
 
 # min sum_j alpha_j' K alpha_j over the three paths, subject to the NLLS
@@ -83,7 +84,7 @@ def unpack(x):
 # scale is immaterial to the constraint set.
 @jax.jit
 def objective(x):
-    theta = unpack(x)
+    theta = unravel(x)
     return (
         theta["alpha_mu"] @ K @ theta["alpha_mu"]
         + theta["alpha_c"] @ K @ theta["alpha_c"]
@@ -93,7 +94,7 @@ def objective(x):
 
 @jax.jit
 def constraints(x):
-    return residual_fn(unpack(x), args, p)
+    return residual_fn(unravel(x), args, p)
 
 
 def lagrangian(x, objective_multiplier, multipliers):
@@ -172,13 +173,7 @@ model.set_lagrangian_hessian(
     hessian_callback,
 )
 model.set_lagrangian_sign_convention(unopy.MULTIPLIER_POSITIVE)
-
-# Flat steady-flow warm start for the free scalars.
-c_flow = k_0**a - delta * k_0
-x_initial = np.zeros(N_VARIABLES)
-x_initial[3 * N_TRAIN] = c_flow
-x_initial[3 * N_TRAIN + 1] = c_flow**-sigma_crra
-model.set_initial_primal_iterate(x_initial)
+model.set_initial_primal_iterate(np.asarray(x_initial))
 
 solver = unopy.UnoSolver()
 solver.set_preset("ipopt")
@@ -191,7 +186,7 @@ solve_time = time.perf_counter() - start
 
 # primal_solution appends solver-internal auxiliaries; only the leading
 # 3 N_TRAIN + 2 block is ours.
-theta = unpack(jnp.asarray(np.array(result.primal_solution))[:N_VARIABLES])
+theta = unravel(jnp.asarray(np.array(result.primal_solution))[:N_VARIABLES])
 
 K_test, K_tilde_test = kernel_matrices(t_test, t_train)
 mu_test = theta["mu_0"] + K_tilde_test @ theta["alpha_mu"]

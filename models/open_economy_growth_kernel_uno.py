@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -8,45 +9,136 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 import unopy
+from flax import struct
 from jax.flatten_util import ravel_pytree
 from jax.tree_util import Partial
 
 from models.kernels import (
+    IntegratedPath,
     KernelSettings,
     integrated_kernel_matrices,
+    integrated_kernel_paths,
     rkhs_norm_squared,
 )
 from models.open_economy_growth_benchmark import open_economy_growth_benchmark
 from models.open_economy_growth_shared import (
+    OPEN_ECONOMY_GROWTH_CONSTANTS as CONSTANTS,
+)
+from models.open_economy_growth_shared import (
     DataSettings,
-    ModelParameters,
-    Theta,
-    evaluate_grid,
-    model_parameter_values,
+    StructuralParameters,
+    investment_expenditure,
+    path_residuals,
     present_value_gap,
-    residual_fn,
+    production,
     steady_state,
     tail_diagnostics,
     tvc_diagnostics,
 )
-from models.utilities import Stopwatch, acceptance_fields, make_sampled_train_grid
+from models.utilities import (
+    ACCEPTED_SOLUTION_STATUSES,
+    Stopwatch,
+    UnoOptimizerSettings,
+    acceptance_fields,
+    make_sampled_train_grid,
+)
+
+
+# Alpha blocks first (the metric penalizes the leading flat coordinates).
+class Theta(NamedTuple):
+    alpha_mu: jax.Array
+    alpha_c: jax.Array
+    alpha_k: jax.Array
+    alpha_a: jax.Array
+    alpha_q: jax.Array
+    c_offset: jax.Array
+    mu_offset: jax.Array
+    q_offset: jax.Array
+
+
+@struct.dataclass
+class ResidualArgs:
+    K: jax.Array
+    K_tilde: jax.Array
+    unravel: Partial
+
+
+def residual_fn(theta, args, p):
+    steady_p = steady_state(p)
+    # The asset block is the one path with no unpenalized offset, so its
+    # scale enters the minimum-norm selection metric; the scale must be
+    # differentiation-inert or every parameter sensitivity picks up a
+    # selection-drift term from the metric moving with p. The other
+    # normalizations are absorbed by their free offsets.
+    output_scale_p = jax.lax.stop_gradient(steady_p["output"])
+    log_consumption_scale_p = jnp.log(steady_p["g"])
+    paths = integrated_kernel_paths(
+        {
+            "log_mu": IntegratedPath(
+                theta.alpha_mu,
+                -p.gamma * log_consumption_scale_p + theta.mu_offset,
+            ),
+            "log_c": IntegratedPath(
+                theta.alpha_c, log_consumption_scale_p + theta.c_offset
+            ),
+            "log_k": IntegratedPath(theta.alpha_k, jnp.log(p.k_0)),
+            "a_raw": IntegratedPath(theta.alpha_a, jnp.zeros((), theta.alpha_a.dtype)),
+            "log_q": IntegratedPath(
+                theta.alpha_q, jnp.log(steady_p["q"]) + theta.q_offset
+            ),
+        },
+        args.K,
+        args.K_tilde,
+    )
+    k = jnp.exp(paths["log_k"].value)
+    a = p.a_0 + output_scale_p * paths["a_raw"].value
+    q = jnp.exp(paths["log_q"].value)
+    c = jnp.exp(paths["log_c"].value)
+    mu = jnp.exp(paths["log_mu"].value)
+    dlog_k_dt = paths["log_k"].d_dt
+    da_dt = output_scale_p * paths["a_raw"].d_dt
+    dlog_q_dt = paths["log_q"].d_dt
+    dlog_mu_dt = paths["log_mu"].d_dt
+    residuals = path_residuals(
+        k,
+        a,
+        q,
+        c,
+        mu,
+        jnp.ones_like(k),
+        dlog_k_dt,
+        da_dt,
+        dlog_q_dt,
+        dlog_mu_dt,
+        p,
+    )
+    residual = jnp.concatenate(
+        [
+            residuals["capital"],
+            residuals["assets"],
+            residuals["tobin_q"],
+            residuals["marginal_wealth"],
+            residuals["consumption_foc"],
+        ]
+    )
+    return residual / jnp.sqrt(residual.size)
 
 
 @jax.jit
 def objective(x, args):
-    theta = args["unravel"](x)
+    theta = args.unravel(x)
     return (
-        rkhs_norm_squared(theta.alpha_mu, args["K"])
-        + rkhs_norm_squared(theta.alpha_c, args["K"])
-        + rkhs_norm_squared(theta.alpha_k, args["K"])
-        + rkhs_norm_squared(theta.alpha_a, args["K"])
-        + rkhs_norm_squared(theta.alpha_q, args["K"])
+        rkhs_norm_squared(theta.alpha_mu, args.K)
+        + rkhs_norm_squared(theta.alpha_c, args.K)
+        + rkhs_norm_squared(theta.alpha_k, args.K)
+        + rkhs_norm_squared(theta.alpha_a, args.K)
+        + rkhs_norm_squared(theta.alpha_q, args.K)
     )
 
 
 @jax.jit
 def constraints(x, args, p):
-    theta = args["unravel"](x)
+    theta = args.unravel(x)
     return residual_fn(theta, args, p)
 
 
@@ -69,22 +161,20 @@ class ToleranceSettings:
     validation_residual: float = 1e-2
 
 
-@dataclass(frozen=True)
-class SolverSettings:
-    preset: str = "ipopt"
-    max_iterations: int | None = None
-    time_limit: float | None = None
-    primal_tolerance: float = 1e-4
-    dual_tolerance: float = 1e-4
-
-
 def open_economy_growth_kernel_uno(
+    alpha: float = CONSTANTS.alpha,
+    gamma: float = CONSTANTS.gamma,
+    delta: float = CONSTANTS.delta,
+    r: float = CONSTANTS.r,
+    eta: float = CONSTANTS.eta,
+    r_star: float = CONSTANTS.r_star,
     k_0: float = 1.0,
     a_0: float = 0.0,
-    parameters: ModelParameters = ModelParameters(),
     kernel_set: KernelSettings = KernelSettings(ell=20.0),
     data_set: DataSettings = DataSettings(),
-    solver_set: SolverSettings = SolverSettings(),
+    solver_set: UnoOptimizerSettings = UnoOptimizerSettings(
+        primal_tolerance=1e-4, dual_tolerance=1e-4
+    ),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = False,
 ):
@@ -102,7 +192,20 @@ def open_economy_growth_kernel_uno(
         0.0, float(train_data[-1]), data_set.validation_points, dtype=jnp.float64
     )
     n_train = len(train_data)
-    steady = steady_state(parameters)
+    # Value container only: no p rides through IPOPT for implicit
+    # differentiation.
+    p = StructuralParameters.create(
+        jnp.float64,
+        alpha=alpha,
+        gamma=gamma,
+        delta=delta,
+        r=r,
+        eta=eta,
+        r_star=r_star,
+        k_0=k_0,
+        a_0=a_0,
+    )
+    steady = steady_state(p)
     output_scale = steady["output"]
     consumption_scale = steady["g"]
 
@@ -114,12 +217,6 @@ def open_economy_growth_kernel_uno(
         kernel_set.ell,
     )
     K = (K + K.T) / 2.0
-
-    p = {
-        "parameters": model_parameter_values(parameters),
-        "k_0": jnp.asarray(k_0, dtype=jnp.float64),
-        "a_0": jnp.asarray(a_0, dtype=jnp.float64),
-    }
 
     # The zero coordinate contains no saddle-path or present-value information:
     # it is flat in the derivative RKHS at the model's scale normalizations.
@@ -134,7 +231,7 @@ def open_economy_growth_kernel_uno(
         q_offset=jnp.zeros((), dtype=jnp.float64),
     )
     x_initial, unravel = ravel_pytree(theta_0)
-    args = {"K": K, "K_tilde": K_tilde, "unravel": Partial(unravel)}
+    args = ResidualArgs(K=K, K_tilde=K_tilde, unravel=Partial(unravel))
 
     n_variables = x_initial.size
     n_constraints = 5 * n_train
@@ -208,8 +305,6 @@ def open_economy_growth_kernel_uno(
 
     solver = unopy.UnoSolver()
     solver.set_preset(solver_set.preset)
-    solver.set_option("primal_tolerance", solver_set.primal_tolerance)
-    solver.set_option("dual_tolerance", solver_set.dual_tolerance)
     if not verbose:
         solver.set_option("logger", "SILENT")
         solver.set_option("print_solution", False)
@@ -217,6 +312,10 @@ def open_economy_growth_kernel_uno(
         solver.set_option("max_iterations", solver_set.max_iterations)
     if solver_set.time_limit is not None:
         solver.set_option("time_limit", solver_set.time_limit)
+    if solver_set.primal_tolerance is not None:
+        solver.set_option("primal_tolerance", solver_set.primal_tolerance)
+    if solver_set.dual_tolerance is not None:
+        solver.set_option("dual_tolerance", solver_set.dual_tolerance)
 
     timer = Stopwatch()
     result = solver.optimize(model)
@@ -226,15 +325,84 @@ def open_economy_growth_kernel_uno(
     x = np.array(result.primal_solution, dtype=np.float64)[:n_variables]
     theta = unravel(jnp.asarray(x))
 
-    train_eval = evaluate_grid(theta, train_data, train_data, kernel_set, p)
-    validation_eval = evaluate_grid(theta, validation_data, train_data, kernel_set, p)
-    test_eval = evaluate_grid(theta, test_data, train_data, kernel_set, p)
+    # Paths, model quantities, and DAE residuals on an evaluation grid
+    # through fresh cross-kernel matrices against the training grid.
+    def evaluate_grid(points):
+        K_eval, K_tilde_eval = integrated_kernel_matrices(
+            points,
+            train_data,
+            kernel_set.kernel,
+            kernel_set.sigma,
+            kernel_set.ell,
+        )
+        steady_p = steady_state(p)
+        output_scale_p = jax.lax.stop_gradient(steady_p["output"])
+        log_consumption_scale_p = jnp.log(steady_p["g"])
+        paths = integrated_kernel_paths(
+            {
+                "log_mu": IntegratedPath(
+                    theta.alpha_mu,
+                    -p.gamma * log_consumption_scale_p + theta.mu_offset,
+                ),
+                "log_c": IntegratedPath(
+                    theta.alpha_c, log_consumption_scale_p + theta.c_offset
+                ),
+                "log_k": IntegratedPath(theta.alpha_k, jnp.log(p.k_0)),
+                "a_raw": IntegratedPath(
+                    theta.alpha_a, jnp.zeros((), theta.alpha_a.dtype)
+                ),
+                "log_q": IntegratedPath(
+                    theta.alpha_q, jnp.log(steady_p["q"]) + theta.q_offset
+                ),
+            },
+            K_eval,
+            K_tilde_eval,
+        )
+        k = jnp.exp(paths["log_k"].value)
+        a = p.a_0 + output_scale_p * paths["a_raw"].value
+        q = jnp.exp(paths["log_q"].value)
+        c = jnp.exp(paths["log_c"].value)
+        mu = jnp.exp(paths["log_mu"].value)
+        dlog_k_dt = paths["log_k"].d_dt
+        da_dt = output_scale_p * paths["a_raw"].d_dt
+        dlog_q_dt = paths["log_q"].d_dt
+        dlog_mu_dt = paths["log_mu"].d_dt
+        z = jnp.ones_like(k)
+        residuals = path_residuals(
+            k,
+            a,
+            q,
+            c,
+            mu,
+            z,
+            dlog_k_dt,
+            da_dt,
+            dlog_q_dt,
+            dlog_mu_dt,
+            p,
+        )
+        return {
+            "t": points,
+            "k": k,
+            "a": a,
+            "q": q,
+            "c": c,
+            "mu": mu,
+            "x": investment_expenditure(k, q, p),
+            "output": production(k, z, p),
+            "current_account": da_dt,
+            **residuals,
+        }
+
+    train_eval = evaluate_grid(train_data)
+    validation_eval = evaluate_grid(validation_data)
+    test_eval = evaluate_grid(test_data)
     tail = tail_diagnostics(
         train_eval["k"][-1],
         train_eval["a"][-1],
         train_eval["q"][-1],
         train_eval["c"][-1],
-        parameters,
+        p,
     )
     residual_names = (
         "capital",
@@ -250,9 +418,7 @@ def open_economy_growth_kernel_uno(
         float(jnp.max(jnp.abs(validation_eval[name]))) for name in residual_names
     )
 
-    benchmark, benchmark_diagnostics = open_economy_growth_benchmark(
-        k_0, a_0, parameters=parameters
-    )
+    benchmark, benchmark_diagnostics = open_economy_growth_benchmark(p)
     benchmark_values = benchmark(np.asarray(test_data))
     k_relative_error = jnp.abs(
         test_eval["k"] - jnp.asarray(benchmark_values["k"])
@@ -290,7 +456,7 @@ def open_economy_growth_kernel_uno(
         validation_eval["q"],
         validation_eval["c"],
         a_0,
-        parameters,
+        p,
     )
     tvc = tvc_diagnostics(
         train_eval["k"][-1],
@@ -298,7 +464,7 @@ def open_economy_growth_kernel_uno(
         train_eval["q"][-1],
         train_eval["c"][-1],
         train_eval["t"][-1],
-        parameters,
+        p,
     )
 
     solve_time = elapsed
@@ -307,7 +473,7 @@ def open_economy_growth_kernel_uno(
     rejection_reasons = []
     if solver_status != "SUCCESS":
         rejection_reasons.append("solver_status")
-    if solution_status not in {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}:
+    if solution_status not in ACCEPTED_SOLUTION_STATUSES:
         rejection_reasons.append("solution_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
@@ -328,12 +494,17 @@ def open_economy_growth_kernel_uno(
 
     @jax.jit
     def kernel_solution(points):
-        values = evaluate_grid(theta, points, train_data, kernel_set, p)
+        values = evaluate_grid(points)
         return values["k"], values["a"], values["q"], values["c"]
 
     results = {
-        **asdict(parameters),
-        "r_star_resolved": parameters.r_star,
+        "alpha": alpha,
+        "gamma": gamma,
+        "delta": delta,
+        "r": r,
+        "eta": eta,
+        "r_star": r_star,
+        "r_star_resolved": r_star,
         "k_0": k_0,
         "a_0": a_0,
         "a_0_over_output_ss": a_0 / float(output_scale),
@@ -432,7 +603,14 @@ def open_economy_growth_kernel_uno(
         "data_set": asdict(data_set),
         "solver_set": asdict(solver_set),
         "tolerance_set": asdict(tolerance_set),
-        "parameters": asdict(parameters),
+        "parameters": {
+            "alpha": alpha,
+            "gamma": gamma,
+            "delta": delta,
+            "r": r,
+            "eta": eta,
+            "r_star": r_star,
+        },
         "initial_conditions": {"k_0": k_0, "a_0": a_0},
     }
     return results, {

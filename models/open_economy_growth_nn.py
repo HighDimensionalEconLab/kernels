@@ -18,7 +18,11 @@ from nlls_gram import (
 
 from models.open_economy_growth_benchmark import open_economy_growth_benchmark
 from models.open_economy_growth_shared import (
-    ModelParameters,
+    OPEN_ECONOMY_GROWTH_CONSTANTS as CONSTANTS,
+)
+from models.open_economy_growth_shared import (
+    DataSettings,
+    StructuralParameters,
     investment_expenditure,
     path_residuals,
     present_value_gap,
@@ -44,33 +48,13 @@ RESIDUAL_NAMES = (
 )
 
 
-# Acceptance gates (CLI-reachable so a float32 caller can pass its own bar;
-# the float32 replication driver does) plus the solve budget.
+# Acceptance gates, CLI-reachable so a lower-precision caller can pass its
+# own bars.
 @dataclass(frozen=True)
 class ToleranceSettings:
     train_residual: float = 1e-5
     validation_residual: float = 1e-2
     benchmark_match: float = 1e-3
-    max_steps: int = 400
-    train_loss_threshold: float = 1e-14
-    # frac_accepted measures acceptance within the restart budget, not first-try
-    # robustness: a seed that stalls short of the loss threshold is redrawn.
-    num_attempts: int = 5
-
-
-# The kernel driver's front-loaded collocation design on the same [0, 160]
-# span at half its density (96 vs 192 points).
-@dataclass(frozen=True)
-class DataSettings:
-    train_T: float = 160.0
-    train_points: int = 96
-    train_points_list: list[float] | None = None
-    sampling: str = "front_loaded"
-    dense_T: float = 40.0
-    tail_points: int = 15
-    test_T: float = 50.0
-    test_points: int = 201
-    validation_points: int = 401
 
 
 @dataclass(frozen=True)
@@ -91,40 +75,10 @@ class PathScales:
 
 
 @struct.dataclass
-class DynamicModelParameters:
-    alpha: jax.Array
-    gamma: jax.Array
-    delta: jax.Array
-    r: jax.Array
-    eta: jax.Array
-    r_star: jax.Array
-    chi: jax.Array
-
-    @classmethod
-    def from_model(cls, p, dtype):
-        return cls(
-            alpha=jnp.asarray(p.alpha, dtype=dtype),
-            gamma=jnp.asarray(p.gamma, dtype=dtype),
-            delta=jnp.asarray(p.delta, dtype=dtype),
-            r=jnp.asarray(p.r, dtype=dtype),
-            eta=jnp.asarray(p.eta, dtype=dtype),
-            r_star=jnp.asarray(p.r_star, dtype=dtype),
-            chi=jnp.asarray(p.delta ** (1.0 - p.eta), dtype=dtype),
-        )
-
-
-@struct.dataclass
-class ResidualParameters:
-    k_0: jax.Array
-    a_0: jax.Array
-    structural: DynamicModelParameters
-
-
-@struct.dataclass
 class ResidualArgs:
+    batch: dict  # {"t"}
     graphdef: nnx.GraphDef
     nondiff: nnx.State
-    t: jax.Array
     scales: PathScales = struct.field(pytree_node=False)
 
 
@@ -189,7 +143,7 @@ def path_values(model, t, p, scales):
     a = p.a_0 + scales.output * (raw[:, 1] - raw_at_zero[1])
     log_q = scales.log_q_ss + raw[:, 2]
     log_c = scales.log_consumption + raw[:, 3]
-    log_mu = -p.structural.gamma * scales.log_consumption + raw[:, 4]
+    log_mu = -p.gamma * scales.log_consumption + raw[:, 4]
 
     return {
         "t": t,
@@ -223,25 +177,36 @@ def dae_residuals(values, p):
 
 def residual_fn(theta, args, p):
     values = path_values(
-        nnx.merge(args.graphdef, theta, args.nondiff), args.t, p, args.scales
+        nnx.merge(args.graphdef, theta, args.nondiff), args.batch["t"], p, args.scales
     )
-    residuals = dae_residuals(values, p.structural)
+    residuals = dae_residuals(values, p)
     residual = jnp.concatenate([residuals[name] for name in RESIDUAL_NAMES])
     return residual / jnp.sqrt(residual.size)
 
 
 def open_economy_growth_nn(
+    alpha: float = CONSTANTS.alpha,
+    gamma: float = CONSTANTS.gamma,
+    delta: float = CONSTANTS.delta,
+    r: float = CONSTANTS.r,
+    eta: float = CONSTANTS.eta,
+    r_star: float = CONSTANTS.r_star,
     k_0: float = 1.0,
     a_0: float = 0.0,
-    parameters: ModelParameters = ModelParameters(),
     seed: int = 0,
     use_float64: bool = True,
-    data_set: DataSettings = DataSettings(),
+    # The kernel driver's front-loaded collocation design on the same
+    # [0, 160] span at half its density (96 vs 192 points).
+    data_set: DataSettings = DataSettings(train_points=96),
     nn_set: SequencePathSettings = SequencePathSettings(),
+    # atol is on the residual norm (the loss stops at atol^2).
     lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=1e-5,
         damping_decrease=0.5,
         damping_increase=2.0,
+        max_steps=400,
+        atol=1e-07,
+        num_attempts=5,
     ),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
@@ -256,7 +221,18 @@ def open_economy_growth_nn(
     validation_t = jnp.linspace(
         0.0, float(train_t[-1]), data_set.validation_points, dtype=dtype
     )
-    steady = steady_state(parameters)
+    p = StructuralParameters.create(
+        dtype,
+        alpha=alpha,
+        gamma=gamma,
+        delta=delta,
+        r=r,
+        eta=eta,
+        r_star=r_star,
+        k_0=k_0,
+        a_0=a_0,
+    )
+    steady = steady_state(p)
     output_scale = float(steady["output"])
     scales = PathScales(
         output=output_scale,
@@ -264,17 +240,12 @@ def open_economy_growth_nn(
         log_q_ss=math.log(float(steady["q"])),
     )
     nn_set = replace(nn_set, input_scale=max(float(train_t[-1]), 1.0))
-    residual_parameters = ResidualParameters(
-        k_0=jnp.asarray(k_0, dtype=dtype),
-        a_0=jnp.asarray(a_0, dtype=dtype),
-        structural=DynamicModelParameters.from_model(parameters, dtype),
-    )
 
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     model = SequencePathNN(nn_set, dtype=dtype, rngs=nnx.Rngs(init_key))
     graphdef, theta_0, nondiff = nnx.split(model, nnx.Param, ...)
     residual_args = ResidualArgs(
-        graphdef=graphdef, nondiff=nondiff, t=train_t, scales=scales
+        batch={"t": train_t}, graphdef=graphdef, nondiff=nondiff, scales=scales
     )
 
     solver = LevenbergMarquardt(
@@ -285,17 +256,14 @@ def open_economy_growth_nn(
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
-    # solve()'s atol is on the residual norm; the settings threshold is on the
-    # sum of squared residuals.
-    atol = math.sqrt(tolerance_set.train_loss_threshold)
     solve_options = dict(
-        max_steps=tolerance_set.max_steps,
-        atol=atol,
+        max_steps=lm_set.max_steps,
+        atol=lm_set.atol,
         max_steps_is_success=False,
     )
     multi_start = MultiStart(
         key=multi_start_key,
-        num_starts=tolerance_set.num_attempts,
+        num_starts=lm_set.num_attempts,
         draw=DrawNNXModule(SequencePathNN, nn_set, dtype=dtype),
     )
 
@@ -303,7 +271,7 @@ def open_economy_growth_nn(
     result = solver.solve(
         theta_0,
         residual_args,
-        p=residual_parameters,
+        p=p,
         multi_start=multi_start,
         **solve_options,
     )
@@ -312,12 +280,12 @@ def open_economy_growth_nn(
     attempt = int(result.multi_start.attempt) + 1
 
     def evaluate_grid(points):
-        values = path_values(model, points, residual_parameters, scales)
-        residuals = dae_residuals(values, residual_parameters.structural)
+        values = path_values(model, points, p, scales)
+        residuals = dae_residuals(values, p)
         return {
             **values,
-            "x": investment_expenditure(values["k"], values["q"], parameters),
-            "output": production(values["k"], jnp.ones_like(values["k"]), parameters),
+            "x": investment_expenditure(values["k"], values["q"], p),
+            "output": production(values["k"], jnp.ones_like(values["k"]), p),
             "current_account": values["da_dt"],
             **residuals,
         }
@@ -334,9 +302,7 @@ def open_economy_growth_nn(
         float(jnp.max(jnp.abs(validation_eval[name]))) for name in RESIDUAL_NAMES
     )
 
-    benchmark, benchmark_diagnostics = open_economy_growth_benchmark(
-        k_0, a_0, parameters=parameters
-    )
+    benchmark, benchmark_diagnostics = open_economy_growth_benchmark(p)
     benchmark_values = benchmark(np.asarray(test_t))
     k_relative_error = jnp.abs(
         test_eval["k"] - jnp.asarray(benchmark_values["k"])
@@ -374,14 +340,14 @@ def open_economy_growth_nn(
         validation_eval["q"],
         validation_eval["c"],
         a_0,
-        parameters,
+        p,
     )
     tail = tail_diagnostics(
         train_eval["k"][-1],
         train_eval["a"][-1],
         train_eval["q"][-1],
         train_eval["c"][-1],
-        parameters,
+        p,
     )
     tvc = tvc_diagnostics(
         train_eval["k"][-1],
@@ -389,7 +355,7 @@ def open_economy_growth_nn(
         train_eval["q"][-1],
         train_eval["c"][-1],
         train_eval["t"][-1],
-        parameters,
+        p,
     )
 
     rejection_reasons = []
@@ -406,8 +372,13 @@ def open_economy_growth_nn(
 
     n_train = len(train_t)
     results = {
-        **asdict(parameters),
-        "r_star_resolved": parameters.r_star,
+        "alpha": alpha,
+        "gamma": gamma,
+        "delta": delta,
+        "r": r,
+        "eta": eta,
+        "r_star": r_star,
+        "r_star_resolved": r_star,
         "k_0": k_0,
         "a_0": a_0,
         "a_0_over_output_ss": a_0 / output_scale,
@@ -498,7 +469,14 @@ def open_economy_growth_nn(
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),
-        "parameters": asdict(parameters),
+        "parameters": {
+            "alpha": alpha,
+            "gamma": gamma,
+            "delta": delta,
+            "r": r,
+            "eta": eta,
+            "r_star": r_star,
+        },
         "initial_conditions": {"k_0": k_0, "a_0": a_0},
     }
     return results, {
@@ -510,7 +488,7 @@ def open_economy_growth_nn(
             "solver": solver,
             "residual_fn": residual_fn,
             "theta_0": theta_0,
-            "p": residual_parameters,
+            "p": p,
             "residual_args": residual_args,
             "multi_start": multi_start,
             "options": solve_options,

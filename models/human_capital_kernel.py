@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from typing import NamedTuple
 
 import jax
@@ -8,11 +8,17 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from nlls_gram import (
-    LevenbergMarquardt,
-    RidgeLevenbergMarquardt,
-)
+from flax import struct
+from nlls_gram import RidgeLevenbergMarquardt
 
+from models.human_capital_shared import (
+    RESIDUAL_NAMES,
+    DataSettings,
+    StructuralParameters,
+    ToleranceSettings,
+    human_capital_initial_conditions,
+    production_terms,
+)
 from models.kernels import (
     IntegratedPath,
     KernelSettings,
@@ -21,61 +27,12 @@ from models.kernels import (
     integrated_metric_factorization,
 )
 from models.utilities import (
+    OptimizerSettings,
+    RidgeSettings,
     Stopwatch,
     acceptance_fields,
     make_train_t_grid,
 )
-
-
-def human_capital_initial_residual(params, batch):
-    a_k, a_h, delta_k, delta_h, k_0 = batch
-    h_0 = jnp.exp(params["log_h"])
-    c_0 = jnp.exp(params["log_c"])
-    output = (k_0**a_k) * (h_0**a_h)
-    marginal_k = a_k * (k_0 ** (a_k - 1.0)) * (h_0**a_h)
-    marginal_h = a_h * (k_0**a_k) * (h_0 ** (a_h - 1.0))
-    return jnp.array(
-        [
-            marginal_h - delta_h - (marginal_k - delta_k),
-            c_0 + delta_h * h_0 + delta_k * k_0 - output,
-        ],
-        dtype=h_0.dtype,
-    )
-
-
-def human_capital_initial_conditions(
-    a_k: float = 1 / 3,
-    a_h: float = 1 / 4,
-    delta_k: float = 0.1,
-    delta_h: float = 0.05,
-    k_0: float = 1.5,
-    iterations: int = 20,
-    dtype=jnp.float64,
-):
-    batch = tuple(
-        jnp.asarray(value, dtype=dtype) for value in (a_k, a_h, delta_k, delta_h, k_0)
-    )
-    k_0_jax = batch[-1]
-    c_guess = (
-        (k_0_jax ** batch[0]) * (k_0_jax ** batch[1])
-        - batch[3] * k_0_jax
-        - batch[2] * k_0_jax
-    )
-    params = {
-        "log_h": jnp.log(k_0_jax),
-        "log_c": jnp.log(jnp.maximum(c_guess, jnp.asarray(1e-12, dtype=dtype))),
-    }
-    solver = LevenbergMarquardt(human_capital_initial_residual, init_damping=1e-4)
-    result = solver.solve(
-        params,
-        batch,
-        max_steps=iterations,
-        max_steps_is_success=False,
-    )
-    h_0 = jnp.exp(result.x["log_h"])
-    c_0 = jnp.exp(result.x["log_c"])
-    residual = human_capital_initial_residual(result.x, batch)
-    return h_0, c_0, residual, result
 
 
 # Alpha blocks first (the metric penalizes the leading flat coordinates).
@@ -94,111 +51,45 @@ class Theta(NamedTuple):
     mu_h_0: jax.Array
 
 
-RESIDUAL_NAMES = (
-    "physical_accumulation",
-    "human_accumulation",
-    "physical_euler",
-    "human_euler",
-    "feasibility",
-    "shadow_price",
-    "costate_gap",
-)
-
-
-def production_terms(k, h, p):
-    a_k, a_h = p["a_k"], p["a_h"]
-    output = (k**a_k) * (h**a_h)
-    f_k = a_k * k ** (a_k - 1.0) * h**a_h
-    f_h = a_h * k**a_k * h ** (a_h - 1.0)
-    return output, f_k, f_h
-
-
-def residuals(values, p):
-    delta_k, delta_h, rho_hat = p["delta_k"], p["delta_h"], p["rho_hat"]
-    (
-        k,
-        h,
-        i_k,
-        i_h,
-        c,
-        mu_k,
-        mu_h,
-        dk_dt,
-        dh_dt,
-        dmu_k_dt,
-        dmu_h_dt,
-    ) = values
-    output, f_k, f_h = production_terms(k, h, p)
-    return (
-        dk_dt - (i_k - delta_k * k),
-        dh_dt - (i_h - delta_h * h),
-        dmu_k_dt + mu_k * (f_k - delta_k - rho_hat),
-        dmu_h_dt + mu_h * (f_h - delta_h - rho_hat),
-        c + i_h + i_k - output,
-        mu_k * c - 1.0,
-        mu_k - mu_h,
-    )
+@struct.dataclass
+class ResidualArgs:
+    K: jax.Array
+    K_tilde: jax.Array
 
 
 def residual_fn(theta, args, p):
+    delta_k, delta_h, rho_hat = p.delta_k, p.delta_h, p.rho_hat
     paths = integrated_kernel_paths(
         {
-            "k": IntegratedPath(theta.alpha_k, p["k_0"]),
-            "h": IntegratedPath(theta.alpha_h, p["h_0"]),
+            "k": IntegratedPath(theta.alpha_k, p.k_0),
+            "h": IntegratedPath(theta.alpha_h, p.h_0),
             "i_k": IntegratedPath(theta.alpha_i_k, theta.i_k_0),
             "i_h": IntegratedPath(theta.alpha_i_h, theta.i_h_0),
             "c": IntegratedPath(theta.alpha_c, theta.c_0),
             "mu_k": IntegratedPath(theta.alpha_mu_k, theta.mu_k_0),
             "mu_h": IntegratedPath(theta.alpha_mu_h, theta.mu_h_0),
         },
-        args["K"],
-        args["K_tilde"],
+        args.K,
+        args.K_tilde,
     )
-    values = (
-        paths["k"].value,
-        paths["h"].value,
-        paths["i_k"].value,
-        paths["i_h"].value,
-        paths["c"].value,
-        paths["mu_k"].value,
-        paths["mu_h"].value,
-        paths["k"].d_dt,
-        paths["h"].d_dt,
-        paths["mu_k"].d_dt,
-        paths["mu_h"].d_dt,
+    k, dk_dt = paths["k"]
+    h, dh_dt = paths["h"]
+    i_k, i_h, c = paths["i_k"].value, paths["i_h"].value, paths["c"].value
+    mu_k, dmu_k_dt = paths["mu_k"]
+    mu_h, dmu_h_dt = paths["mu_h"]
+    output, f_k, f_h = production_terms(k, h, p)
+    residual = jnp.concatenate(
+        [
+            dk_dt - (i_k - delta_k * k),
+            dh_dt - (i_h - delta_h * h),
+            dmu_k_dt + mu_k * (f_k - delta_k - rho_hat),
+            dmu_h_dt + mu_h * (f_h - delta_h - rho_hat),
+            c + i_h + i_k - output,
+            mu_k * c - 1.0,
+            mu_k - mu_h,
+        ]
     )
-    residual = jnp.concatenate(residuals(values, p))
     return residual / jnp.sqrt(residual.size)
-
-
-@dataclass(frozen=True)
-class DataSettings:
-    train_T: float = 80.0
-    train_points: int = 81
-    train_points_list: list[float] | None = None
-    test_T: float = 100.0
-    test_points: int = 100
-    validation_points: int = 300
-
-
-# Acceptance gates, CLI-reachable so a float32 caller can pass its own bar
-# (the float32 replication driver does).
-@dataclass(frozen=True)
-class ToleranceSettings:
-    train_residual: float = 1e-5
-
-
-@dataclass(frozen=True)
-class SolverSettings:
-    init_damping: float = 1e-8
-    damping_decrease: float = 0.1
-    damping_increase: float = 4.0
-    max_steps: int = 100
-    # Convergence requires gtol AND residual_atol; the converged residual
-    # floors at O(ridge * ||dual||), so residual_atol sits above it.
-    residual_atol: float = 1e-9
-    ridge: float = 3e-11
-    gtol: float = 1e-10
 
 
 def human_capital_kernel(
@@ -211,7 +102,17 @@ def human_capital_kernel(
     use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
-    lm_set: SolverSettings = SolverSettings(),
+    # Convergence requires gtol AND atol; the converged residual floors at
+    # O(ridge * ||dual||), so atol sits above it.
+    lm_set: OptimizerSettings = OptimizerSettings(
+        init_damping=1e-8,
+        damping_decrease=0.1,
+        damping_increase=4.0,
+        max_steps=100,
+        atol=1e-9,
+        gtol=1e-10,
+    ),
+    ridge_set: RidgeSettings = RidgeSettings(ridge=3e-11),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = False,
 ):
@@ -242,19 +143,17 @@ def human_capital_kernel(
     # Everything in p -- h_0 as its own leaf included -- is implicitly
     # differentiable through the solve (nlls-gram's implicit JVP/VJP at the
     # ridge stationary point).
-    p = {
-        name: jnp.asarray(value, dtype=dtype)
-        for name, value in {
-            "a_k": a_k,
-            "a_h": a_h,
-            "delta_k": delta_k,
-            "delta_h": delta_h,
-            "rho_hat": rho_hat,
-            "k_0": k_0,
-            "h_0": h_0,
-        }.items()
-    }
-    residual_args = {"K": K, "K_tilde": K_tilde}
+    p = StructuralParameters.create(
+        dtype,
+        a_k=a_k,
+        a_h=a_h,
+        delta_k=delta_k,
+        delta_h=delta_h,
+        rho_hat=rho_hat,
+        k_0=k_0,
+        h_0=h_0,
+    )
+    residual_args = ResidualArgs(K=K, K_tilde=K_tilde)
 
     theta_0 = Theta(
         alpha_k=jnp.zeros(n_train, dtype=dtype),
@@ -273,7 +172,7 @@ def human_capital_kernel(
     solver = RidgeLevenbergMarquardt(
         residual_fn,
         metric=metric,
-        ridge=lm_set.ridge,
+        ridge=ridge_set.ridge,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
@@ -282,7 +181,7 @@ def human_capital_kernel(
     solve_options = dict(
         max_steps=lm_set.max_steps,
         gtol=lm_set.gtol,
-        atol=lm_set.residual_atol,
+        atol=lm_set.atol,
         max_steps_is_success=False,
     )
 
@@ -311,8 +210,8 @@ def human_capital_kernel(
         )
         paths = integrated_kernel_paths(
             {
-                "k": IntegratedPath(theta.alpha_k, p["k_0"]),
-                "h": IntegratedPath(theta.alpha_h, p["h_0"]),
+                "k": IntegratedPath(theta.alpha_k, p.k_0),
+                "h": IntegratedPath(theta.alpha_h, p.h_0),
                 "i_k": IntegratedPath(theta.alpha_i_k, theta.i_k_0),
                 "i_h": IntegratedPath(theta.alpha_i_h, theta.i_h_0),
                 "c": IntegratedPath(theta.alpha_c, theta.c_0),
@@ -322,29 +221,11 @@ def human_capital_kernel(
             K_eval,
             K_tilde_eval,
         )
-        k, h, i_k, i_h, c, mu_k, mu_h = (
-            paths["k"].value,
-            paths["h"].value,
-            paths["i_k"].value,
-            paths["i_h"].value,
-            paths["c"].value,
-            paths["mu_k"].value,
-            paths["mu_h"].value,
-        )
-        values = (
-            k,
-            h,
-            i_k,
-            i_h,
-            c,
-            mu_k,
-            mu_h,
-            paths["k"].d_dt,
-            paths["h"].d_dt,
-            paths["mu_k"].d_dt,
-            paths["mu_h"].d_dt,
-        )
-        residual_values = residuals(values, p)
+        k, dk_dt = paths["k"]
+        h, dh_dt = paths["h"]
+        i_k, i_h, c = paths["i_k"].value, paths["i_h"].value, paths["c"].value
+        mu_k, dmu_k_dt = paths["mu_k"]
+        mu_h, dmu_h_dt = paths["mu_h"]
         output, f_k, f_h = production_terms(k, h, p)
         return {
             "t": points,
@@ -355,7 +236,13 @@ def human_capital_kernel(
             "c": c,
             "mu_k": mu_k,
             "mu_h": mu_h,
-            **dict(zip(RESIDUAL_NAMES, residual_values, strict=True)),
+            "physical_accumulation": dk_dt - (i_k - delta_k * k),
+            "human_accumulation": dh_dt - (i_h - delta_h * h),
+            "physical_euler": dmu_k_dt + mu_k * (f_k - delta_k - rho_hat),
+            "human_euler": dmu_h_dt + mu_h * (f_h - delta_h - rho_hat),
+            "feasibility": c + i_h + i_k - output,
+            "shadow_price": mu_k * c - 1.0,
+            "costate_gap": mu_k - mu_h,
             "hidden_dae_residual": (f_k - delta_k) - (f_h - delta_h),
             "Y": output,
         }
@@ -391,8 +278,8 @@ def human_capital_kernel(
         )
         paths = integrated_kernel_paths(
             {
-                "k": IntegratedPath(theta.alpha_k, p["k_0"]),
-                "h": IntegratedPath(theta.alpha_h, p["h_0"]),
+                "k": IntegratedPath(theta.alpha_k, p.k_0),
+                "h": IntegratedPath(theta.alpha_h, p.h_0),
                 "i_k": IntegratedPath(theta.alpha_i_k, theta.i_k_0),
                 "i_h": IntegratedPath(theta.alpha_i_h, theta.i_h_0),
                 "c": IntegratedPath(theta.alpha_c, theta.c_0),
@@ -458,7 +345,7 @@ def human_capital_kernel(
             jnp.max(jnp.abs(test_eval["hidden_dae_residual"]))
         ),
         "solve_time": elapsed,
-        "ridge": lm_set.ridge,
+        "ridge": ridge_set.ridge,
         "gtol": lm_set.gtol,
         "train_loss": float(result.info.resid_loss),
         "final_grad_norm": float(result.info.grad_norm),
@@ -491,6 +378,7 @@ def human_capital_kernel(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
+        "ridge_set": asdict(ridge_set),
         "tolerance_set": asdict(tolerance_set),
         "parameters": {
             "a_k": a_k,

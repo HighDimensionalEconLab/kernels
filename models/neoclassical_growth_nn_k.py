@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import math
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, replace
 
 import jax
 import jax.numpy as jnp
@@ -21,6 +20,10 @@ from models.neoclassical_growth_shared import (
     NEOCLASSICAL_GROWTH_CONSTANTS as CONSTANTS,
 )
 from models.neoclassical_growth_shared import (
+    DataSettings,
+    GrowthPolicySettings,
+    StructuralParameters,
+    ToleranceSettings,
     mpk,
     production,
 )
@@ -33,68 +36,11 @@ from models.utilities import (
 )
 
 
-# The shared StructuralParameters plus the trend rate g: consumption is
-# substituted from the resource constraint, so the residual needs z(t) =
-# e^{(1-a) g t} analytically (z-dot enters c-dot) rather than as grid data.
-# Field names match the shared struct, so the imported production/mpk apply.
-@struct.dataclass
-class StructuralParameters:
-    a: jax.Array
-    delta: jax.Array
-    rho_hat: jax.Array
-    sigma_crra: jax.Array
-    z_0: jax.Array
-    k_0: jax.Array
-    g: jax.Array
-    A: jax.Array
-    b_1: jax.Array
-    b_2: jax.Array
-    k_thr: jax.Array
-
-    @classmethod
-    def create(cls, dtype, **kwargs):
-        return cls(
-            **{key: jnp.asarray(value, dtype=dtype) for key, value in kwargs.items()}
-        )
-
-
-@dataclass
-class DataSettings:
-    train_T: float = CONSTANTS.train_T
-    train_points: int = 101
-    train_points_list: list[float] | None = None
-    test_T: float = CONSTANTS.sequence_test_T
-    test_points: int = 101
-    test_tvc_T: float = CONSTANTS.transversality_T
-
-
-@dataclass(frozen=True)
-class ToleranceSettings:
-    max_steps: int = 250
-    train_loss_threshold: float = 1e-15
-    log_tvc_threshold: float = 0.0
-    num_attempts: int = 5
-
-
-@dataclass(frozen=True)
-class GrowthPolicySettings:
-    width: int = 32
-    depth: int = 3
-    hidden_activation: str = "tanh"
-    hidden_bias: bool = True
-    output_bias: bool = True
-    input_scale: float = 40.0
-    # Trend e^{g_hat t} on the capital head: a learned Param (init g_hat_init)
-    # or fixed at the constructor's g_hat.
-    learn_g_hat: bool = False
-    g_hat_init: float = 0.0
-
-
 @struct.dataclass
 class ResidualArgs:
+    batch: dict  # {"t"}
     graphdef: nnx.GraphDef
     nondiff: nnx.State
-    t: jax.Array
 
 
 # Single-head capital path k(t); consumption is derived from the resource
@@ -193,8 +139,9 @@ def euler_residual(model, t, p):
 
 def residual_fn(theta, args, p):
     model = nnx.merge(args.graphdef, theta, args.nondiff)
-    euler = jax.vmap(lambda t: euler_residual(model, t, p))(args.t)
-    ic = model(jnp.asarray(0.0, dtype=args.t.dtype)) - p.k_0
+    t_train = args.batch["t"]
+    euler = jax.vmap(lambda t: euler_residual(model, t, p))(t_train)
+    ic = model(jnp.asarray(0.0, dtype=t_train.dtype)) - p.k_0
     residual = jnp.concatenate([euler, jnp.atleast_1d(ic)])
     return residual / jnp.sqrt(residual.size)
 
@@ -243,12 +190,16 @@ def neoclassical_growth_nn_k(
     sigma_crra: float = CONSTANTS.sigma_crra,
     seed: int = 0,
     use_float64: bool = True,
-    data_set: DataSettings = DataSettings(),
+    data_set: DataSettings = DataSettings(test_points=101),
     nn_set: GrowthPolicySettings = GrowthPolicySettings(),
+    # atol is on the residual norm (the loss stops at atol^2).
     lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=1e-5,
         damping_decrease=0.5,
         damping_increase=2.0,
+        max_steps=250,
+        atol=3.162277660168379e-08,
+        num_attempts=5,
     ),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
@@ -291,7 +242,9 @@ def neoclassical_growth_nn_k(
         rngs=nnx.Rngs(init_key),
     )
     graphdef, theta_0, nondiff = nnx.split(model, nnx.Param, ...)
-    residual_args = ResidualArgs(graphdef=graphdef, nondiff=nondiff, t=t_train)
+    residual_args = ResidualArgs(
+        batch={"t": t_train}, graphdef=graphdef, nondiff=nondiff
+    )
 
     # Multi-start Levenberg-Marquardt solve.
     solver = LevenbergMarquardt(
@@ -303,17 +256,14 @@ def neoclassical_growth_nn_k(
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
 
-    # solve()'s atol is on the residual norm; the settings threshold is on
-    # the sum of squared residuals.
-    atol = math.sqrt(tolerance_set.train_loss_threshold)
     solve_options = dict(
-        max_steps=tolerance_set.max_steps,
-        atol=atol,
+        max_steps=lm_set.max_steps,
+        atol=lm_set.atol,
         max_steps_is_success=False,
     )
     multi_start = MultiStart(
         key=multi_start_key,
-        num_starts=tolerance_set.num_attempts,
+        num_starts=lm_set.num_attempts,
         draw=DrawNNXModule(
             CapitalPathNN,
             policy_settings,

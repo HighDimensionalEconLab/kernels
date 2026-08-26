@@ -46,7 +46,7 @@ def run(
     go(
         "large_countries",
         "ten_country_drawn_initial_conditions",
-        parameters=LARGE_COUNTRY_PARAMETERS,
+        **LARGE_COUNTRY_PARAMETERS,
     )
     write_summary(output_dir, PREFIX, experiments={"baseline", "large_countries"})
 

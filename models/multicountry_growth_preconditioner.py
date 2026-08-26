@@ -147,10 +147,10 @@ register_pytree_dataclass(
 # metric's upper Cholesky factor of K). The driver threads it through the
 # solver's args so the rebuild callback below stays a value-hashable static.
 def build_arrow_woodbury(theta, kernel_args, p, ridge, damping, num_countries):
-    K = kernel_args["K"]
-    K_tilde = kernel_args["K_tilde"]
-    K_check = kernel_args["K_check"]
-    F_t = kernel_args["F_t"]
+    K = kernel_args.K
+    K_tilde = kernel_args.K_tilde
+    K_check = kernel_args.K_check
+    F_t = kernel_args.F_t
     N = num_countries
     n_train = K.shape[0]
     dtype = K.dtype
@@ -158,13 +158,12 @@ def build_arrow_woodbury(theta, kernel_args, p, ridge, damping, num_countries):
     num_offsets = 3 * N + 1
     residual_scale = 1.0 / jnp.sqrt(float(num_blocks * n_train))
 
-    parameters_p = p["parameters"]
-    populations_p = parameters_p.populations
-    a_0_p = p["a_0"] - jnp.sum(populations_p * p["a_0"]) / jnp.sum(populations_p)
-    steady_p = steady_state(parameters_p, dtype)
+    populations_p = p.populations
+    a_0_p = p.a_0 - jnp.sum(populations_p * p.a_0) / jnp.sum(populations_p)
+    steady_p = steady_state(p, dtype)
     output_scale_p = steady_p["output_scale"]
     log_consumption_scale_p = jnp.log(steady_p["consumption_scale"])
-    log_k_0 = jnp.log(p["k_0"])
+    log_k_0 = jnp.log(p.k_0)
 
     coefficients = jnp.concatenate(
         [
@@ -199,20 +198,20 @@ def build_arrow_woodbury(theta, kernel_args, p, ridge, damping, num_countries):
         residuals = path_residuals(
             jnp.exp(log_k_0 + lv[0:N]),
             a_0_p + output_scale_p * lv[N : 2 * N],
-            jnp.exp(-jnp.log(parameters_p.eta) + offsets[:N] + lv[2 * N : 3 * N]),
+            jnp.exp(-jnp.log(p.eta) + offsets[:N] + lv[2 * N : 3 * N]),
             jnp.exp(log_consumption_scale_p + offsets[N : 2 * N] + lv[3 * N : 4 * N]),
             jnp.exp(
-                -parameters_p.gammas * log_consumption_scale_p
+                -p.gammas * log_consumption_scale_p
                 + offsets[2 * N : 3 * N]
                 + lv[4 * N : 5 * N]
             ),
-            parameters_p.productivities,
-            jnp.exp(jnp.log(parameters_p.r) + offsets[-1] + lv[5 * N]),
+            p.productivities,
+            jnp.exp(jnp.log(p.r) + offsets[-1] + lv[5 * N]),
             dv[0:N],
             output_scale_p * dv[N : 2 * N],
             dv[2 * N : 3 * N],
             dv[4 * N : 5 * N],
-            parameters_p,
+            p,
         )
         return residual_scale * jnp.concatenate(
             [

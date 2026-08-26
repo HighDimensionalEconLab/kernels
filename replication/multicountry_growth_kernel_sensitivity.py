@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
-
 import jax
 import jax.numpy as jnp
 import jsonargparse
@@ -63,7 +61,7 @@ def sensitivity_row(options, mode):
         )
         coordinates = path_coordinates(solved.x, K_sens, K_tilde_sens, p_value)
         return (
-            sensitivity_observables(coordinates, p_value["parameters"]),
+            sensitivity_observables(coordinates, p_value),
             solved.status,
         )
 
@@ -78,22 +76,21 @@ def sensitivity_row(options, mode):
         primal_observables = np.asarray(
             sensitivity_observables(
                 path_coordinates(theta, K_sens, K_tilde_sens, spec["p"]),
-                spec["p"]["parameters"],
+                spec["p"],
             )
         )
-        gradient_parameters = jacobian["parameters"]
         scalar_blocks = {
-            "alpha": np.asarray(gradient_parameters.alpha),
-            "delta": np.asarray(gradient_parameters.delta),
-            "r": np.asarray(gradient_parameters.r),
-            "eta": np.asarray(gradient_parameters.eta),
+            "alpha": np.asarray(jacobian.alpha),
+            "delta": np.asarray(jacobian.delta),
+            "r": np.asarray(jacobian.r),
+            "eta": np.asarray(jacobian.eta),
         }
         country_blocks = {
-            "gamma": np.asarray(gradient_parameters.gammas),
-            "productivity": np.asarray(gradient_parameters.productivities),
-            "population": np.asarray(gradient_parameters.populations),
-            "k_0": np.asarray(jacobian["k_0"]),
-            "a_0": np.asarray(jacobian["a_0"]),
+            "gamma": np.asarray(jacobian.gammas),
+            "productivity": np.asarray(jacobian.productivities),
+            "population": np.asarray(jacobian.populations),
+            "k_0": np.asarray(jacobian.k_0),
+            "a_0": np.asarray(jacobian.a_0),
         }
         rate_a_0_gradient = country_blocks["a_0"][:, 0, :]
     else:
@@ -109,24 +106,13 @@ def sensitivity_row(options, mode):
         # (1, ..., 1) in gamma: the country count cancels, so this is the
         # representative-agent risk-aversion change at any N.
         gamma_common = np.asarray(
-            tangent_at_p(
-                {
-                    **zero_tangent,
-                    "parameters": replace(
-                        zero_tangent["parameters"],
-                        gammas=jnp.ones_like(spec["p"]["parameters"].gammas),
-                    ),
-                }
-            )
+            tangent_at_p(zero_tangent.replace(gammas=jnp.ones_like(spec["p"].gammas)))
         )
         rate_a_0_gradient = np.column_stack(
             [
                 np.asarray(
                     tangent_at_p(
-                        {
-                            **zero_tangent,
-                            "a_0": zero_tangent["a_0"].at[country].set(1.0),
-                        }
+                        zero_tangent.replace(a_0=zero_tangent.a_0.at[country].set(1.0))
                     )
                 )[:, 0]
                 for country in range(num_countries)
@@ -145,7 +131,7 @@ def sensitivity_row(options, mode):
         primal_observables,
         scalar_blocks,
         country_blocks,
-        [float(value) for value in spec["p"]["parameters"].populations],
+        [float(value) for value in spec["p"].populations],
     )
 
     # Under identical homothetic preferences the world rate is invariant
@@ -189,7 +175,7 @@ def run(output_dir: str = ".results"):
         )
 
     go("sensitivity", "reverse")
-    go("sensitivity_ten_countries", "forward", parameters=LARGE_COUNTRY_PARAMETERS)
+    go("sensitivity_ten_countries", "forward", **LARGE_COUNTRY_PARAMETERS)
 
 
 if __name__ == "__main__":

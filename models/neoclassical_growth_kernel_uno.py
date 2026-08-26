@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import jsonargparse
 import numpy as np
+import pandas as pd
 import unopy
+from flax import struct
 from jax.flatten_util import ravel_pytree
 from jax.tree_util import Partial
 
 from models.kernels import (
+    IntegratedPath,
     KernelSettings,
     integrated_kernel_matrices,
+    integrated_kernel_paths,
     rkhs_norm_squared,
 )
 from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
@@ -22,28 +27,78 @@ from models.neoclassical_growth_shared import (
 from models.neoclassical_growth_shared import (
     DataSettings,
     StructuralParameters,
-    Theta,
-    evaluate_paths,
-    residual_fn,
-    snapshot,
+    mpk,
+    production,
     steady_flow_consumption_guess,
 )
-from models.utilities import Stopwatch, acceptance_fields, make_train_t_grid
+from models.utilities import (
+    ACCEPTED_SOLUTION_STATUSES,
+    Stopwatch,
+    UnoOptimizerSettings,
+    acceptance_fields,
+    make_train_t_grid,
+)
+
+
+# Alpha blocks first (the metric penalizes the leading flat coordinates);
+# g_hat is the trend rate of the approximation class, None unless learned.
+class Theta(NamedTuple):
+    alpha_mu: jax.Array
+    alpha_c: jax.Array
+    alpha_k: jax.Array
+    c_0: jax.Array
+    mu_0: jax.Array
+    g_hat: jax.Array | None = None
+
+
+@struct.dataclass
+class ResidualArgs:
+    batch: dict  # {"t", "z_trend", "g_hat"} -- always plain arrays
+    K: jax.Array
+    K_tilde: jax.Array
+    unravel: Partial
+
+
+# CRRA first-order condition u'(c) = mu; the costate and resource residuals
+# are utility-free. batch["g_hat"] is the fixed trend rate (0 without
+# growth); a learned theta.g_hat overrides it.
+def residual_fn(theta, args, p):
+    g_hat = theta.g_hat if theta.g_hat is not None else args.batch["g_hat"]
+    trend_mu = -p.sigma_crra * g_hat
+    paths = integrated_kernel_paths(
+        {
+            "mu": IntegratedPath(theta.alpha_mu, theta.mu_0, trend_mu),
+            "c": IntegratedPath(theta.alpha_c, theta.c_0, g_hat),
+            "k": IntegratedPath(theta.alpha_k, p.k_0, g_hat),
+        },
+        args.K,
+        args.K_tilde,
+        args.batch["t"],
+    )
+    k, dk_dt = paths["k"]
+    mu, dmu_dt = paths["mu"]
+    c = paths["c"].value
+    z = p.z_0 * args.batch["z_trend"]
+    resource = dk_dt - (production(z, k, p) - p.delta * k - c)
+    euler = dmu_dt + mu * (mpk(z, k, p) - p.delta - p.rho_hat)
+    shadow_price = mu * c**p.sigma_crra - 1.0
+    residual = jnp.concatenate([resource, euler, shadow_price])
+    return residual / jnp.sqrt(residual.size)
 
 
 @jax.jit
 def objective(x, args):
-    theta = args["unravel"](x)
+    theta = args.unravel(x)
     return (
-        rkhs_norm_squared(theta.alpha_mu, args["K"])
-        + rkhs_norm_squared(theta.alpha_c, args["K"])
-        + rkhs_norm_squared(theta.alpha_k, args["K"])
+        rkhs_norm_squared(theta.alpha_mu, args.K)
+        + rkhs_norm_squared(theta.alpha_c, args.K)
+        + rkhs_norm_squared(theta.alpha_k, args.K)
     )
 
 
 @jax.jit
 def constraints(x, args, p):
-    theta = args["unravel"](x)
+    theta = args.unravel(x)
     return residual_fn(theta, args, p)
 
 
@@ -70,16 +125,9 @@ class ToleranceSettings:
     log_tvc_threshold: float = 0.0
 
 
-@dataclass(frozen=True)
-class SolverSettings:
-    preset: str = "ipopt"
-    max_iterations: int | None = None
-    time_limit: float | None = None
-
-
 # Fail-fast budget for kinked production: near the basin threshold the NLP
 # can wander, and the sweep classifies a slow solve as rejected.
-KINKED_SOLVER_SETTINGS = SolverSettings(max_iterations=25, time_limit=0.15)
+KINKED_SOLVER_SETTINGS = UnoOptimizerSettings(max_iterations=25, time_limit=0.15)
 
 
 def neoclassical_growth_kernel_uno(
@@ -95,7 +143,7 @@ def neoclassical_growth_kernel_uno(
     b_2: float | None = None,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
-    solver_set: SolverSettings | None = None,
+    solver_set: UnoOptimizerSettings | None = None,
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     c_0_guess: float | None = None,  # overrides the flat steady-flow warm start
     verbose: bool = False,
@@ -112,7 +160,7 @@ def neoclassical_growth_kernel_uno(
         A, b_1, b_2, k_thr = 1.0, 1.0, 0.0, float("inf")
     if solver_set is None:
         solver_set = (
-            KINKED_SOLVER_SETTINGS if use_kinked_production else SolverSettings()
+            KINKED_SOLVER_SETTINGS if use_kinked_production else UnoOptimizerSettings()
         )
 
     kernel = kernel_set.kernel
@@ -133,6 +181,7 @@ def neoclassical_growth_kernel_uno(
         sigma_crra=sigma_crra,
         z_0=z_0,
         k_0=k_0,
+        g=0.0,
         A=A,
         b_1=b_1,
         b_2=b_2,
@@ -150,14 +199,16 @@ def neoclassical_growth_kernel_uno(
         mu_0=jnp.asarray(c_flow_guess**-sigma_crra),
     )
     x_initial, unravel = ravel_pytree(theta_0)
-    args = {
-        "K": K_jax,
-        "K_tilde": K_tilde_jax,
-        "t": None,
-        "z_trend": 1.0,
-        "g_hat": None,
-        "unravel": Partial(unravel),
-    }
+    args = ResidualArgs(
+        batch={
+            "t": train_data,
+            "z_trend": jnp.ones_like(train_data),
+            "g_hat": jnp.zeros((), dtype=jnp.float64),
+        },
+        K=K_jax,
+        K_tilde=K_tilde_jax,
+        unravel=Partial(unravel),
+    )
 
     n_variables = x_initial.size
     n_constraints = 3 * n_train
@@ -239,6 +290,10 @@ def neoclassical_growth_kernel_uno(
         solver.set_option("max_iterations", solver_set.max_iterations)
     if solver_set.time_limit is not None:
         solver.set_option("time_limit", solver_set.time_limit)
+    if solver_set.primal_tolerance is not None:
+        solver.set_option("primal_tolerance", solver_set.primal_tolerance)
+    if solver_set.dual_tolerance is not None:
+        solver.set_option("dual_tolerance", solver_set.dual_tolerance)
 
     timer = Stopwatch()
     result = solver.optimize(model)
@@ -249,6 +304,36 @@ def neoclassical_growth_kernel_uno(
     x = np.array(result.primal_solution, dtype=np.float64)[:n_variables]
     theta = unravel(jnp.asarray(x))
     c_0, mu_0 = theta.c_0, theta.mu_0
+
+    # Paths and residual rows on an evaluation grid through fresh
+    # cross-kernel matrices against the training grid.
+    def evaluate_grid(points):
+        K_eval, K_tilde_eval = integrated_kernel_matrices(
+            points, train_data, kernel, sigma, ell
+        )
+        paths = integrated_kernel_paths(
+            {
+                "mu": IntegratedPath(theta.alpha_mu, theta.mu_0),
+                "c": IntegratedPath(theta.alpha_c, theta.c_0),
+                "k": IntegratedPath(theta.alpha_k, p.k_0),
+            },
+            K_eval,
+            K_tilde_eval,
+        )
+        k, dk_dt = paths["k"]
+        mu, dmu_dt = paths["mu"]
+        c = paths["c"].value
+        return {
+            "t": points,
+            "k": k,
+            "c": c,
+            "mu": mu,
+            "dk_dt": dk_dt,
+            "dmu_dt": dmu_dt,
+            "resource": dk_dt - (production(z_0, k, p) - p.delta * k - c),
+            "euler": dmu_dt + mu * (mpk(z_0, k, p) - p.delta - p.rho_hat),
+            "shadow_price": mu * c**p.sigma_crra - 1.0,
+        }
 
     test_data = jnp.linspace(
         0, data_set.test_T, data_set.test_points, dtype=jnp.float64
@@ -264,17 +349,29 @@ def neoclassical_growth_kernel_uno(
             a, delta, rho_hat, sigma_crra, g=0.0, z_0=z_0, k_0=k_0
         )
     )
-    train_df = snapshot(theta, train_data, p, train_data, kernel_set, z=z_0)
-    validation_df = snapshot(theta, validation_data, p, train_data, kernel_set, z=z_0)
-    test_df = snapshot(
-        theta,
-        test_data,
-        p,
-        train_data,
-        kernel_set,
-        benchmark=test_benchmark,
-        z=z_0,
+    train_eval = evaluate_grid(train_data)
+    validation_eval = evaluate_grid(validation_data)
+    test_eval = evaluate_grid(test_data)
+    frame_columns = ("t", "k", "c", "mu", "resource", "euler", "shadow_price")
+    train_df = pd.DataFrame(
+        {name: np.asarray(train_eval[name]) for name in frame_columns}
     )
+    validation_df = pd.DataFrame(
+        {name: np.asarray(validation_eval[name]) for name in frame_columns}
+    )
+    test_df = pd.DataFrame(
+        {name: np.asarray(test_eval[name]) for name in frame_columns}
+    )
+    if test_benchmark is not None:
+        k_b, c_b = test_benchmark(test_data)
+        test_df["k_benchmark"] = np.asarray(k_b)
+        test_df["c_benchmark"] = np.asarray(c_b)
+        test_df["k_rel_error"] = np.abs(test_df["k"] - test_df["k_benchmark"]) / np.abs(
+            test_df["k_benchmark"]
+        )
+        test_df["c_rel_error"] = np.abs(test_df["c"] - test_df["c_benchmark"]) / np.abs(
+            test_df["c_benchmark"]
+        )
 
     residual_names = ("resource", "euler", "shadow_price")
     max_train_residual = max(
@@ -307,18 +404,18 @@ def neoclassical_growth_kernel_uno(
 
     @jax.jit
     def kernel_solution(t_grid):
-        paths = evaluate_paths(theta, t_grid, train_data, kernel_set, p)
+        values = evaluate_grid(t_grid)
         return (
-            paths["k"].value,
-            paths["c"].value,
-            paths["mu"].value,
-            paths["k"].d_dt,
-            paths["mu"].d_dt,
+            values["k"],
+            values["c"],
+            values["mu"],
+            values["dk_dt"],
+            values["dmu_dt"],
         )
 
     tvc_t = jnp.asarray([data_set.test_tvc_T], dtype=jnp.float64)
-    paths_T = evaluate_paths(theta, tvc_t, train_data, kernel_set, p)
-    k_T, c_T = paths_T["k"].value, paths_T["c"].value
+    tvc_eval = evaluate_grid(tvc_t)
+    k_T, c_T = tvc_eval["k"], tvc_eval["c"]
     log_tvc = float(
         -rho_hat * data_set.test_tvc_T - sigma_crra * jnp.log(c_T[0]) + jnp.log(k_T[0])
     )
@@ -338,7 +435,7 @@ def neoclassical_growth_kernel_uno(
     rejection_reasons = []
     if solver_status != "SUCCESS":
         rejection_reasons.append("solver_status")
-    if solution_status not in {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}:
+    if solution_status not in ACCEPTED_SOLUTION_STATUSES:
         rejection_reasons.append("solution_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")

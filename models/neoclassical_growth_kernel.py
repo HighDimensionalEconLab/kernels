@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import jsonargparse
 import numpy as np
+import pandas as pd
+from flax import struct
 from nlls_gram import RidgeLevenbergMarquardt
 
 from models.kernels import (
+    IntegratedPath,
     KernelSettings,
+    integrated_kernel_matrices,
+    integrated_kernel_paths,
     integrated_metric_factorization,
 )
 from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
@@ -19,17 +25,62 @@ from models.neoclassical_growth_shared import (
 from models.neoclassical_growth_shared import (
     DataSettings,
     StructuralParameters,
-    Theta,
-    evaluate_paths,
-    residual_fn,
-    snapshot,
+    mpk,
+    production,
     steady_flow_consumption_guess,
 )
 from models.utilities import (
+    OptimizerSettings,
+    RidgeSettings,
     Stopwatch,
     acceptance_fields,
     make_train_t_grid,
 )
+
+
+# Alpha blocks first (the metric penalizes the leading flat coordinates);
+# g_hat is the trend rate of the approximation class, None unless learned.
+class Theta(NamedTuple):
+    alpha_mu: jax.Array
+    alpha_c: jax.Array
+    alpha_k: jax.Array
+    c_0: jax.Array
+    mu_0: jax.Array
+    g_hat: jax.Array | None = None
+
+
+@struct.dataclass
+class ResidualArgs:
+    batch: dict  # {"t", "z_trend", "g_hat"} -- always plain arrays
+    K: jax.Array
+    K_tilde: jax.Array
+
+
+# CRRA first-order condition u'(c) = mu; the costate and resource residuals
+# are utility-free. batch["g_hat"] is the fixed trend rate (0 without
+# growth); a learned theta.g_hat overrides it.
+def residual_fn(theta, args, p):
+    g_hat = theta.g_hat if theta.g_hat is not None else args.batch["g_hat"]
+    trend_mu = -p.sigma_crra * g_hat
+    paths = integrated_kernel_paths(
+        {
+            "mu": IntegratedPath(theta.alpha_mu, theta.mu_0, trend_mu),
+            "c": IntegratedPath(theta.alpha_c, theta.c_0, g_hat),
+            "k": IntegratedPath(theta.alpha_k, p.k_0, g_hat),
+        },
+        args.K,
+        args.K_tilde,
+        args.batch["t"],
+    )
+    k, dk_dt = paths["k"]
+    mu, dmu_dt = paths["mu"]
+    c = paths["c"].value
+    z = p.z_0 * args.batch["z_trend"]
+    resource = dk_dt - (production(z, k, p) - p.delta * k - c)
+    euler = dmu_dt + mu * (mpk(z, k, p) - p.delta - p.rho_hat)
+    shadow_price = mu * c**p.sigma_crra - 1.0
+    residual = jnp.concatenate([resource, euler, shadow_price])
+    return residual / jnp.sqrt(residual.size)
 
 
 # CLI-reachable bars; only train_residual gates acceptance.
@@ -37,22 +88,6 @@ from models.utilities import (
 class ToleranceSettings:
     train_residual: float = 1e-5
     log_tvc_threshold: float = 0.0
-
-
-@dataclass(frozen=True)
-class SolverSettings:
-    init_damping: float = 1e-8
-    damping_decrease: float = 0.1
-    damping_increase: float = 4.0
-    max_steps: int = 50
-    residual_atol: float = 2e-8  # on the 1/sqrt(3n)-scaled residual norm
-    # Ridge weight of ||r||^2 + ridge * sum_j alpha_j' K alpha_j with the free
-    # (c_0, mu_0) unpenalized; the converged residual norm is
-    # O(ridge * ||dual||), so ridge must sit low enough that residual_atol
-    # stays reachable. Convergence requires gtol AND residual_atol.
-    # Tuning: https://highdimensionaleconlab.github.io/nlls_gram/ridge_lm/
-    ridge: float = 1e-10
-    gtol: float = 1e-9
 
 
 def neoclassical_growth_kernel(
@@ -73,7 +108,22 @@ def neoclassical_growth_kernel(
     use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
-    lm_set: SolverSettings = SolverSettings(),
+    # atol is on the 1/sqrt(3n)-scaled residual norm; convergence requires
+    # gtol AND atol.
+    lm_set: OptimizerSettings = OptimizerSettings(
+        init_damping=1e-8,
+        damping_decrease=0.1,
+        damping_increase=4.0,
+        max_steps=50,
+        atol=2e-8,
+        gtol=1e-9,
+    ),
+    # Ridge weight of ||r||^2 + ridge * sum_j alpha_j' K alpha_j with the free
+    # (c_0, mu_0) unpenalized; the converged residual norm is
+    # O(ridge * ||dual||), so ridge must sit low enough that atol stays
+    # reachable. Tuning:
+    # https://highdimensionaleconlab.github.io/nlls_gram/ridge_lm/
+    ridge_set: RidgeSettings = RidgeSettings(ridge=1e-10),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     c_0_guess: float | None = None,  # overrides the flat steady-flow warm start
     verbose: bool = False,
@@ -105,6 +155,7 @@ def neoclassical_growth_kernel(
         sigma_crra=sigma_crra,
         z_0=z_0,
         k_0=k_0,
+        g=g,
         A=A,
         b_1=b_1,
         b_2=b_2,
@@ -120,16 +171,18 @@ def neoclassical_growth_kernel(
     )
 
     def z_path(t_grid):
-        return z_0 * jnp.exp((1.0 - a) * g * t_grid) if g != 0.0 else z_0
+        return z_0 * jnp.exp((1.0 - a) * g * t_grid)
 
     g_hat_fixed = jnp.asarray(g, dtype=dtype) if g != 0.0 and not learn_g_hat else None
-    residual_args = {
-        "K": K_jax,
-        "K_tilde": K_tilde_jax,
-        "t": train_data,
-        "z_trend": jnp.exp((1.0 - a) * g * train_data) if g != 0.0 else 1.0,
-        "g_hat": g_hat_fixed,
-    }
+    residual_args = ResidualArgs(
+        batch={
+            "t": train_data,
+            "z_trend": jnp.exp((1.0 - a) * g * train_data),
+            "g_hat": jnp.asarray(g, dtype=dtype),
+        },
+        K=K_jax,
+        K_tilde=K_tilde_jax,
+    )
 
     c_flow_guess = steady_flow_consumption_guess(z_0, k_0, a, delta, A, b_1, b_2)
     if c_0_guess is not None:
@@ -147,7 +200,7 @@ def neoclassical_growth_kernel(
     solver = RidgeLevenbergMarquardt(
         residual_fn,
         metric=metric,
-        ridge=lm_set.ridge,
+        ridge=ridge_set.ridge,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
@@ -156,7 +209,7 @@ def neoclassical_growth_kernel(
     solve_options = dict(
         max_steps=lm_set.max_steps,
         gtol=lm_set.gtol,
-        atol=lm_set.residual_atol,
+        atol=lm_set.atol,
         max_steps_is_success=False,
     )
 
@@ -168,6 +221,40 @@ def neoclassical_growth_kernel(
     c_0, mu_0 = theta.c_0, theta.mu_0
     steps = int(result.steps)
 
+    # Paths and residual rows on an evaluation grid through fresh
+    # cross-kernel matrices against the training grid.
+    def evaluate_grid(points):
+        K_eval, K_tilde_eval = integrated_kernel_matrices(
+            points, train_data, kernel, sigma, ell
+        )
+        g_hat = theta.g_hat if theta.g_hat is not None else g_hat_fixed
+        trend_mu = None if g_hat is None else -p.sigma_crra * g_hat
+        paths = integrated_kernel_paths(
+            {
+                "mu": IntegratedPath(theta.alpha_mu, theta.mu_0, trend_mu),
+                "c": IntegratedPath(theta.alpha_c, theta.c_0, g_hat),
+                "k": IntegratedPath(theta.alpha_k, p.k_0, g_hat),
+            },
+            K_eval,
+            K_tilde_eval,
+            points,
+        )
+        k, dk_dt = paths["k"]
+        mu, dmu_dt = paths["mu"]
+        c = paths["c"].value
+        z = z_path(points)
+        return {
+            "t": points,
+            "k": k,
+            "c": c,
+            "mu": mu,
+            "dk_dt": dk_dt,
+            "dmu_dt": dmu_dt,
+            "resource": dk_dt - (production(z, k, p) - p.delta * k - c),
+            "euler": dmu_dt + mu * (mpk(z, k, p) - p.delta - p.rho_hat),
+            "shadow_price": mu * c**p.sigma_crra - 1.0,
+        }
+
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
     test_benchmark = (
         None
@@ -176,29 +263,29 @@ def neoclassical_growth_kernel(
             a, delta, rho_hat, sigma_crra, g=g, z_0=z_0, k_0=k_0
         )
     )
-    train_df = snapshot(
-        theta,
-        train_data,
-        p,
-        train_data,
-        kernel_set,
-        g_hat_fixed,
-        z=z_path(train_data),
+    train_eval = evaluate_grid(train_data)
+    test_eval = evaluate_grid(test_data)
+    frame_columns = ("t", "k", "c", "mu", "resource", "euler", "shadow_price")
+    train_df = pd.DataFrame(
+        {name: np.asarray(train_eval[name]) for name in frame_columns}
     )
-    test_df = snapshot(
-        theta,
-        test_data,
-        p,
-        train_data,
-        kernel_set,
-        g_hat_fixed,
-        benchmark=test_benchmark,
-        z=z_path(test_data),
+    test_df = pd.DataFrame(
+        {name: np.asarray(test_eval[name]) for name in frame_columns}
     )
+    if test_benchmark is not None:
+        k_b, c_b = test_benchmark(test_data)
+        test_df["k_benchmark"] = np.asarray(k_b)
+        test_df["c_benchmark"] = np.asarray(c_b)
+        test_df["k_rel_error"] = np.abs(test_df["k"] - test_df["k_benchmark"]) / np.abs(
+            test_df["k_benchmark"]
+        )
+        test_df["c_rel_error"] = np.abs(test_df["c"] - test_df["c_benchmark"]) / np.abs(
+            test_df["c_benchmark"]
+        )
 
     tvc_t = jnp.asarray([data_set.test_tvc_T], dtype=dtype)
-    paths_T = evaluate_paths(theta, tvc_t, train_data, kernel_set, p, g_hat_fixed)
-    k_T, c_T = paths_T["k"].value, paths_T["c"].value
+    tvc_eval = evaluate_grid(tvc_t)
+    k_T, c_T = tvc_eval["k"], tvc_eval["c"]
     log_tvc = float(
         -rho_hat * data_set.test_tvc_T - sigma_crra * jnp.log(c_T[0]) + jnp.log(k_T[0])
     )
@@ -257,7 +344,7 @@ def neoclassical_growth_kernel(
         "log_tvc_residual": log_tvc,
         "transversality_ok": transversality_ok,
         "solve_time": elapsed,
-        "ridge": lm_set.ridge,
+        "ridge": ridge_set.ridge,
         "gtol": lm_set.gtol,
         "train_loss": float(result.info.resid_loss),
         "final_damping": float(result.lm_state.damping),
@@ -290,6 +377,7 @@ def neoclassical_growth_kernel(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
+        "ridge_set": asdict(ridge_set),
         "tolerance_set": asdict(tolerance_set),
         "parameters": {
             "a": a,
@@ -307,13 +395,13 @@ def neoclassical_growth_kernel(
 
     @jax.jit
     def kernel_solution(t_grid):
-        paths = evaluate_paths(theta, t_grid, train_data, kernel_set, p, g_hat_fixed)
+        values = evaluate_grid(t_grid)
         return (
-            paths["k"].value,
-            paths["c"].value,
-            paths["mu"].value,
-            paths["k"].d_dt,
-            paths["mu"].d_dt,
+            values["k"],
+            values["c"],
+            values["mu"],
+            values["dk_dt"],
+            values["dmu_dt"],
         )
 
     return results, {

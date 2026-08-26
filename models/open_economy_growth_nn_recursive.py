@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import asdict, dataclass, replace
 from functools import partial
 
@@ -16,7 +15,10 @@ from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 
 from models.open_economy_growth_benchmark import open_economy_growth_benchmark
 from models.open_economy_growth_shared import (
-    ModelParameters,
+    OPEN_ECONOMY_GROWTH_CONSTANTS as CONSTANTS,
+)
+from models.open_economy_growth_shared import (
+    StructuralParameters,
     marginal_product,
     present_value_gap,
     production,
@@ -39,18 +41,13 @@ from models.utilities import (
 # residual or initialization.
 
 
-# Acceptance gates (CLI-reachable so a float32 caller can pass its own bar;
-# the float32 replication driver does) plus the solve budget.
+# Acceptance gates, CLI-reachable so a lower-precision caller can pass its
+# own bars.
 @dataclass(frozen=True)
 class ToleranceSettings:
     train_residual: float = 1e-5
     validation_residual: float = 5e-3
     benchmark_match: float = 1e-3
-    max_steps: int = 250
-    train_loss_threshold: float = 1e-14
-    # frac_accepted measures acceptance within the restart budget, not first-try
-    # robustness: a seed that stalls short of the loss threshold is redrawn.
-    num_attempts: int = 5
 
 
 @dataclass(frozen=True)
@@ -83,36 +80,6 @@ class ResidualArgs:
     graphdef: nnx.GraphDef
     nondiff: nnx.State
     data_set: DataSettings = struct.field(pytree_node=False)
-
-
-@struct.dataclass
-class DynamicModelParameters:
-    alpha: jax.Array
-    gamma: jax.Array
-    delta: jax.Array
-    r: jax.Array
-    eta: jax.Array
-    r_star: jax.Array
-    chi: jax.Array
-
-    @classmethod
-    def from_model(cls, p, dtype):
-        return cls(
-            alpha=jnp.asarray(p.alpha, dtype=dtype),
-            gamma=jnp.asarray(p.gamma, dtype=dtype),
-            delta=jnp.asarray(p.delta, dtype=dtype),
-            r=jnp.asarray(p.r, dtype=dtype),
-            eta=jnp.asarray(p.eta, dtype=dtype),
-            r_star=jnp.asarray(p.r_star, dtype=dtype),
-            chi=jnp.asarray(p.delta ** (1.0 - p.eta), dtype=dtype),
-        )
-
-
-@struct.dataclass
-class ResidualParameters:
-    k_0: jax.Array
-    a_0: jax.Array
-    structural: DynamicModelParameters
 
 
 class SequentialPolicyNN(nnx.Module):
@@ -280,10 +247,10 @@ def residual_fn(theta, args, p):
         policy,
         p.k_0,
         p.a_0,
-        p.structural,
+        p,
         args.data_set,
     )
-    values = path_values(policy, states.reshape(-1, 2), p.structural)
+    values = path_values(policy, states.reshape(-1, 2), p)
     euler = jnp.stack([values["q_euler"], values["c_euler"]], axis=-1)
     euler = euler.reshape(active.shape + (2,))
     active_count = jnp.asarray(jnp.maximum(jnp.sum(active), 1), dtype=euler.dtype)
@@ -317,31 +284,38 @@ def evaluate_path_jit(policy, T, budget, k_0, a_0, args):
 
 # Evaluates along the integrator's own states: n_points from n - 1 steps.
 def evaluate_path(policy, T, n_points, k_0, a_0, p):
-    dtype = jnp.asarray(k_0).dtype
-    dynamic_parameters = DynamicModelParameters.from_model(p, dtype)
     return evaluate_path_jit(
         policy,
         T,
         n_points - 1,
         k_0,
         a_0,
-        dynamic_parameters,
+        p,
     )
 
 
 def open_economy_growth_nn_recursive(
+    alpha: float = CONSTANTS.alpha,
+    gamma: float = CONSTANTS.gamma,
+    delta: float = CONSTANTS.delta,
+    r: float = CONSTANTS.r,
+    eta: float = CONSTANTS.eta,
+    r_star: float = CONSTANTS.r_star,
     k_0: float = 1.0,
     a_0: float = 0.0,
-    parameters: ModelParameters = ModelParameters(),
     seed: int = 0,
     use_float64: bool = True,
     data_set: DataSettings = DataSettings(),
     nn_set: SequentialPolicySettings = SequentialPolicySettings(),
+    # atol is on the residual norm (the loss stops at atol^2).
     lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=3.26e-5,
         damping_decrease=0.482,
         damping_increase=2.71,
         geodesic_acceptance_ratio=0.541,
+        max_steps=250,
+        atol=1e-07,
+        num_attempts=5,
     ),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
@@ -351,12 +325,22 @@ def open_economy_growth_nn_recursive(
     dtype = jnp.float64 if use_float64 else jnp.float32
     k_0_jax = jnp.asarray(k_0, dtype=dtype)
     a_0_jax = jnp.asarray(a_0, dtype=dtype)
-    dynamic_parameters = DynamicModelParameters.from_model(parameters, dtype)
-    initial_output = float(production(k_0_jax, 1.0, parameters))
+    p = StructuralParameters.create(
+        dtype,
+        alpha=alpha,
+        gamma=gamma,
+        delta=delta,
+        r=r,
+        eta=eta,
+        r_star=r_star,
+        k_0=k_0,
+        a_0=a_0,
+    )
+    initial_output = float(production(k_0_jax, 1.0, p))
     nn_set = replace(
         nn_set,
         flow_scale=initial_output,
-        investment_anchor=parameters.delta * k_0,
+        investment_anchor=delta * k_0,
         k_0_ref=k_0,
     )
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
@@ -367,11 +351,6 @@ def open_economy_growth_nn_recursive(
         nondiff=nondiff,
         data_set=data_set,
     )
-    residual_parameters = ResidualParameters(
-        k_0=k_0_jax,
-        a_0=a_0_jax,
-        structural=dynamic_parameters,
-    )
 
     solver = LevenbergMarquardt(
         residual_fn,
@@ -381,22 +360,21 @@ def open_economy_growth_nn_recursive(
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
-    atol = math.sqrt(tolerance_set.train_loss_threshold)
     multi_start = MultiStart(
         key=multi_start_key,
-        num_starts=tolerance_set.num_attempts,
+        num_starts=lm_set.num_attempts,
         draw=DrawNNXModule(SequentialPolicyNN, nn_set, dtype=dtype),
     )
     solve_options = dict(
-        max_steps=tolerance_set.max_steps,
-        atol=atol,
+        max_steps=lm_set.max_steps,
+        atol=lm_set.atol,
         max_steps_is_success=False,
     )
     timer = Stopwatch()
     result = solver.solve(
         theta_0,
         residual_args,
-        p=residual_parameters,
+        p=p,
         multi_start=multi_start,
         **solve_options,
     )
@@ -410,7 +388,7 @@ def open_economy_growth_nn_recursive(
         data_set.train_points,
         k_0_jax,
         a_0_jax,
-        parameters,
+        p,
     )
     test_eval = evaluate_path(
         policy,
@@ -418,7 +396,7 @@ def open_economy_growth_nn_recursive(
         data_set.test_points,
         k_0_jax,
         a_0_jax,
-        parameters,
+        p,
     )
     diagnostic_eval = evaluate_path(
         policy,
@@ -426,7 +404,7 @@ def open_economy_growth_nn_recursive(
         data_set.diagnostic_points,
         k_0_jax,
         a_0_jax,
-        parameters,
+        p,
     )
     train_t = train_eval["t"]
     test_t = test_eval["t"]
@@ -461,15 +439,13 @@ def open_economy_growth_nn_recursive(
     acceptance = acceptance_fields(rejection_reasons)
     solution_accepted = acceptance["solution_accepted"]
 
-    benchmark, benchmark_diagnostics = open_economy_growth_benchmark(
-        k_0, a_0, parameters=parameters
-    )
+    benchmark, benchmark_diagnostics = open_economy_growth_benchmark(p)
     benchmark_values = benchmark(np.asarray(test_t))
     benchmark_test_values = {
         name: jnp.asarray(benchmark_values[name], dtype=dtype)
         for name in ("k", "q", "c", "a")
     }
-    output_scale = jnp.asarray(steady_state(parameters)["output"], dtype=dtype)
+    output_scale = jnp.asarray(steady_state(p)["output"], dtype=dtype)
     k_relative_error = (
         jnp.abs(test_eval["k"] - benchmark_test_values["k"])
         / benchmark_test_values["k"]
@@ -496,7 +472,7 @@ def open_economy_growth_nn_recursive(
         terminal["a"],
         terminal["q"],
         terminal["c"],
-        parameters,
+        p,
     )
     tvc = tvc_diagnostics(
         terminal["k"],
@@ -504,7 +480,7 @@ def open_economy_growth_nn_recursive(
         terminal["q"],
         terminal["c"],
         terminal["t"],
-        parameters,
+        p,
     )
     pv_gap = present_value_gap(
         diagnostic_eval["t"],
@@ -512,12 +488,12 @@ def open_economy_growth_nn_recursive(
         diagnostic_eval["q"],
         diagnostic_eval["c"],
         a_0_jax,
-        parameters,
+        p,
     )
     theta_initial, _ = ravel_pytree(theta_0)
     theta_final, _ = ravel_pytree(result.x)
 
-    steady = steady_state(parameters)
+    steady = steady_state(p)
     grid_lo = min(k_0, float(steady["k"]))
     grid_hi = max(k_0, float(steady["k"]))
     margin = 0.05 * (grid_hi - grid_lo) + 1e-6
@@ -533,12 +509,17 @@ def open_economy_growth_nn_recursive(
     policy_x = policy_flows[:, 0]
     policy_ca = policy_flows[:, 1]
     policy_s = policy_x / policy_k
-    policy_chi = parameters.delta ** (1.0 - parameters.eta)
-    policy_q = policy_s ** (1.0 - parameters.eta) / (policy_chi * parameters.eta)
+    policy_chi = delta ** (1.0 - eta)
+    policy_q = policy_s ** (1.0 - eta) / (policy_chi * eta)
 
     results = {
-        **asdict(parameters),
-        "r_star_resolved": parameters.r_star,
+        "alpha": alpha,
+        "gamma": gamma,
+        "delta": delta,
+        "r": r,
+        "eta": eta,
+        "r_star": r_star,
+        "r_star_resolved": r_star,
         "k_0": k_0,
         "a_0": a_0,
         "seed": seed,
@@ -634,7 +615,14 @@ def open_economy_growth_nn_recursive(
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),
-        "parameters": asdict(parameters),
+        "parameters": {
+            "alpha": alpha,
+            "gamma": gamma,
+            "delta": delta,
+            "r": r,
+            "eta": eta,
+            "r_star": r_star,
+        },
         "initial_conditions": {"k_0": k_0, "a_0": a_0},
     }
     jax.block_until_ready(nnx.state(policy))
@@ -649,7 +637,7 @@ def open_economy_growth_nn_recursive(
             "solver": solver,
             "residual_fn": residual_fn,
             "theta_0": theta_0,
-            "p": residual_parameters,
+            "p": p,
             "residual_args": residual_args,
             "multi_start": multi_start,
             "options": solve_options,

@@ -8,8 +8,8 @@ import numpy as np
 
 from models import multicountry_growth_kernel
 from models.multicountry_growth_shared import (
+    MULTICOUNTRY_GROWTH_CONSTANTS,
     InitialConditionSettings,
-    MulticountryParameters,
     draw_initial_conditions,
     steady_state,
 )
@@ -87,9 +87,10 @@ def bond_invariance(validation_frames, num_countries, test_T):
 
 def run(output_dir: str = ".results"):
     configure_process()
-    parameters = MulticountryParameters()
-    drawn_k_0, _ = draw_initial_conditions(InitialConditionSettings(), parameters)
-    output_scale = float(steady_state(parameters)["output_scale"])
+    drawn_k_0, _ = draw_initial_conditions(
+        InitialConditionSettings(), MULTICOUNTRY_GROWTH_CONSTANTS.populations
+    )
+    output_scale = float(steady_state(MULTICOUNTRY_GROWTH_CONSTANTS)["output_scale"])
     meta = dict(n_seeds=1, residual_dtype="float64")
     validation_frames = {}
 
@@ -124,24 +125,20 @@ def run(output_dir: str = ".results"):
     )
     go(
         "three_countries",
-        parameters=dict(
-            gammas=(2.0, 2.0, 2.0),
-            populations=(1.0, 1.0, 1.0),
-            productivities=(1.0, 1.0, 1.0),
-        ),
+        gammas=(2.0, 2.0, 2.0),
+        populations=(1.0, 1.0, 1.0),
+        productivities=(1.0, 1.0, 1.0),
     )
     go(
         "heterogeneous_countries",
-        parameters=dict(
-            populations=(1.0, 2.0),
-            productivities=(1.0, 1.1),
-        ),
+        populations=(1.0, 2.0),
+        productivities=(1.0, 1.1),
     )
     # Symmetric in preferences, size, and technology: the only heterogeneity
     # is the drawn capital and the drawn bond positions, so the aggregate
     # comparative statics isolate what a wide cross-section adds over two
     # countries rather than what asymmetric calibration adds.
-    go("ten_countries", parameters=LARGE_COUNTRY_PARAMETERS)
+    go("ten_countries", **LARGE_COUNTRY_PARAMETERS)
     write_summary(
         output_dir,
         PREFIX,
@@ -156,7 +153,7 @@ def run(output_dir: str = ".results"):
     )
     invariance = bond_invariance(
         validation_frames,
-        parameters.num_countries,
+        len(MULTICOUNTRY_GROWTH_CONSTANTS.populations),
         multicountry_growth_kernel.DataSettings().test_T,
     )
     summary_path = pathlib.Path(output_dir) / f"{PREFIX}_summary.json"

@@ -43,6 +43,7 @@ from models.utilities import (
     SDE_SOLVERS,
     STATUS_TO_REASON,
     OptimizerSettings,
+    RidgeSettings,
     Stopwatch,
     acceptance_fields,
     cache_key,
@@ -52,27 +53,12 @@ from models.utilities import (
 )
 
 
-# Acceptance gates on the held-out batch, plus the ridge LM budget; the
-# float32 replication driver passes its own bars.
+# Acceptance gates on the held-out batch, CLI-reachable so a
+# lower-precision caller can pass its own bars.
 @dataclass(frozen=True)
 class ToleranceSettings:
     test_euler_mean_abs: float = 5e-3
     test_euler_max: float = 3e-1
-    max_steps: int = 100
-    residual_atol: float = 1e-5
-    gtol: float = 1e-7
-    ridge: float = 1e-12
-    # ridge_init=None solves at the fixed ridge above; a value enables ridge
-    # continuation annealed from ridge_init down to `ridge` (the floor) by
-    # factors of `ridge_decrease` on inner stationarity. The metric's
-    # factorization never involves the ridge, so the anneal composes
-    # unchanged.
-    ridge_init: float | None = None
-    ridge_decrease: float = 0.1
-    # Relative stationarity threshold that triggers the next ridge level:
-    # looser anneals faster (fewer steps per level), tighter solves each
-    # level out more completely before descending.
-    ridge_grad_rtol: float = 1e-2
 
 
 # Kernel geometry lives in the NN's normalized coordinates, so one
@@ -240,24 +226,23 @@ def stochastic_open_economy_growth_kernel_recursive(
     # with --policy_cache feeds a module-default kernel run.
     ic_set: InitialConditionSettings = InitialConditionSettings(),
     kernel_set: StateKernelSettings = StateKernelSettings(),
+    # atol must clear the seed-dependent ridge-floor residual (conjunctive
+    # stopping; observed floors reach ~5e-5).
     lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=4.9e-4,
         damping_decrease=0.16,
         damping_increase=8.5,
         geodesic_acceleration=True,
         geodesic_acceptance_ratio=0.75,
-    ),
-    # residual_atol must clear the seed-dependent ridge-floor residual
-    # (conjunctive stopping; observed floors reach ~5e-5). The held-out max
-    # bar guards against simulation divergence, not NN accuracy: the
-    # frozen-design kernel is coarser than the NN it consumes and blow-ups
-    # land at 1e3+.
-    tolerance_set: ToleranceSettings = ToleranceSettings(
         max_steps=300,
-        residual_atol=1e-4,
+        atol=1e-4,
         gtol=7.4e-7,
-        ridge=5.4e-11,
     ),
+    ridge_set: RidgeSettings = RidgeSettings(ridge=5.4e-11, ridge_decrease=0.1),
+    # The held-out max bar guards against simulation divergence, not NN
+    # accuracy: the frozen-design kernel is coarser than the NN it consumes
+    # and blow-ups land at 1e3+.
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
 ):
     jax.config.update("jax_enable_x64", True)
@@ -408,15 +393,15 @@ def stochastic_open_economy_growth_kernel_recursive(
         theta_0 = theta_0 + (jnp.zeros(2, dtype=dtype),)
     if kernel_set.linear_mean:
         theta_0 = theta_0 + (jnp.zeros((4, 2), dtype=dtype),)
-    if tolerance_set.ridge_init is None:
-        initial_ridge = tolerance_set.ridge
+    if ridge_set.ridge_init is None:
+        initial_ridge = ridge_set.ridge
         continuation_options = {}
     else:
-        initial_ridge = tolerance_set.ridge_init
+        initial_ridge = ridge_set.ridge_init
         callback = AnnealRidge(
-            ridge_floor=tolerance_set.ridge,
-            decrease=tolerance_set.ridge_decrease,
-            grad_rtol=tolerance_set.ridge_grad_rtol,
+            ridge_floor=ridge_set.ridge,
+            decrease=ridge_set.ridge_decrease,
+            grad_rtol=ridge_set.ridge_grad_rtol,
         )
         continuation_options = {
             "callback": callback,
@@ -439,9 +424,9 @@ def stochastic_open_economy_growth_kernel_recursive(
         theta_0,
         args,
         p=p,
-        max_steps=tolerance_set.max_steps,
-        atol=tolerance_set.residual_atol,
-        gtol=tolerance_set.gtol,
+        max_steps=lm_set.max_steps,
+        atol=lm_set.atol,
+        gtol=lm_set.gtol,
         max_steps_is_success=False,
         **continuation_options,
     )
@@ -605,10 +590,10 @@ def stochastic_open_economy_growth_kernel_recursive(
         "asset_lengthscale": lengthscales[2],
         "rate_lengthscale": lengthscales[3],
         "metric_epsilon": kernel_set.metric_epsilon,
-        "ridge": tolerance_set.ridge,
-        "ridge_init": tolerance_set.ridge_init,
-        "ridge_decrease": tolerance_set.ridge_decrease,
-        "ridge_grad_rtol": tolerance_set.ridge_grad_rtol,
+        "ridge": ridge_set.ridge,
+        "ridge_init": ridge_set.ridge_init,
+        "ridge_decrease": ridge_set.ridge_decrease,
+        "ridge_grad_rtol": ridge_set.ridge_grad_rtol,
         "train_loss": train_loss,
         "train_euler_mean_abs": float(jnp.mean(jnp.abs(train_euler))),
         "train_euler_max_abs": float(jnp.max(jnp.abs(train_euler))),
@@ -670,6 +655,7 @@ def stochastic_open_economy_growth_kernel_recursive(
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
         "lm_set": asdict(lm_set),
+        "ridge_set": asdict(ridge_set),
         "tolerance_set": asdict(tolerance_set),
         "parameters": asdict(parameters),
         "shocks": {

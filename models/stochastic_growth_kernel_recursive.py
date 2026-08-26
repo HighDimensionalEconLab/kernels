@@ -37,6 +37,7 @@ from models.utilities import (
     SDE_SOLVERS,
     STATUS_TO_REASON,
     OptimizerSettings,
+    RidgeSettings,
     Stopwatch,
     acceptance_fields,
     cache_key,
@@ -67,11 +68,6 @@ class StateKernelSettings:
 
 @dataclass(frozen=True)
 class ToleranceSettings:
-    max_steps: int = 100
-    # Float32 callers pass looser tolerances explicitly.
-    residual_atol: float = 1e-5
-    gtol: float = 1e-7
-    ridge: float = 1e-12
     log_tvc_threshold: float = 0.0
 
 
@@ -205,18 +201,19 @@ def stochastic_growth_kernel_recursive(
         train_log_k_variance=0.01,
     ),
     kernel_set: StateKernelSettings = StateKernelSettings(),
+    # atol sits just above this representation's float64 residual floor.
     lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=1e-6,
         damping_decrease=0.25,
         damping_increase=4.0,
         geodesic_acceleration=True,
         geodesic_acceptance_ratio=0.75,
+        max_steps=150,
+        atol=7e-5,
+        gtol=1e-7,
     ),
-    # residual_atol sits just above this representation's float64 residual
-    # floor.
-    tolerance_set: ToleranceSettings = ToleranceSettings(
-        max_steps=150, residual_atol=7e-5
-    ),
+    ridge_set: RidgeSettings = RidgeSettings(ridge=1e-12),
+    tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
 ):
     jax.config.update("jax_enable_x64", True)
@@ -306,7 +303,7 @@ def stochastic_growth_kernel_recursive(
     solver = RidgeLevenbergMarquardt(
         residual_fn,
         metric=metric,
-        ridge=tolerance_set.ridge,
+        ridge=ridge_set.ridge,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
@@ -320,9 +317,9 @@ def stochastic_growth_kernel_recursive(
         theta_0,
         args,
         p=p,
-        max_steps=tolerance_set.max_steps,
-        atol=tolerance_set.residual_atol,
-        gtol=tolerance_set.gtol,
+        max_steps=lm_set.max_steps,
+        atol=lm_set.atol,
+        gtol=lm_set.gtol,
         max_steps_is_success=False,
     )
     solve_time = solve_timer.elapsed(result)
@@ -492,7 +489,7 @@ def stochastic_growth_kernel_recursive(
         "log_z_lengthscale": kernel_set.log_z_lengthscale,
         "log_k_lengthscale": kernel_set.log_k_lengthscale,
         "metric_epsilon": kernel_set.metric_epsilon,
-        "ridge": tolerance_set.ridge,
+        "ridge": ridge_set.ridge,
         "train_loss": train_loss,
         "max_train_euler": max_train_euler,
         "max_test_euler": max_test_euler,
@@ -543,6 +540,7 @@ def stochastic_growth_kernel_recursive(
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
         "lm_set": asdict(lm_set),
+        "ridge_set": asdict(ridge_set),
         "tolerance_set": asdict(tolerance_set),
         "parameters": {
             "a": a,

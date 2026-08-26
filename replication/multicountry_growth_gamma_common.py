@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import statistics
-from dataclasses import replace
 
 import jax
 import jax.numpy as jnp
@@ -9,11 +8,10 @@ import jsonargparse
 import pandas as pd
 from nlls_gram import CG, LMStatus, RidgeLevenbergMarquardt
 
-from models import multicountry_growth_kernel
 from models.kernels import integrated_kernel_matrices
 from models.multicountry_growth_kernel import path_coordinates
 from models.multicountry_growth_preconditioner import build_arrow_woodbury
-from models.utilities import Stopwatch
+from models.utilities import CGSettings, Stopwatch
 from replication.multicountry_growth_scaling import (
     KERNEL_SET,
     PREFIX,
@@ -45,20 +43,19 @@ def run(output_dir: str = ".results"):
     configure_process()
     print(f"gamma_common (N={GAMMA_COMMON_COUNT}, cg) -> {output_dir}/")
     num_countries = GAMMA_COMMON_COUNT
-    lm_overrides = rung_lm_overrides(num_countries)
+    overrides = rung_lm_overrides(num_countries)
     results, extras = run_solver(
         SOLVER,
         {
-            "parameters": rung_parameters(num_countries),
+            **rung_parameters(num_countries),
             "kernel_set": KERNEL_SET,
-            "lm_set": {"linear_solver": "cg", **lm_overrides},
+            **overrides,
+            "ridge_set": {**overrides.get("ridge_set", {}), "linear_solver": "cg"},
         },
     )
     spec, result = extras["solve"], extras["result"]
     theta = result.x
-    lm_settings = multicountry_growth_kernel.SolverSettings(
-        linear_solver="cg", **lm_overrides
-    )
+    cg_settings = CGSettings(**overrides.get("cg_set", {}))
     t_common = jnp.asarray(GAMMA_COMMON_TIMES, dtype=jnp.float64)
     train_data = jnp.asarray(extras["train_df"]["t"].to_numpy())
     K_common, K_tilde_common = integrated_kernel_matrices(
@@ -75,15 +72,15 @@ def run(output_dir: str = ".results"):
                 spec["residual_args"],
                 spec["p"],
                 float(result.lm_state.ridge),
-                lm_settings.cg_damping_floor,
+                cg_settings.damping_floor,
                 num_countries,
             ),
-            tol=lm_settings.cg_tol,
-            maxiter=lm_settings.cg_maxiter,
+            tol=cg_settings.tol,
+            maxiter=cg_settings.maxiter,
         ),
         # The undamped AD system runs once, so it gets a deeper budget than
         # the damped inner solves.
-        ad_solver=CG(None, maxiter=10 * lm_settings.cg_maxiter),
+        ad_solver=CG(None, maxiter=10 * cg_settings.maxiter),
         init_damping=primal_solver.init_damping,
         damping_decrease=primal_solver.damping_decrease,
         damping_increase=primal_solver.damping_increase,
@@ -98,13 +95,9 @@ def run(output_dir: str = ".results"):
         )
         return coordinates["interest_rate"], common_result.status
 
-    gamma_direction = {
-        **jax.tree_util.tree_map(jnp.zeros_like, spec["p"]),
-        "parameters": replace(
-            jax.tree_util.tree_map(jnp.zeros_like, spec["p"])["parameters"],
-            gammas=jnp.ones_like(spec["p"]["parameters"].gammas),
-        ),
-    }
+    gamma_direction = jax.tree_util.tree_map(jnp.zeros_like, spec["p"]).replace(
+        gammas=jnp.ones_like(spec["p"].gammas)
+    )
     tangent_times = []
     for _ in range(WARM_TIMING_REPETITIONS + 1):
         tangent_timer = Stopwatch()

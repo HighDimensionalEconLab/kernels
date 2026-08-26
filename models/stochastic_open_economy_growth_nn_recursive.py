@@ -56,8 +56,9 @@ from models.utilities import (
 # initialization; the deterministic benchmark is ex-post diagnostics only.
 
 
-# Acceptance gates on the held-out batch (the float32 replication driver
-# passes its own bars) plus the epoch/shock-ladder training budget.
+# Acceptance gates on the held-out batch plus the epoch/shock-ladder
+# training budget; CLI-reachable so a lower-precision caller can pass its
+# own bars.
 @dataclass(frozen=True)
 class ToleranceSettings:
     test_euler_mean_abs: float = 5e-3
@@ -68,7 +69,6 @@ class ToleranceSettings:
     # continuation_epochs; convergence is only declared at scale 1.0.
     max_steps: int = 250
     train_loss_threshold: float = 1e-10
-    num_attempts: int = 2
     num_epochs: int = 5
     epoch_early_stopping: bool = True
     shock_continuation: bool = True
@@ -280,6 +280,7 @@ def stochastic_open_economy_growth_nn_recursive(
         damping_increase=3.22,
         geodesic_acceleration=True,
         geodesic_acceptance_ratio=0.782,
+        num_attempts=2,
     ),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     asset_shift_scale: float = 0.5,
@@ -541,7 +542,7 @@ def stochastic_open_economy_growth_nn_recursive(
             callback=callback,
             multi_start=MultiStart(
                 key=multi_start_key,
-                num_starts=tolerance_set.num_attempts,
+                num_starts=lm_set.num_attempts,
                 draw=DrawSequentialPolicy(nn_set, dtype),
                 accept=accept_training,
             ),

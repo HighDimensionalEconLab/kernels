@@ -3,9 +3,8 @@
 This directory holds useful variations that are not part of the main paper
 replication pipeline.
 
-The asset-pricing and neoclassical-growth UNO implementations are main examples
-with drivers under `replication/`. The human-capital and advertising UNO
-implementations remain here as optional comparisons.
+All UNO implementations live under `models/`; the human-capital and
+advertising UNO ensemble drivers remain here as optional comparisons.
 
 ## Comparisons and sweeps
 

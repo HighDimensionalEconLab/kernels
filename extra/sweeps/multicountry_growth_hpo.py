@@ -26,8 +26,8 @@ from models.multicountry_growth_nn import (
     multicountry_growth_nn,
 )
 from models.multicountry_growth_shared import (
+    MULTICOUNTRY_GROWTH_CONSTANTS,
     InitialConditionSettings,
-    MulticountryParameters,
     draw_initial_conditions,
     steady_state,
 )
@@ -44,20 +44,35 @@ NN_GRID = {
     "depth": (3, 4),
     "damping": ("oe", "shared"),
 }
+# Solve fields pin the multicountry NN driver's defaults; only the damping
+# schedule varies.
 DAMPING_SCHEDULES = {
     "oe": OptimizerSettings(
-        init_damping=1e-5, damping_decrease=0.5, damping_increase=2.0
+        init_damping=1e-5,
+        damping_decrease=0.5,
+        damping_increase=2.0,
+        max_steps=400,
+        atol=1e-07,
+        num_attempts=5,
     ),
     "shared": OptimizerSettings(
-        init_damping=1e-5, damping_decrease=0.35, damping_increase=8.0
+        init_damping=1e-5,
+        damping_decrease=0.35,
+        damping_increase=8.0,
+        max_steps=400,
+        atol=1e-07,
+        num_attempts=5,
     ),
 }
 
 
 def kernel_sweep(output):
-    parameters = MulticountryParameters()
-    drawn_k_0, _ = draw_initial_conditions(InitialConditionSettings(), parameters)
-    half_output = 0.5 * float(steady_state(parameters)["output_scale"])
+    drawn_k_0, _ = draw_initial_conditions(
+        InitialConditionSettings(), MULTICOUNTRY_GROWTH_CONSTANTS.populations
+    )
+    half_output = 0.5 * float(
+        steady_state(MULTICOUNTRY_GROWTH_CONSTANTS)["output_scale"]
+    )
     configurations = {
         "baseline": {},
         "initial_debt": dict(k_0=drawn_k_0, a_0=(-half_output, half_output)),
@@ -70,7 +85,6 @@ def kernel_sweep(output):
         try:
             for name, overrides in configurations.items():
                 results, extras = multicountry_growth_kernel(
-                    parameters=parameters,
                     kernel_set=KernelSettings(kernel=kernel, ell=ell),
                     data_set=DataSettings(train_points=train_points),
                     **overrides,

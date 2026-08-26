@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
+from flax import struct
 
 # Validity of the inputs, not an acceptance gate: checked in exact float64 on
 # the raw values, so it holds at any working dtype.
@@ -17,8 +18,10 @@ INITIAL_CLEARING_TOL = 1e-10
 DEBT_SERVICE_MARGIN = 0.05
 
 
+# Shared calibration: every multicountry driver defaults to the instance
+# below.
 @dataclass(frozen=True)
-class MulticountryParameters:
+class MulticountryConstants:
     alpha: float = 0.33
     gammas: tuple[float, ...] = (2.0, 2.0)
     delta: float = -math.log(0.94)
@@ -31,18 +34,16 @@ class MulticountryParameters:
     def num_countries(self):
         return len(self.populations)
 
-    @property
-    def chi(self):
-        return self.delta ** (1.0 - self.eta)
+
+MULTICOUNTRY_GROWTH_CONSTANTS = MulticountryConstants()
 
 
-# Differentiable duck-type of MulticountryParameters: a pytree whose leaves
-# can carry tracers, for implicit-AD comparative statics through the
-# solver's `p` argument. The model functions only use attribute access, so
-# either container works; this one skips the float-only validation.
-@jax.tree_util.register_dataclass
-@dataclass(frozen=True)
-class MulticountryParameterValues:
+# Deep structural parameters and the initial conditions together (vector
+# leaves over countries), all implicitly differentiable through the solver's
+# `p` argument. The country count is compile-time structure and stays
+# host-side (len(populations) at the drivers).
+@struct.dataclass
+class StructuralParameters:
     alpha: jax.Array
     gammas: jax.Array
     delta: jax.Array
@@ -50,26 +51,44 @@ class MulticountryParameterValues:
     eta: jax.Array
     populations: jax.Array
     productivities: jax.Array
+    k_0: jax.Array
+    a_0: jax.Array
 
     @property
     def num_countries(self):
         return self.populations.shape[-1]
 
+    # chi = delta^(1 - eta) normalizes adjustment costs so the steady-state
+    # investment rate is exactly delta; a derived quantity, so tangents flow
+    # through delta and eta.
     @property
     def chi(self):
         return self.delta ** (1.0 - self.eta)
 
+    @classmethod
+    def create(cls, dtype, **kwargs):
+        return cls(
+            **{key: jnp.asarray(value, dtype=dtype) for key, value in kwargs.items()}
+        )
 
-def multicountry_parameter_values(p, dtype=jnp.float64):
-    return MulticountryParameterValues(
-        alpha=jnp.asarray(p.alpha, dtype=dtype),
-        gammas=jnp.asarray(p.gammas, dtype=dtype),
-        delta=jnp.asarray(p.delta, dtype=dtype),
-        r=jnp.asarray(p.r, dtype=dtype),
-        eta=jnp.asarray(p.eta, dtype=dtype),
-        populations=jnp.asarray(p.populations, dtype=dtype),
-        productivities=jnp.asarray(p.productivities, dtype=dtype),
-    )
+
+@dataclass(frozen=True)
+class DataSettings:
+    train_T: float = 160.0
+    train_points: int = 192
+    train_points_list: list[float] | None = None
+    sampling: str = "front_loaded"
+    dense_T: float = 40.0
+    tail_points: int = 15
+    test_T: float = 50.0
+    test_points: int = 201
+    validation_points: int = 401
+    # Long-run validity checks are evaluated at t ~ long_run_check_T (flat
+    # consumption/capital/debt, capital at the theory steady state, interest
+    # rate ~ r), with flatness measured against
+    # t = long_run_check_T - long_run_window.
+    long_run_check_T: float = 100.0
+    long_run_window: float = 10.0
 
 
 # Identical initial conditions across countries make the multicountry
@@ -92,14 +111,14 @@ class InitialConditionSettings:
     a_0_sigma: float = 0.6
 
 
-def draw_initial_conditions(initial_set, p, dtype=jnp.float64):
+def draw_initial_conditions(initial_set, populations, dtype=jnp.float64):
     key_k, key_a = jax.random.split(jax.random.key(initial_set.seed))
-    num_countries = p.num_countries
+    num_countries = len(populations)
     k_0 = jnp.exp(
         initial_set.k_0_log_sigma
         * jax.random.normal(key_k, (num_countries,), dtype=dtype)
     )
-    populations = jnp.asarray(p.populations, dtype=dtype)
+    populations = jnp.asarray(populations, dtype=dtype)
     raw = initial_set.a_0_sigma * jax.random.normal(
         key_a, (num_countries,), dtype=dtype
     )
@@ -107,21 +126,23 @@ def draw_initial_conditions(initial_set, p, dtype=jnp.float64):
     return tuple(float(value) for value in k_0), tuple(float(value) for value in a_0)
 
 
-def validate_initial_conditions(k_0, a_0, p):
+def validate_initial_conditions(p):
     populations = np.asarray(p.populations, dtype=np.float64)
-    a_0_np = np.asarray(a_0, dtype=np.float64)
+    a_0_np = np.asarray(p.a_0, dtype=np.float64)
     scale = float(steady_state(p, jnp.float64)["output_scale"])
     clearing_gap = float(np.sum(populations * a_0_np)) / scale
     if abs(clearing_gap) > INITIAL_CLEARING_TOL:
         raise ValueError("population-weighted initial NFA positions must sum to zero")
     productivities = np.asarray(p.productivities, dtype=np.float64)
-    output_0 = productivities * np.asarray(k_0, dtype=np.float64) ** p.alpha
-    margin = output_0 + p.r * a_0_np - DEBT_SERVICE_MARGIN * output_0
+    r = float(np.asarray(p.r, dtype=np.float64))
+    alpha = float(np.asarray(p.alpha, dtype=np.float64))
+    output_0 = productivities * np.asarray(p.k_0, dtype=np.float64) ** alpha
+    margin = output_0 + r * a_0_np - DEBT_SERVICE_MARGIN * output_0
     if np.any(margin <= 0.0):
         worst = int(np.argmin(margin))
         raise ValueError(
             f"country {worst + 1} initial debt service exceeds output: "
-            f"z f(k_0) + r a_0 = {output_0[worst] + p.r * a_0_np[worst]:.4f} "
+            f"z f(k_0) + r a_0 = {output_0[worst] + r * a_0_np[worst]:.4f} "
             f"must exceed {DEBT_SERVICE_MARGIN:.0%} of its initial output "
             f"{output_0[worst]:.4f}"
         )

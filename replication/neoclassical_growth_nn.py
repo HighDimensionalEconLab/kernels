@@ -35,11 +35,11 @@ def run(
 
     experiments = {
         "baseline": {},
-        "baseline_g02": {"g": 0.02, "tolerance_set": {"train_loss_threshold": 1e-14}},
+        "baseline_g02": {"g": 0.02, "lm_set": {"atol": 1e-07}},
         "baseline_g02_learned": {
             "g": 0.02,
             "nn_set": {"learn_g_hat": True},
-            "tolerance_set": {"train_loss_threshold": 1e-14},
+            "lm_set": {"atol": 1e-07},
         },
     }
 

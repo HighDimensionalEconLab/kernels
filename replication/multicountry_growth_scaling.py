@@ -71,9 +71,9 @@ def rung_lm_overrides(num_countries):
     # floor deepens with it so the preconditioned condition number
     # ~ floor/ridge stays small.
     if num_countries >= 100:
-        deep = dict(ridge=1e-13, cg_damping_floor=3e-12)
+        deep = {"ridge_set": {"ridge": 1e-13}, "cg_set": {"damping_floor": 3e-12}}
     elif num_countries >= 25:
-        deep = dict(ridge=3e-13, cg_damping_floor=1e-11)
+        deep = {"ridge_set": {"ridge": 3e-13}, "cg_set": {"damping_floor": 1e-11}}
     else:
         deep = {}
     # Wide systems need the stricter scaled-residual stop to descend from
@@ -86,7 +86,7 @@ def rung_lm_overrides(num_countries):
         if num_countries >= WIDE_STOPPING_START
         else NARROW_RESIDUAL_ATOL
     )
-    return {"residual_atol": residual_atol, **deep}
+    return {"lm_set": {"atol": residual_atol}, **deep}
 
 
 def run(
@@ -109,12 +109,14 @@ def run(
         for solver_name in solvers:
             name = f"{'dense' if solver_name == 'cholesky' else 'cg'}_N{num_countries}"
             print(f"{name} -> {output_dir}/", flush=True)
+            overrides = rung_lm_overrides(num_countries)
             options = {
-                "parameters": parameters,
+                **parameters,
                 "kernel_set": KERNEL_SET,
-                "lm_set": {
+                **overrides,
+                "ridge_set": {
+                    **overrides.get("ridge_set", {}),
                     "linear_solver": solver_name,
-                    **rung_lm_overrides(num_countries),
                 },
             }
             results, extras = run_solver(SOLVER, options)

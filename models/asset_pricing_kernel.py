@@ -1,23 +1,24 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
+from flax import struct
 from nlls_gram import (
     RidgeLevenbergMarquardt,
 )
 
-from models.asset_pricing_benchmark import mu_f_array
 from models.asset_pricing_shared import (
     DataSettings,
-    Theta,
+    StructuralParameters,
     ToleranceSettings,
     dividends,
-    residual_fn,
+    mu_f_array,
 )
 from models.kernels import (
     IntegratedPath,
@@ -28,28 +29,34 @@ from models.kernels import (
     rkhs_norm_squared,
 )
 from models.utilities import (
+    OptimizerSettings,
+    RidgeSettings,
     Stopwatch,
     acceptance_fields,
     make_train_t_grid,
 )
 
 
-@dataclass(frozen=True)
-class SolverSettings:
-    init_damping: float = 1e-8
-    damping_decrease: float = 0.5
-    damping_increase: float = 4.0
-    max_steps: int = 100
-    residual_atol: float = 1e-9  # unscaled residual norm; bounds max|residual|
-    p0_init: float = 0.0
-    # Ridge weight of ||r||^2 + ridge * a'Ka with the free p_0 unpenalized;
-    # the converged residual norm is O(ridge * ||dual||), so residual_atol
-    # must sit above that floor. Convergence requires gtol AND residual_atol,
-    # and gtol must be tight enough to resolve the weakly penalized p_0
-    # direction. Tuning:
-    # https://highdimensionaleconlab.github.io/nlls_gram/ridge_lm/
-    ridge: float = 1e-10
-    gtol: float = 1e-13
+# Alpha first (the metric penalizes the leading flat coordinates).
+class Theta(NamedTuple):
+    alpha: jax.Array
+    p_0: jax.Array
+
+
+@struct.dataclass
+class ResidualArgs:
+    batch: dict  # {"t"}
+    K: jax.Array
+    K_tilde: jax.Array
+
+
+# No-arbitrage residual dp/dt = r p - x along the dividend path.
+def residual_fn(theta, args, p):
+    paths = integrated_kernel_paths(
+        {"price": IntegratedPath(theta.alpha, theta.p_0)}, args.K, args.K_tilde
+    )
+    price, dprice_dt = paths["price"]
+    return dprice_dt - (p.r * price - dividends(args.batch["t"], p))
 
 
 def asset_pricing_kernel(
@@ -57,10 +64,25 @@ def asset_pricing_kernel(
     c: float = 0.02,
     g: float = -0.2,
     x_0: float = 0.01,
+    p0_init: float = 0.0,  # seeds theta_0's free p_0 coefficient
     use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
-    lm_set: SolverSettings = SolverSettings(),
+    # atol is on the unscaled residual norm, so it bounds max|residual|; the
+    # converged residual floors at O(ridge * ||dual||), so atol must sit above
+    # it. Convergence requires gtol AND atol, and gtol must be tight enough to
+    # resolve the weakly penalized p_0 direction. Tuning:
+    # https://highdimensionaleconlab.github.io/nlls_gram/ridge_lm/
+    lm_set: OptimizerSettings = OptimizerSettings(
+        init_damping=1e-8,
+        damping_decrease=0.5,
+        damping_increase=4.0,
+        max_steps=100,
+        atol=1e-9,
+        gtol=1e-13,
+    ),
+    # Ridge weight of ||r||^2 + ridge * a'Ka with the free p_0 unpenalized.
+    ridge_set: RidgeSettings = RidgeSettings(ridge=1e-10),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = False,
 ):
@@ -72,7 +94,7 @@ def asset_pricing_kernel(
     train_data = make_train_t_grid(data_set, dtype)
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
     n_train = len(train_data)
-    p = {"r": r, "c": c, "g": g, "x_0": x_0}
+    p = StructuralParameters.create(dtype, r=r, c=c, g=g, x_0=x_0)
 
     # The residual is affine in theta, so each ridge-LM step is an exact
     # kernel ridge solve converging to the minimizer of ||r||^2 + ridge * a'Ka
@@ -82,25 +104,25 @@ def asset_pricing_kernel(
         train_data, kernel, sigma, ell, repeats=1
     )
     K_jax = K_metric
-    residual_args = {"K": K_jax, "K_tilde": K_tilde_jax, "t": train_data}
+    residual_args = ResidualArgs(batch={"t": train_data}, K=K_jax, K_tilde=K_tilde_jax)
 
     solver = RidgeLevenbergMarquardt(
         residual_fn,
         metric=metric,
-        ridge=lm_set.ridge,
+        ridge=ridge_set.ridge,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
     )
     theta_0 = Theta(
         alpha=jnp.zeros(n_train, dtype=dtype),
-        p_0=jnp.asarray(lm_set.p0_init, dtype=dtype),
+        p_0=jnp.asarray(p0_init, dtype=dtype),
     )
 
     solve_options = dict(
         max_steps=lm_set.max_steps,
         gtol=lm_set.gtol,
-        atol=lm_set.residual_atol,
+        atol=lm_set.atol,
         max_steps_is_success=False,
     )
 
@@ -198,7 +220,7 @@ def asset_pricing_kernel(
         "p_rel_error_max": float(p_rel_error[1:].max()),
         "p_rel_error_min": float(p_rel_error[1:].min()),
         "solve_time": elapsed,
-        "ridge": lm_set.ridge,
+        "ridge": ridge_set.ridge,
         "gtol": lm_set.gtol,
         "train_loss": float(result.info.resid_loss),
         "final_damping": float(result.lm_state.damping),
@@ -231,6 +253,7 @@ def asset_pricing_kernel(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
+        "ridge_set": asdict(ridge_set),
         "tolerance_set": asdict(tolerance_set),
         "parameters": {"r": r, "c": c, "g": g},
         "initial_conditions": {"x_0": x_0},

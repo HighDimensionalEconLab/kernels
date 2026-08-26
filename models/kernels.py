@@ -71,9 +71,6 @@ def rbf_state_gram(centers, sigma, ell):
 # to the mean far more slowly off the center support; matern12 is excluded
 # because its kink sits exactly at the centers the Euler residual
 # differentiates through.
-MATERN_STATE_FAMILIES = ("matern32", "matern52")
-
-
 def matern_correlation(name, scaled_abs):
     x = MATERN_DECAY[name] * scaled_abs
     poly = {"matern32": 1.0 + x, "matern52": 1.0 + x + x**2 / 3.0}[name]

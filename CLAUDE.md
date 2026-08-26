@@ -9,10 +9,18 @@ per-directory READMEs.
   `(results, extras)`, writes nothing, exposes a jsonargparse CLI. Unqualified
   kernel filenames are the NLLS formulation; `_uno` is the constrained IPOPT
   comparison (host-side float64 only — NLLS/NN are the float32/GPU methods).
-  `<model>_shared.py` holds everything used by more than one driver (model
-  structure plus the kernel Theta/residual/evaluation); drivers never import
-  other drivers. The `_uno` drivers map IPOPT's flat vector to the NLLS Theta
-  via `ravel_pytree`'s unravel riding in `args` as a `tree_util.Partial`.
+  `<model>_shared.py` holds model structure only (constants, the flat
+  `StructuralParameters` struct — deep parameters plus initial conditions —
+  production/steady-state functions, diagnostics, shared settings, and for
+  the DAE models `path_residuals`, the equation system every representation
+  consumes); drivers never import other drivers. Each kernel and kernel_uno
+  driver owns its `Theta`, `ResidualArgs`, and `residual_fn` — the residual
+  rows written inline — plus a post-solve `evaluate_grid(points)` closure for
+  off-grid paths and residual rows. Solver-inert data rides in
+  `ResidualArgs`, grid inputs inside its `batch` dict with standardized names
+  (`t`, `z_trend`, `g_hat`) as always-plain arrays. The `_uno` drivers map
+  IPOPT's flat vector to the NLLS Theta via `ravel_pytree`'s unravel riding
+  in their `ResidualArgs` as a `tree_util.Partial`.
 - `replication/` — ensemble + figure drivers; `collect_json.py` writes
   `.results/all_results.json`, the only place paper numbers are selected and
   rounded. Generated JSON is gitignored; track one with a targeted `!path` rule.
@@ -32,10 +40,17 @@ per-directory READMEs.
   first). Minimizer = min-RKHS-norm interpolant up to an O(ridge) bias.
 - Stopping is conjunctive `gtol` AND `atol`; `gtol` must resolve the weakly
   penalized free constants (asset pricing needs `gtol ~ 1e-3 * ridge`).
+- Settings taxonomy: `lm_set: OptimizerSettings` carries exactly the LM
+  constructor + `solve()` kwargs (`atol`/`gtol`/`max_steps` named as the
+  optimizer names them), `ridge_set: RidgeSettings` the RidgeLM extras
+  (ridge, continuation, linear_solver), `cg_set: CGSettings` the CG knobs,
+  `solver_set: UnoOptimizerSettings` the Uno/IPOPT options; `tolerance_set`
+  holds ex-post acceptance gates only (the epoch-recursive NN drivers also
+  keep their training-schedule fields there).
 - Simple ODE drivers pin a fixed small ridge; the DAE drivers (`open_economy`,
-  `multicountry`) anneal via `ridge_continuation`. `multicountry` with
-  `lm_set.linear_solver="cg"` is the large-N path: matrix-free preconditioned
-  CG using the arrowhead + Woodbury structure assembled in
+  `multicountry`) anneal via `ridge_set.ridge_init`. `multicountry` with
+  `ridge_set.linear_solver="cg"` is the large-N path: matrix-free
+  preconditioned CG using the arrowhead + Woodbury structure assembled in
   `multicountry_growth_preconditioner.py`.
 - Every driver threads structural parameters and initial conditions through
   the implicit-AD `p` argument and returns `extras["solve"]` (solver,

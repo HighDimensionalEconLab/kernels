@@ -57,7 +57,6 @@ class ToleranceSettings:
     # tighter gates make acceptance depend on the noise draw and burn whole
     # attempts, while test-Euler quality is flat below ~5e-13.
     train_loss_threshold: float = 5e-13
-    num_attempts: int = 4
     log_tvc_threshold: float = 0.0
     num_epochs: int = 6
     epoch_early_stopping: bool = True
@@ -213,6 +212,7 @@ def stochastic_growth_nn_recursive(
         damping_increase=2.71,
         geodesic_acceleration=True,
         geodesic_acceptance_ratio=0.541,
+        num_attempts=4,
     ),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     # Directory for content-addressed policy artifacts (e.g. ".results"): an
@@ -384,7 +384,7 @@ def stochastic_growth_nn_recursive(
         )
         multi_start = MultiStart(
             key=multi_start_key,
-            num_starts=tolerance_set.num_attempts,
+            num_starts=lm_set.num_attempts,
             draw=draw,
         )
         solve_options = dict(

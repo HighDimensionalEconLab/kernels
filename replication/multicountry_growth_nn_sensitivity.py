@@ -74,9 +74,7 @@ def run(
                     residual_args.graphdef, solved.x, residual_args.nondiff
                 )
                 values = path_values(policy, t_sens, p_value, scales)
-                return sensitivity_observables(
-                    values, p_value.structural
-                ), solved.status
+                return sensitivity_observables(values, p_value), solved.status
 
             # The full Jacobian: every observable against every parameter,
             # at one reverse pass per output scalar.
@@ -91,10 +89,10 @@ def run(
             primal_observables = np.asarray(
                 sensitivity_observables(
                     path_values(extras["model"], t_sens, spec["p"], scales),
-                    spec["p"].structural,
+                    spec["p"],
                 )
             )
-            gradient_parameters = jacobian.structural
+            gradient_parameters = jacobian
             country_blocks = {
                 "gamma": np.asarray(gradient_parameters.gammas),
                 "productivity": np.asarray(gradient_parameters.productivities),
@@ -114,7 +112,7 @@ def run(
                     "eta": np.asarray(gradient_parameters.eta),
                 },
                 country_blocks,
-                [float(value) for value in spec["p"].structural.populations],
+                [float(value) for value in spec["p"].populations],
             )
 
             # Under identical homothetic preferences the world rate is
@@ -153,7 +151,7 @@ def run(
     go(
         "sensitivity_ten_countries",
         "ten_country_drawn_initial_conditions",
-        parameters=LARGE_COUNTRY_PARAMETERS,
+        **LARGE_COUNTRY_PARAMETERS,
     )
 
 

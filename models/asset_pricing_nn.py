@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import asdict, dataclass, replace
 
 import jax
@@ -12,7 +11,12 @@ from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import DrawNNXModule, LevenbergMarquardt, MultiStart
 
-from models.asset_pricing_benchmark import mu_f_array
+from models.asset_pricing_shared import (
+    DataSettings,
+    StructuralParameters,
+    dividends,
+    mu_f_array,
+)
 from models.utilities import (
     ACTIVATIONS,
     STATUS_TO_REASON,
@@ -23,15 +27,6 @@ from models.utilities import (
 
 
 @dataclass(frozen=True)
-class DataSettings:
-    train_T: float = 40.0
-    train_points: int = 41
-    train_points_list: list[float] | None = None
-    test_T: float = 50.0
-    test_points: int = 101
-
-
-@dataclass(frozen=True)
 class PricePolicySettings:
     width: int = 16
     depth: int = 2
@@ -39,13 +34,6 @@ class PricePolicySettings:
     hidden_bias: bool = True
     output_bias: bool = True
     input_scale: float = 40.0
-
-
-@dataclass(frozen=True)
-class ToleranceSettings:
-    max_steps: int = 400
-    train_loss_threshold: float = 1e-15
-    num_attempts: int = 5
 
 
 @struct.dataclass
@@ -105,32 +93,30 @@ class PricePolicyNN(nnx.Module):
         return self.head(h)[0]
 
 
-def path_values(model, t, p):
-    r, c, g, x_0 = p["r"], p["c"], p["g"], p["x_0"]
-    price, price_derivative = jax.vmap(
-        lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),))
-    )(t)
-    dividends = (x_0 + c / g) * jnp.exp(g * t) - c / g
-    residual = price_derivative - (r * price - dividends)
-    return {
-        "t": t,
-        "p": price,
-        "dp_dt": price_derivative,
-        "dividends": dividends,
-        "residual": residual,
-    }
-
-
+# No-arbitrage residual dp/dt = r p - x along the dividend path.
 def residual_fn(theta, args, p):
     model = nnx.merge(args.graphdef, theta, args.nondiff)
-    residual = path_values(model, args.batch["t"], p)["residual"]
+    t = args.batch["t"]
+    price, dprice_dt = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(t)
+    residual = dprice_dt - (p.r * price - dividends(t, p))
     return residual / jnp.sqrt(residual.size)
 
 
+# Model paths and residuals on a time grid, with relative errors against the
+# closed-form benchmark.
 def snapshot(model, t, p):
-    r, c, g, x_0 = (float(p[name]) for name in ("r", "c", "g", "x_0"))
-    values = jax.device_get(path_values(model, t, p))
-    frame = pd.DataFrame({key: np.asarray(value) for key, value in values.items()})
+    price, dprice_dt = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(t)
+    dividend_values = dividends(t, p)
+    frame = pd.DataFrame(
+        {
+            "t": np.asarray(t),
+            "p": np.asarray(price),
+            "dp_dt": np.asarray(dprice_dt),
+            "dividends": np.asarray(dividend_values),
+            "residual": np.asarray(dprice_dt - (p.r * price - dividend_values)),
+        }
+    )
+    r, c, g, x_0 = (float(getattr(p, name)) for name in ("r", "c", "g", "x_0"))
     benchmark = np.asarray(jax.device_get(mu_f_array(t, c, g, r, x_0)))
     frame["p_benchmark"] = benchmark
     frame["p_rel_error"] = np.abs(frame["p"] - benchmark) / np.abs(benchmark)
@@ -146,16 +132,19 @@ def asset_pricing_nn(
     x_0: float = 0.01,
     seed: int = 0,
     use_float64: bool = True,
-    data_set: DataSettings = DataSettings(),
+    data_set: DataSettings = DataSettings(test_points=101),
     nn_set: PricePolicySettings = PricePolicySettings(),
     # Library-default LM damping schedule; pinned here so the CLI reaches it.
+    # atol is on the residual norm (the loss stops at atol^2).
     lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=1e-3,
         damping_decrease=0.5,
         damping_increase=4.0,
         geodesic_acceptance_ratio=0.75,
+        max_steps=400,
+        atol=3.162277660168379e-08,
+        num_attempts=5,
     ),
-    tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
 ):
     jax.config.update("jax_enable_x64", True)
@@ -175,10 +164,7 @@ def asset_pricing_nn(
     residual_args = ResidualArgs(
         batch={"t": train_t}, graphdef=graphdef, nondiff=nondiff
     )
-    p = {
-        name: jnp.asarray(value, dtype=dtype)
-        for name, value in {"r": r, "c": c, "g": g, "x_0": x_0}.items()
-    }
+    p = StructuralParameters.create(dtype, r=r, c=c, g=g, x_0=x_0)
 
     solver = LevenbergMarquardt(
         residual_fn,
@@ -188,15 +174,14 @@ def asset_pricing_nn(
         geodesic_acceleration=lm_set.geodesic_acceleration,
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
-    atol = math.sqrt(tolerance_set.train_loss_threshold)
     solve_options = dict(
-        max_steps=tolerance_set.max_steps,
-        atol=atol,
+        max_steps=lm_set.max_steps,
+        atol=lm_set.atol,
         max_steps_is_success=False,
     )
     multi_start = MultiStart(
         key=multi_start_key,
-        num_starts=tolerance_set.num_attempts,
+        num_starts=lm_set.num_attempts,
         draw=DrawNNXModule(PricePolicyNN, nn_set, dtype=dtype),
     )
 
@@ -266,7 +251,6 @@ def asset_pricing_nn(
             "nn_set": asdict(nn_set),
             "data_set": asdict(data_set),
             "lm_set": asdict(lm_set),
-            "tolerance_set": asdict(tolerance_set),
             "parameters": {"r": r, "c": c, "g": g},
             "initial_conditions": {"x_0": x_0},
         },

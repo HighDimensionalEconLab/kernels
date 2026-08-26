@@ -32,6 +32,7 @@ from models.neoclassical_growth_shared import (
 from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
+    RidgeSettings,
     Stopwatch,
     acceptance_fields,
     long_df,
@@ -80,11 +81,6 @@ class StateKernelSettings:
 
 @dataclass(frozen=True)
 class ToleranceSettings:
-    max_steps: int = 100
-    # Float32 callers pass looser tolerances explicitly.
-    residual_atol: float = 1e-5
-    gtol: float = 1e-7
-    ridge: float = 1e-12
     log_tvc_threshold: float = 0.0
 
 
@@ -240,7 +236,11 @@ def neoclassical_growth_kernel_recursive(
         damping_increase=4.0,
         geodesic_acceleration=True,
         geodesic_acceptance_ratio=0.75,
+        max_steps=100,
+        atol=1e-5,
+        gtol=1e-7,
     ),
+    ridge_set: RidgeSettings = RidgeSettings(ridge=1e-12),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
 ):
@@ -296,7 +296,7 @@ def neoclassical_growth_kernel_recursive(
     solver = RidgeLevenbergMarquardt(
         residual_fn,
         metric=metric,
-        ridge=tolerance_set.ridge,
+        ridge=ridge_set.ridge,
         init_damping=lm_set.init_damping,
         damping_decrease=lm_set.damping_decrease,
         damping_increase=lm_set.damping_increase,
@@ -310,9 +310,9 @@ def neoclassical_growth_kernel_recursive(
         theta_0,
         args,
         p=p,
-        max_steps=tolerance_set.max_steps,
-        atol=tolerance_set.residual_atol,
-        gtol=tolerance_set.gtol,
+        max_steps=lm_set.max_steps,
+        atol=lm_set.atol,
+        gtol=lm_set.gtol,
         max_steps_is_success=False,
     )
     solve_time = solve_timer.elapsed(result)
@@ -424,7 +424,7 @@ def neoclassical_growth_kernel_recursive(
         "amplitude": kernel_set.amplitude,
         "lengthscale": kernel_set.lengthscale,
         "metric_epsilon": kernel_set.metric_epsilon,
-        "ridge": tolerance_set.ridge,
+        "ridge": ridge_set.ridge,
         "h_const": h_const,
         "rkhs_norm": float(rkhs_norm_squared(alpha, args.gram)),
         "shifted_metric_norm": float(rkhs_norm_squared(alpha, shifted_gram)),
@@ -480,6 +480,7 @@ def neoclassical_growth_kernel_recursive(
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
         "lm_set": asdict(lm_set),
+        "ridge_set": asdict(ridge_set),
         "tolerance_set": asdict(tolerance_set),
         "parameters": {
             "a": a,

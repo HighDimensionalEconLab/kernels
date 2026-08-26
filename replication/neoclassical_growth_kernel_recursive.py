@@ -107,7 +107,7 @@ def run(
                 "verbose": verbose,
                 "g": g,
                 "ic_set": dict(ic_set),
-                "tolerance_set": {"max_steps": 60},
+                "lm_set": {"max_steps": 60},
             },
             retries=RETRIES,
         )

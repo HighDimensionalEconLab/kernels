@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import pathlib
 
+import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 
@@ -10,6 +11,7 @@ from models import multicountry_growth_kernel
 from models.multicountry_growth_shared import (
     MULTICOUNTRY_GROWTH_CONSTANTS,
     InitialConditionSettings,
+    StructuralParameters,
     draw_initial_conditions,
     steady_state,
 )
@@ -88,9 +90,15 @@ def bond_invariance(validation_frames, num_countries, test_T):
 def run(output_dir: str = ".results"):
     configure_process()
     drawn_k_0, _ = draw_initial_conditions(
-        InitialConditionSettings(), MULTICOUNTRY_GROWTH_CONSTANTS.populations
+        InitialConditionSettings(), MULTICOUNTRY_GROWTH_CONSTANTS["populations"]
     )
-    output_scale = float(steady_state(MULTICOUNTRY_GROWTH_CONSTANTS)["output_scale"])
+    output_scale = float(
+        steady_state(
+            StructuralParameters.create(
+                dtype=jnp.float64, **MULTICOUNTRY_GROWTH_CONSTANTS
+            )
+        )["output_scale"]
+    )
     meta = dict(n_seeds=1, residual_dtype="float64")
     validation_frames = {}
 
@@ -153,7 +161,7 @@ def run(output_dir: str = ".results"):
     )
     invariance = bond_invariance(
         validation_frames,
-        len(MULTICOUNTRY_GROWTH_CONSTANTS.populations),
+        len(MULTICOUNTRY_GROWTH_CONSTANTS["populations"]),
         multicountry_growth_kernel.DataSettings().test_T,
     )
     summary_path = pathlib.Path(output_dir) / f"{PREFIX}_summary.json"

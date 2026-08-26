@@ -184,12 +184,12 @@ def residual_fn(theta, args, p):
 
 # The deterministic model plus its OU log-TFP.
 def stochastic_growth_nn_recursive(
-    a: float = CONSTANTS.a,
-    delta: float = CONSTANTS.delta,
-    rho_hat: float = CONSTANTS.rho_hat,
-    sigma_crra: float = CONSTANTS.sigma_crra,
-    eta: float = CONSTANTS.eta,
-    sigma_z: float = CONSTANTS.sigma_z,
+    a: float = CONSTANTS["a"],
+    delta: float = CONSTANTS["delta"],
+    rho_hat: float = CONSTANTS["rho_hat"],
+    sigma_crra: float = CONSTANTS["sigma_crra"],
+    eta: float = CONSTANTS["eta"],
+    sigma_z: float = CONSTANTS["sigma_z"],
     z_bar: float = 1.0,
     z_0: float = 1.0,
     k_0: float = 1.0,
@@ -200,7 +200,7 @@ def stochastic_growth_nn_recursive(
     # The initial log z spread matches the ergodic variance (sigma_z^2/(2 eta)).
     ic_set: InitialConditionSettings = InitialConditionSettings(
         num_train_trajectories=16,
-        train_log_z_variance=CONSTANTS.z_ergodic_variance,
+        train_log_z_variance=CONSTANTS["z_ergodic_variance"],
         train_log_k_variance=0.01,
     ),
     nn_set: InvestmentPolicySettings = InvestmentPolicySettings(),

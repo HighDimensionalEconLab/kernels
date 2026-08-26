@@ -201,13 +201,13 @@ class ToleranceSettings:
 
 
 def multicountry_growth_kernel(
-    alpha: float = CONSTANTS.alpha,
-    gammas: tuple[float, ...] = CONSTANTS.gammas,
-    delta: float = CONSTANTS.delta,
-    r: float = CONSTANTS.r,
-    eta: float = CONSTANTS.eta,
-    populations: tuple[float, ...] = CONSTANTS.populations,
-    productivities: tuple[float, ...] = CONSTANTS.productivities,
+    alpha: float = CONSTANTS["alpha"],
+    gammas: tuple[float, ...] = CONSTANTS["gammas"],
+    delta: float = CONSTANTS["delta"],
+    r: float = CONSTANTS["r"],
+    eta: float = CONSTANTS["eta"],
+    populations: tuple[float, ...] = CONSTANTS["populations"],
+    productivities: tuple[float, ...] = CONSTANTS["productivities"],
     k_0: tuple[float, ...] | None = None,
     a_0: tuple[float, ...] | None = None,
     use_float64: bool = True,

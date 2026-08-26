@@ -8,24 +8,21 @@ import jax.numpy as jnp
 
 from models.utilities import ParameterPyTree
 
-
-# Shared calibration: every open economy driver defaults to the instance
-# below so all solve the identical model.
-@dataclass(frozen=True)
-class OpenEconomyConstants:
-    alpha: float = 0.33
-    gamma: float = 2.0
-    delta: float = -math.log(0.94)
-    r: float = -math.log(0.96)
-    eta: float = 0.76
-    r_star: float = -math.log(0.96)
-
-
-OPEN_ECONOMY_GROWTH_CONSTANTS = OpenEconomyConstants()
+# Shared calibration every open economy driver defaults to, so all solve the
+# identical model.
+OPEN_ECONOMY_GROWTH_CONSTANTS = {
+    "alpha": 0.33,
+    "gamma": 2.0,
+    "delta": -math.log(0.94),
+    "r": -math.log(0.96),
+    "eta": 0.76,
+    "r_star": -math.log(0.96),
+}
 
 
 # Deep structural parameters and the initial conditions together, all
-# implicitly differentiable through the solver's `p` argument.
+# implicitly differentiable through the solver's `p` argument. The optional
+# ICs let steady-state consumers build a p from the constants alone.
 class StructuralParameters(ParameterPyTree):
     alpha: jax.Array
     gamma: jax.Array
@@ -33,8 +30,8 @@ class StructuralParameters(ParameterPyTree):
     r: jax.Array
     eta: jax.Array
     r_star: jax.Array
-    k_0: jax.Array
-    a_0: jax.Array
+    k_0: jax.Array | None = None
+    a_0: jax.Array | None = None
 
 
 def production(k, z, p):

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import jax.numpy as jnp
 import jsonargparse
 
 from models import open_economy_growth_kernel_uno
 from models.open_economy_growth_shared import (
     OPEN_ECONOMY_GROWTH_CONSTANTS,
+    StructuralParameters,
     steady_state,
 )
 from replication.utilities import (
@@ -20,7 +22,13 @@ PREFIX = "open_economy_growth_kernel_uno"
 
 def run(output_dir: str = ".results", verbose: bool = False):
     configure_process()
-    output_ss = float(steady_state(OPEN_ECONOMY_GROWTH_CONSTANTS)["output"])
+    output_ss = float(
+        steady_state(
+            StructuralParameters.create(
+                dtype=jnp.float64, **OPEN_ECONOMY_GROWTH_CONSTANTS
+            )
+        )["output"]
+    )
     meta = dict(n_seeds=1, residual_dtype="float64")
 
     def go(name, **experiment):

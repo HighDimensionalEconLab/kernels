@@ -281,12 +281,12 @@ def evaluate_path(policy, T, n_points, p):
 
 
 def open_economy_growth_nn_recursive(
-    alpha: float = CONSTANTS.alpha,
-    gamma: float = CONSTANTS.gamma,
-    delta: float = CONSTANTS.delta,
-    r: float = CONSTANTS.r,
-    eta: float = CONSTANTS.eta,
-    r_star: float = CONSTANTS.r_star,
+    alpha: float = CONSTANTS["alpha"],
+    gamma: float = CONSTANTS["gamma"],
+    delta: float = CONSTANTS["delta"],
+    r: float = CONSTANTS["r"],
+    eta: float = CONSTANTS["eta"],
+    r_star: float = CONSTANTS["r_star"],
     k_0: float = 1.0,
     a_0: float = 0.0,
     seed: int = 0,

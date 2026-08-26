@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import asdict
-
 import jsonargparse
 import numpy as np
 
@@ -32,7 +30,7 @@ def run(
         "k_0",
         [float(k_0) for k_0 in grid],
         options={
-            **asdict(KINKED_CALIBRATION),
+            **KINKED_CALIBRATION,
             "verbose": verbose,
             # The kinked basin experiments keep their own calibrated grid:
             # paths settle by T = 40, and the file defaults carry the smooth

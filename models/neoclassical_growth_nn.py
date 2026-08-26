@@ -157,9 +157,9 @@ def snapshot(theta, args, p, benchmark=None):
 
 
 def neoclassical_growth_nn(
-    a: float = CONSTANTS.a,
-    delta: float = CONSTANTS.delta,
-    rho_hat: float = CONSTANTS.rho_hat,
+    a: float = CONSTANTS["a"],
+    delta: float = CONSTANTS["delta"],
+    rho_hat: float = CONSTANTS["rho_hat"],
     k_0: float = 1.0,
     # Hicks-neutral technology z(t) = z_0 e^{(1-a) g t}: the unit trend enters
     # the residuals as data, z_0 rides in p; nn_set.learn_g_hat frees the
@@ -169,7 +169,7 @@ def neoclassical_growth_nn(
     A: float | None = None,
     b_1: float | None = None,
     b_2: float | None = None,
-    sigma_crra: float = CONSTANTS.sigma_crra,
+    sigma_crra: float = CONSTANTS["sigma_crra"],
     seed: int = 0,
     use_float64: bool = True,
     data_set: DataSettings = DataSettings(test_points=101),

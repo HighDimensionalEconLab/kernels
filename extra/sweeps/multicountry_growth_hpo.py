@@ -12,6 +12,7 @@ from __future__ import annotations
 import itertools
 import pathlib
 
+import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
@@ -28,6 +29,7 @@ from models.multicountry_growth_nn import (
 from models.multicountry_growth_shared import (
     MULTICOUNTRY_GROWTH_CONSTANTS,
     InitialConditionSettings,
+    StructuralParameters,
     draw_initial_conditions,
     steady_state,
 )
@@ -68,10 +70,14 @@ DAMPING_SCHEDULES = {
 
 def kernel_sweep(output):
     drawn_k_0, _ = draw_initial_conditions(
-        InitialConditionSettings(), MULTICOUNTRY_GROWTH_CONSTANTS.populations
+        InitialConditionSettings(), MULTICOUNTRY_GROWTH_CONSTANTS["populations"]
     )
     half_output = 0.5 * float(
-        steady_state(MULTICOUNTRY_GROWTH_CONSTANTS)["output_scale"]
+        steady_state(
+            StructuralParameters.create(
+                dtype=jnp.float64, **MULTICOUNTRY_GROWTH_CONSTANTS
+            )
+        )["output_scale"]
     )
     configurations = {
         "baseline": {},

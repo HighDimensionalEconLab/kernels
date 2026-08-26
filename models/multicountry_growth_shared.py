@@ -19,20 +19,16 @@ INITIAL_CLEARING_TOL = 1e-10
 DEBT_SERVICE_MARGIN = 0.05
 
 
-# Shared calibration: every multicountry driver defaults to the instance
-# below.
-@dataclass(frozen=True)
-class MulticountryConstants:
-    alpha: float = 0.33
-    gammas: tuple[float, ...] = (2.0, 2.0)
-    delta: float = -math.log(0.94)
-    r: float = -math.log(0.96)
-    eta: float = 0.76
-    populations: tuple[float, ...] = (1.0, 1.0)
-    productivities: tuple[float, ...] = (1.0, 1.0)
-
-
-MULTICOUNTRY_GROWTH_CONSTANTS = MulticountryConstants()
+# Shared calibration every multicountry driver defaults to.
+MULTICOUNTRY_GROWTH_CONSTANTS = {
+    "alpha": 0.33,
+    "gammas": (2.0, 2.0),
+    "delta": -math.log(0.94),
+    "r": -math.log(0.96),
+    "eta": 0.76,
+    "populations": (1.0, 1.0),
+    "productivities": (1.0, 1.0),
+}
 
 
 # Deep structural parameters and the initial conditions together (vector
@@ -47,8 +43,9 @@ class StructuralParameters(ParameterPyTree):
     eta: jax.Array
     populations: jax.Array
     productivities: jax.Array
-    k_0: jax.Array
-    a_0: jax.Array
+    # Optional ICs let steady-state consumers build a p from the constants.
+    k_0: jax.Array | None = None
+    a_0: jax.Array | None = None
 
 
 @dataclass(frozen=True)

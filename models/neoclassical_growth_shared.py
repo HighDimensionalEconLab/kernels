@@ -11,59 +11,41 @@ from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 
 from models.utilities import ParameterPyTree
 
-
-# Shared calibration: every deterministic solver variant defaults to the
-# instance below so all solve the identical model on the same windows. The
-# discount rate maps exactly from the quarterly anchor e^(-rho_hat/4) = beta.
-# Sequential drivers evaluate their path solution on a grid extending past
-# train_T to test extrapolation; recursive drivers roll held-out initial
-# conditions for test_T.
-@dataclass(frozen=True)
-class GrowthConstants:
-    a: float
-    delta: float
-    sigma_crra: float
-    quarterly_beta: float
-    rho_hat: float
-    train_T: float
-    test_T: float
-    sequence_test_T: float
-    transversality_T: float
-
-
-# Neoclassical growth, from Aruoba, Fernandez-Villaverde & Rubio-Ramirez
-# (2006 JEDC, Tables 1-2): beta = 0.9896 (a 4% annual interest rate), capital
-# share 1/3, annual depreciation 0.1 (King-Rebelo 1999's 0.025 quarterly).
-# sigma_crra = 2 is their tau and is a free choice rather than a mapped
-# value. train_T = 100 covers ~10 e-foldings of the calibrated saddle path
-# (|lambda_stable| ~ 0.105); the transversality certificate extends to twice
-# that.
-NEOCLASSICAL_GROWTH_CONSTANTS = GrowthConstants(
-    a=1 / 3,
-    delta=0.1,
-    sigma_crra=2.0,
-    quarterly_beta=0.9896,
-    rho_hat=-4.0 * math.log(0.9896),
-    train_T=100.0,
-    test_T=40.0,
-    sequence_test_T=110.0,
-    transversality_T=200.0,
-)
+# Shared calibration every deterministic solver variant defaults to, so all
+# solve the identical model on the same windows. Neoclassical growth from
+# Aruoba, Fernandez-Villaverde & Rubio-Ramirez (2006 JEDC, Tables 1-2):
+# beta = 0.9896 (a 4% annual interest rate), capital share 1/3, annual
+# depreciation 0.1 (King-Rebelo 1999's 0.025 quarterly); the discount rate
+# maps exactly from the quarterly anchor e^(-rho_hat/4) = beta. sigma_crra =
+# 2 is their tau and is a free choice rather than a mapped value. train_T =
+# 100 covers ~10 e-foldings of the calibrated saddle path (|lambda_stable| ~
+# 0.105); the transversality certificate extends to twice that. Sequential
+# drivers evaluate their path solution on a grid extending past train_T to
+# test extrapolation; recursive drivers roll held-out initial conditions for
+# test_T.
+NEOCLASSICAL_GROWTH_CONSTANTS = {
+    "a": 1 / 3,
+    "delta": 0.1,
+    "sigma_crra": 2.0,
+    "quarterly_beta": 0.9896,
+    "rho_hat": -4.0 * math.log(0.9896),
+    "train_T": 100.0,
+    "test_T": 40.0,
+    "sequence_test_T": 110.0,
+    "transversality_T": 200.0,
+}
 
 
 # The concave-convex (kinked) production calibration.
-@dataclass(frozen=True)
-class KinkedCalibration:
-    a: float = 1 / 3
-    delta: float = 0.1
-    rho_hat: float = 0.11
-    sigma_crra: float = 1.0
-    A: float = 0.5
-    b_1: float = 3.0
-    b_2: float = 2.5
-
-
-KINKED_CALIBRATION = KinkedCalibration()
+KINKED_CALIBRATION = {
+    "a": 1 / 3,
+    "delta": 0.1,
+    "rho_hat": 0.11,
+    "sigma_crra": 1.0,
+    "A": 0.5,
+    "b_1": 3.0,
+    "b_2": 2.5,
+}
 
 
 # (A, b_1, b_2, k_thr) = (1, 1, 0, inf) is smooth Cobb-Douglas; the kinked
@@ -105,12 +87,12 @@ def mpk(z, k, p):
 
 @dataclass(frozen=True)
 class DataSettings:
-    train_T: float = NEOCLASSICAL_GROWTH_CONSTANTS.train_T
+    train_T: float = NEOCLASSICAL_GROWTH_CONSTANTS["train_T"]
     train_points: int = 101
     train_points_list: list[float] | None = None
-    test_T: float = NEOCLASSICAL_GROWTH_CONSTANTS.sequence_test_T
+    test_T: float = NEOCLASSICAL_GROWTH_CONSTANTS["sequence_test_T"]
     test_points: int = 100
-    test_tvc_T: float = NEOCLASSICAL_GROWTH_CONSTANTS.transversality_T
+    test_tvc_T: float = NEOCLASSICAL_GROWTH_CONSTANTS["transversality_T"]
 
 
 # The sequential NN drivers' acceptance gate.
@@ -209,12 +191,12 @@ def neoclassical_steady_state_sensitivities(p):
 
 
 def kinked_thresholds(
-    a=KINKED_CALIBRATION.a,
-    delta=KINKED_CALIBRATION.delta,
-    rho_hat=KINKED_CALIBRATION.rho_hat,
-    A=KINKED_CALIBRATION.A,
-    b_1=KINKED_CALIBRATION.b_1,
-    b_2=KINKED_CALIBRATION.b_2,
+    a=KINKED_CALIBRATION["a"],
+    delta=KINKED_CALIBRATION["delta"],
+    rho_hat=KINKED_CALIBRATION["rho_hat"],
+    A=KINKED_CALIBRATION["A"],
+    b_1=KINKED_CALIBRATION["b_1"],
+    b_2=KINKED_CALIBRATION["b_2"],
 ):
     # Branch switch k_thr where k^a = b_1 k^a - b_2, and the per-branch steady
     # states from f'(k_ss) = delta + rho_hat (ex-post classification only).

@@ -132,10 +132,10 @@ KINKED_SOLVER_SETTINGS = UnoOptimizerSettings(max_iterations=25, time_limit=0.15
 
 
 def neoclassical_growth_kernel_uno(
-    a: float = CONSTANTS.a,
-    delta: float = CONSTANTS.delta,
-    rho_hat: float = CONSTANTS.rho_hat,
-    sigma_crra: float = CONSTANTS.sigma_crra,
+    a: float = CONSTANTS["a"],
+    delta: float = CONSTANTS["delta"],
+    rho_hat: float = CONSTANTS["rho_hat"],
+    sigma_crra: float = CONSTANTS["sigma_crra"],
     k_0: float = 1.0,
     # No trend machinery in this driver: technology is the constant z_0.
     z_0: float = 1.0,

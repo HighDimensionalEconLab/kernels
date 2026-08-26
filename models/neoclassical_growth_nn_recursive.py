@@ -50,9 +50,9 @@ class DataSettings:
     train_points: int = 65
     test_points: int = 41
     tvc_steps: int = 256
-    train_T: float = CONSTANTS.train_T
-    train_tvc_T: float = CONSTANTS.transversality_T
-    test_T: float = CONSTANTS.test_T
+    train_T: float = CONSTANTS["train_T"]
+    train_tvc_T: float = CONSTANTS["transversality_T"]
+    test_T: float = CONSTANTS["test_T"]
     ode_solver: str = "rk4"
     rtol: float = 1e-6
     atol: float = 1e-8
@@ -327,10 +327,10 @@ def residual_fn(theta, args, p):
 # The stochastic variant (stochastic_growth_nn_recursive) solves this same
 # model with stochastic TFP.
 def neoclassical_growth_nn_recursive(
-    a: float = CONSTANTS.a,
-    delta: float = CONSTANTS.delta,
-    rho_hat: float = CONSTANTS.rho_hat,
-    sigma_crra: float = CONSTANTS.sigma_crra,
+    a: float = CONSTANTS["a"],
+    delta: float = CONSTANTS["delta"],
+    rho_hat: float = CONSTANTS["rho_hat"],
+    sigma_crra: float = CONSTANTS["sigma_crra"],
     g: float = 0.0,
     z_0: float = 1.0,
     k_0: float = 1.0,

@@ -181,12 +181,12 @@ def residual_fn(theta, args, p):
 # once under the saved reference NN policy -- rather than re-integrated by
 # differentiating through the solver's own simulation.
 def stochastic_growth_kernel_recursive(
-    a: float = CONSTANTS.a,
-    delta: float = CONSTANTS.delta,
-    rho_hat: float = CONSTANTS.rho_hat,
-    sigma_crra: float = CONSTANTS.sigma_crra,
-    eta: float = CONSTANTS.eta,
-    sigma_z: float = CONSTANTS.sigma_z,
+    a: float = CONSTANTS["a"],
+    delta: float = CONSTANTS["delta"],
+    rho_hat: float = CONSTANTS["rho_hat"],
+    sigma_crra: float = CONSTANTS["sigma_crra"],
+    eta: float = CONSTANTS["eta"],
+    sigma_z: float = CONSTANTS["sigma_z"],
     z_bar: float = 1.0,
     z_0: float = 1.0,
     k_0: float = 1.0,
@@ -197,7 +197,7 @@ def stochastic_growth_kernel_recursive(
     data_set: DataSettings = DataSettings(train_points=33),
     ic_set: InitialConditionSettings = InitialConditionSettings(
         num_train_trajectories=16,
-        train_log_z_variance=CONSTANTS.z_ergodic_variance,
+        train_log_z_variance=CONSTANTS["z_ergodic_variance"],
         train_log_k_variance=0.01,
     ),
     kernel_set: StateKernelSettings = StateKernelSettings(),

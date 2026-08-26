@@ -196,13 +196,13 @@ def residual_fn(theta, args, p):
 
 
 def multicountry_growth_nn(
-    alpha: float = CONSTANTS.alpha,
-    gammas: tuple[float, ...] = CONSTANTS.gammas,
-    delta: float = CONSTANTS.delta,
-    r: float = CONSTANTS.r,
-    eta: float = CONSTANTS.eta,
-    populations: tuple[float, ...] = CONSTANTS.populations,
-    productivities: tuple[float, ...] = CONSTANTS.productivities,
+    alpha: float = CONSTANTS["alpha"],
+    gammas: tuple[float, ...] = CONSTANTS["gammas"],
+    delta: float = CONSTANTS["delta"],
+    r: float = CONSTANTS["r"],
+    eta: float = CONSTANTS["eta"],
+    populations: tuple[float, ...] = CONSTANTS["populations"],
+    productivities: tuple[float, ...] = CONSTANTS["productivities"],
     k_0: tuple[float, ...] | None = None,
     a_0: tuple[float, ...] | None = None,
     seed: int = 0,

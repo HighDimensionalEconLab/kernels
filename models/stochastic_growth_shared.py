@@ -21,49 +21,32 @@ from models.utilities import (
 # paper's F(k, z) = e^z k^a written here with z in levels.
 
 
-# Shared calibration: both stochastic recursive solver variants default to
-# the instance below so they solve the identical model on the same windows.
-# Quarterly anchors map exactly: e^(-rho_hat/4) = beta, e^(-eta/4) = rho, and
-# the OU innovation scale matches the AR(1) stationary variance,
-# sigma_z^2/(2 eta) = sigma^2/(1 - rho^2).
-@dataclass(frozen=True)
-class StochasticGrowthConstants:
-    a: float
-    delta: float
-    sigma_crra: float
-    quarterly_beta: float
-    quarterly_tfp_rho: float
-    quarterly_tfp_sigma: float
-    rho_hat: float
-    eta: float
-    z_ergodic_variance: float
-    sigma_z: float
-    train_T: float
-    test_T: float
-    transversality_T: float
-
-
-# From Aruoba, Fernandez-Villaverde & Rubio-Ramirez (2006 JEDC, Tables 1-2):
-# beta = 0.9896, log-TFP AR(1) rho = 0.95 with their high-variance
-# sensitivity column's innovation sd 0.035, capital share 1/3, annual
-# depreciation 0.1. sigma_crra = 2 is their tau and is a free choice rather
-# than a mapped value. The values duplicate the deterministic family's
-# calibration deliberately: the two model files stay independent.
-STOCHASTIC_GROWTH_CONSTANTS = StochasticGrowthConstants(
-    a=1 / 3,
-    delta=0.1,
-    sigma_crra=2.0,
-    quarterly_beta=0.9896,
-    quarterly_tfp_rho=0.95,
-    quarterly_tfp_sigma=0.035,
-    rho_hat=-4.0 * math.log(0.9896),
-    eta=-4.0 * math.log(0.95),
-    z_ergodic_variance=0.035**2 / (1.0 - 0.95**2),
-    sigma_z=math.sqrt(2.0 * (-4.0 * math.log(0.95)) * (0.035**2 / (1.0 - 0.95**2))),
-    train_T=100.0,
-    test_T=40.0,
-    transversality_T=200.0,
-)
+# Shared calibration both stochastic recursive solver variants default to,
+# so they solve the identical model on the same windows. From Aruoba,
+# Fernandez-Villaverde & Rubio-Ramirez (2006 JEDC, Tables 1-2): beta =
+# 0.9896, log-TFP AR(1) rho = 0.95 with their high-variance sensitivity
+# column's innovation sd 0.035, capital share 1/3, annual depreciation 0.1.
+# sigma_crra = 2 is their tau and is a free choice rather than a mapped
+# value. Quarterly anchors map exactly: e^(-rho_hat/4) = beta, e^(-eta/4) =
+# rho, and the OU innovation scale matches the AR(1) stationary variance,
+# sigma_z^2/(2 eta) = sigma^2/(1 - rho^2). The values duplicate the
+# deterministic family's calibration deliberately: the two model files stay
+# independent.
+STOCHASTIC_GROWTH_CONSTANTS = {
+    "a": 1 / 3,
+    "delta": 0.1,
+    "sigma_crra": 2.0,
+    "quarterly_beta": 0.9896,
+    "quarterly_tfp_rho": 0.95,
+    "quarterly_tfp_sigma": 0.035,
+    "rho_hat": -4.0 * math.log(0.9896),
+    "eta": -4.0 * math.log(0.95),
+    "z_ergodic_variance": 0.035**2 / (1.0 - 0.95**2),
+    "sigma_z": math.sqrt(2.0 * (-4.0 * math.log(0.95)) * (0.035**2 / (1.0 - 0.95**2))),
+    "train_T": 100.0,
+    "test_T": 40.0,
+    "transversality_T": 200.0,
+}
 
 
 class StructuralParameters(ParameterPyTree):
@@ -85,9 +68,9 @@ class DataSettings:
     train_points: int = 65
     test_points: int = 41
     tvc_steps: int = 256
-    train_T: float = STOCHASTIC_GROWTH_CONSTANTS.train_T
-    train_tvc_T: float = STOCHASTIC_GROWTH_CONSTANTS.transversality_T
-    test_T: float = STOCHASTIC_GROWTH_CONSTANTS.test_T
+    train_T: float = STOCHASTIC_GROWTH_CONSTANTS["train_T"]
+    train_tvc_T: float = STOCHASTIC_GROWTH_CONSTANTS["transversality_T"]
+    test_T: float = STOCHASTIC_GROWTH_CONSTANTS["test_T"]
     policy_grid_size: int = 100
 
 

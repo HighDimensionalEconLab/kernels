@@ -93,10 +93,10 @@ class ToleranceSettings:
 
 
 def neoclassical_growth_kernel(
-    a: float = CONSTANTS.a,
-    delta: float = CONSTANTS.delta,
-    rho_hat: float = CONSTANTS.rho_hat,
-    sigma_crra: float = CONSTANTS.sigma_crra,
+    a: float = CONSTANTS["a"],
+    delta: float = CONSTANTS["delta"],
+    rho_hat: float = CONSTANTS["rho_hat"],
+    sigma_crra: float = CONSTANTS["sigma_crra"],
     k_0: float = 1.0,
     # Hicks-neutral technology z(t) = z_0 e^{(1-a) g t}: the unit trend enters
     # the residuals as data, z_0 rides in p; learn_g_hat frees the trend rate

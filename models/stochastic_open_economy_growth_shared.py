@@ -25,19 +25,7 @@ from models.utilities import (
 # Exogenous driving processes, AR(1) anchors mapped exactly to OU rates:
 # e^(-kappa) = rho over the anchor period and the OU innovation scale matches
 # the AR(1) stationary variance, sigma^2/(2 kappa) = sd^2/(1 - rho^2). Both
-# stochastic recursive solver variants default to the instance below.
-@dataclass(frozen=True)
-class ProcessConstants:
-    quarterly_tfp_rho: float
-    quarterly_tfp_sigma: float
-    annual_rate_rho: float
-    annual_rate_innovation_sd: float
-    kappa_z: float
-    sigma_z: float
-    kappa_r: float
-    sigma_r: float
-
-
+# stochastic recursive solver variants default to the values below.
 # Productivity duplicates the neoclassical family's quarterly TFP anchors
 # deliberately (log-TFP AR(1) rho = 0.95, the high-variance sensitivity
 # column's innovation sd 0.035, from Aruoba, Fernandez-Villaverde &
@@ -50,16 +38,16 @@ class ProcessConstants:
 # risk-free real rate in Fernandez-Villaverde et al. (2011 AER "Risk
 # Matters"): monthly rho = 0.95 (kappa ~ 0.62/yr) with a 38bp annualized
 # innovation sd, stationary sd ~1.2pp.
-PROCESS_CONSTANTS = ProcessConstants(
-    quarterly_tfp_rho=0.95,
-    quarterly_tfp_sigma=0.035,
-    annual_rate_rho=0.83**4,
-    annual_rate_innovation_sd=0.0115,
-    kappa_z=-4.0 * math.log(0.95),
-    sigma_z=math.sqrt(2.0 * (-4.0 * math.log(0.95)) * (0.035**2 / (1.0 - 0.95**2))),
-    kappa_r=-math.log(0.83**4),
-    sigma_r=0.0115 * math.sqrt(2.0 * (-math.log(0.83**4)) / (1.0 - (0.83**4) ** 2)),
-)
+PROCESS_CONSTANTS = {
+    "quarterly_tfp_rho": 0.95,
+    "quarterly_tfp_sigma": 0.035,
+    "annual_rate_rho": 0.83**4,
+    "annual_rate_innovation_sd": 0.0115,
+    "kappa_z": -4.0 * math.log(0.95),
+    "sigma_z": math.sqrt(2.0 * (-4.0 * math.log(0.95)) * (0.035**2 / (1.0 - 0.95**2))),
+    "kappa_r": -math.log(0.83**4),
+    "sigma_r": 0.0115 * math.sqrt(2.0 * (-math.log(0.83**4)) / (1.0 - (0.83**4) ** 2)),
+}
 
 
 # The deterministic sequential counterpart in open_economy_growth.py carries

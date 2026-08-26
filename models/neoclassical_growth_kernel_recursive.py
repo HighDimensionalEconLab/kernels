@@ -42,15 +42,15 @@ from models.utilities import (
 
 @dataclass(frozen=True)
 class DataSettings:
-    train_T: float = CONSTANTS.train_T
+    train_T: float = CONSTANTS["train_T"]
     # Fixed RKHS centers on the exact path: a representation size, not a
     # simulation grid (nothing is integrated during training).
     train_points: int = 65
     # Held-out paths are fixed-step RK4 on the integrator's own states.
     test_points: int = 41
     tvc_steps: int = 256
-    train_tvc_T: float = CONSTANTS.transversality_T
-    test_T: float = CONSTANTS.test_T
+    train_tvc_T: float = CONSTANTS["transversality_T"]
+    test_T: float = CONSTANTS["test_T"]
 
 
 @dataclass(frozen=True)
@@ -215,10 +215,10 @@ def residual_fn(theta, args, p):
 
 
 def neoclassical_growth_kernel_recursive(
-    a: float = CONSTANTS.a,
-    delta: float = CONSTANTS.delta,
-    rho_hat: float = CONSTANTS.rho_hat,
-    sigma_crra: float = CONSTANTS.sigma_crra,
+    a: float = CONSTANTS["a"],
+    delta: float = CONSTANTS["delta"],
+    rho_hat: float = CONSTANTS["rho_hat"],
+    sigma_crra: float = CONSTANTS["sigma_crra"],
     g: float = 0.0,
     z_0: float = 1.0,
     k_0: float = 1.0,

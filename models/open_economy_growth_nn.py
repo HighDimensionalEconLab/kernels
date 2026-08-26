@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import asdict, dataclass, replace
 
 import jax
@@ -37,6 +36,7 @@ from models.utilities import (
     Stopwatch,
     acceptance_fields,
     make_sampled_train_grid,
+    unit_softplus,
 )
 
 RESIDUAL_NAMES = (
@@ -65,21 +65,11 @@ class SequencePathSettings:
     input_scale: float = 160.0
 
 
-# Constant normalizations of the five path blocks; static structure, not
-# traced data, so the residual keeps them out of the p argument.
-@dataclass(frozen=True)
-class PathScales:
-    output: float
-    log_consumption: float
-    log_q_ss: float
-
-
 @struct.dataclass
 class ResidualArgs:
     batch: dict  # {"t"}
     graphdef: nnx.GraphDef
     nondiff: nnx.State
-    scales: PathScales = struct.field(pytree_node=False)
 
 
 class SequencePathNN(nnx.Module):
@@ -87,11 +77,23 @@ class SequencePathNN(nnx.Module):
         self,
         settings: SequencePathSettings,
         *,
+        k_scale: float,
+        a_scale: float,
+        q_scale: float,
+        c_scale: float,
+        mu_scale: float,
         dtype,
         rngs: nnx.Rngs,
     ):
         self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
         self.input_scale = nnx.static(settings.input_scale)
+        # Non-Param Variables: the output scales are data (no recompilation
+        # when they change) but sit outside the differentiated Param state.
+        self.k_scale = nnx.Variable(jnp.asarray(k_scale, dtype=dtype))
+        self.a_scale = nnx.Variable(jnp.asarray(a_scale, dtype=dtype))
+        self.q_scale = nnx.Variable(jnp.asarray(q_scale, dtype=dtype))
+        self.c_scale = nnx.Variable(jnp.asarray(c_scale, dtype=dtype))
+        self.mu_scale = nnx.Variable(jnp.asarray(mu_scale, dtype=dtype))
         self.layers = nnx.List(
             [
                 nnx.Linear(
@@ -113,9 +115,9 @@ class SequencePathNN(nnx.Module):
                     rngs=rngs,
                 )
             )
-        # Near-zero head: the drawn paths start at the model's normalizations
-        # (k = k_0, a = a_0, q = q_ss, c = g_ss), matching the kernel's zero
-        # coordinate rather than an arbitrary point of the state space.
+        # Near-zero head: the drawn paths start at the declared scales
+        # (k = k_0, a = 0, q = 1/eta, c and mu at the k_0 flow scale); the
+        # initial conditions are imposed as residual rows.
         self.head = nnx.Linear(
             settings.width,
             5,
@@ -129,58 +131,43 @@ class SequencePathNN(nnx.Module):
         h = jnp.atleast_1d(t / self.input_scale)
         for layer in self.layers:
             h = self.hidden_activation(layer(h))
-        return self.head(h)
-
-
-def path_values(model, t, p, scales):
-    # k(0) = k_0 and a(0) = a_0 hold exactly by anchoring the two accumulating
-    # paths on the network's own value at zero; c, mu, and q stay free there,
-    # which is the NN counterpart of the kernel's three unpenalized offsets.
-    raw_at_zero = model(jnp.zeros((), dtype=t.dtype))
-    raw, raw_dt = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(t)
-
-    log_k = jnp.log(p.k_0) + (raw[:, 0] - raw_at_zero[0])
-    a = p.a_0 + scales.output * (raw[:, 1] - raw_at_zero[1])
-    log_q = scales.log_q_ss + raw[:, 2]
-    log_c = scales.log_consumption + raw[:, 3]
-    log_mu = -p.gamma * scales.log_consumption + raw[:, 4]
-
-    return {
-        "t": t,
-        "k": jnp.exp(log_k),
-        "a": a,
-        "q": jnp.exp(log_q),
-        "c": jnp.exp(log_c),
-        "mu": jnp.exp(log_mu),
-        "dlog_k_dt": raw_dt[:, 0],
-        "da_dt": scales.output * raw_dt[:, 1],
-        "dlog_q_dt": raw_dt[:, 2],
-        "dlog_marginal_wealth_dt": raw_dt[:, 4],
-    }
-
-
-def dae_residuals(values, p):
-    return path_residuals(
-        values["k"],
-        values["a"],
-        values["q"],
-        values["c"],
-        values["mu"],
-        jnp.ones_like(values["k"]),
-        values["dlog_k_dt"],
-        values["da_dt"],
-        values["dlog_q_dt"],
-        values["dlog_marginal_wealth_dt"],
-        p,
-    )
+        raw = self.head(h)
+        # Assets are signed, so their raw head output scales linearly; the
+        # other four paths are positive via unit_softplus.
+        return jnp.stack(
+            [
+                self.k_scale[...] * unit_softplus(raw[0]),
+                self.a_scale[...] * raw[1],
+                self.q_scale[...] * unit_softplus(raw[2]),
+                self.c_scale[...] * unit_softplus(raw[3]),
+                self.mu_scale[...] * unit_softplus(raw[4]),
+            ]
+        )
 
 
 def residual_fn(theta, args, p):
-    values = path_values(
-        nnx.merge(args.graphdef, theta, args.nondiff), args.batch["t"], p, args.scales
+    model = nnx.merge(args.graphdef, theta, args.nondiff)
+    t = args.batch["t"]
+    values, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
+        t
     )
-    residuals = dae_residuals(values, p)
-    residual = jnp.concatenate([residuals[name] for name in RESIDUAL_NAMES])
+    k, a, q, c, mu = (values[:, index] for index in range(5))
+    residuals = path_residuals(
+        k,
+        a,
+        q,
+        c,
+        mu,
+        jnp.ones_like(k),
+        derivatives[:, 0] / k,
+        derivatives[:, 1],
+        derivatives[:, 2] / q,
+        derivatives[:, 4] / mu,
+        p,
+    )
+    at_zero = model(jnp.asarray(0.0, dtype=t.dtype))
+    ic = jnp.stack([at_zero[0] - p.k_0, at_zero[1] - p.a_0])
+    residual = jnp.concatenate([*(residuals[name] for name in RESIDUAL_NAMES), ic])
     return residual / jnp.sqrt(residual.size)
 
 
@@ -232,20 +219,31 @@ def open_economy_growth_nn(
         k_0=k_0,
         a_0=a_0,
     )
-    steady = steady_state(p)
-    output_scale = float(steady["output"])
-    scales = PathScales(
-        output=output_scale,
-        log_consumption=math.log(float(steady["g"])),
-        log_q_ss=math.log(float(steady["q"])),
-    )
+    # Normalizations from the initial conditions and structural parameters
+    # alone: time-0 output for the signed asset path, the flow sustainable at
+    # k_0 for consumption (mu consistent via the FOC), and the replacement-
+    # investment price 1/eta for q.
+    k_scale = float(k_0)
+    a_scale = float(k_0**alpha)
+    q_scale = 1.0 / float(eta)
+    c_scale = float(k_0**alpha - delta * k_0)
+    mu_scale = float(c_scale ** (-gamma))
     nn_set = replace(nn_set, input_scale=max(float(train_t[-1]), 1.0))
 
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
-    model = SequencePathNN(nn_set, dtype=dtype, rngs=nnx.Rngs(init_key))
+    model = SequencePathNN(
+        nn_set,
+        k_scale=k_scale,
+        a_scale=a_scale,
+        q_scale=q_scale,
+        c_scale=c_scale,
+        mu_scale=mu_scale,
+        dtype=dtype,
+        rngs=nnx.Rngs(init_key),
+    )
     graphdef, theta_0, nondiff = nnx.split(model, nnx.Param, ...)
     residual_args = ResidualArgs(
-        batch={"t": train_t}, graphdef=graphdef, nondiff=nondiff, scales=scales
+        batch={"t": train_t}, graphdef=graphdef, nondiff=nondiff
     )
 
     solver = LevenbergMarquardt(
@@ -264,7 +262,16 @@ def open_economy_growth_nn(
     multi_start = MultiStart(
         key=multi_start_key,
         num_starts=lm_set.num_attempts,
-        draw=DrawNNXModule(SequencePathNN, nn_set, dtype=dtype),
+        draw=DrawNNXModule(
+            SequencePathNN,
+            nn_set,
+            k_scale=k_scale,
+            a_scale=a_scale,
+            q_scale=q_scale,
+            c_scale=c_scale,
+            mu_scale=mu_scale,
+            dtype=dtype,
+        ),
     )
 
     timer = Stopwatch()
@@ -280,13 +287,33 @@ def open_economy_growth_nn(
     attempt = int(result.multi_start.attempt) + 1
 
     def evaluate_grid(points):
-        values = path_values(model, points, p, scales)
-        residuals = dae_residuals(values, p)
+        values, derivatives = jax.vmap(
+            lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),))
+        )(points)
+        k, a, q, c, mu = (values[:, index] for index in range(5))
+        residuals = path_residuals(
+            k,
+            a,
+            q,
+            c,
+            mu,
+            jnp.ones_like(k),
+            derivatives[:, 0] / k,
+            derivatives[:, 1],
+            derivatives[:, 2] / q,
+            derivatives[:, 4] / mu,
+            p,
+        )
         return {
-            **values,
-            "x": investment_expenditure(values["k"], values["q"], p),
-            "output": production(values["k"], jnp.ones_like(values["k"]), p),
-            "current_account": values["da_dt"],
+            "t": points,
+            "k": k,
+            "a": a,
+            "q": q,
+            "c": c,
+            "mu": mu,
+            "x": investment_expenditure(k, q, p),
+            "output": production(k, jnp.ones_like(k), p),
+            "current_account": derivatives[:, 1],
             **residuals,
         }
 
@@ -302,6 +329,8 @@ def open_economy_growth_nn(
         float(jnp.max(jnp.abs(validation_eval[name]))) for name in RESIDUAL_NAMES
     )
 
+    steady = steady_state(p)
+    output_scale = float(steady["output"])
     benchmark, benchmark_diagnostics = open_economy_growth_benchmark(p)
     benchmark_values = benchmark(np.asarray(test_t))
     k_relative_error = jnp.abs(

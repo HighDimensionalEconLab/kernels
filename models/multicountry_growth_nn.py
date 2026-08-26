@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import asdict, dataclass, replace
 
 import jax
@@ -41,6 +40,7 @@ from models.utilities import (
     Stopwatch,
     acceptance_fields,
     make_sampled_train_grid,
+    unit_softplus,
 )
 
 RESIDUAL_NAMES = (
@@ -69,21 +69,11 @@ class SequencePathSettings:
     input_scale: float = 160.0
 
 
-# Constant normalizations of the path blocks; static structure, not traced
-# data, so the residual keeps them out of the p argument.
-@dataclass(frozen=True)
-class PathScales:
-    output: float
-    log_consumption: float
-    log_q_ss: float
-
-
 @struct.dataclass
 class ResidualArgs:
     batch: dict  # {"t"}
     graphdef: nnx.GraphDef
     nondiff: nnx.State
-    scales: PathScales = struct.field(pytree_node=False)
 
 
 class SequencePathNN(nnx.Module):
@@ -92,12 +82,26 @@ class SequencePathNN(nnx.Module):
         num_countries: int,
         settings: SequencePathSettings,
         *,
+        k_scale: tuple[float, ...],
+        a_scale: float,
+        q_scale: float,
+        c_scale: float,
+        mu_scale: tuple[float, ...],
+        rate_scale: float,
         dtype,
         rngs: nnx.Rngs,
     ):
         self.num_countries = nnx.static(num_countries)
         self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
         self.input_scale = nnx.static(settings.input_scale)
+        # Non-Param Variables: the output scales are data (no recompilation
+        # when they change) but sit outside the differentiated Param state.
+        self.k_scale = nnx.Variable(jnp.asarray(k_scale, dtype=dtype))
+        self.a_scale = nnx.Variable(jnp.asarray(a_scale, dtype=dtype))
+        self.q_scale = nnx.Variable(jnp.asarray(q_scale, dtype=dtype))
+        self.c_scale = nnx.Variable(jnp.asarray(c_scale, dtype=dtype))
+        self.mu_scale = nnx.Variable(jnp.asarray(mu_scale, dtype=dtype))
+        self.rate_scale = nnx.Variable(jnp.asarray(rate_scale, dtype=dtype))
         self.layers = nnx.List(
             [
                 nnx.Linear(
@@ -119,10 +123,9 @@ class SequencePathNN(nnx.Module):
                     rngs=rngs,
                 )
             )
-        # Near-zero head: the drawn paths start at the model's
-        # normalizations (k = k_0, a = a_0, q = 1/eta, c and mu at the
-        # world consumption scale, rate = r), matching the kernel's zero
-        # coordinate rather than an arbitrary point of the state space.
+        # Near-zero head: the drawn paths start at the declared scales
+        # (k = k_0, a = 0, q = 1/eta, c and mu at the world flow scale,
+        # rate = r); the initial conditions are imposed as residual rows.
         self.head = nnx.Linear(
             settings.width,
             5 * num_countries + 1,
@@ -136,50 +139,27 @@ class SequencePathNN(nnx.Module):
         h = jnp.atleast_1d(t / self.input_scale)
         for layer in self.layers:
             h = self.hidden_activation(layer(h))
-        return self.head(h)
+        raw = self.head(h)
+        blocks = raw[: 5 * self.num_countries].reshape(5, self.num_countries)
+        # Assets are signed, so their raw block scales linearly; the other
+        # paths and the world rate are positive via unit_softplus.
+        return {
+            "k": self.k_scale[...] * unit_softplus(blocks[0]),
+            "a": self.a_scale[...] * blocks[1],
+            "q": self.q_scale[...] * unit_softplus(blocks[2]),
+            "c": self.c_scale[...] * unit_softplus(blocks[3]),
+            "mu": self.mu_scale[...] * unit_softplus(blocks[4]),
+            "interest_rate": self.rate_scale[...] * unit_softplus(raw[-1]),
+        }
 
 
-def path_values(model, t, p, scales):
-    # k_i(0) = k_0_i and a_i(0) = a_0_i hold exactly by anchoring the
-    # accumulating paths on the network's own value at zero; q_i, c_i,
-    # mu_i, and the rate stay free there, which is the NN counterpart of
-    # the kernel's 3N + 1 unpenalized offsets.
-    raw_at_zero = model(jnp.zeros((), dtype=t.dtype))
-    raw, raw_dt = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(t)
-    num_countries = model.num_countries
-    blocks = raw[:, : 5 * num_countries].reshape(-1, 5, num_countries)
-    blocks_at_zero = raw_at_zero[: 5 * num_countries].reshape(5, num_countries)
-    blocks_dt = raw_dt[:, : 5 * num_countries].reshape(-1, 5, num_countries)
-
-    # Population demeaning is a no-op at the primal point (the driver
-    # anchors cleared positions) and projects AD perturbations of a_0 onto
-    # the feasible clearing set, so every direction is meaningful.
-    populations = p.populations
-    a_0 = p.a_0 - jnp.sum(populations * p.a_0) / jnp.sum(populations)
-    log_k = jnp.log(p.k_0) + (blocks[:, 0] - blocks_at_zero[0])
-    a = a_0 + scales.output * (blocks[:, 1] - blocks_at_zero[1])
-    log_q = scales.log_q_ss + blocks[:, 2]
-    log_c = scales.log_consumption + blocks[:, 3]
-    log_mu = -p.gammas * scales.log_consumption + blocks[:, 4]
-    log_rate = jnp.log(p.r) + raw[:, -1]
-
-    return {
-        "t": t,
-        "k": jnp.exp(log_k),
-        "a": a,
-        "q": jnp.exp(log_q),
-        "c": jnp.exp(log_c),
-        "mu": jnp.exp(log_mu),
-        "interest_rate": jnp.exp(log_rate),
-        "dlog_k_dt": blocks_dt[:, 0],
-        "da_dt": scales.output * blocks_dt[:, 1],
-        "dlog_q_dt": blocks_dt[:, 2],
-        "dlog_mu_dt": blocks_dt[:, 4],
-    }
-
-
-def dae_residuals(values, p):
-    return path_residuals(
+def residual_fn(theta, args, p):
+    model = nnx.merge(args.graphdef, theta, args.nondiff)
+    t = args.batch["t"]
+    values, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
+        t
+    )
+    residuals = path_residuals(
         values["k"],
         values["a"],
         values["q"],
@@ -187,19 +167,18 @@ def dae_residuals(values, p):
         values["mu"],
         p.productivities,
         values["interest_rate"],
-        values["dlog_k_dt"],
-        values["da_dt"],
-        values["dlog_q_dt"],
-        values["dlog_mu_dt"],
+        derivatives["k"] / values["k"],
+        derivatives["a"],
+        derivatives["q"] / values["q"],
+        derivatives["mu"] / values["mu"],
         p,
     )
-
-
-def residual_fn(theta, args, p):
-    values = path_values(
-        nnx.merge(args.graphdef, theta, args.nondiff), args.batch["t"], p, args.scales
-    )
-    residuals = dae_residuals(values, p)
+    at_zero = model(jnp.asarray(0.0, dtype=t.dtype))
+    # Population demeaning is a no-op at the primal point (the driver
+    # anchors cleared positions) and projects AD perturbations of a_0 onto
+    # the feasible clearing set, so every direction is meaningful.
+    a_0 = p.a_0 - jnp.sum(p.populations * p.a_0) / jnp.sum(p.populations)
+    ic = jnp.concatenate([at_zero["k"] - p.k_0, at_zero["a"] - a_0])
     residual = jnp.concatenate(
         [
             residuals["capital"].reshape(-1),
@@ -208,6 +187,7 @@ def residual_fn(theta, args, p):
             residuals["marginal_wealth"].reshape(-1),
             residuals["consumption_foc"].reshape(-1),
             residuals["asset_clearing"],
+            ic,
         ]
     )
     return residual / jnp.sqrt(residual.size)
@@ -298,20 +278,39 @@ def multicountry_growth_nn(
         k_0=k_0,
         a_0=a_0_array,
     )
-    steady = steady_state(p, dtype)
-    output_scale = float(steady["output_scale"])
-    scales = PathScales(
-        output=output_scale,
-        log_consumption=math.log(float(steady["consumption_scale"])),
-        log_q_ss=math.log(1.0 / eta),
+    # Normalizations from the initial conditions and structural parameters
+    # alone: population-weighted time-0 output for the signed asset paths,
+    # time-0 output net of replacement investment for consumption
+    # (per-country mu consistent via the FOC), the replacement-investment
+    # price 1/eta for q, and r for the world rate.
+    initial_output = production(p.k_0, p.productivities, p)
+    a_scale = float(jnp.sum(populations_array * initial_output) / total_population)
+    c_scale = float(
+        jnp.sum(populations_array * (initial_output - p.delta * p.k_0))
+        / total_population
     )
+    k_scale = tuple(float(value) for value in k_0)
+    mu_scale = tuple(float(c_scale ** (-gamma)) for gamma in gammas)
+    q_scale = 1.0 / eta
+    rate_scale = r
     nn_set = replace(nn_set, input_scale=max(float(train_t[-1]), 1.0))
 
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
-    model = SequencePathNN(num_countries, nn_set, dtype=dtype, rngs=nnx.Rngs(init_key))
+    model = SequencePathNN(
+        num_countries,
+        nn_set,
+        k_scale=k_scale,
+        a_scale=a_scale,
+        q_scale=q_scale,
+        c_scale=c_scale,
+        mu_scale=mu_scale,
+        rate_scale=rate_scale,
+        dtype=dtype,
+        rngs=nnx.Rngs(init_key),
+    )
     graphdef, theta_0, nondiff = nnx.split(model, nnx.Param, ...)
     residual_args = ResidualArgs(
-        batch={"t": train_t}, graphdef=graphdef, nondiff=nondiff, scales=scales
+        batch={"t": train_t}, graphdef=graphdef, nondiff=nondiff
     )
 
     solver = LevenbergMarquardt(
@@ -330,7 +329,18 @@ def multicountry_growth_nn(
     multi_start = MultiStart(
         key=multi_start_key,
         num_starts=lm_set.num_attempts,
-        draw=DrawNNXModule(SequencePathNN, num_countries, nn_set, dtype=dtype),
+        draw=DrawNNXModule(
+            SequencePathNN,
+            num_countries,
+            nn_set,
+            k_scale=k_scale,
+            a_scale=a_scale,
+            q_scale=q_scale,
+            c_scale=c_scale,
+            mu_scale=mu_scale,
+            rate_scale=rate_scale,
+            dtype=dtype,
+        ),
     )
 
     timer = Stopwatch()
@@ -346,10 +356,26 @@ def multicountry_growth_nn(
     attempt = int(result.multi_start.attempt) + 1
 
     def evaluate_grid(points):
-        values = path_values(model, points, p, scales)
-        residuals = dae_residuals(values, p)
-        x = investment_expenditure(values["k"], values["q"], p)
-        output = production(values["k"], p.productivities, p)
+        values, derivatives = jax.vmap(
+            lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),))
+        )(points)
+        k, q, mu = values["k"], values["q"], values["mu"]
+        residuals = path_residuals(
+            k,
+            values["a"],
+            q,
+            values["c"],
+            mu,
+            p.productivities,
+            values["interest_rate"],
+            derivatives["k"] / k,
+            derivatives["a"],
+            derivatives["q"] / q,
+            derivatives["mu"] / mu,
+            p,
+        )
+        x = investment_expenditure(k, q, p)
+        output = production(k, p.productivities, p)
         resources = output - x
         # Goods-market clearing is implied by the budgets and the clearing
         # row (Walras), so the per-capita goods gap is a reported
@@ -359,12 +385,13 @@ def multicountry_growth_nn(
             / total_population
         )
         return {
+            "t": points,
             **values,
             "x": x,
             "output": output,
             "resources": resources,
-            "current_account": values["da_dt"],
-            "relative_welfare_weights": relative_welfare_weights(values["mu"]),
+            "current_account": derivatives["a"],
+            "relative_welfare_weights": relative_welfare_weights(mu),
             "resource_gap": resource_gap,
             **residuals,
         }
@@ -406,6 +433,8 @@ def multicountry_growth_nn(
     acceptance = acceptance_fields(rejection_reasons)
     solution_accepted = acceptance["solution_accepted"]
 
+    steady = steady_state(p, dtype)
+    output_scale = float(steady["output_scale"])
     resolved_steady = resolved_steady_state(validation_eval["mu"][-1], p)
     tail = tail_diagnostics(validation_eval, p)
     tvc = tvc_diagnostics(validation_t, validation_eval, p)

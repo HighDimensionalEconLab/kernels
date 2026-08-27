@@ -137,11 +137,9 @@ def human_capital_kernel(
     K, K_tilde, metric = integrated_metric_factorization(
         train_data, kernel, sigma, ell, repeats=7
     )
-    h_0_jax, c_0_init_jax, initial_residual, _ = human_capital_initial_conditions(
+    h_0, c_0_init, initial_residual, _ = human_capital_initial_conditions(
         a_k, a_h, delta_k, delta_h, k_0, dtype=dtype
     )
-    h_0 = float(h_0_jax)
-    c_0_init = float(c_0_init_jax)
 
     # Everything in p -- h_0 as its own leaf included -- is implicitly
     # differentiable through the solve (nlls-gram's implicit JVP/VJP at the

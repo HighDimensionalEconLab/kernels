@@ -98,7 +98,6 @@ def build_residual_args(train_log_states, kernel_set, k_0=1.0):
         jnp.asarray(kernel_set.ray_amplitude, dtype),
         jnp.asarray(kernel_set.ray_lengthscale, dtype),
     )
-    gram = (gram + gram.T) / 2.0
     return ResidualArgs(
         train_log_states=flat_states,
         q_centers=q_centers,

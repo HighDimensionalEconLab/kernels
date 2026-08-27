@@ -317,7 +317,6 @@ def open_economy_growth_nn_recursive(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    k_0_jax = jnp.asarray(k_0, dtype=dtype)
     p = StructuralParameters.create(
         dtype=dtype,
         alpha=alpha,
@@ -329,7 +328,7 @@ def open_economy_growth_nn_recursive(
         k_0=k_0,
         a_0=a_0,
     )
-    initial_output = float(production(k_0_jax, 1.0, p))
+    initial_output = float(production(p.k_0, 1.0, p))
     nn_set = replace(
         nn_set,
         flow_scale=initial_output,

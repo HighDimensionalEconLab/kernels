@@ -99,27 +99,24 @@ def asset_pricing_kernel_uno(
         0, data_set.test_T, data_set.test_points, dtype=jnp.float64
     )
 
-    n_train = len(train_data)
     K, K_tilde = integrated_kernel_matrices(train_data, train_data, kernel, sigma, ell)
-    K_jax = (K + K.T) / 2
-    K_tilde_jax = jnp.asarray(K_tilde)
 
     p = StructuralParameters.create(dtype=jnp.float64, r=r, c=c, g=g, x_0=x_0)
 
     theta_0 = Theta(
-        alpha=jnp.zeros(n_train, dtype=jnp.float64),
+        alpha=jnp.zeros(len(train_data), dtype=jnp.float64),
         p_0=jnp.zeros((), dtype=jnp.float64),
     )
     x_initial, unravel = ravel_pytree(theta_0)
     args = KernelResidualArgs(
         batch={"t": train_data},
-        K=K_jax,
-        K_tilde=K_tilde_jax,
+        K=K,
+        K_tilde=K_tilde,
         unravel=Partial(unravel),
     )
 
     n_variables = x_initial.size
-    n_constraints = n_train
+    n_constraints = len(train_data)
     variable_lower_bounds = np.full(n_variables, -np.inf, dtype=np.float64)
     variable_upper_bounds = np.full(n_variables, np.inf, dtype=np.float64)
     constraint_lower_bounds = np.zeros(n_constraints, dtype=np.float64)
@@ -263,7 +260,7 @@ def asset_pricing_kernel_uno(
         "tolerance_set": asdict(tolerance_set),
         "p_0": float(p_0),
         "horizon_bias_p0": horizon_bias_p0,
-        "rkhs_norm_p": float(rkhs_norm_squared(alpha, K_jax)),
+        "rkhs_norm_p": float(rkhs_norm_squared(alpha, K)),
         "max_train_residual": max_train_residual,
         "max_test_residual": float(jnp.max(jnp.abs(test_residual))),
         # min/max error statistics exclude the pinned t = 0 point ([1:]).

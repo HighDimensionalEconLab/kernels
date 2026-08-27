@@ -128,8 +128,6 @@ def optimal_advertising_kernel_uno(
 
     n_train = len(train_data)
     K, K_tilde = integrated_kernel_matrices(train_data, train_data, kernel, sigma, ell)
-    K_jax = (K + K.T) / 2
-    K_tilde_jax = jnp.asarray(K_tilde)
 
     gamma = (beta + rho_hat) / c
     p = StructuralParameters.create(
@@ -145,7 +143,7 @@ def optimal_advertising_kernel_uno(
         u_0=jnp.asarray(u_0_guess, dtype=jnp.float64),
     )
     x_initial, unravel = ravel_pytree(theta_0)
-    args = KernelResidualArgs(K=K_jax, K_tilde=K_tilde_jax, unravel=Partial(unravel))
+    args = KernelResidualArgs(K=K, K_tilde=K_tilde, unravel=Partial(unravel))
 
     n_variables = x_initial.size
     n_constraints = 3 * n_train
@@ -293,9 +291,9 @@ def optimal_advertising_kernel_uno(
         "tolerance_set": asdict(tolerance_set),
         "mu_0": float(theta.mu_0),
         "u_0": float(theta.u_0),
-        "rkhs_norm_x": float(rkhs_norm_squared(theta.alpha_x, K_jax)),
-        "rkhs_norm_mu": float(rkhs_norm_squared(theta.alpha_mu, K_jax)),
-        "rkhs_norm_u": float(rkhs_norm_squared(theta.alpha_u, K_jax)),
+        "rkhs_norm_x": float(rkhs_norm_squared(theta.alpha_x, K)),
+        "rkhs_norm_mu": float(rkhs_norm_squared(theta.alpha_mu, K)),
+        "rkhs_norm_u": float(rkhs_norm_squared(theta.alpha_u, K)),
         "max_train_residual": max_train_residual,
         "solve_time": solve_time,
         "stationarity": result.solution_stationarity,

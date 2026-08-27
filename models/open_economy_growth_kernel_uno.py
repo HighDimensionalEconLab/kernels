@@ -200,7 +200,6 @@ def open_economy_growth_kernel_uno(
         kernel_set.sigma,
         kernel_set.ell,
     )
-    K = (K + K.T) / 2.0
 
     log_c_seed = jnp.log(production(p.k_0, 1.0, p) - p.delta * p.k_0)
     theta_0 = Theta(

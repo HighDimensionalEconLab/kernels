@@ -166,14 +166,10 @@ def human_capital_kernel_uno(
 
     n_train = len(train_data)
     K, K_tilde = integrated_kernel_matrices(train_data, train_data, kernel, sigma, ell)
-    K_jax = (K + K.T) / 2
-    K_tilde_jax = jnp.asarray(K_tilde)
 
-    h_0_jax, c_0_init_jax, initial_residual, _ = human_capital_initial_conditions(
+    h_0, c_0_init, initial_residual, _ = human_capital_initial_conditions(
         a_k, a_h, delta_k, delta_h, k_0
     )
-    h_0 = float(h_0_jax)
-    c_0_init = float(c_0_init_jax)
     # Value container only: no p rides through IPOPT for implicit
     # differentiation.
     p = StructuralParameters.create(
@@ -202,7 +198,7 @@ def human_capital_kernel_uno(
         mu_h_0=jnp.asarray(1.0 / c_0_init, dtype=jnp.float64),
     )
     x_initial, unravel = ravel_pytree(theta_0)
-    args = KernelResidualArgs(K=K_jax, K_tilde=K_tilde_jax, unravel=Partial(unravel))
+    args = KernelResidualArgs(K=K, K_tilde=K_tilde, unravel=Partial(unravel))
 
     n_variables = x_initial.size
     n_constraints = 7 * n_train
@@ -298,13 +294,13 @@ def human_capital_kernel_uno(
     x = np.array(result.primal_solution, dtype=np.float64)[:n_variables]
     theta = unravel(jnp.asarray(x))
     rkhs_norms = {
-        "k": float(rkhs_norm_squared(theta.alpha_k, K_jax)),
-        "h": float(rkhs_norm_squared(theta.alpha_h, K_jax)),
-        "i_k": float(rkhs_norm_squared(theta.alpha_i_k, K_jax)),
-        "i_h": float(rkhs_norm_squared(theta.alpha_i_h, K_jax)),
-        "c": float(rkhs_norm_squared(theta.alpha_c, K_jax)),
-        "mu_k": float(rkhs_norm_squared(theta.alpha_mu_k, K_jax)),
-        "mu_h": float(rkhs_norm_squared(theta.alpha_mu_h, K_jax)),
+        "k": float(rkhs_norm_squared(theta.alpha_k, K)),
+        "h": float(rkhs_norm_squared(theta.alpha_h, K)),
+        "i_k": float(rkhs_norm_squared(theta.alpha_i_k, K)),
+        "i_h": float(rkhs_norm_squared(theta.alpha_i_h, K)),
+        "c": float(rkhs_norm_squared(theta.alpha_c, K)),
+        "mu_k": float(rkhs_norm_squared(theta.alpha_mu_k, K)),
+        "mu_h": float(rkhs_norm_squared(theta.alpha_mu_h, K)),
     }
 
     def evaluate_grid(points):

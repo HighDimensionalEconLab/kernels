@@ -125,7 +125,6 @@ def build_residual_args(train_states, kernel_set, reference_policy):
         kernel_set.amplitude,
         state_lengthscales(kernel_set),
     )
-    gram = (gram + gram.T) / 2.0
     return ResidualArgs(
         centers=centers,
         train_states=flat_states,

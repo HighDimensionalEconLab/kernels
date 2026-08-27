@@ -21,6 +21,7 @@ from models.asset_pricing_shared import (
 from models.neural_networks import (
     ACTIVATIONS,
     NNXResidualArgs,
+    TimeMLP,
 )
 from models.utilities import (
     STATUS_TO_REASON,
@@ -41,62 +42,12 @@ class PricePolicySettings:
     output_bias: bool = True
 
 
-class PricePolicyNN(nnx.Module):
-    def __init__(
-        self,
-        settings: PricePolicySettings,
-        *,
-        input_scale: float,
-        dtype,
-        rngs: nnx.Rngs,
-    ):
-        self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
-        self.input_scale = nnx.static(input_scale)
-        self.layers = nnx.List(
-            [
-                nnx.Linear(
-                    1,
-                    settings.width,
-                    use_bias=settings.hidden_bias,
-                    dtype=dtype,
-                    param_dtype=dtype,
-                    rngs=rngs,
-                )
-            ]
-        )
-        for _ in range(settings.depth - 1):
-            self.layers.append(
-                nnx.Linear(
-                    settings.width,
-                    settings.width,
-                    use_bias=settings.hidden_bias,
-                    dtype=dtype,
-                    param_dtype=dtype,
-                    rngs=rngs,
-                )
-            )
-        self.head = nnx.Linear(
-            settings.width,
-            1,
-            use_bias=settings.output_bias,
-            kernel_init=nnx.initializers.normal(1e-3),
-            dtype=dtype,
-            param_dtype=dtype,
-            rngs=rngs,
-        )
-
-    def __call__(self, t):
-        h = jnp.atleast_1d(t / self.input_scale)
-        for layer in self.layers:
-            h = self.hidden_activation(layer(h))
-        return self.head(h)[0]
-
-
 # No-arbitrage residual dp/dt = r p - x along the dividend path.
 def residual_fn(theta, args, p):
     model = nnx.merge(args.graphdef, theta, args.nondiff)
     t = args.batch["t"]
-    price, dprice_dt = jax.vmap(value_and_grad_fwd(model))(t)
+    paths, derivatives = value_and_grad_fwd(model)(t)
+    price, dprice_dt = paths[:, 0], derivatives[:, 0]
     residual = dprice_dt - (p.r * price - dividends(t, p))
     values = {"p": price, "dp_dt": dprice_dt, "residual": residual}
     return residual / jnp.sqrt(residual.size), values
@@ -155,8 +106,13 @@ def asset_pricing_nn(
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     input_scale = max(float(data_set.train_T), 1.0)
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
-    model = PricePolicyNN(
-        nn_set,
+    model = TimeMLP(
+        1,
+        width=nn_set.width,
+        depth=nn_set.depth,
+        activation=ACTIVATIONS[nn_set.hidden_activation],
+        use_bias=nn_set.hidden_bias,
+        use_output_bias=nn_set.output_bias,
         input_scale=input_scale,
         dtype=dtype,
         rngs=nnx.Rngs(init_key),
@@ -184,7 +140,17 @@ def asset_pricing_nn(
     multi_start = MultiStart(
         key=multi_start_key,
         num_starts=lm_set.num_attempts,
-        draw=DrawNNXModule(PricePolicyNN, nn_set, input_scale=input_scale, dtype=dtype),
+        draw=DrawNNXModule(
+            TimeMLP,
+            1,
+            width=nn_set.width,
+            depth=nn_set.depth,
+            activation=ACTIVATIONS[nn_set.hidden_activation],
+            use_bias=nn_set.hidden_bias,
+            use_output_bias=nn_set.output_bias,
+            input_scale=input_scale,
+            dtype=dtype,
+        ),
     )
 
     timer = Stopwatch()

@@ -30,6 +30,7 @@ from models.neoclassical_growth_shared import (
 from models.neural_networks import (
     ACTIVATIONS,
     NNXResidualArgs,
+    TimeMLP,
     unit_softplus,
 )
 from models.utilities import (
@@ -41,76 +42,10 @@ from models.utilities import (
 )
 
 
-# Single-head capital path k(t); consumption is derived from the resource
-# constraint rather than approximated.
-class CapitalPathNN(nnx.Module):
-    def __init__(
-        self,
-        settings: GrowthPolicySettings,
-        *,
-        input_scale: float,
-        k_scale: float,
-        g: float | None,
-        dtype,
-        rngs: nnx.Rngs,
-    ):
-        self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
-        self.input_scale = nnx.static(input_scale)
-        # Non-Param Variable: the output scale is data (no recompilation when
-        # it changes) but sits outside the differentiated Param state.
-        self.k_scale = nnx.Variable(jnp.asarray(k_scale, dtype=dtype))
-        # Trend factor e^{g t} on the output head; None omits it from the
-        # graph entirely. Always a Param when present -- whether it is
-        # learned is the solve's diff filter's decision, not the module's.
-        self.g = None if g is None else nnx.Param(jnp.asarray(g, dtype=dtype))
-        self.layers = nnx.List(
-            [
-                nnx.Linear(
-                    1,
-                    settings.width,
-                    use_bias=settings.hidden_bias,
-                    dtype=dtype,
-                    param_dtype=dtype,
-                    rngs=rngs,
-                )
-            ]
-        )
-        for _ in range(settings.depth - 1):
-            self.layers.append(
-                nnx.Linear(
-                    settings.width,
-                    settings.width,
-                    use_bias=settings.hidden_bias,
-                    dtype=dtype,
-                    param_dtype=dtype,
-                    rngs=rngs,
-                )
-            )
-        self.head = nnx.Linear(
-            settings.width,
-            1,
-            use_bias=settings.output_bias,
-            kernel_init=nnx.initializers.normal(1e-3),
-            dtype=dtype,
-            param_dtype=dtype,
-            rngs=rngs,
-        )
-
-    # Scalar t to scalar k, so the nested jvps in the residual stay clean.
-    def __call__(self, t):
-        h = jnp.atleast_1d(t / self.input_scale)
-        for layer in self.layers:
-            h = self.hidden_activation(layer(h))
-        k = self.k_scale[...] * unit_softplus(self.head(h)[0])
-        if self.g is not None:
-            k = jnp.exp(self.g[...] * t) * k
-        return k
-
-
 # c(t) = f(z(t), k(t)) - delta k(t) - k_dot(t): the resource constraint holds
 # identically, leaving only the Euler equation and the initial condition.
 def substituted_consumption(model, t, p):
-    k, dk_dt = value_and_grad_fwd(model)(t)
+    k, dk_dt = value_and_grad_fwd(lambda s: model(s)[0])(t)
     z = p.z_0 * jnp.exp((1.0 - p.a) * p.g * t)
     return production(z, k, p) - p.delta * k - dk_dt
 
@@ -128,7 +63,7 @@ def euler_residual(model, t, p):
     return (
         dlog_c_dt
         + domain_guard
-        - (mpk(z, model(t), p) - p.delta - p.rho_hat) / p.sigma_crra
+        - (mpk(z, model(t)[0], p) - p.delta - p.rho_hat) / p.sigma_crra
     )
 
 
@@ -136,7 +71,7 @@ def residual_fn(theta, args, p):
     model = nnx.merge(args.graphdef, theta, args.nondiff)
     t_train = args.batch["t"]
     euler = jax.vmap(lambda t: euler_residual(model, t, p))(t_train)
-    ic = model(jnp.asarray(0.0, dtype=t_train.dtype)) - p.k_0
+    ic = model(jnp.asarray(0.0, dtype=t_train.dtype))[0] - p.k_0
     residual = jnp.concatenate([euler, jnp.atleast_1d(ic)])
     return residual / jnp.sqrt(residual.size), {"euler": euler}
 
@@ -151,7 +86,7 @@ def snapshot(theta, args, p, benchmark):
     df = pd.DataFrame(
         {
             "t": np.asarray(t),
-            "k": np.asarray(jax.vmap(model)(t)),
+            "k": np.asarray(model(t)[:, 0]),
             "c": np.asarray(
                 jax.vmap(lambda s: substituted_consumption(model, s, p))(t)
             ),
@@ -222,10 +157,16 @@ def neoclassical_growth_nn_k(
     # The module's trend Param: the init guess when learned, the true rate
     # when fixed, absent entirely for the trendless g = 0 graph.
     g_nn = g_hat_init if learn_g_hat else (g if g != 0.0 else None)
-    model = CapitalPathNN(
-        nn_set,
+    model = TimeMLP(
+        1,
+        width=nn_set.width,
+        depth=nn_set.depth,
+        activation=ACTIVATIONS[nn_set.hidden_activation],
+        use_bias=nn_set.hidden_bias,
+        use_output_bias=nn_set.output_bias,
+        final_activation=unit_softplus,
         input_scale=input_scale,
-        k_scale=k_scale,
+        output_scale=k_scale,
         g=g_nn,
         dtype=dtype,
         rngs=nnx.Rngs(init_key),
@@ -258,11 +199,17 @@ def neoclassical_growth_nn_k(
         key=multi_start_key,
         num_starts=lm_set.num_attempts,
         draw=DrawNNXModule(
-            CapitalPathNN,
-            nn_set,
+            TimeMLP,
+            1,
             wrt=diff_wrt,
+            width=nn_set.width,
+            depth=nn_set.depth,
+            activation=ACTIVATIONS[nn_set.hidden_activation],
+            use_bias=nn_set.hidden_bias,
+            use_output_bias=nn_set.output_bias,
+            final_activation=unit_softplus,
             input_scale=input_scale,
-            k_scale=k_scale,
+            output_scale=k_scale,
             g=g_nn,
             dtype=dtype,
         ),
@@ -295,7 +242,7 @@ def neoclassical_growth_nn_k(
     )
 
     tvc_t = jnp.asarray(data_set.test_tvc_T, dtype=dtype)
-    k_T = model(tvc_t)
+    k_T = model(tvc_t)[0]
     c_T = substituted_consumption(model, tvc_t, p)
     log_tvc = float(-p.rho_hat * tvc_t - p.sigma_crra * jnp.log(c_T) + jnp.log(k_T))
     transversality_ok = bool(log_tvc < tolerance_set.log_tvc_threshold)

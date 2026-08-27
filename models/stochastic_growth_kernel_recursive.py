@@ -142,9 +142,10 @@ def investment(theta, args, log_state, p):
 class KernelInvestmentPolicy:
     theta: tuple
     args: ResidualArgs
+    p: StructuralParameters
 
-    def __call__(self, log_state, p):
-        return investment(self.theta, self.args, log_state, p)
+    def __call__(self, log_state):
+        return jnp.atleast_1d(investment(self.theta, self.args, log_state, self.p))
 
 
 # Locate the reference NN policy for this exact problem (structural
@@ -171,7 +172,7 @@ def load_reference_policy(policy_dir, problem_config):
 
 
 def residual_fn(theta, args, p):
-    policy = KernelInvestmentPolicy(theta, args)
+    policy = KernelInvestmentPolicy(theta, args, p)
     residual = euler_residuals(policy, args.train_log_states, p)
     return residual / jnp.sqrt(residual.size)
 
@@ -348,7 +349,7 @@ def stochastic_growth_kernel_recursive(
     alpha = theta[0]
     rkhs_norm_ray = float(alpha @ ray_gram @ alpha)
     rkhs_norm_2d = float(alpha @ (args.gram - ray_gram) @ alpha)
-    policy = KernelInvestmentPolicy(theta, args)
+    policy = KernelInvestmentPolicy(theta, args, p)
     train_values = trajectory_values(policy, train_log_states, p)
     train_initial = np.asarray(train_initial_conditions)
     train_df = long_df(

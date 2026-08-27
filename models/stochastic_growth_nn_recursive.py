@@ -10,9 +10,15 @@ import jsonargparse
 import numpy as np
 from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
-from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
+from nlls_gram import (
+    DrawNNXModule,
+    LevenbergMarquardt,
+    LMAction,
+    LMStatus,
+    MultiStart,
+)
 
-from models.neural_networks import save_model
+from models.neural_networks import StateMLP, save_model
 from models.stochastic_growth_shared import (
     STOCHASTIC_GROWTH_CONSTANTS as CONSTANTS,
 )
@@ -20,11 +26,11 @@ from models.stochastic_growth_shared import (
     DataSettings,
     DrawInvestmentPolicy,
     InitialConditionSettings,
-    InvestmentPolicyNN,
     InvestmentPolicySettings,
     StructuralParameters,
     euler_residuals,
     growth_initial_conditions,
+    investment_policy_spec,
     log_tvc_residual,
     problem_cache_config,
     simulate,
@@ -249,8 +255,9 @@ def stochastic_growth_nn_recursive(
 
     fit_timer = Stopwatch()
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
+    policy_spec = investment_policy_spec(nn_set, delta, k_0, dtype)
     graphdef, _, nondiff = nnx.split(
-        InvestmentPolicyNN(nn_set, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(0)),
+        StateMLP(2, rngs=nnx.Rngs(0), **policy_spec),
         nnx.Param,
         ...,
     )
@@ -332,7 +339,7 @@ def stochastic_growth_nn_recursive(
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
     _, theta_0, _ = nnx.split(
-        InvestmentPolicyNN(nn_set, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(init_key)),
+        StateMLP(2, rngs=nnx.Rngs(init_key), **policy_spec),
         nnx.Param,
         ...,
     )
@@ -349,7 +356,7 @@ def stochastic_growth_nn_recursive(
         n_steps=n_train_steps,
         dt=train_dt,
     )
-    draw = DrawInvestmentPolicy(nn_set, k_scale=k_0, dtype=dtype)
+    draw = DrawInvestmentPolicy(DrawNNXModule(StateMLP, 2, **policy_spec))
     # The per-step tolerance is sound only while the training batch never
     # changes; across epochs, convergence is judged at the boundaries
     # instead.

@@ -8,10 +8,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
-from nlls_gram import DrawNNXModule
 from tinydiffeq import SaveAt, solve_sde
 
-from models.neural_networks import unit_softplus
+from models.neural_networks import StateMLP
 from models.utilities import ParameterPyTree
 
 # Stochastic neoclassical growth on the state (log z, log k): OU log-TFP
@@ -73,13 +72,13 @@ def mpk(z, k, p):
 
 def consumption(policy, log_state, p):
     z, k = jnp.exp(log_state)
-    return production(z, k, p) - policy(log_state, p)
+    return production(z, k, p) - policy(log_state)[0]
 
 
 def log_state_drift(policy, log_state, p):
     log_z, log_k = log_state
     k = jnp.exp(log_k)
-    investment = policy(log_state, p)
+    investment = policy(log_state)[0]
     return jnp.stack([p.eta * (p.log_z_bar - log_z), investment / k - p.delta])
 
 
@@ -225,7 +224,7 @@ def add_reference_path_diagnostics(test_df, test_values, fd_values):
 def trajectory_values(policy, log_states, p):
     shape = log_states.shape[:-1]
     flat_states = log_states.reshape(-1, 2)
-    investment = jax.vmap(lambda state: policy(state, p))(flat_states).reshape(shape)
+    investment = jax.vmap(lambda state: policy(state)[0])(flat_states).reshape(shape)
     c = jax.vmap(lambda state: consumption(policy, state, p))(flat_states).reshape(
         shape
     )
@@ -343,56 +342,20 @@ class InvestmentPolicySettings:
     head_init_scale: float = 1e-3
 
 
-# i = delta * k_scale * U(h(log z, log k)), U the unit softplus with
-# near-zero head. Mean reversion in z fixes a scale, so h is a free gelu MLP
-# of both states anchored at the constant delta * k_scale; consumption Y - i
-# stays unclamped.
-class InvestmentPolicyNN(nnx.Module):
-    def __init__(
-        self,
-        settings: InvestmentPolicySettings,
-        *,
-        k_scale=1.0,
-        dtype,
-        rngs: nnx.Rngs,
-    ):
-        self.k_scale = nnx.Variable(jnp.asarray(k_scale, dtype=dtype))
-        self.layers = nnx.List(
-            [
-                nnx.Linear(
-                    2,
-                    settings.mlp_width,
-                    dtype=dtype,
-                    param_dtype=dtype,
-                    rngs=rngs,
-                )
-            ]
-        )
-        for _ in range(settings.mlp_depth - 1):
-            self.layers.append(
-                nnx.Linear(
-                    settings.mlp_width,
-                    settings.mlp_width,
-                    dtype=dtype,
-                    param_dtype=dtype,
-                    rngs=rngs,
-                )
-            )
-        self.head = nnx.Linear(
-            settings.mlp_width,
-            1,
-            kernel_init=nnx.initializers.normal(settings.head_init_scale),
-            bias_init=nnx.initializers.zeros_init(),
-            dtype=dtype,
-            param_dtype=dtype,
-            rngs=rngs,
-        )
-
-    def __call__(self, log_state, p):
-        h = log_state
-        for layer in self.layers:
-            h = jax.nn.gelu(layer(h))
-        return p.delta * self.k_scale[...] * unit_softplus(self.head(h)[0])
+# The gelu trunk stays hardcoded: the residual differentiates the policy
+# twice, and the mean reversion in z fixes a scale, so the raw (log z, log k)
+# state feeds the trunk unnormalized with the constant delta * k_0 anchor.
+def investment_policy_spec(settings, delta, k_0, dtype):
+    return dict(
+        width=settings.mlp_width,
+        depth=settings.mlp_depth,
+        activation=jax.nn.gelu,
+        heads=((1, settings.head_init_scale),),
+        positive=(True,),
+        anchor=(delta * k_0,),
+        out_scale=(delta * k_0,),
+        dtype=dtype,
+    )
 
 
 # DrawNNXModule redraws theta but passes args through unchanged; multi-start
@@ -400,10 +363,8 @@ class InvestmentPolicyNN(nnx.Module):
 # restart_key/epoch_key here (and resetting epoch to 0) is what keeps each
 # retry's epoch-boundary resampling independent of the others.
 class DrawInvestmentPolicy:
-    def __init__(self, settings, *, k_scale, dtype):
-        self.draw_theta = DrawNNXModule(
-            InvestmentPolicyNN, settings, k_scale=k_scale, dtype=dtype
-        )
+    def __init__(self, draw_theta):
+        self.draw_theta = draw_theta
 
     def __call__(self, key, _, args):
         theta, _ = self.draw_theta(key, _, args)
@@ -424,9 +385,13 @@ class DrawInvestmentPolicy:
         )
 
 
-# The load template only needs the architecture from meta: the scale
-# Variables ride in the artifact's nondiff block and overwrite the defaults.
+# The load template only needs the architecture from meta: the anchor and
+# normalization Variables ride in the artifact's nondiff block and overwrite
+# the placeholder defaults.
 def make_investment_policy(meta, dtype):
-    return InvestmentPolicyNN(
-        InvestmentPolicySettings(**meta["settings"]), dtype=dtype, rngs=nnx.Rngs(0)
+    settings = InvestmentPolicySettings(**meta["settings"])
+    return StateMLP(
+        2,
+        rngs=nnx.Rngs(0),
+        **investment_policy_spec(settings, 1.0, 1.0, dtype),
     )

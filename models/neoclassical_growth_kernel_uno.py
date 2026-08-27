@@ -333,7 +333,7 @@ def neoclassical_growth_kernel_uno(
     )
     # Dense off-grid residual check between the training points.
     validation_data = jnp.linspace(
-        0, data_set.train_T, max(data_set.test_points, 801), dtype=jnp.float64
+        0, data_set.train_T, data_set.validation_points, dtype=jnp.float64
     )
     test_benchmark = None if use_kinked_production else neoclassical_growth_benchmark(p)
     train_eval = evaluate_grid(train_data)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, replace
+from dataclasses import asdict
 
 import jax
 import jax.numpy as jnp
@@ -46,13 +46,14 @@ class CapitalPathNN(nnx.Module):
         self,
         settings: GrowthPolicySettings,
         *,
+        input_scale: float,
         k_scale: float,
         g_hat: float = 0.0,
         dtype,
         rngs: nnx.Rngs,
     ):
         self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
-        self.input_scale = nnx.static(settings.input_scale)
+        self.input_scale = nnx.static(input_scale)
         # Non-Param Variable: the output scale is data (no recompilation when
         # it changes) but sits outside the differentiated Param state.
         self.k_scale = nnx.Variable(jnp.asarray(k_scale, dtype=dtype))
@@ -227,11 +228,12 @@ def neoclassical_growth_nn_k(
     )
 
     t_train = make_train_t_grid(data_set, dtype)
-    policy_settings = replace(nn_set, input_scale=max(float(data_set.train_T), 1.0))
+    input_scale = max(float(data_set.train_T), 1.0)
     k_scale = float(k_0)
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     model = CapitalPathNN(
-        policy_settings,
+        nn_set,
+        input_scale=input_scale,
         k_scale=k_scale,
         g_hat=g,
         dtype=dtype,
@@ -263,7 +265,8 @@ def neoclassical_growth_nn_k(
         num_starts=lm_set.num_attempts,
         draw=DrawNNXModule(
             CapitalPathNN,
-            policy_settings,
+            nn_set,
+            input_scale=input_scale,
             k_scale=k_scale,
             g_hat=g,
             dtype=dtype,
@@ -303,7 +306,7 @@ def neoclassical_growth_nn_k(
 
     results = {
         "parameters": p.to_dict(),
-        "nn_set": asdict(policy_settings),
+        "nn_set": asdict(nn_set),
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),

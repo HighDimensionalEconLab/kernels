@@ -92,6 +92,7 @@ class DataSettings:
     train_points_list: list[float] | None = None
     test_T: float = NEOCLASSICAL_GROWTH_CONSTANTS["sequence_test_T"]
     test_points: int = 100
+    validation_points: int = 801
     test_tvc_T: float = NEOCLASSICAL_GROWTH_CONSTANTS["transversality_T"]
 
 
@@ -109,7 +110,6 @@ class GrowthPolicySettings:
     hidden_activation: str = "tanh"
     hidden_bias: bool = True
     output_bias: bool = True
-    input_scale: float = 40.0
     # Trend e^{g_hat t} on the output heads: a learned Param (init g_hat_init)
     # or fixed at the constructor's g_hat.
     learn_g_hat: bool = False

@@ -160,7 +160,7 @@ def human_capital_kernel_uno(
     validation_data = jnp.linspace(
         0.0,
         data_set.train_T,
-        max(data_set.test_points, data_set.validation_points),
+        data_set.validation_points,
         dtype=jnp.float64,
     )
 

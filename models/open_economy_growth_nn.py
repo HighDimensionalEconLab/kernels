@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 
 import jax
 import jax.numpy as jnp
@@ -65,7 +65,6 @@ class SequencePathSettings:
     width: int = 32
     depth: int = 3
     hidden_activation: str = "tanh"
-    input_scale: float = 160.0
 
 
 class SequencePathNN(nnx.Module):
@@ -73,6 +72,7 @@ class SequencePathNN(nnx.Module):
         self,
         settings: SequencePathSettings,
         *,
+        input_scale: float,
         k_scale: float,
         a_scale: float,
         q_scale: float,
@@ -82,7 +82,7 @@ class SequencePathNN(nnx.Module):
         rngs: nnx.Rngs,
     ):
         self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
-        self.input_scale = nnx.static(settings.input_scale)
+        self.input_scale = nnx.static(input_scale)
         # Non-Param Variables: the output scales are data (no recompilation
         # when they change) but sit outside the differentiated Param state.
         self.k_scale = nnx.Variable(jnp.asarray(k_scale, dtype=dtype))
@@ -226,11 +226,12 @@ def open_economy_growth_nn(
     q_scale = 1.0 / float(eta)
     c_scale = float(k_0**alpha - delta * k_0)
     mu_scale = float(c_scale ** (-gamma))
-    nn_set = replace(nn_set, input_scale=max(float(train_t[-1]), 1.0))
+    input_scale = max(float(train_t[-1]), 1.0)
 
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     model = SequencePathNN(
         nn_set,
+        input_scale=input_scale,
         k_scale=k_scale,
         a_scale=a_scale,
         q_scale=q_scale,
@@ -264,6 +265,7 @@ def open_economy_growth_nn(
         draw=DrawNNXModule(
             SequencePathNN,
             nn_set,
+            input_scale=input_scale,
             k_scale=k_scale,
             a_scale=a_scale,
             q_scale=q_scale,

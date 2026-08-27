@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, replace
+from dataclasses import asdict
 
 import jax
 import jax.numpy as jnp
@@ -45,6 +45,7 @@ class GrowthPolicyNN(nnx.Module):
         self,
         settings: GrowthPolicySettings,
         *,
+        input_scale: float,
         k_scale: float,
         c_scale: float,
         g_hat: float = 0.0,
@@ -52,7 +53,7 @@ class GrowthPolicyNN(nnx.Module):
         rngs: nnx.Rngs,
     ):
         self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
-        self.input_scale = nnx.static(settings.input_scale)
+        self.input_scale = nnx.static(input_scale)
         # Non-Param Variables: the output scales are data (no recompilation
         # when they change) but sit outside the differentiated Param state.
         self.k_scale = nnx.Variable(jnp.asarray(k_scale, dtype=dtype))
@@ -216,12 +217,13 @@ def neoclassical_growth_nn(
     t_train = make_train_t_grid(data_set, dtype)
     z_trend_train = jnp.exp((1.0 - a) * g * t_train)
     c_flow_guess = steady_flow_consumption_guess(p)
-    policy_settings = replace(nn_set, input_scale=max(float(data_set.train_T), 1.0))
+    input_scale = max(float(data_set.train_T), 1.0)
     k_scale = float(k_0)
     c_scale = c_flow_guess
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     model = GrowthPolicyNN(
-        policy_settings,
+        nn_set,
+        input_scale=input_scale,
         k_scale=k_scale,
         c_scale=c_scale,
         g_hat=g,
@@ -256,7 +258,8 @@ def neoclassical_growth_nn(
         num_starts=lm_set.num_attempts,
         draw=DrawNNXModule(
             GrowthPolicyNN,
-            policy_settings,
+            nn_set,
+            input_scale=input_scale,
             k_scale=k_scale,
             c_scale=c_scale,
             g_hat=g,
@@ -302,7 +305,7 @@ def neoclassical_growth_nn(
         rejection_reasons.append("train_loss")
     results = {
         "parameters": p.to_dict(),
-        "nn_set": asdict(policy_settings),
+        "nn_set": asdict(nn_set),
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),

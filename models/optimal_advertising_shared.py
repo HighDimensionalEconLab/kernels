@@ -26,7 +26,7 @@ class DataSettings:
 
 
 # Acceptance gates, CLI-reachable so a lower-precision caller can pass its
-# own bars.
+# own bars; keep train_residual above ~8x machine epsilon for the run dtype.
 @dataclass(frozen=True)
 class ToleranceSettings:
     train_residual: float = 1e-8

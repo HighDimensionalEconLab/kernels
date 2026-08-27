@@ -115,7 +115,7 @@ def optimal_advertising_kernel(
     validation_data = jnp.linspace(
         0.0,
         data_set.train_T,
-        max(data_set.test_points, data_set.validation_points),
+        data_set.validation_points,
         dtype=dtype,
     )
     n_train = len(train_data)
@@ -194,14 +194,10 @@ def optimal_advertising_kernel(
             for grid in (train_eval, validation_eval, test_eval)
         )
     )
-    train_residual_tolerance = max(
-        tolerance_set.train_residual,
-        8.0 * float(jnp.finfo(dtype).eps),
-    )
     rejection_reasons = []
     if not finite_valid:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > train_residual_tolerance:
+    if max_train_residual > tolerance_set.train_residual:
         rejection_reasons.append("train_residual")
 
     kernel_solution = jax.jit(evaluate_grid)

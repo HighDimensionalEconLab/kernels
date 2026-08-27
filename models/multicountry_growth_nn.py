@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 
 import jax
 import jax.numpy as jnp
@@ -72,7 +72,6 @@ class SequencePathSettings:
     width: int = 32
     depth: int = 3
     hidden_activation: str = "tanh"
-    input_scale: float = 160.0
 
 
 class SequencePathNN(nnx.Module):
@@ -81,6 +80,7 @@ class SequencePathNN(nnx.Module):
         num_countries: int,
         settings: SequencePathSettings,
         *,
+        input_scale: float,
         k_scale: tuple[float, ...],
         a_scale: float,
         q_scale: float,
@@ -92,7 +92,7 @@ class SequencePathNN(nnx.Module):
     ):
         self.num_countries = nnx.static(num_countries)
         self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
-        self.input_scale = nnx.static(settings.input_scale)
+        self.input_scale = nnx.static(input_scale)
         # Non-Param Variables: the output scales are data (no recompilation
         # when they change) but sit outside the differentiated Param state.
         self.k_scale = nnx.Variable(jnp.asarray(k_scale, dtype=dtype))
@@ -296,12 +296,13 @@ def multicountry_growth_nn(
     mu_scale = tuple(float(c_scale ** (-gamma)) for gamma in gammas)
     q_scale = 1.0 / eta
     rate_scale = r
-    nn_set = replace(nn_set, input_scale=max(float(train_t[-1]), 1.0))
+    input_scale = max(float(train_t[-1]), 1.0)
 
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     model = SequencePathNN(
         num_countries,
         nn_set,
+        input_scale=input_scale,
         k_scale=k_scale,
         a_scale=a_scale,
         q_scale=q_scale,
@@ -337,6 +338,7 @@ def multicountry_growth_nn(
             SequencePathNN,
             num_countries,
             nn_set,
+            input_scale=input_scale,
             k_scale=k_scale,
             a_scale=a_scale,
             q_scale=q_scale,

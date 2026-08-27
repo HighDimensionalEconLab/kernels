@@ -157,15 +157,11 @@ def asset_pricing_kernel(
     # Analytic finite-horizon bias in the matern12 case.
     horizon_bias_p0 = kernel_horizon_bias_p0(p, kernel_set, T=float(train_data[-1]))
 
-    train_residual_tolerance = max(
-        tolerance_set.train_residual,
-        8.0 * float(jnp.finfo(dtype).eps),
-    )
     finite = bool(jnp.all(jnp.isfinite(p_test)) and jnp.all(jnp.isfinite(p_benchmark)))
     rejection_reasons = []
     if not finite:
         rejection_reasons.append("nonfinite")
-    if max_train_residual > train_residual_tolerance:
+    if max_train_residual > tolerance_set.train_residual:
         rejection_reasons.append("train_residual")
     if float(p_0) < 0.0:
         rejection_reasons.append("negative_p_0")

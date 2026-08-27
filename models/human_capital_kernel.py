@@ -129,7 +129,7 @@ def human_capital_kernel(
     validation_data = jnp.linspace(
         0.0,
         data_set.train_T,
-        max(data_set.test_points, data_set.validation_points),
+        data_set.validation_points,
         dtype=dtype,
     )
     n_train = len(train_data)

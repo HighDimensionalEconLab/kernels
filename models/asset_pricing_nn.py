@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 
 import jax
 import jax.numpy as jnp
@@ -37,7 +37,6 @@ class PricePolicySettings:
     hidden_activation: str = "tanh"
     hidden_bias: bool = True
     output_bias: bool = True
-    input_scale: float = 40.0
 
 
 class PricePolicyNN(nnx.Module):
@@ -45,11 +44,12 @@ class PricePolicyNN(nnx.Module):
         self,
         settings: PricePolicySettings,
         *,
+        input_scale: float,
         dtype,
         rngs: nnx.Rngs,
     ):
         self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
-        self.input_scale = nnx.static(settings.input_scale)
+        self.input_scale = nnx.static(input_scale)
         self.layers = nnx.List(
             [
                 nnx.Linear(
@@ -151,11 +151,11 @@ def asset_pricing_nn(
     dtype = jnp.float64 if use_float64 else jnp.float32
     train_t = make_train_t_grid(data_set, dtype)
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
-    nn_set = replace(nn_set, input_scale=max(float(data_set.train_T), 1.0))
-
+    input_scale = max(float(data_set.train_T), 1.0)
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     model = PricePolicyNN(
         nn_set,
+        input_scale=input_scale,
         dtype=dtype,
         rngs=nnx.Rngs(init_key),
     )
@@ -182,7 +182,7 @@ def asset_pricing_nn(
     multi_start = MultiStart(
         key=multi_start_key,
         num_starts=lm_set.num_attempts,
-        draw=DrawNNXModule(PricePolicyNN, nn_set, dtype=dtype),
+        draw=DrawNNXModule(PricePolicyNN, nn_set, input_scale=input_scale, dtype=dtype),
     )
 
     timer = Stopwatch()

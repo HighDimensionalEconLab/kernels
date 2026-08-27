@@ -92,6 +92,9 @@ per-directory READMEs.
 
 - x64 + `jax_default_matmul_precision="highest"` set by every entrypoint
   before any array is created.
+- Numeric settings are used verbatim — never clamped, floored, or defensively
+  adjusted in code; guidance (e.g. keep `train_residual` above ~8x machine
+  epsilon for the run dtype) rides as comments on the field defaults.
 - Seeds: 7 for sequence-space NN ensembles, 5 for recursive NN; each NN seed
   gets up to `lm_set.num_attempts` multi-start attempts.
 - Lint: `uv run ruff check .` and `uv run ruff format .`; enable the committed

@@ -39,7 +39,8 @@ from models.multicountry_growth_shared import (
 from models.neural_networks import (
     ACTIVATIONS,
     NNXResidualArgs,
-    unit_softplus,
+    TimeMLP,
+    UnitSoftplusWhere,
 )
 from models.utilities import (
     OptimizerSettings,
@@ -67,104 +68,34 @@ class SequencePathSettings:
     hidden_activation: str = "tanh"
 
 
-class SequencePathNN(nnx.Module):
-    def __init__(
-        self,
-        num_countries: int,
-        settings: SequencePathSettings,
-        *,
-        input_scale: float,
-        k_scale: tuple[float, ...],
-        a_scale: float,
-        q_scale: float,
-        c_scale: float,
-        mu_scale: tuple[float, ...],
-        rate_scale: float,
-        dtype,
-        rngs: nnx.Rngs,
-    ):
-        self.num_countries = nnx.static(num_countries)
-        self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
-        self.input_scale = nnx.static(input_scale)
-        # Non-Param Variables: the output scales are data (no recompilation
-        # when they change) but sit outside the differentiated Param state.
-        self.k_scale = nnx.Variable(jnp.asarray(k_scale, dtype=dtype))
-        self.a_scale = nnx.Variable(jnp.asarray(a_scale, dtype=dtype))
-        self.q_scale = nnx.Variable(jnp.asarray(q_scale, dtype=dtype))
-        self.c_scale = nnx.Variable(jnp.asarray(c_scale, dtype=dtype))
-        self.mu_scale = nnx.Variable(jnp.asarray(mu_scale, dtype=dtype))
-        self.rate_scale = nnx.Variable(jnp.asarray(rate_scale, dtype=dtype))
-        self.layers = nnx.List(
-            [
-                nnx.Linear(
-                    1,
-                    settings.width,
-                    dtype=dtype,
-                    param_dtype=dtype,
-                    rngs=rngs,
-                )
-            ]
-        )
-        for _ in range(settings.depth - 1):
-            self.layers.append(
-                nnx.Linear(
-                    settings.width,
-                    settings.width,
-                    dtype=dtype,
-                    param_dtype=dtype,
-                    rngs=rngs,
-                )
-            )
-        # Near-zero head: the drawn paths start at the declared scales
-        # (k = k_0, a = 0, q = 1/eta, c and mu at the world flow scale,
-        # rate = r); the initial conditions are imposed as residual rows.
-        self.head = nnx.Linear(
-            settings.width,
-            5 * num_countries + 1,
-            kernel_init=nnx.initializers.normal(1e-3),
-            dtype=dtype,
-            param_dtype=dtype,
-            rngs=rngs,
-        )
-
-    def __call__(self, t):
-        h = jnp.atleast_1d(t / self.input_scale)
-        for layer in self.layers:
-            h = self.hidden_activation(layer(h))
-        raw = self.head(h)
-        blocks = raw[: 5 * self.num_countries].reshape(5, self.num_countries)
-        # Assets are signed, so their raw block scales linearly; the other
-        # paths and the world rate are positive via unit_softplus.
-        return {
-            "k": self.k_scale[...] * unit_softplus(blocks[0]),
-            "a": self.a_scale[...] * blocks[1],
-            "q": self.q_scale[...] * unit_softplus(blocks[2]),
-            "c": self.c_scale[...] * unit_softplus(blocks[3]),
-            "mu": self.mu_scale[...] * unit_softplus(blocks[4]),
-            "interest_rate": self.rate_scale[...] * unit_softplus(raw[-1]),
-        }
-
-
 def residual_fn(theta, args, p):
     model = nnx.merge(args.graphdef, theta, args.nondiff)
     t = args.batch["t"]
-    paths, derivatives = jax.vmap(value_and_grad_fwd(model))(t)
-    k, a, q = paths["k"], paths["a"], paths["q"]
-    c, mu = paths["c"], paths["mu"]
-    rate_column = paths["interest_rate"][..., None]
+    # Flat head layout: k | a | q | c | mu blocks of N countries, then the
+    # world interest rate.
+    n = p.k_0.shape[-1]
+    paths, derivatives = value_and_grad_fwd(model)(t)
+    k, a, q = paths[..., :n], paths[..., n : 2 * n], paths[..., 2 * n : 3 * n]
+    c, mu = paths[..., 3 * n : 4 * n], paths[..., 4 * n : 5 * n]
+    rate_column = paths[..., 5 * n :]
     gammas = jnp.asarray(p.gammas, dtype=c.dtype)
     populations = jnp.asarray(p.populations, dtype=a.dtype)
     chi = p.delta ** (1.0 - p.eta)
     values = {
-        **paths,
-        "current_account": derivatives["a"],
-        "capital": derivatives["k"] / k
+        "k": k,
+        "a": a,
+        "q": q,
+        "c": c,
+        "mu": mu,
+        "interest_rate": paths[..., 5 * n],
+        "current_account": derivatives[..., n : 2 * n],
+        "capital": derivatives[..., :n] / k
         - (chi * investment_rate_from_q(q, p) ** p.eta - p.delta),
-        "assets": derivatives["a"]
+        "assets": derivatives[..., n : 2 * n]
         - current_account(k, a, q, c, p.productivities, rate_column, p),
-        "tobin_q": derivatives["q"] / q
+        "tobin_q": derivatives[..., 2 * n : 3 * n] / q
         - q_drift(k, q, p.productivities, rate_column, p) / q,
-        "marginal_wealth": derivatives["mu"] / mu - (p.r - rate_column),
+        "marginal_wealth": derivatives[..., 4 * n : 5 * n] / mu - (p.r - rate_column),
         "consumption_foc": mu * c**gammas - 1.0,
         # World bond clearing, per capita so the row size is N-free.
         "asset_clearing": jnp.sum(populations * a, axis=-1) / jnp.sum(populations),
@@ -174,7 +105,7 @@ def residual_fn(theta, args, p):
     # anchors cleared positions) and projects AD perturbations of a_0 onto
     # the feasible clearing set, so every direction is meaningful.
     a_0 = p.a_0 - jnp.sum(p.populations * p.a_0) / jnp.sum(p.populations)
-    ic = jnp.concatenate([at_zero["k"] - p.k_0, at_zero["a"] - a_0])
+    ic = jnp.concatenate([at_zero[:n] - p.k_0, at_zero[n : 2 * n] - a_0])
     residual = jnp.concatenate(
         [
             values["capital"].reshape(-1),
@@ -288,16 +219,29 @@ def multicountry_growth_nn(
     input_scale = max(float(train_t[-1]), 1.0)
 
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
-    model = SequencePathNN(
-        num_countries,
-        nn_set,
+    # Assets are signed, so their head block scales linearly; the other
+    # paths and the world rate are positive via unit_softplus.
+    positive = (
+        (True,) * num_countries
+        + (False,) * num_countries
+        + (True,) * (3 * num_countries + 1)
+    )
+    output_scale = (
+        *k_scale,
+        *(a_scale,) * num_countries,
+        *(q_scale,) * num_countries,
+        *(c_scale,) * num_countries,
+        *mu_scale,
+        rate_scale,
+    )
+    model = TimeMLP(
+        5 * num_countries + 1,
+        width=nn_set.width,
+        depth=nn_set.depth,
+        activation=ACTIVATIONS[nn_set.hidden_activation],
+        final_activation=UnitSoftplusWhere(positive),
         input_scale=input_scale,
-        k_scale=k_scale,
-        a_scale=a_scale,
-        q_scale=q_scale,
-        c_scale=c_scale,
-        mu_scale=mu_scale,
-        rate_scale=rate_scale,
+        output_scale=output_scale,
         dtype=dtype,
         rngs=nnx.Rngs(init_key),
     )
@@ -324,16 +268,14 @@ def multicountry_growth_nn(
         key=multi_start_key,
         num_starts=lm_set.num_attempts,
         draw=DrawNNXModule(
-            SequencePathNN,
-            num_countries,
-            nn_set,
+            TimeMLP,
+            5 * num_countries + 1,
+            width=nn_set.width,
+            depth=nn_set.depth,
+            activation=ACTIVATIONS[nn_set.hidden_activation],
+            final_activation=UnitSoftplusWhere(positive),
             input_scale=input_scale,
-            k_scale=k_scale,
-            a_scale=a_scale,
-            q_scale=q_scale,
-            c_scale=c_scale,
-            mu_scale=mu_scale,
-            rate_scale=rate_scale,
+            output_scale=output_scale,
             dtype=dtype,
         ),
     )

@@ -18,7 +18,8 @@ from nlls_gram import (
 from models.neural_networks import (
     ACTIVATIONS,
     NNXResidualArgs,
-    unit_softplus,
+    TimeMLP,
+    UnitSoftplusWhere,
 )
 from models.open_economy_growth_benchmark import open_economy_growth_benchmark
 from models.open_economy_growth_shared import (
@@ -61,84 +62,10 @@ class SequencePathSettings:
     hidden_activation: str = "tanh"
 
 
-class SequencePathNN(nnx.Module):
-    def __init__(
-        self,
-        settings: SequencePathSettings,
-        *,
-        input_scale: float,
-        k_scale: float,
-        a_scale: float,
-        q_scale: float,
-        c_scale: float,
-        mu_scale: float,
-        dtype,
-        rngs: nnx.Rngs,
-    ):
-        self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
-        self.input_scale = nnx.static(input_scale)
-        # Non-Param Variables: the output scales are data (no recompilation
-        # when they change) but sit outside the differentiated Param state.
-        self.k_scale = nnx.Variable(jnp.asarray(k_scale, dtype=dtype))
-        self.a_scale = nnx.Variable(jnp.asarray(a_scale, dtype=dtype))
-        self.q_scale = nnx.Variable(jnp.asarray(q_scale, dtype=dtype))
-        self.c_scale = nnx.Variable(jnp.asarray(c_scale, dtype=dtype))
-        self.mu_scale = nnx.Variable(jnp.asarray(mu_scale, dtype=dtype))
-        self.layers = nnx.List(
-            [
-                nnx.Linear(
-                    1,
-                    settings.width,
-                    dtype=dtype,
-                    param_dtype=dtype,
-                    rngs=rngs,
-                )
-            ]
-        )
-        for _ in range(settings.depth - 1):
-            self.layers.append(
-                nnx.Linear(
-                    settings.width,
-                    settings.width,
-                    dtype=dtype,
-                    param_dtype=dtype,
-                    rngs=rngs,
-                )
-            )
-        # Near-zero head: the drawn paths start at the declared scales
-        # (k = k_0, a = 0, q = 1/eta, c and mu at the k_0 flow scale); the
-        # initial conditions are imposed as residual rows.
-        self.head = nnx.Linear(
-            settings.width,
-            5,
-            kernel_init=nnx.initializers.normal(1e-3),
-            dtype=dtype,
-            param_dtype=dtype,
-            rngs=rngs,
-        )
-
-    def __call__(self, t):
-        h = jnp.atleast_1d(t / self.input_scale)
-        for layer in self.layers:
-            h = self.hidden_activation(layer(h))
-        raw = self.head(h)
-        # Assets are signed, so their raw head output scales linearly; the
-        # other four paths are positive via unit_softplus.
-        return jnp.stack(
-            [
-                self.k_scale[...] * unit_softplus(raw[0]),
-                self.a_scale[...] * raw[1],
-                self.q_scale[...] * unit_softplus(raw[2]),
-                self.c_scale[...] * unit_softplus(raw[3]),
-                self.mu_scale[...] * unit_softplus(raw[4]),
-            ]
-        )
-
-
 def residual_fn(theta, args, p):
     model = nnx.merge(args.graphdef, theta, args.nondiff)
     t = args.batch["t"]
-    paths, derivatives = jax.vmap(value_and_grad_fwd(model))(t)
+    paths, derivatives = value_and_grad_fwd(model)(t)
     k, a, q, c, mu = (paths[:, index] for index in range(5))
     da_dt = derivatives[:, 1]
     z = jnp.ones_like(k)
@@ -229,14 +156,16 @@ def open_economy_growth_nn(
     input_scale = max(float(train_t[-1]), 1.0)
 
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
-    model = SequencePathNN(
-        nn_set,
+    # Assets are signed, so the a head output scales linearly; the other
+    # four paths are positive via unit_softplus.
+    model = TimeMLP(
+        5,
+        width=nn_set.width,
+        depth=nn_set.depth,
+        activation=ACTIVATIONS[nn_set.hidden_activation],
+        final_activation=UnitSoftplusWhere((True, False, True, True, True)),
         input_scale=input_scale,
-        k_scale=k_scale,
-        a_scale=a_scale,
-        q_scale=q_scale,
-        c_scale=c_scale,
-        mu_scale=mu_scale,
+        output_scale=(k_scale, a_scale, q_scale, c_scale, mu_scale),
         dtype=dtype,
         rngs=nnx.Rngs(init_key),
     )
@@ -263,14 +192,14 @@ def open_economy_growth_nn(
         key=multi_start_key,
         num_starts=lm_set.num_attempts,
         draw=DrawNNXModule(
-            SequencePathNN,
-            nn_set,
+            TimeMLP,
+            5,
+            width=nn_set.width,
+            depth=nn_set.depth,
+            activation=ACTIVATIONS[nn_set.hidden_activation],
+            final_activation=UnitSoftplusWhere((True, False, True, True, True)),
             input_scale=input_scale,
-            k_scale=k_scale,
-            a_scale=a_scale,
-            q_scale=q_scale,
-            c_scale=c_scale,
-            mu_scale=mu_scale,
+            output_scale=(k_scale, a_scale, q_scale, c_scale, mu_scale),
             dtype=dtype,
         ),
     )

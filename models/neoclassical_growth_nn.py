@@ -212,10 +212,9 @@ def neoclassical_growth_nn(
 
     t_train = make_train_t_grid(data_set, dtype)
     z_trend_train = jnp.exp((1.0 - a) * g * t_train)
-    c_flow_guess = float(production(p.z_0, p.k_0, p) - p.delta * p.k_0)
     input_scale = max(float(data_set.train_T), 1.0)
     k_scale = float(k_0)
-    c_scale = c_flow_guess
+    c_scale = float(production(p.z_0, p.k_0, p) - p.delta * p.k_0)
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     model = GrowthPolicyNN(
         nn_set,
@@ -284,7 +283,11 @@ def neoclassical_growth_nn(
     train_df = snapshot(result.x, residual_args, p, benchmark)
     test_df = snapshot(
         result.x,
-        residual_args.replace(batch={"t": test_t, "z_trend": z_trend_test}),
+        NNXResidualArgs(
+            batch={"t": test_t, "z_trend": z_trend_test},
+            graphdef=graphdef,
+            nondiff=nondiff,
+        ),
         p,
         benchmark,
     )

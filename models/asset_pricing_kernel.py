@@ -59,7 +59,6 @@ def asset_pricing_kernel(
     c: float = 0.02,
     g: float = -0.2,
     x_0: float = 0.01,
-    p0_init: float = 0.0,  # seeds theta_0's free p_0 coefficient
     use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
@@ -84,15 +83,12 @@ def asset_pricing_kernel(
     ell, sigma = kernel_set.ell, kernel_set.sigma
     train_data = make_train_t_grid(data_set, dtype)
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
-    n_train = len(train_data)
     p = StructuralParameters.create(dtype=dtype, r=r, c=c, g=g, x_0=x_0)
 
-    K_metric, K_tilde_jax, metric = integrated_metric_factorization(
+    K, K_tilde, metric = integrated_metric_factorization(
         train_data, kernel, sigma, ell, repeats=1
     )
-    residual_args = KernelResidualArgs(
-        batch={"t": train_data}, K=K_metric, K_tilde=K_tilde_jax
-    )
+    residual_args = KernelResidualArgs(batch={"t": train_data}, K=K, K_tilde=K_tilde)
 
     solver = RidgeLevenbergMarquardt(
         residual_fn,
@@ -104,8 +100,8 @@ def asset_pricing_kernel(
         damping_increase=lm_set.damping_increase,
     )
     theta_0 = Theta(
-        alpha=jnp.zeros(n_train, dtype=dtype),
-        p_0=jnp.asarray(p0_init, dtype=dtype),
+        alpha=jnp.zeros(len(train_data), dtype=dtype),
+        p_0=jnp.zeros((), dtype=dtype),
     )
 
     solve_options = dict(
@@ -167,7 +163,7 @@ def asset_pricing_kernel(
         "tolerance_set": asdict(tolerance_set),
         "p_0": float(p_0),
         "horizon_bias_p0": horizon_bias_p0,
-        "rkhs_norm_p": float(rkhs_norm_squared(alpha, K_metric)),
+        "rkhs_norm_p": float(rkhs_norm_squared(alpha, K)),
         "max_train_residual": max_train_residual,
         "max_test_residual": float(jnp.max(jnp.abs(test_residual))),
         # min/max error statistics exclude the pinned t = 0 point ([1:]).

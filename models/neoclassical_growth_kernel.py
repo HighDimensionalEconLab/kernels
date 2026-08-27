@@ -119,7 +119,6 @@ def neoclassical_growth_kernel(
     ),
     ridge_set: RidgeSettings = RidgeSettings(ridge=1e-10),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
-    c_0_guess: float | None = None,  # overrides the flat steady-flow warm start
     verbose: bool = False,
 ):
     jax.config.update("jax_enable_x64", True)
@@ -156,7 +155,7 @@ def neoclassical_growth_kernel(
         k_thr=k_thr,
     )
 
-    K_jax, K_tilde_jax, metric = integrated_metric_factorization(
+    K, K_tilde, metric = integrated_metric_factorization(
         train_data, kernel, sigma, ell, repeats=3
     )
 
@@ -166,19 +165,17 @@ def neoclassical_growth_kernel(
             "z_trend": jnp.exp((1.0 - a) * g * train_data),
             "g_hat": jnp.asarray(g, dtype=dtype),
         },
-        K=K_jax,
-        K_tilde=K_tilde_jax,
+        K=K,
+        K_tilde=K_tilde,
     )
 
-    c_flow_guess = float(production(p.z_0, p.k_0, p) - p.delta * p.k_0)
-    if c_0_guess is not None:
-        c_flow_guess = float(c_0_guess)
+    c_0_init = production(p.z_0, p.k_0, p) - p.delta * p.k_0
     theta_0 = Theta(
         alpha_mu=jnp.zeros(n_train, dtype=dtype),
         alpha_c=jnp.zeros(n_train, dtype=dtype),
         alpha_k=jnp.zeros(n_train, dtype=dtype),
-        c_0=jnp.asarray(c_flow_guess, dtype=dtype),
-        mu_0=jnp.asarray(c_flow_guess**-sigma_crra, dtype=dtype),
+        c_0=c_0_init,
+        mu_0=c_0_init**-sigma_crra,
         g_hat=jnp.zeros((), dtype=dtype) if learn_g_hat else None,
     )
 
@@ -216,14 +213,14 @@ def neoclassical_growth_kernel(
         )
         values = residual_fn(
             theta,
-            residual_args.replace(
-                K=K_eval,
-                K_tilde=K_tilde_eval,
+            KernelResidualArgs(
                 batch={
-                    **residual_args.batch,
                     "t": points,
                     "z_trend": jnp.exp((1.0 - a) * g * points),
+                    "g_hat": jnp.asarray(g, dtype=dtype),
                 },
+                K=K_eval,
+                K_tilde=K_tilde_eval,
             ),
             p,
         )[1]

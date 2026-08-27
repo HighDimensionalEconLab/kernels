@@ -146,7 +146,6 @@ def neoclassical_growth_kernel_uno(
     data_set: DataSettings = DataSettings(),
     solver_set: UnoOptimizerSettings | None = None,
     tolerance_set: ToleranceSettings = ToleranceSettings(),
-    c_0_guess: float | None = None,  # overrides the flat steady-flow warm start
     verbose: bool = False,
 ):
     # IPOPT works in float64 C arrays, so this solver is float64-only.
@@ -169,8 +168,6 @@ def neoclassical_growth_kernel_uno(
     train_data = make_train_t_grid(data_set, jnp.float64)
     n_train = len(train_data)
     K, K_tilde = integrated_kernel_matrices(train_data, train_data, kernel, sigma, ell)
-    K_jax = (K + K.T) / 2
-    K_tilde_jax = jnp.asarray(K_tilde)
 
     # Value container only: no p rides through IPOPT for implicit
     # differentiation.
@@ -189,15 +186,13 @@ def neoclassical_growth_kernel_uno(
         k_thr=k_thr,
     )
 
-    c_flow_guess = float(production(p.z_0, p.k_0, p) - p.delta * p.k_0)
-    if c_0_guess is not None:
-        c_flow_guess = float(c_0_guess)
+    c_0_init = production(p.z_0, p.k_0, p) - p.delta * p.k_0
     theta_0 = Theta(
         alpha_mu=jnp.zeros(n_train, dtype=jnp.float64),
         alpha_c=jnp.zeros(n_train, dtype=jnp.float64),
         alpha_k=jnp.zeros(n_train, dtype=jnp.float64),
-        c_0=jnp.asarray(c_flow_guess),
-        mu_0=jnp.asarray(c_flow_guess**-sigma_crra),
+        c_0=c_0_init,
+        mu_0=c_0_init**-sigma_crra,
     )
     x_initial, unravel = ravel_pytree(theta_0)
     args = KernelResidualArgs(
@@ -206,8 +201,8 @@ def neoclassical_growth_kernel_uno(
             "z_trend": jnp.ones_like(train_data),
             "g_hat": jnp.zeros((), dtype=jnp.float64),
         },
-        K=K_jax,
-        K_tilde=K_tilde_jax,
+        K=K,
+        K_tilde=K_tilde,
         unravel=Partial(unravel),
     )
 
@@ -314,14 +309,14 @@ def neoclassical_growth_kernel_uno(
         )
         values = residual_fn(
             theta,
-            args.replace(
-                K=K_eval,
-                K_tilde=K_tilde_eval,
+            KernelResidualArgs(
                 batch={
                     "t": points,
                     "z_trend": jnp.ones_like(points),
                     "g_hat": jnp.zeros((), dtype=jnp.float64),
                 },
+                K=K_eval,
+                K_tilde=K_tilde_eval,
             ),
             p,
         )[1]

@@ -175,7 +175,7 @@ def accepted_cell(j):
 # model's headline benchmark metric (p for asset pricing; k for growth; the
 # max over k/q/c/a-scaled for the open economy); the concave-convex rows
 # report the correct-basin fraction over the 70 initial conditions instead,
-# since the kinked model has no closed-form benchmark path.
+# since the butterfly model has no closed-form benchmark path.
 def write_sequential_comparison_table(out):
     def basin_fraction(name):
         frame = pd.read_parquet(out / f"{name}_threshold_results.parquet")

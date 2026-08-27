@@ -13,7 +13,7 @@ from mpl_toolkits.axes_grid1.inset_locator import mark_inset, zoomed_inset_axes
 QUANTILES = [0.1, 0.5, 0.9]
 DETERMINISTIC_TIMING_REPETITIONS = 1
 
-# Shared kinked-production basin experiment: the k_0 grid crosses the
+# Shared butterfly-production basin experiment: the k_0 grid crosses the
 # concave-convex threshold and spans both basins of attraction.
 BASIN_K0_GRID = np.linspace(0.5, 4.0, 15)
 
@@ -235,13 +235,13 @@ def write_summary(output_dir, prefix, experiments=None):
     (out / f"{prefix}_summary.json").write_text(json.dumps(summary, indent=2))
 
 
-# --- kinked (concave-convex) production geometry ------------------------------
+# --- butterfly (concave-convex) production geometry ---------------------------
 
 
 def classify_path_basin(k_path, k_0, k_thr, k_ss_low, k_ss_high, tol_frac=0.05):
     # Finite-horizon solutions (kernel and sequential-NN paths to test_T) may
     # end mid-transition near the threshold, so a settle-ball test alone cannot
-    # apply. A path that ends inside the ball (tol_frac of the kink) around a
+    # apply. A path that ends inside the ball (tol_frac of the branch switch) around a
     # steady state counts as settled there; otherwise classify by the side of
     # the threshold the path ends on AND whether its tail is still moving
     # toward that side's steady state (a diverging tail fails).

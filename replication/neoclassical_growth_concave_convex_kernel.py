@@ -6,9 +6,9 @@ import numpy as np
 
 from models import neoclassical_growth_kernel
 from models.neoclassical_growth_shared import (
-    KINKED_CALIBRATION,
+    BUTTERFLY_CALIBRATION,
     StructuralParameters,
-    kinked_thresholds,
+    butterfly_thresholds,
 )
 from replication.utilities import (
     classify_path_basin,
@@ -35,9 +35,9 @@ def run(
         "k_0",
         [float(k_0) for k_0 in grid],
         options={
-            **KINKED_CALIBRATION,
+            **BUTTERFLY_CALIBRATION,
             "verbose": verbose,
-            # The kinked basin experiments keep their own calibrated grid:
+            # The butterfly basin experiments keep their own calibrated grid:
             # paths settle by T = 40, and the file defaults carry the smooth
             # model's longer horizon.
             "data_set": dict(
@@ -47,10 +47,10 @@ def run(
     )
 
     # Ex-post basin classification of each finite-horizon path (side of the
-    # kink the trajectory ends on + direction of motion).
+    # branch switch the trajectory ends on + direction of motion).
     parameters = dict(hyperparameters["parameters"])
     del parameters["learn_g_hat"]  # derived scalar, not a StructuralParameters field
-    k_thr, k_ss_low, k_ss_high = kinked_thresholds(
+    k_thr, k_ss_low, k_ss_high = butterfly_thresholds(
         StructuralParameters.create(dtype=jnp.float64, **parameters)
     )
     test_df = frames["test_df"]

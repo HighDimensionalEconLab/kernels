@@ -124,9 +124,9 @@ def neoclassical_growth_kernel(
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     dtype = jnp.float64 if use_float64 else jnp.float32
-    # Kinked production is enabled exactly when all of A, b_1, b_2 are given.
-    use_kinked_production = not (A is None or b_1 is None or b_2 is None)
-    if use_kinked_production:
+    # Butterfly production is enabled exactly when all of A, b_1, b_2 are given.
+    use_butterfly_production = not (A is None or b_1 is None or b_2 is None)
+    if use_butterfly_production:
         A, b_1, b_2 = float(A), float(b_1), float(b_2)
         k_thr = (b_2 / (b_1 - 1.0)) ** (1.0 / a)
     else:
@@ -137,7 +137,7 @@ def neoclassical_growth_kernel(
     train_data = make_train_t_grid(data_set, dtype)
     n_train = len(train_data)
 
-    # Everything in p, the kink family included, is implicitly
+    # Everything in p, the butterfly family included, is implicitly
     # differentiable through the solve (nlls-gram's implicit JVP/VJP at the
     # ridge stationary point).
     p = StructuralParameters.create(
@@ -227,7 +227,9 @@ def neoclassical_growth_kernel(
         return {"t": points, **values}
 
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
-    test_benchmark = None if use_kinked_production else neoclassical_growth_benchmark(p)
+    test_benchmark = (
+        None if use_butterfly_production else neoclassical_growth_benchmark(p)
+    )
     train_eval = evaluate_grid(train_data)
     test_eval = evaluate_grid(test_data)
     frame_columns = ("t", "k", "c", "mu", "resource", "euler", "shadow_price")
@@ -299,7 +301,7 @@ def neoclassical_growth_kernel(
         "steps": steps,
         **acceptance_fields(rejection_reasons),
     }
-    if not use_kinked_production:
+    if not use_butterfly_production:
         k_rel_error = test_df["k_rel_error"].to_numpy()
         c_rel_error = test_df["c_rel_error"].to_numpy()
         # min/max error statistics exclude the pinned t = 0 point ([1:]): its

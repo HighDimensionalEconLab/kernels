@@ -200,9 +200,9 @@ def neoclassical_growth_nn_k(
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
-    # Kinked production is enabled exactly when all of A, b_1, b_2 are given.
-    use_kinked_production = not (A is None or b_1 is None or b_2 is None)
-    if use_kinked_production:
+    # Butterfly production is enabled exactly when all of A, b_1, b_2 are given.
+    use_butterfly_production = not (A is None or b_1 is None or b_2 is None)
+    if use_butterfly_production:
         A, b_1, b_2 = float(A), float(b_1), float(b_2)
         k_thr = (b_2 / (b_1 - 1.0)) ** (1.0 / a)
     else:
@@ -287,7 +287,7 @@ def neoclassical_growth_nn_k(
     rejection_reasons = [] if accepted else ["train_loss"]
 
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
-    benchmark = None if use_kinked_production else neoclassical_growth_benchmark(p)
+    benchmark = None if use_butterfly_production else neoclassical_growth_benchmark(p)
     train_df = snapshot(result.x, residual_args, p, benchmark)
     test_df = snapshot(
         result.x,
@@ -326,7 +326,7 @@ def neoclassical_growth_nn_k(
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
         **acceptance_fields(rejection_reasons),
     }
-    if not use_kinked_production:
+    if not use_butterfly_production:
         results.update(
             test_k_rel_error_mean=float(test_df["k_rel_error"].mean()),
             test_c_rel_error_mean=float(test_df["c_rel_error"].mean()),

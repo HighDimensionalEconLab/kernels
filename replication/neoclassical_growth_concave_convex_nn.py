@@ -6,9 +6,9 @@ import numpy as np
 
 from models import neoclassical_growth_nn
 from models.neoclassical_growth_shared import (
-    KINKED_CALIBRATION,
+    BUTTERFLY_CALIBRATION,
     StructuralParameters,
-    kinked_thresholds,
+    butterfly_thresholds,
 )
 from replication.utilities import (
     classify_path_basin,
@@ -35,9 +35,9 @@ def run(
         "k_0",
         [float(k_0) for k_0 in grid],
         options={
-            **KINKED_CALIBRATION,
+            **BUTTERFLY_CALIBRATION,
             "verbose": verbose,
-            # The kinked basin experiments keep their own calibrated grid:
+            # The butterfly basin experiments keep their own calibrated grid:
             # paths settle by T = 40, and the file defaults carry the smooth
             # model's longer horizon.
             "data_set": dict(
@@ -49,7 +49,7 @@ def run(
     # Ex-post basin classification of each finite-horizon path, identical to the
     # kernel sweep: a sequence-space solution may still be in motion at test_T,
     # so the settle-ball test the recursive policy uses cannot apply.
-    k_thr, k_ss_low, k_ss_high = kinked_thresholds(
+    k_thr, k_ss_low, k_ss_high = butterfly_thresholds(
         StructuralParameters.create(dtype=jnp.float64, **hyperparameters["parameters"])
     )
     test_df = frames["test_df"]

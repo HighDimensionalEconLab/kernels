@@ -117,7 +117,7 @@ lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
 
 
 # CLI-reachable bars; all but log_tvc_threshold gate acceptance, and the mpk
-# bound applies only under kinked production.
+# bound applies only under butterfly production.
 @dataclass(frozen=True)
 class ToleranceSettings:
     train_residual: float = 1e-5
@@ -126,9 +126,9 @@ class ToleranceSettings:
     log_tvc_threshold: float = 0.0
 
 
-# Fail-fast budget for kinked production: near the basin threshold the NLP
+# Fail-fast budget for butterfly production: near the basin threshold the NLP
 # can wander, and the sweep classifies a slow solve as rejected.
-KINKED_SOLVER_SETTINGS = UnoOptimizerSettings(max_iterations=25, time_limit=0.15)
+BUTTERFLY_SOLVER_SETTINGS = UnoOptimizerSettings(max_iterations=25, time_limit=0.15)
 
 
 def neoclassical_growth_kernel_uno(
@@ -151,16 +151,18 @@ def neoclassical_growth_kernel_uno(
     # IPOPT works in float64 C arrays, so this solver is float64-only.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
-    # Kinked production is enabled exactly when all of A, b_1, b_2 are given.
-    use_kinked_production = not (A is None or b_1 is None or b_2 is None)
-    if use_kinked_production:
+    # Butterfly production is enabled exactly when all of A, b_1, b_2 are given.
+    use_butterfly_production = not (A is None or b_1 is None or b_2 is None)
+    if use_butterfly_production:
         A, b_1, b_2 = float(A), float(b_1), float(b_2)
         k_thr = (b_2 / (b_1 - 1.0)) ** (1.0 / a)
     else:
         A, b_1, b_2, k_thr = 1.0, 1.0, 0.0, float("inf")
     if solver_set is None:
         solver_set = (
-            KINKED_SOLVER_SETTINGS if use_kinked_production else UnoOptimizerSettings()
+            BUTTERFLY_SOLVER_SETTINGS
+            if use_butterfly_production
+            else UnoOptimizerSettings()
         )
 
     kernel = kernel_set.kernel
@@ -329,7 +331,9 @@ def neoclassical_growth_kernel_uno(
     validation_data = jnp.linspace(
         0, data_set.train_T, data_set.validation_points, dtype=jnp.float64
     )
-    test_benchmark = None if use_kinked_production else neoclassical_growth_benchmark(p)
+    test_benchmark = (
+        None if use_butterfly_production else neoclassical_growth_benchmark(p)
+    )
     train_eval = evaluate_grid(train_data)
     validation_eval = evaluate_grid(validation_data)
     test_eval = evaluate_grid(test_data)
@@ -363,7 +367,7 @@ def neoclassical_growth_kernel_uno(
     )
 
     # The costate-implied MPK must sit between the two branch slopes up to
-    # kink slack; violations gate acceptance under kinked production.
+    # branch slack; violations gate acceptance under butterfly production.
     def mpk_violations(df):
         k = df["k"].to_numpy()
         m1 = z_0 * A * a * k ** (a - 1.0)
@@ -423,11 +427,11 @@ def neoclassical_growth_kernel_uno(
     if max_train_residual > tolerance_set.train_residual:
         rejection_reasons.append("train_residual")
     if (
-        use_kinked_production
+        use_butterfly_production
         and max_validation_residual > tolerance_set.validation_residual
     ):
         rejection_reasons.append("validation_residual")
-    if use_kinked_production and (
+    if use_butterfly_production and (
         p_lower_violation > tolerance_set.mpk_bound
         or p_upper_violation > tolerance_set.mpk_bound
     ):
@@ -452,7 +456,7 @@ def neoclassical_growth_kernel_uno(
         **acceptance_fields(rejection_reasons),
     }
 
-    if not use_kinked_production:
+    if not use_butterfly_production:
         k_rel_error = test_df["k_rel_error"].to_numpy()
         c_rel_error = test_df["c_rel_error"].to_numpy()
         # min/max error statistics exclude the pinned t = 0 point ([1:]): its

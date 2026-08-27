@@ -26,8 +26,8 @@ NEOCLASSICAL_GROWTH_CONSTANTS = {
 }
 
 
-# The concave-convex (kinked) production calibration.
-KINKED_CALIBRATION = {
+# The concave-convex (butterfly) production calibration.
+BUTTERFLY_CALIBRATION = {
     "a": 1 / 3,
     "delta": 0.1,
     "rho_hat": 0.11,
@@ -38,7 +38,7 @@ KINKED_CALIBRATION = {
 }
 
 
-# (A, b_1, b_2, k_thr) = (1, 1, 0, inf) is smooth Cobb-Douglas; the kinked
+# (A, b_1, b_2, k_thr) = (1, 1, 0, inf) is smooth Cobb-Douglas; the butterfly
 # family sets all four, with k_thr = (b_2 / (b_1 - 1))^{1/a} the branch
 # switch. The sequential kernel/NN residuals read the trend through batch
 # z_trend data rather than p.g; only drivers that need z(t) analytically
@@ -65,7 +65,7 @@ def production(z, k, p):
     return z * p.A * jnp.maximum(base, p.b_1 * base - p.b_2)
 
 
-# Marginal product, kinked at k_thr: the branch switch is intrinsic to the
+# Marginal product with the branch switch at k_thr: it is intrinsic to the
 # model's first-order condition and measure-zero through the where.
 def mpk(z, k, p):
     branch = jnp.where(k > p.k_thr, p.b_1, 1.0)
@@ -170,7 +170,7 @@ def neoclassical_steady_state_sensitivities(p):
     }
 
 
-def kinked_thresholds(p):
+def butterfly_thresholds(p):
     # Branch switch k_thr where k^a = b_1 k^a - b_2, and the per-branch steady
     # states from f'(k_ss) = delta + rho_hat (ex-post classification only).
     a, delta, rho_hat = float(p.a), float(p.delta), float(p.rho_hat)

@@ -19,7 +19,7 @@ from replication.utilities import configure_process, style
 # at the steady state, the stable manifold mu*(x) = 1/c*(x) traced
 # parametrically from two benchmark saddle paths, and divergent trajectories
 # integrated off the manifold. The defaults are the smooth-branch values of
-# the kinked calibration, whose sigma_crra = 1 is the log utility the
+# the butterfly calibration, whose sigma_crra = 1 is the log utility the
 # isocline formula requires (k_ss = 2).
 def field(state, _, args, p):
     x, mu = state

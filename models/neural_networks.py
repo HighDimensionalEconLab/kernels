@@ -119,6 +119,175 @@ class TimeMLP(nnx.Module):
         return out
 
 
+def normalize_state(state, center, scale, squash=None):
+    u = (state - center) / scale
+    if squash is None:
+        return u
+    # Bounded squash on the flagged coordinates only: (-2, 2), ~95% saturated
+    # near |u| ~ 3.7.
+    return jnp.where(jnp.asarray(squash), 2.0 * jnp.tanh(u / 2.0), u)
+
+
+# Positive outputs: anchor * U((out_scale/anchor) * raw) -- a near-zero raw
+# starts at anchor with an O(out_scale) Jacobian. Signed outputs:
+# offset + out_scale * raw.
+def anchored_outputs(raw, positive, anchor, out_scale, offset):
+    return jnp.where(
+        jnp.asarray(positive),
+        anchor * unit_softplus((out_scale / anchor) * raw),
+        offset + out_scale * raw,
+    )
+
+
+@dataclass(frozen=True)  # value-hashable: shares DrawNNXModule/jit compilations
+class MaskedLecunInit:
+    mask: tuple[float, ...]  # one flag per input coordinate
+
+    def __call__(self, key, shape, dtype):
+        return (
+            nnx.initializers.lecun_normal()(key, shape, dtype)
+            * jnp.asarray(self.mask, dtype=dtype)[:, None]
+        )
+
+
+# p-free MLP policy map state (..., in_features) -> (..., out_features):
+# optional elementwise log, affine normalization with optional per-coordinate
+# tanh squash, trunk, one Linear head per (out_width, kernel_std) entry (None
+# kernel_std draws a zeros kernel), then anchored_outputs with the per-output
+# positive mask. A scalar state broadcasts against the (in_features,)
+# normalization for in_features = 1. Every constructor kwarg is hashable so
+# DrawNNXModule specs stay value-hashable.
+class StateMLP(nnx.Module):
+    def __init__(
+        self,
+        in_features,
+        *,
+        width,
+        depth,
+        activation,
+        heads,
+        positive,
+        center=None,
+        scale=None,
+        anchor,
+        out_scale,
+        offset=None,
+        squash=None,
+        log_input=False,
+        input_kernel_mask=None,
+        dtype,
+        rngs,
+    ):
+        self.activation = nnx.static(activation)
+        self.positive = nnx.static(positive)
+        self.squash = nnx.static(squash)
+        self.log_input = nnx.static(log_input)
+        out_features = sum(out_width for out_width, _ in heads)
+        # Non-Param Variables: normalization and output-map constants are data
+        # outside the differentiated Param state, restored from an artifact's
+        # nondiff block on load_model. Placeholders keep the where-select in
+        # anchored_outputs safe: anchor 1.0 in signed slots, offset 0.0 in
+        # positive slots.
+        self.center = nnx.Variable(
+            jnp.zeros(in_features, dtype=dtype)
+            if center is None
+            else jnp.asarray(center, dtype=dtype)
+        )
+        self.scale = nnx.Variable(
+            jnp.ones(in_features, dtype=dtype)
+            if scale is None
+            else jnp.asarray(scale, dtype=dtype)
+        )
+        self.anchor = nnx.Variable(jnp.asarray(anchor, dtype=dtype))
+        self.out_scale = nnx.Variable(jnp.asarray(out_scale, dtype=dtype))
+        self.offset = nnx.Variable(
+            jnp.zeros(out_features, dtype=dtype)
+            if offset is None
+            else jnp.asarray(offset, dtype=dtype)
+        )
+        layers = [
+            nnx.Linear(
+                in_features,
+                width,
+                **(
+                    {}
+                    if input_kernel_mask is None
+                    else {"kernel_init": MaskedLecunInit(input_kernel_mask)}
+                ),
+                dtype=dtype,
+                param_dtype=dtype,
+                rngs=rngs,
+            )
+        ]
+        for _ in range(depth - 1):
+            layers.append(
+                nnx.Linear(width, width, dtype=dtype, param_dtype=dtype, rngs=rngs)
+            )
+        self.layers = nnx.List(layers)
+        self.heads = nnx.List(
+            [
+                nnx.Linear(
+                    width,
+                    out_width,
+                    kernel_init=(
+                        nnx.initializers.zeros_init()
+                        if kernel_std is None
+                        else nnx.initializers.normal(kernel_std)
+                    ),
+                    bias_init=nnx.initializers.zeros_init(),
+                    dtype=dtype,
+                    param_dtype=dtype,
+                    rngs=rngs,
+                )
+                for out_width, kernel_std in heads
+            ]
+        )
+
+    def __call__(self, state):
+        h = jnp.log(state) if self.log_input else state
+        h = normalize_state(h, self.center[...], self.scale[...], self.squash)
+        for layer in self.layers:
+            h = self.activation(layer(h))
+        raw = jnp.concatenate([head(h) for head in self.heads], axis=-1)
+        return anchored_outputs(
+            raw, self.positive, self.anchor[...], self.out_scale[...], self.offset[...]
+        )
+
+
+# Homothetic neoclassical investment policy i = delta * k * U(h(log kappa)),
+# kappa = k / z^{1/(1-a)} the detrended capital; a and delta are baked as
+# non-Param Variables so the call is p-free like StateMLP's. Returns (1,).
+class HomotheticPolicyMLP(nnx.Module):
+    def __init__(
+        self, *, width, depth, activation, head_kernel_std, a, delta, dtype, rngs
+    ):
+        self.activation = nnx.static(activation)
+        self.a = nnx.Variable(jnp.asarray(a, dtype=dtype))
+        self.delta = nnx.Variable(jnp.asarray(delta, dtype=dtype))
+        layers = [nnx.Linear(1, width, dtype=dtype, param_dtype=dtype, rngs=rngs)]
+        for _ in range(depth - 1):
+            layers.append(
+                nnx.Linear(width, width, dtype=dtype, param_dtype=dtype, rngs=rngs)
+            )
+        self.layers = nnx.List(layers)
+        self.head = nnx.Linear(
+            width,
+            1,
+            kernel_init=nnx.initializers.normal(head_kernel_std),
+            bias_init=nnx.initializers.zeros_init(),
+            dtype=dtype,
+            param_dtype=dtype,
+            rngs=rngs,
+        )
+
+    def __call__(self, log_state):
+        log_z, log_k = log_state
+        h = jnp.atleast_1d(log_k - log_z / (1.0 - self.a[...]))
+        for layer in self.layers:
+            h = self.activation(layer(h))
+        return self.delta[...] * jnp.exp(log_k) * unit_softplus(self.head(h))
+
+
 # One .npz per trained module: the nnx.Param block and the non-differentiated
 # Variable block as "params/..." and "nondiff/..." flat keys (nnx's supported
 # State.to_pure_dict / replace_by_pure_dict conversion, list indices numeric),

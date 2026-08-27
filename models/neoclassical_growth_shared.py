@@ -95,7 +95,8 @@ class DataSettings:
     test_tvc_T: float = NEOCLASSICAL_GROWTH_CONSTANTS["transversality_T"]
 
 
-# The sequential NN drivers' acceptance gate.
+# Threshold for the reported transversality_ok diagnostic; acceptance gates
+# on the training loss only.
 @dataclass(frozen=True)
 class ToleranceSettings:
     log_tvc_threshold: float = 0.0

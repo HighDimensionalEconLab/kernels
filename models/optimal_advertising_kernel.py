@@ -44,6 +44,9 @@ class Theta(NamedTuple):
     u_0: jax.Array
 
 
+RESIDUAL_NAMES = ("state", "costate", "shadow_price")
+
+
 def residual_fn(theta, args, p):
     rho_hat, c, beta, kappa = p.rho_hat, p.c, p.beta, p.kappa
     gamma = (beta + rho_hat) / c
@@ -68,9 +71,7 @@ def residual_fn(theta, args, p):
         "costate": dmu_dt - (-gamma + (rho_hat + beta) * mu + mu * u),
         "shadow_price": u**control_power - kappa * mu * (1.0 - x),
     }
-    residual = jnp.concatenate(
-        [values["state"], values["costate"], values["shadow_price"]]
-    )
+    residual = jnp.concatenate([values[name] for name in RESIDUAL_NAMES])
     return residual / jnp.sqrt(residual.size), values
 
 
@@ -176,12 +177,11 @@ def optimal_advertising_kernel(
     train_eval = evaluate_grid(train_data)
     validation_eval = evaluate_grid(validation_data)
     test_eval = evaluate_grid(test_data)
-    residual_names = ("state", "costate", "shadow_price")
     max_train_residual = max(
-        float(jnp.max(jnp.abs(train_eval[name]))) for name in residual_names
+        float(jnp.max(jnp.abs(train_eval[name]))) for name in RESIDUAL_NAMES
     )
     max_validation_residual = max(
-        float(jnp.max(jnp.abs(validation_eval[name]))) for name in residual_names
+        float(jnp.max(jnp.abs(validation_eval[name]))) for name in RESIDUAL_NAMES
     )
     finite_valid = bool(
         all(
@@ -204,21 +204,7 @@ def optimal_advertising_kernel(
     if max_train_residual > train_residual_tolerance:
         rejection_reasons.append("train_residual")
 
-    @jax.jit
-    def kernel_solution(points):
-        K_eval, K_tilde_eval = integrated_kernel_matrices(
-            points, train_data, kernel, sigma, ell
-        )
-        paths = integrated_kernel_paths(
-            {
-                "x": IntegratedPath(theta.alpha_x, p.x_0),
-                "mu": IntegratedPath(theta.alpha_mu, theta.mu_0),
-                "u": IntegratedPath(theta.alpha_u, theta.u_0),
-            },
-            K_eval,
-            K_tilde_eval,
-        )
-        return paths["x"].value, paths["mu"].value, paths["u"].value
+    kernel_solution = jax.jit(evaluate_grid)
 
     rkhs_norms = {
         "x": rkhs_norm_squared(alpha_x, K),

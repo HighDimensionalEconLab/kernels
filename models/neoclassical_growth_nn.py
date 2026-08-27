@@ -322,7 +322,7 @@ def neoclassical_growth_nn(
         "steps": steps,
         "attempt": attempt,
         "solve_time": solve_time,
-        "solve_time_success": solve_time if accepted else np.nan,
+        "solve_time_success": solve_time if not rejection_reasons else np.nan,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
         **acceptance_fields(rejection_reasons),
         "train_T": float(t_train[-1]),

@@ -32,6 +32,7 @@ from models.utilities import (
     NNXResidualArgs,
     OptimizerSettings,
     Stopwatch,
+    acceptance_fields,
     make_train_t_grid,
     unit_softplus,
 )
@@ -284,6 +285,7 @@ def neoclassical_growth_nn_k(
     attempt = int(result.multi_start.attempt) + 1
     train_loss = float(result.info.loss)
     accepted = bool(result.multi_start.accepted)
+    rejection_reasons = [] if accepted else ["train_loss"]
 
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     benchmark = None if use_kinked_production else neoclassical_growth_benchmark(p)
@@ -318,9 +320,9 @@ def neoclassical_growth_nn_k(
         "steps": steps,
         "attempt": attempt,
         "solve_time": solve_time,
-        "solve_time_success": solve_time if accepted else np.nan,
+        "solve_time_success": solve_time if not rejection_reasons else np.nan,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
-        "solution_accepted": bool(accepted),
+        **acceptance_fields(rejection_reasons),
         "train_T": float(t_train[-1]),
         "num_train_points": int(t_train.shape[0]),
     }

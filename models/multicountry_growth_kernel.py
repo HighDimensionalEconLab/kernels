@@ -159,7 +159,12 @@ def residual_fn(theta, args, p):
     populations = jnp.asarray(p.populations, dtype=a.dtype)
     chi = p.delta ** (1.0 - p.eta)
     values = {
-        **coordinates,
+        "k": k,
+        "a": a,
+        "q": q,
+        "c": c,
+        "mu": mu,
+        "interest_rate": coordinates["interest_rate"],
         "current_account": coordinates["da_dt"],
         "capital": coordinates["dlog_k_dt"]
         - (chi * investment_rate_from_q(q, p) ** p.eta - p.delta),
@@ -187,7 +192,7 @@ def residual_fn(theta, args, p):
             values["asset_clearing"],
         ]
     )
-    return residual * (1.0 / jnp.sqrt(residual.size)), values
+    return residual / jnp.sqrt(residual.size), values
 
 
 # Numerical acceptance and ex-post quality thresholds, CLI-reachable so a
@@ -354,6 +359,7 @@ def multicountry_growth_kernel(
             decrease=ridge_set.ridge_decrease,
             grad_rtol=ridge_set.ridge_grad_rtol,
         )
+    init_damping = lm_set.init_damping
     if ridge_set.linear_solver == "cg":
         # The kernel matrices ride in the solver's args so the rebuild
         # callback stays a value-hashable static; the initial preconditioner
@@ -364,7 +370,6 @@ def multicountry_growth_kernel(
             K_check=jsp_linalg.solve_triangular(metric.F.T, K_tilde.T, lower=True).T,
             F_t=metric.F.T,
         )
-        init_damping = lm_set.init_damping
         linear_solver = CG(
             build_arrow_woodbury(
                 theta_0,
@@ -384,7 +389,6 @@ def multicountry_growth_kernel(
         )
     else:
         kernel_args = KernelResidualArgs(K=K, K_tilde=K_tilde)
-        init_damping = lm_set.init_damping
         linear_solver = {"auto": Cholesky(), "cholesky": Cholesky(), "qr": QR()}[
             ridge_set.linear_solver
         ]

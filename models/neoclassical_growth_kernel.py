@@ -49,6 +49,9 @@ class Theta(NamedTuple):
     g_hat: jax.Array | None = None
 
 
+RESIDUAL_NAMES = ("resource", "euler", "shadow_price")
+
+
 # CRRA first-order condition u'(c) = mu; the costate and resource residuals
 # are utility-free. batch["g_hat"] is the fixed trend rate (0 without
 # growth); a learned theta.g_hat overrides it.
@@ -79,9 +82,7 @@ def residual_fn(theta, args, p):
         "euler": dmu_dt + mu * (mpk(z, k, p) - p.delta - p.rho_hat),
         "shadow_price": mu * c**p.sigma_crra - 1.0,
     }
-    residual = jnp.concatenate(
-        [values["resource"], values["euler"], values["shadow_price"]]
-    )
+    residual = jnp.concatenate([values[name] for name in RESIDUAL_NAMES])
     return residual / jnp.sqrt(residual.size), values
 
 
@@ -232,9 +233,9 @@ def neoclassical_growth_kernel(
                 K=K_eval,
                 K_tilde=K_tilde_eval,
                 batch={
+                    **residual_args.batch,
                     "t": points,
                     "z_trend": jnp.exp((1.0 - a) * g * points),
-                    "g_hat": jnp.asarray(g, dtype=dtype),
                 },
             ),
             p,

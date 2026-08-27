@@ -24,6 +24,7 @@ from models.kernels import (
     integrated_kernel_matrices,
     integrated_kernel_paths,
     integrated_metric_factorization,
+    rkhs_norm_squared,
 )
 from models.utilities import (
     KernelResidualArgs,
@@ -192,20 +193,6 @@ def human_capital_kernel(
     result = solver.solve(theta_0, residual_args, p=p, **solve_options)
     elapsed = timer.elapsed(result)
     theta = result.x
-    (
-        alpha_k,
-        alpha_h,
-        alpha_i_k,
-        alpha_i_h,
-        alpha_c,
-        alpha_mu_k,
-        alpha_mu_h,
-        i_k_0,
-        i_h_0,
-        c_0,
-        mu_k_0,
-        mu_h_0,
-    ) = theta
 
     def evaluate_grid(points):
         K_eval, K_tilde_eval = integrated_kernel_matrices(
@@ -233,52 +220,26 @@ def human_capital_kernel(
             for name in positive_names
         )
     )
-    train_residual_tolerance = tolerance_set.train_residual
     rejection_reasons = []
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > train_residual_tolerance:
+    if max_train_residual > tolerance_set.train_residual:
         rejection_reasons.append("train_residual")
 
-    @jax.jit
-    def kernel_solution(points):
-        K_eval, K_tilde_eval = integrated_kernel_matrices(
-            points, train_data, kernel, sigma, ell
-        )
-        paths = integrated_kernel_paths(
-            {
-                "k": IntegratedPath(theta.alpha_k, p.k_0),
-                "h": IntegratedPath(theta.alpha_h, p.h_0),
-                "i_k": IntegratedPath(theta.alpha_i_k, theta.i_k_0),
-                "i_h": IntegratedPath(theta.alpha_i_h, theta.i_h_0),
-                "c": IntegratedPath(theta.alpha_c, theta.c_0),
-                "mu_k": IntegratedPath(theta.alpha_mu_k, theta.mu_k_0),
-                "mu_h": IntegratedPath(theta.alpha_mu_h, theta.mu_h_0),
-            },
-            K_eval,
-            K_tilde_eval,
-        )
-        return (
-            paths["k"].value,
-            paths["h"].value,
-            paths["c"].value,
-            paths["i_k"].value,
-            paths["i_h"].value,
-            paths["mu_k"].value,
-            paths["mu_h"].value,
-        )
+    kernel_solution = jax.jit(evaluate_grid)
 
     alpha_by_name = {
-        "k": alpha_k,
-        "h": alpha_h,
-        "i_k": alpha_i_k,
-        "i_h": alpha_i_h,
-        "c": alpha_c,
-        "mu_k": alpha_mu_k,
-        "mu_h": alpha_mu_h,
+        "k": theta.alpha_k,
+        "h": theta.alpha_h,
+        "i_k": theta.alpha_i_k,
+        "i_h": theta.alpha_i_h,
+        "c": theta.alpha_c,
+        "mu_k": theta.alpha_mu_k,
+        "mu_h": theta.alpha_mu_h,
     }
     rkhs_norms = {
-        name: float(alpha @ K @ alpha) for name, alpha in alpha_by_name.items()
+        name: float(rkhs_norm_squared(alpha, K))
+        for name, alpha in alpha_by_name.items()
     }
     results = {
         "parameters": p.to_dict(),
@@ -289,17 +250,16 @@ def human_capital_kernel(
         "tolerance_set": asdict(tolerance_set),
         "train_T": float(train_data[-1]),
         "num_train_points": n_train,
-        "c_0": float(c_0),
-        "i_k_0": float(i_k_0),
-        "i_h_0": float(i_h_0),
-        "mu_k_0": float(mu_k_0),
-        "mu_h_0": float(mu_h_0),
+        "c_0": float(theta.c_0),
+        "i_k_0": float(theta.i_k_0),
+        "i_h_0": float(theta.i_h_0),
+        "mu_k_0": float(theta.mu_k_0),
+        "mu_h_0": float(theta.mu_h_0),
         "initial_condition_residual": float(
             jnp.linalg.norm(initial_residual, ord=jnp.inf)
         ),
         **{f"rkhs_norm_{name}": value for name, value in rkhs_norms.items()},
         "max_train_residual": max_train_residual,
-        "train_residual_tolerance": train_residual_tolerance,
         "max_validation_residual": max_validation_residual,
         "max_test_feasibility": float(jnp.max(jnp.abs(test_eval["feasibility"]))),
         "max_test_hidden_dae_residual": float(

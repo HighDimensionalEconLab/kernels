@@ -61,6 +61,8 @@ RESIDUAL_NAMES = (
 @dataclass(frozen=True)
 class ToleranceSettings:
     train_residual: float = 1e-5
+    # The validation threshold is an HPO/quality diagnostic; it does not
+    # redefine convergence of a finite, feasible numerical solution.
     validation_residual: float = 1e-2
 
 
@@ -383,7 +385,6 @@ def multicountry_growth_nn(
     train_eval = evaluate_grid(train_t)
     validation_eval = evaluate_grid(validation_t)
     test_eval = evaluate_grid(test_t)
-    jax.block_until_ready((train_eval, validation_eval, test_eval))
 
     max_train_residual = max(
         float(jnp.max(jnp.abs(train_eval[name]))) for name in RESIDUAL_NAMES
@@ -392,6 +393,8 @@ def multicountry_growth_nn(
         float(jnp.max(jnp.abs(validation_eval[name]))) for name in RESIDUAL_NAMES
     )
     max_resource_gap = float(jnp.max(jnp.abs(validation_eval["resource_gap"])))
+    max_asset_clearing = float(jnp.max(jnp.abs(validation_eval["asset_clearing"])))
+    validation_pass = max_validation_residual <= tolerance_set.validation_residual
 
     finite_positive = bool(
         all(
@@ -412,8 +415,6 @@ def multicountry_growth_nn(
         rejection_reasons.append("nonfinite_or_nonpositive")
     if max_train_residual > tolerance_set.train_residual:
         rejection_reasons.append("train_residual")
-    if max_validation_residual > tolerance_set.validation_residual:
-        rejection_reasons.append("validation_residual")
     acceptance = acceptance_fields(rejection_reasons)
     solution_accepted = acceptance["solution_accepted"]
 
@@ -447,7 +448,9 @@ def multicountry_growth_nn(
         "consumption_scale": float(steady["consumption_scale"]),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
+        "validation_pass": validation_pass,
         "max_resource_gap": max_resource_gap,
+        "max_asset_clearing": max_asset_clearing,
         "differential_residual_count": 4 * num_countries * n_train,
         "algebraic_residual_count": (num_countries + 1) * n_train,
         "dae_residual_count": (5 * num_countries + 1) * n_train,

@@ -64,6 +64,15 @@ class Theta(NamedTuple):
     log_q_0: jax.Array
 
 
+RESIDUAL_NAMES = (
+    "capital",
+    "assets",
+    "tobin_q",
+    "marginal_wealth",
+    "consumption_foc",
+)
+
+
 def residual_fn(theta, args, p):
     # The asset block is the one path with no free scalar anchor, so its
     # scale enters the minimum-norm selection metric; the scale must be
@@ -104,15 +113,7 @@ def residual_fn(theta, args, p):
         "marginal_wealth": paths["log_mu"].d_dt - (p.r - p.r_star),
         "consumption_foc": mu * c**p.gamma - 1.0,
     }
-    residual = jnp.concatenate(
-        [
-            values["capital"],
-            values["assets"],
-            values["tobin_q"],
-            values["marginal_wealth"],
-            values["consumption_foc"],
-        ]
-    )
+    residual = jnp.concatenate([values[name] for name in RESIDUAL_NAMES])
     return residual / jnp.sqrt(residual.size), values
 
 
@@ -295,18 +296,11 @@ def open_economy_growth_kernel(
         train_eval["c"][-1],
         p,
     )
-    residual_names = (
-        "capital",
-        "assets",
-        "tobin_q",
-        "marginal_wealth",
-        "consumption_foc",
-    )
     max_train_residual = max(
-        float(jnp.max(jnp.abs(train_eval[name]))) for name in residual_names
+        float(jnp.max(jnp.abs(train_eval[name]))) for name in RESIDUAL_NAMES
     )
     max_validation_residual = max(
-        float(jnp.max(jnp.abs(validation_eval[name]))) for name in residual_names
+        float(jnp.max(jnp.abs(validation_eval[name]))) for name in RESIDUAL_NAMES
     )
 
     benchmark, benchmark_diagnostics = open_economy_growth_benchmark(p)
@@ -443,12 +437,17 @@ def open_economy_growth_kernel(
         "rkhs_norm_q": float(rkhs_norm_q),
         "rkhs_norm_total": float(rkhs_norm_total),
         "solve_time": solve_time,
+        # Measured, not requested: under ridge continuation the implicit dual
+        # is solved at the achieved ridge, which can sit above the configured
+        # floor if the anneal stops early.
+        "ridge": float(result.lm_state.ridge),
         "train_loss": float(result.info.resid_loss),
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
         **acceptance_fields(rejection_reasons),
         "log_c_0": float(log_c_0),
         "log_mu_0": float(log_mu_0),
+        "log_q_0": float(log_q_0),
     }
     if verbose:
         print(

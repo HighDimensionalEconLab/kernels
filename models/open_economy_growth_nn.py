@@ -298,7 +298,6 @@ def open_economy_growth_nn(
     train_eval = evaluate_grid(train_t)
     validation_eval = evaluate_grid(validation_t)
     test_eval = evaluate_grid(test_t)
-    jax.block_until_ready((train_eval, validation_eval, test_eval))
 
     max_train_residual = max(
         float(jnp.max(jnp.abs(train_eval[name]))) for name in RESIDUAL_NAMES

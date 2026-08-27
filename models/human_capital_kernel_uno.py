@@ -67,8 +67,8 @@ def objective(x, args):
     )
 
 
-# Unscaled residual rows: they are the IPOPT constraints directly (the NLLS
-# driver solves the 1/sqrt(count)-scaled version of the same stack).
+# The 1/sqrt(count)-scaled residual rows are the IPOPT constraints, the same
+# stack the NLLS driver solves.
 def residual_fn(theta, args, p):
     delta_k, delta_h, rho_hat = p.delta_k, p.delta_h, p.rho_hat
     paths = integrated_kernel_paths(
@@ -109,7 +109,7 @@ def residual_fn(theta, args, p):
         "Y": output,
     }
     residual = jnp.concatenate([values[name] for name in RESIDUAL_NAMES])
-    return residual, values
+    return residual / jnp.sqrt(residual.size), values
 
 
 @jax.jit
@@ -329,41 +329,13 @@ def human_capital_kernel_uno(
     positive_names = ("k", "h", "i_k", "i_h", "c", "mu_k", "mu_h")
     finite_positive = bool(
         all(
-            jnp.all(jnp.isfinite(test_eval[name]))
-            and jnp.all(jnp.isfinite(validation_eval[name]))
-            and jnp.min(test_eval[name]) > 0.0
-            and jnp.min(validation_eval[name]) > 0.0
+            jnp.all(jnp.isfinite(grid[name])) and jnp.min(grid[name]) > 0.0
+            for grid in (train_eval, validation_eval, test_eval)
             for name in positive_names
         )
     )
 
-    @jax.jit
-    def kernel_solution(points):
-        K_eval, K_tilde_eval = integrated_kernel_matrices(
-            points, train_data, kernel, sigma, ell
-        )
-        paths = integrated_kernel_paths(
-            {
-                "k": IntegratedPath(theta.alpha_k, p.k_0),
-                "h": IntegratedPath(theta.alpha_h, p.h_0),
-                "i_k": IntegratedPath(theta.alpha_i_k, theta.i_k_0),
-                "i_h": IntegratedPath(theta.alpha_i_h, theta.i_h_0),
-                "c": IntegratedPath(theta.alpha_c, theta.c_0),
-                "mu_k": IntegratedPath(theta.alpha_mu_k, theta.mu_k_0),
-                "mu_h": IntegratedPath(theta.alpha_mu_h, theta.mu_h_0),
-            },
-            K_eval,
-            K_tilde_eval,
-        )
-        return (
-            paths["k"].value,
-            paths["h"].value,
-            paths["c"].value,
-            paths["i_k"].value,
-            paths["i_h"].value,
-            paths["mu_k"].value,
-            paths["mu_h"].value,
-        )
+    kernel_solution = jax.jit(evaluate_grid)
 
     solve_time = elapsed
     solver_status = str(result.optimization_status).split(".")[-1]
@@ -406,7 +378,8 @@ def human_capital_kernel_uno(
         "primal_feasibility": result.solution_primal_feasibility,
         **acceptance_fields(rejection_reasons),
     }
-    print(f"solve_time(s) = {solve_time}")
+    if verbose:
+        print(f"solve_time(s) = {solve_time}")
 
     frame_columns = (
         "t",

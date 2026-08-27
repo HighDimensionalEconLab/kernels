@@ -272,10 +272,11 @@ def asset_pricing_kernel_uno(
         "primal_feasibility": result.solution_primal_feasibility,
         **acceptance_fields(rejection_reasons),
     }
-    print(
-        f"solve_time(s) = {solve_time}, "
-        f"E(|rel_error(p)|) = {results['p_rel_error_mean']:.3e}"
-    )
+    if verbose:
+        print(
+            f"solve_time(s) = {solve_time}, "
+            f"E(|rel_error(p)|) = {results['p_rel_error_mean']:.3e}"
+        )
 
     train_df = pd.DataFrame(
         {

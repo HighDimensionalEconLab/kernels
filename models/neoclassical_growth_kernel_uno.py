@@ -51,6 +51,9 @@ class Theta(NamedTuple):
     g_hat: jax.Array | None = None
 
 
+RESIDUAL_NAMES = ("resource", "euler", "shadow_price")
+
+
 # CRRA first-order condition u'(c) = mu; the costate and resource residuals
 # are utility-free. batch["g_hat"] is the fixed trend rate (0 without
 # growth); a learned theta.g_hat overrides it.
@@ -81,9 +84,7 @@ def residual_fn(theta, args, p):
         "euler": dmu_dt + mu * (mpk(z, k, p) - p.delta - p.rho_hat),
         "shadow_price": mu * c**p.sigma_crra - 1.0,
     }
-    residual = jnp.concatenate(
-        [values["resource"], values["euler"], values["shadow_price"]]
-    )
+    residual = jnp.concatenate([values[name] for name in RESIDUAL_NAMES])
     return residual / jnp.sqrt(residual.size), values
 
 
@@ -472,12 +473,13 @@ def neoclassical_growth_kernel_uno(
             test_k_rel_error_min=float(k_rel_error[1:].min()),
             test_c_rel_error_min=float(c_rel_error[1:].min()),
         )
-        print(
-            f"solve_time(s) = {solve_time}, "
-            f"E(|rel_error(k)|) = {results['test_k_rel_error_mean']:.3e}, "
-            f"E(|rel_error(c)|) = {results['test_c_rel_error_mean']:.3e}"
-        )
-    else:
+        if verbose:
+            print(
+                f"solve_time(s) = {solve_time}, "
+                f"E(|rel_error(k)|) = {results['test_k_rel_error_mean']:.3e}, "
+                f"E(|rel_error(c)|) = {results['test_c_rel_error_mean']:.3e}"
+            )
+    elif verbose:
         print(f"solve_time(s) = {solve_time}")
     return results, {
         "model": kernel_solution,

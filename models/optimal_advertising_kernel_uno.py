@@ -53,8 +53,11 @@ def objective(x, args):
     )
 
 
-# Unscaled residual rows: they are the IPOPT constraints directly (the NLLS
-# driver solves the 1/sqrt(count)-scaled version of the same stack).
+# The 1/sqrt(count)-scaled residual rows are the IPOPT constraints, the same
+# stack the NLLS driver solves.
+RESIDUAL_NAMES = ("state", "costate", "shadow_price")
+
+
 def residual_fn(theta, args, p):
     rho_hat, c, beta, kappa = p.rho_hat, p.c, p.beta, p.kappa
     gamma = (beta + rho_hat) / c
@@ -79,10 +82,8 @@ def residual_fn(theta, args, p):
         "costate": dmu_dt - (-gamma + (rho_hat + beta) * mu + mu * u),
         "shadow_price": u**control_power - kappa * mu * (1.0 - x),
     }
-    residual = jnp.concatenate(
-        [values["state"], values["costate"], values["shadow_price"]]
-    )
-    return residual, values
+    residual = jnp.concatenate([values[name] for name in RESIDUAL_NAMES])
+    return residual / jnp.sqrt(residual.size), values
 
 
 @jax.jit
@@ -257,18 +258,13 @@ def optimal_advertising_kernel_uno(
         K_eval, K_tilde_eval = integrated_kernel_matrices(
             points, train_data, kernel, sigma, ell
         )
-        paths = integrated_kernel_paths(
-            {
-                "x": IntegratedPath(theta.alpha_x, p.x_0),
-                "mu": IntegratedPath(theta.alpha_mu, theta.mu_0),
-                "u": IntegratedPath(theta.alpha_u, theta.u_0),
-            },
-            K_eval,
-            K_tilde_eval,
-        )
-        return paths["x"].value, paths["mu"].value, paths["u"].value
+        values = residual_fn(
+            theta, KernelResidualArgs(K=K_eval, K_tilde=K_tilde_eval), p
+        )[1]
+        return {"t": points, **values}
 
-    x_test, mu_test, u_test = kernel_solution(test_data)
+    test_values = kernel_solution(test_data)
+    x_test, mu_test, u_test = test_values["x"], test_values["mu"], test_values["u"]
 
     solve_time = elapsed
     solver_status = str(result.optimization_status).split(".")[-1]
@@ -308,7 +304,8 @@ def optimal_advertising_kernel_uno(
         "primal_feasibility": result.solution_primal_feasibility,
         **acceptance_fields(rejection_reasons),
     }
-    print(f"solve_time(s) = {solve_time}")
+    if verbose:
+        print(f"solve_time(s) = {solve_time}")
 
     train_df = pd.DataFrame(
         {

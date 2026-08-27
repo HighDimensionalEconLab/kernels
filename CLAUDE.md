@@ -16,7 +16,9 @@ per-directory READMEs.
   solver args, and to_dict skips None — production/steady-state functions,
   diagnostics, and shared settings); drivers never import other drivers.
   `results` is the full serializable record: nested input blocks first
-  (`"parameters": p.to_dict()` plus one `"<name>_set": asdict(...)` per
+  (`"parameters": p.to_dict()`, plus the rare named derived scalar a paper
+  table consumes — optimal advertising's `gamma`, the neoclassical kernel's
+  `learn_g_hat` — and one `"<name>_set": asdict(...)` per
   settings object; recursive drivers add an `"initial_conditions"` block for
   draw centers not on `p`), then flat measured outcomes only — never plain
   copies of settings fields or parameters. `extras` carries live objects
@@ -31,7 +33,8 @@ per-directory READMEs.
   (`_uno` `constraints` wrappers take `[0]`), and the post-solve
   `evaluate_grid(points)` / `snapshot` closures build eval-grid args, consume
   `residual_fn(...)[1]`, and add derived diagnostics on top — rows are never
-  written twice. Sequence-space drivers share the solver-args
+  written twice. Initial-condition rows appear only in the flat vector,
+  never in the aux dict. Sequence-space drivers share the solver-args
   structs in `models/utilities.py`: `KernelResidualArgs` (K, K_tilde, the
   optional `batch` dict of standardized always-plain grid arrays — `t`,
   `z_trend`, `g_hat` — and, for the `_uno` drivers, `ravel_pytree`'s unravel
@@ -71,9 +74,10 @@ per-directory READMEs.
   preconditioned CG using the arrowhead + Woodbury structure assembled in
   `multicountry_growth_preconditioner.py`.
 - Every driver threads structural parameters and initial conditions through
-  the implicit-AD `p` argument and returns `extras["solve"]` (solver,
-  residual_fn, theta_0, p, args, options); the sensitivity drivers re-solve
-  from that handle and differentiate with respect to `p`.
+  the implicit-AD `p` argument; the NLLS drivers return `extras["solve"]`
+  (solver, residual_fn, theta_0, p, args, options) and the sensitivity
+  drivers re-solve from that handle and differentiate with respect to `p`
+  (the `_uno` and kernel-recursive drivers return no solve handle).
 - Recursive NN/kernel: training collocation is the integrator's own fixed-step
   RK4 states (nothing interpolated inside the residual); the policy is
   `i = delta * k * unit_softplus(h)` on the homothetic state; acceptance is

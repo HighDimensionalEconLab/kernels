@@ -21,7 +21,11 @@ class ParameterPyTree(struct.PyTreeNode):
     @classmethod
     def create(cls, *, dtype, **kwargs):
         return cls(
-            **{key: jnp.asarray(value, dtype=dtype) for key, value in kwargs.items()}
+            **{
+                key: jnp.asarray(value, dtype=dtype)
+                for key, value in kwargs.items()
+                if value is not None
+            }
         )
 
     def to_dict(self):

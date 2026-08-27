@@ -97,9 +97,8 @@ def asset_pricing_kernel(
     K_metric, K_tilde_jax, metric = integrated_metric_factorization(
         train_data, kernel, sigma, ell, repeats=1
     )
-    K_jax = K_metric
     residual_args = KernelResidualArgs(
-        batch={"t": train_data}, K=K_jax, K_tilde=K_tilde_jax
+        batch={"t": train_data}, K=K_metric, K_tilde=K_tilde_jax
     )
 
     solver = RidgeLevenbergMarquardt(
@@ -204,7 +203,6 @@ def asset_pricing_kernel(
         "num_train_points": n_train,
         "p_0": float(p_0),
         "horizon_bias_p0": horizon_bias_p0,
-        # Unshifted alpha' K alpha (the metric norm includes the epsilon shift).
         "rkhs_norm_p": float(rkhs_norm_squared(alpha, K_metric)),
         "max_train_residual": max_train_residual,
         "train_residual_tolerance": train_residual_tolerance,

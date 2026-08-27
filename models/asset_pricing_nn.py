@@ -14,6 +14,7 @@ from nlls_gram import DrawNNXModule, LevenbergMarquardt, MultiStart
 from models.asset_pricing_shared import (
     DataSettings,
     StructuralParameters,
+    ToleranceSettings,
     dividends,
     mu_f_array,
 )
@@ -23,6 +24,7 @@ from models.utilities import (
     NNXResidualArgs,
     OptimizerSettings,
     Stopwatch,
+    acceptance_fields,
     make_train_t_grid,
 )
 
@@ -140,6 +142,7 @@ def asset_pricing_nn(
         atol=3.162277660168379e-08,
         num_attempts=5,
     ),
+    tolerance_set: ToleranceSettings = ToleranceSettings(train_residual=1e-6),
     verbose: bool = True,
 ):
     jax.config.update("jax_enable_x64", True)
@@ -195,17 +198,28 @@ def asset_pricing_nn(
     train_df = snapshot(result.x, residual_args, p)
     test_df = snapshot(result.x, residual_args.replace(batch={"t": test_t}), p)
     max_train_residual = float(train_df["residual"].abs().max())
-    solution_accepted = bool(result.multi_start.accepted)
+    p_0 = float(test_df["p"].iloc[0])
+    rejection_reasons = []
+    if not result.multi_start.accepted:
+        rejection_reasons.append(
+            STATUS_TO_REASON.get(int(result.status), "training_failure")
+        )
+    if max_train_residual > tolerance_set.train_residual:
+        rejection_reasons.append("train_residual")
+    if p_0 < 0.0:
+        rejection_reasons.append("negative_p_0")
+    solution_accepted = not rejection_reasons
 
     results = {
         "parameters": p.to_dict(),
         "nn_set": asdict(nn_set),
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
+        "tolerance_set": asdict(tolerance_set),
         "seed": seed,
         "num_train_points": int(train_t.size),
         "train_T": float(train_t[-1]),
-        "p_0": float(test_df["p"].iloc[0]),
+        "p_0": p_0,
         "train_loss": float(result.info.loss),
         "final_damping": float(result.lm_state.damping),
         "max_train_residual": max_train_residual,
@@ -220,12 +234,7 @@ def asset_pricing_nn(
         "solve_time": solve_time,
         "solve_time_success": solve_time if solution_accepted else np.nan,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
-        "solution_accepted": solution_accepted,
-        "rejection_reason": (
-            "accepted"
-            if solution_accepted
-            else STATUS_TO_REASON.get(int(result.status), "training_failure")
-        ),
+        **acceptance_fields(rejection_reasons),
     }
     if verbose:
         print("\nFinal results:")

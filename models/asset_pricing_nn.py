@@ -197,7 +197,11 @@ def asset_pricing_nn(
     model = nnx.merge(graphdef, result.x, nondiff)
 
     train_df = snapshot(result.x, residual_args, p)
-    test_df = snapshot(result.x, residual_args.replace(batch={"t": test_t}), p)
+    test_df = snapshot(
+        result.x,
+        NNXResidualArgs(batch={"t": test_t}, graphdef=graphdef, nondiff=nondiff),
+        p,
+    )
     max_train_residual = float(train_df["residual"].abs().max())
     p_0 = float(test_df["p"].iloc[0])
     rejection_reasons = []

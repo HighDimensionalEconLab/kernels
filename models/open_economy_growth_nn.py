@@ -285,7 +285,11 @@ def open_economy_growth_nn(
     attempt = int(result.multi_start.attempt) + 1
 
     def evaluate_grid(points):
-        values = residual_fn(result.x, residual_args.replace(batch={"t": points}), p)[1]
+        values = residual_fn(
+            result.x,
+            NNXResidualArgs(batch={"t": points}, graphdef=graphdef, nondiff=nondiff),
+            p,
+        )[1]
         return {
             "t": points,
             **values,

@@ -290,7 +290,10 @@ def neoclassical_growth_nn_k(
     benchmark = None if use_kinked_production else neoclassical_growth_benchmark(p)
     train_df = snapshot(result.x, residual_args, p, benchmark)
     test_df = snapshot(
-        result.x, residual_args.replace(batch={"t": test_t}), p, benchmark
+        result.x,
+        NNXResidualArgs(batch={"t": test_t}, graphdef=graphdef, nondiff=nondiff),
+        p,
+        benchmark,
     )
 
     tvc_t = jnp.asarray(data_set.test_tvc_T, dtype=dtype)

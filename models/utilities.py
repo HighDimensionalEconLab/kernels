@@ -146,7 +146,9 @@ class UnoOptimizerSettings:
     dual_tolerance: float | None = None
 
 
-ACCEPTED_SOLUTION_STATUSES = frozenset({"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"})
+ACCEPTED_UNO_SOLUTION_STATUSES = frozenset(
+    {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
+)
 
 
 # Sequence-space solver args; the recursive drivers keep bespoke ones.

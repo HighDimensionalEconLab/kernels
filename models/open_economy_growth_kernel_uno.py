@@ -37,7 +37,7 @@ from models.open_economy_growth_shared import (
     tvc_diagnostics,
 )
 from models.utilities import (
-    ACCEPTED_SOLUTION_STATUSES,
+    ACCEPTED_UNO_SOLUTION_STATUSES,
     KernelResidualArgs,
     Stopwatch,
     UnoOptimizerSettings,
@@ -406,7 +406,7 @@ def open_economy_growth_kernel_uno(
     rejection_reasons = []
     if solver_status != "SUCCESS":
         rejection_reasons.append("solver_status")
-    if solution_status not in ACCEPTED_SOLUTION_STATUSES:
+    if solution_status not in ACCEPTED_UNO_SOLUTION_STATUSES:
         rejection_reasons.append("solution_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")

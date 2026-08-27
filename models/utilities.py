@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from flax import nnx, struct
 from jax.tree_util import Partial
-from nlls_gram import LMStatus
+from nlls_gram import DrawNNXModule, LMStatus
 from tinydiffeq import SRA1, EulerMaruyama, Milstein
 
 
@@ -165,6 +165,30 @@ class NNXResidualArgs:
     batch: dict
     graphdef: nnx.GraphDef
     nondiff: nnx.State
+
+
+# Multi-start draw splitting redrawn modules with the solver's diff filter
+# rather than bare nnx.Param: a Param the filter freezes out of theta must
+# not reappear in the drawn state. The filter joins the value-hash spec.
+class DrawNNXModuleFiltered(DrawNNXModule):
+    def __init__(self, diff_filter, module_cls, *args, **kwargs):
+        super().__init__(module_cls, *args, **kwargs)
+        self.diff_filter = diff_filter
+
+    def __call__(self, key, x_old, args_old):
+        module = self.module_cls(*self.args, rngs=nnx.Rngs(key), **dict(self.kwargs))
+        _, theta, _ = nnx.split(module, self.diff_filter, ...)
+        return theta, args_old
+
+    def __hash__(self):
+        return hash((type(self), self.diff_filter, super().__hash__()))
+
+    def __eq__(self, other):
+        return (
+            type(other) is type(self)
+            and self.diff_filter == other.diff_filter
+            and super().__eq__(other)
+        )
 
 
 def make_train_t_grid(data_set, dtype):

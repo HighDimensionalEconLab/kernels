@@ -1175,7 +1175,7 @@ def neoclassical_growth_nn(out):
         accepted_sample = df[df["solution_accepted"]]
         payload["experiments"][name] = {
             "g": g02_hp["parameters"]["g"],
-            "learn_g_hat": g02_hp["nn_set"]["learn_g_hat"],
+            "learn_g_hat": g02_hp["parameters"]["learn_g_hat"],
             "frac_accepted": sig(j["frac_accepted"]),
             # Medians over accepted seeds; a wholesale-rejected experiment
             # (the learned-trend certificate refusing every attempt) reports

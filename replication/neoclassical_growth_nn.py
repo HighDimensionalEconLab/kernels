@@ -38,7 +38,7 @@ def run(
         "baseline_g02": {"g": 0.02, "lm_set": {"atol": 1e-07}},
         "baseline_g02_learned": {
             "g": 0.02,
-            "nn_set": {"learn_g_hat": True},
+            "learn_g_hat": True,
             "lm_set": {"atol": 1e-07},
         },
     }

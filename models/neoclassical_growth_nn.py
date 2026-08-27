@@ -10,7 +10,6 @@ import pandas as pd
 from flax import nnx
 from jax.flatten_util import ravel_pytree
 from nlls_gram import (
-    DrawNNXModule,
     LevenbergMarquardt,
     MultiStart,
 )
@@ -29,6 +28,7 @@ from models.neoclassical_growth_shared import (
 )
 from models.utilities import (
     ACTIVATIONS,
+    DrawNNXModuleFiltered,
     NNXResidualArgs,
     OptimizerSettings,
     Stopwatch,
@@ -47,7 +47,7 @@ class GrowthPolicyNN(nnx.Module):
         input_scale: float,
         k_scale: float,
         c_scale: float,
-        g_hat: float = 0.0,
+        g: float | None,
         dtype,
         rngs: nnx.Rngs,
     ):
@@ -57,12 +57,10 @@ class GrowthPolicyNN(nnx.Module):
         # when they change) but sit outside the differentiated Param state.
         self.k_scale = nnx.Variable(jnp.asarray(k_scale, dtype=dtype))
         self.c_scale = nnx.Variable(jnp.asarray(c_scale, dtype=dtype))
-        # trend is static: the trendless graph contains no trend factor at all.
-        self.trend = nnx.static(settings.learn_g_hat or g_hat != 0.0)
-        if settings.learn_g_hat:
-            self.g_hat = nnx.Param(jnp.full((), settings.g_hat_init, dtype=dtype))
-        else:
-            self.g_hat = nnx.Variable(jnp.asarray(g_hat, dtype=dtype))
+        # Trend factor e^{g t} on the output heads; None omits it from the
+        # graph entirely. Always a Param when present -- whether it is
+        # learned is the solve's diff filter's decision, not the module's.
+        self.g = None if g is None else nnx.Param(jnp.asarray(g, dtype=dtype))
         self.layers = nnx.List(
             [
                 nnx.Linear(
@@ -102,8 +100,8 @@ class GrowthPolicyNN(nnx.Module):
             h = self.hidden_activation(layer(h))
         output_scale = jnp.stack([self.k_scale[...], self.c_scale[...]])
         out = output_scale * unit_softplus(self.head(h))
-        if self.trend:
-            out = jnp.exp(self.g_hat[...] * t) * out
+        if self.g is not None:
+            out = jnp.exp(self.g[...] * t) * out
         return out
 
 
@@ -157,6 +155,8 @@ def neoclassical_growth_nn(
     k_0: float = 1.0,
     z_0: float = 1.0,
     g: float = 0.0,
+    learn_g_hat: bool = False,
+    g_hat_init: float = 0.0,  # trend Param init when learned
     A: float = 1.0,
     b_1: float = 1.0,
     b_2: float = 0.0,
@@ -205,16 +205,22 @@ def neoclassical_growth_nn(
     k_scale = float(k_0)
     c_scale = float(production(p.z_0, p.k_0, p) - p.delta * p.k_0)
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
+    # The module's trend Param: the init guess when learned, the true rate
+    # when fixed, absent entirely for the trendless g = 0 graph.
+    g_nn = g_hat_init if learn_g_hat else (g if g != 0.0 else None)
     model = GrowthPolicyNN(
         nn_set,
         input_scale=input_scale,
         k_scale=k_scale,
         c_scale=c_scale,
-        g_hat=g,
+        g=g_nn,
         dtype=dtype,
         rngs=nnx.Rngs(init_key),
     )
-    graphdef, theta_0, nondiff = nnx.split(model, nnx.Param, ...)
+    diff_wrt = (
+        nnx.Param if learn_g_hat else nnx.All(nnx.Param, nnx.Not(nnx.PathContains("g")))
+    )
+    graphdef, theta_0, nondiff = nnx.split(model, diff_wrt, ...)
     residual_args = NNXResidualArgs(
         batch={"t": t_train, "z_trend": z_trend_train},
         graphdef=graphdef,
@@ -240,13 +246,14 @@ def neoclassical_growth_nn(
     multi_start = MultiStart(
         key=multi_start_key,
         num_starts=lm_set.num_attempts,
-        draw=DrawNNXModule(
+        draw=DrawNNXModuleFiltered(
+            diff_wrt,
             GrowthPolicyNN,
             nn_set,
             input_scale=input_scale,
             k_scale=k_scale,
             c_scale=c_scale,
-            g_hat=g,
+            g=g_nn,
             dtype=dtype,
         ),
     )
@@ -286,13 +293,13 @@ def neoclassical_growth_nn(
     log_tvc = float(-p.rho_hat * tvc_t - p.sigma_crra * jnp.log(c_T) + jnp.log(k_T))
     transversality_ok = bool(log_tvc < tolerance_set.log_tvc_threshold)
 
-    g_hat_value = float(model.g_hat[...])
+    g_hat_value = float(model.g[...]) if model.g is not None else float(g)
 
     rejection_reasons = []
     if not accepted:
         rejection_reasons.append("train_loss")
     results = {
-        "parameters": p.to_dict(),
+        "parameters": {**p.to_dict(), "learn_g_hat": learn_g_hat},
         "nn_set": asdict(nn_set),
         "data_set": asdict(data_set),
         "lm_set": asdict(lm_set),
@@ -315,7 +322,7 @@ def neoclassical_growth_nn(
         "attempt": attempt,
         "solve_time": solve_time,
         "solve_time_success": solve_time if not rejection_reasons else np.nan,
-        "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
+        "total_params": int(ravel_pytree(nnx.state(model, diff_wrt))[0].size),
         **acceptance_fields(rejection_reasons),
     }
 

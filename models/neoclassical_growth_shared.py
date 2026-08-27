@@ -97,10 +97,6 @@ class GrowthPolicySettings:
     hidden_activation: str = "tanh"
     hidden_bias: bool = True
     output_bias: bool = True
-    # Trend e^{g_hat t} on the output heads: a learned Param (init g_hat_init)
-    # or fixed at the constructor's g_hat.
-    learn_g_hat: bool = False
-    g_hat_init: float = 0.0
 
 
 def consumption(policy, log_state, p):

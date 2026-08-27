@@ -54,7 +54,7 @@ def run(
             data_set=neoclassical_growth_nn.DataSettings(
                 test_T=test_T, test_points=test_points
             ),
-            nn_set=neoclassical_growth_nn.GrowthPolicySettings(learn_g_hat=True),
+            learn_g_hat=True,
             lm_set=OptimizerSettings(
                 init_damping=1e-5,
                 damping_decrease=0.5,

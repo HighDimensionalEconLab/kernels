@@ -39,6 +39,10 @@ def run(
         "baseline_g02_learned": {
             "g": 0.02,
             "learn_g_hat": True,
+            # From 0 the trend falls into a wrong basin (g_hat drifts
+            # negative) on every multi-start attempt; a small positive init
+            # converges on the first.
+            "g_hat_init": 0.005,
             "lm_set": {"atol": 1e-07},
         },
     }

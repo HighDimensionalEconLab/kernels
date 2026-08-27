@@ -1178,8 +1178,7 @@ def neoclassical_growth_nn(out):
             "learn_g_hat": g02_hp["parameters"]["learn_g_hat"],
             "frac_accepted": sig(j["frac_accepted"]),
             # Medians over accepted seeds; a wholesale-rejected experiment
-            # (the learned-trend certificate refusing every attempt) reports
-            # null rather than statistics of rejected solves.
+            # reports null rather than statistics of rejected solves.
             "g_hat_median": (
                 sig(float(accepted_sample["g_hat"].median()), 4)
                 if not accepted_sample.empty

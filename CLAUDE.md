@@ -48,9 +48,23 @@ per-directory READMEs.
   instantiates (near-zero head, optional `final_activation` — e.g.
   `unit_softplus`, or the per-output `UnitSoftplusWhere` mask for mixed
   signed/positive heads — `output_scale` Variable, optional trend Param
-  `g`), plus `unit_softplus`/`ACTIVATIONS`, `NNXResidualArgs`, and the
-  policy-artifact `save_model`/`load_model`; `utilities.py` keeps the
-  non-NN shared pieces and never imports `nnx`.
+  `g`); the recursive policy pieces — the generic `StateMLP` map
+  state -> (..., out_features) (optional elementwise log, `normalize_state`
+  affine normalization with a per-coordinate tanh-squash mask, one near-zero
+  Linear head per `(out_width, kernel_std)` entry — `None` draws a zeros
+  kernel — `anchored_outputs` anchored-softplus/affine output map on the
+  per-output `positive` mask, optional `MaskedLecunInit` first-layer column
+  mask; normalization and output constants are non-Param Variables) and the
+  hardcoded `HomotheticPolicyMLP`, with the shared
+  `normalize_state`/`anchored_outputs` also imported by the
+  stochastic-open-economy kernel policy; plus `unit_softplus`/`ACTIVATIONS`,
+  `NNXResidualArgs`, and the policy-artifact `save_model`/`load_model`
+  (load factories rebuild the `StateMLP` template from `meta["settings"]`
+  with placeholder Variables the artifact's nondiff block overwrites);
+  `utilities.py` keeps the non-NN shared pieces and never imports `nnx`.
+  Each recursive NN driver builds its `StateMLP` kwargs once (a
+  `policy_spec` dict or shared spec helper) and reuses them verbatim in
+  `DrawNNXModule`, so every kwarg stays hashable.
 - `replication/` — ensemble + figure drivers; `collect_json.py` writes
   `.results/all_results.json`, the only place paper numbers are selected and
   rounded. Generated JSON is gitignored; track one with a targeted `!path` rule.
@@ -90,10 +104,16 @@ per-directory READMEs.
   drivers re-solve from that handle and differentiate with respect to `p`
   (the `_uno` and kernel-recursive drivers return no solve handle).
 - Recursive NN/kernel: training collocation is the integrator's own fixed-step
-  RK4 states (nothing interpolated inside the residual); the policy is
-  `i = delta * k * unit_softplus(h)` on the homothetic state; acceptance is
-  solver convergence only — Euler residuals, transversality, and benchmark
-  errors are reported, never gated.
+  RK4 states (nothing interpolated inside the residual); every recursive
+  policy call is p-free — `policy(state) -> (out_features,)`, single-output
+  consumers index `[0]` — with structural constants baked at construction
+  (`HomotheticPolicyMLP` holds a/delta as non-Param Variables, `StateMLP`
+  anchors like `delta * k_0` live in its Variables) and the kernel-recursive
+  policy structs carrying `p` as a pytree field instead. The neoclassical
+  `homothetic_representation` flag picks `HomotheticPolicyMLP`
+  (`i = delta * k * unit_softplus(h(log kappa))`) vs a general `StateMLP`;
+  acceptance is solver convergence only — Euler residuals, transversality,
+  and benchmark errors are reported, never gated.
 - The stochastic recursive NN drivers always train and write
   content-addressed policy `.npz` artifacts via `--policy_cache <dir>` (a
   pure save target); the kernel-recursive consumers read them via

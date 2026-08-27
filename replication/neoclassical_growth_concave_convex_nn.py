@@ -49,7 +49,7 @@ def run(
     # Ex-post basin classification of each finite-horizon path, identical to the
     # kernel sweep: a sequence-space solution may still be in motion at test_T,
     # so the settle-ball test the recursive policy uses cannot apply. Scored
-    # against the benchmark's DNSS-selected destination per k_0.
+    # against the benchmark destination (the k_thr-side saddle) per k_0.
     k_thr, k_ss_low, k_ss_high = butterfly_thresholds(
         StructuralParameters.create(dtype=jnp.float64, **hyperparameters["parameters"])
     )

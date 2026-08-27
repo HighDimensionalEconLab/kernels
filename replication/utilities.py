@@ -247,7 +247,7 @@ def classify_path_basin(
     # steady-state gap) around a steady state counts as settled there;
     # otherwise classify by the nearer steady state AND whether the tail is
     # still moving toward it (a diverging tail fails). basin_correct compares
-    # the destination against the benchmark's DNSS-selected one.
+    # the destination against the benchmark's (the k_thr-side saddle).
     k_path = np.asarray(k_path, dtype=float)
     k_end, k_prev = float(k_path[-1]), float(k_path[-2])
     tol = tol_frac * (k_ss_high - k_ss_low)

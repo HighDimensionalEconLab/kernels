@@ -48,8 +48,8 @@ def run(
     )
 
     # Ex-post basin classification of each finite-horizon path (nearest steady
-    # state + direction of motion), scored against the benchmark's
-    # DNSS-selected destination per k_0.
+    # state + direction of motion), scored against the benchmark destination
+    # (the k_thr-side saddle) per k_0.
     k_thr, k_ss_low, k_ss_high = butterfly_thresholds(
         StructuralParameters.create(dtype=jnp.float64, **hyperparameters["parameters"])
     )

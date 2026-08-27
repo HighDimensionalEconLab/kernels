@@ -22,7 +22,7 @@ python -m replication.neoclassical_growth_kernel_robustness
 python -m replication.neoclassical_growth_kernel_sensitivity
 python -m replication.neoclassical_growth_concave_convex_kernel
 python -m replication.neoclassical_growth_concave_convex_nn
-python -m replication.neoclassical_growth_concave_convex_dnss
+python -m replication.neoclassical_growth_concave_convex_equilibrium_selection
 python -m replication.asset_pricing_kernel
 python -m replication.asset_pricing_nn
 python -m replication.optimal_advertising_kernel

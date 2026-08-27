@@ -12,7 +12,8 @@ from tinydiffeq import solve_bvp
 # (1 - a) g so the labor-augmenting scale z^{1/(1-a)} grows at g, and the
 # balanced-growth boundary is stationary. Smooth production (b_1 <= 1) has a
 # unique saddle path; the butterfly family (b_1 > 1) has one saddle per
-# production branch and the benchmark keeps the DNSS-selected candidate.
+# production branch and the benchmark follows the one on k_0's side of the
+# branch switch.
 
 
 @struct.dataclass
@@ -79,7 +80,9 @@ def solve_kappa_bvp(p, bench_set):
 # switch never touches it and solves on the true kinked field below; a
 # candidate that straddles the switch must cross it, where the f' jump stalls
 # single-domain collocation, so crossing candidates use the two-phase solver
-# with a free crossing time instead.
+# with a free crossing time instead. The benchmark proper only needs the
+# same-side solve; the crossing machinery serves the equilibrium-selection
+# diagnostics.
 def butterfly_kappa_field(t, y, _, args):
     p, _ = args
     kappa, c_tilde = y
@@ -333,9 +336,10 @@ def butterfly_candidate_value(p, bench_set, branch_slope, num_points=4001):
     return value, path_detrended
 
 
-# The crossing solves cannot reach 1e-10 within the node budget (phase b
-# spans the full horizon), so the butterfly family defaults to 1e-8; an
-# explicitly passed bench_set is used verbatim.
+# Same-side solves with k_0 near the switch approach the node cap at 1e-10,
+# and the crossing diagnostics' phase b spans the full horizon, so the
+# butterfly family defaults to 1e-8; an explicitly passed bench_set is used
+# verbatim.
 BUTTERFLY_BENCHMARK_TOL = 1e-8
 
 
@@ -356,17 +360,15 @@ def neoclassical_growth_benchmark(p, bench_set=None):
             state = solution(jnp.asarray(t))
             return state[:, 0], state[:, 1]
     else:
-        # DNSS selection (Skiba; Beyn-Pampel-Semmler): keep the candidate with
-        # the higher discounted utility. The two-candidate construction
-        # presumes g = 0 (with g > 0 the detrended switch decays and only the
-        # high branch is asymptotically stationary); the fields stay general
-        # so the crossover diagnostics can probe small g.
-        candidates = [
-            butterfly_candidate_value(p, bench_set, s) for s in (1.0, float(p.b_1))
-        ]
-        value, path_detrended = max(candidates, key=lambda pair: pair[0])
+        # The benchmark is the saddle on k_0's side of the branch switch
+        # (equality goes low) -- the crossing-free extremal that the FOC
+        # solvers select. The DNSS discounted-value comparison between the
+        # two candidates lives in
+        # replication/neoclassical_growth_concave_convex_equilibrium_selection.py.
+        side_slope = float(p.b_1) if float(p.k_0) > float(p.k_thr) else 1.0
+        value, path_detrended = butterfly_candidate_value(p, bench_set, side_slope)
         if not np.isfinite(value):
-            raise RuntimeError("no butterfly saddle candidate solved")
+            raise RuntimeError("butterfly benchmark saddle failed")
 
     def paths(t):
         t = jnp.asarray(t)

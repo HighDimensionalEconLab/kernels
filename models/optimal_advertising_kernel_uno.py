@@ -55,9 +55,6 @@ def objective(x, args):
 
 # The 1/sqrt(count)-scaled residual rows are the IPOPT constraints, the same
 # stack the NLLS driver solves.
-RESIDUAL_NAMES = ("state", "costate", "shadow_price")
-
-
 def residual_fn(theta, args, p):
     rho_hat, c, beta, kappa = p.rho_hat, p.c, p.beta, p.kappa
     gamma = (beta + rho_hat) / c
@@ -82,7 +79,9 @@ def residual_fn(theta, args, p):
         "costate": dmu_dt - (-gamma + (rho_hat + beta) * mu + mu * u),
         "shadow_price": u**control_power - kappa * mu * (1.0 - x),
     }
-    residual = jnp.concatenate([values[name] for name in RESIDUAL_NAMES])
+    residual = jnp.concatenate(
+        [values["state"], values["costate"], values["shadow_price"]]
+    )
     return residual / jnp.sqrt(residual.size), values
 
 

@@ -50,9 +50,6 @@ class Theta(NamedTuple):
     g_hat: jax.Array | None = None
 
 
-RESIDUAL_NAMES = ("resource", "euler", "shadow_price")
-
-
 # CRRA first-order condition u'(c) = mu; the costate and resource residuals
 # are utility-free. batch["g_hat"] is the fixed trend rate (0 without
 # growth); a learned theta.g_hat overrides it.
@@ -83,7 +80,9 @@ def residual_fn(theta, args, p):
         "euler": dmu_dt + mu * (mpk(z, k, p) - p.delta - p.rho_hat),
         "shadow_price": mu * c**p.sigma_crra - 1.0,
     }
-    residual = jnp.concatenate([values[name] for name in RESIDUAL_NAMES])
+    residual = jnp.concatenate(
+        [values["resource"], values["euler"], values["shadow_price"]]
+    )
     return residual / jnp.sqrt(residual.size), values
 
 
@@ -352,12 +351,15 @@ def neoclassical_growth_kernel_uno(
         test_df["c_benchmark"]
     )
 
-    residual_names = ("resource", "euler", "shadow_price")
     max_train_residual = max(
-        float(train_df[name].abs().max()) for name in residual_names
+        float(train_df["resource"].abs().max()),
+        float(train_df["euler"].abs().max()),
+        float(train_df["shadow_price"].abs().max()),
     )
     max_validation_residual = max(
-        float(validation_df[name].abs().max()) for name in residual_names
+        float(validation_df["resource"].abs().max()),
+        float(validation_df["euler"].abs().max()),
+        float(validation_df["shadow_price"].abs().max()),
     )
 
     # The costate-implied MPK must sit between the two branch slopes up to

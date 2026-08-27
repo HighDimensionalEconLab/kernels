@@ -114,11 +114,10 @@ def selection_row(k_0, k_ss_low, k_ss_high):
     result_low = solver.solve(theta_low_init, args, p=p, **options)
     theta_low = result_low.x
     values_low = residual_fn(theta_low, args, p)[1]
-    max_residual_low = float(
-        max(
-            np.abs(values_low[name]).max()
-            for name in ("resource", "euler", "shadow_price")
-        )
+    max_residual_low = max(
+        float(np.abs(values_low["resource"]).max()),
+        float(np.abs(values_low["euler"]).max()),
+        float(np.abs(values_low["shadow_price"]).max()),
     )
     k_end = float(values_low["k"][-1])
     if abs(k_end - k_ss_high) < abs(k_end - k_ss_low):

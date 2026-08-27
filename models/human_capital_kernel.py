@@ -11,7 +11,6 @@ import pandas as pd
 from nlls_gram import RidgeLevenbergMarquardt
 
 from models.human_capital_shared import (
-    RESIDUAL_NAMES,
     DataSettings,
     StructuralParameters,
     ToleranceSettings,
@@ -91,7 +90,17 @@ def residual_fn(theta, args, p):
         "hidden_dae_residual": (f_k - delta_k) - (f_h - delta_h),
         "Y": output,
     }
-    residual = jnp.concatenate([values[name] for name in RESIDUAL_NAMES])
+    residual = jnp.concatenate(
+        [
+            values["physical_accumulation"],
+            values["human_accumulation"],
+            values["physical_euler"],
+            values["human_euler"],
+            values["feasibility"],
+            values["shadow_price"],
+            values["costate_gap"],
+        ]
+    )
     return residual / jnp.sqrt(residual.size), values
 
 
@@ -205,10 +214,22 @@ def human_capital_kernel(
     validation_eval = evaluate_grid(validation_data)
     test_eval = evaluate_grid(test_data)
     max_train_residual = max(
-        float(jnp.max(jnp.abs(train_eval[name]))) for name in RESIDUAL_NAMES
+        float(jnp.max(jnp.abs(train_eval["physical_accumulation"]))),
+        float(jnp.max(jnp.abs(train_eval["human_accumulation"]))),
+        float(jnp.max(jnp.abs(train_eval["physical_euler"]))),
+        float(jnp.max(jnp.abs(train_eval["human_euler"]))),
+        float(jnp.max(jnp.abs(train_eval["feasibility"]))),
+        float(jnp.max(jnp.abs(train_eval["shadow_price"]))),
+        float(jnp.max(jnp.abs(train_eval["costate_gap"]))),
     )
     max_validation_residual = max(
-        float(jnp.max(jnp.abs(validation_eval[name]))) for name in RESIDUAL_NAMES
+        float(jnp.max(jnp.abs(validation_eval["physical_accumulation"]))),
+        float(jnp.max(jnp.abs(validation_eval["human_accumulation"]))),
+        float(jnp.max(jnp.abs(validation_eval["physical_euler"]))),
+        float(jnp.max(jnp.abs(validation_eval["human_euler"]))),
+        float(jnp.max(jnp.abs(validation_eval["feasibility"]))),
+        float(jnp.max(jnp.abs(validation_eval["shadow_price"]))),
+        float(jnp.max(jnp.abs(validation_eval["costate_gap"]))),
     )
     positive_names = ("k", "h", "i_k", "i_h", "c", "mu_k", "mu_h")
     finite_positive = bool(

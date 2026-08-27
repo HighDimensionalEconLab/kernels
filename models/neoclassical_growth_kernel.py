@@ -48,9 +48,6 @@ class Theta(NamedTuple):
     g_hat: jax.Array | None = None
 
 
-RESIDUAL_NAMES = ("resource", "euler", "shadow_price")
-
-
 # CRRA first-order condition u'(c) = mu; the costate and resource residuals
 # are utility-free. batch["g_hat"] is the fixed trend rate (0 without
 # growth); a learned theta.g_hat overrides it.
@@ -81,7 +78,9 @@ def residual_fn(theta, args, p):
         "euler": dmu_dt + mu * (mpk(z, k, p) - p.delta - p.rho_hat),
         "shadow_price": mu * c**p.sigma_crra - 1.0,
     }
-    residual = jnp.concatenate([values[name] for name in RESIDUAL_NAMES])
+    residual = jnp.concatenate(
+        [values["resource"], values["euler"], values["shadow_price"]]
+    )
     return residual / jnp.sqrt(residual.size), values
 
 

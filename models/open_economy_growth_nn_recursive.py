@@ -383,12 +383,13 @@ def open_economy_growth_nn_recursive(
     test_t = test_eval["t"]
     jax.block_until_ready((train_eval, test_eval, diagnostic_eval))
 
-    residual_names = ("q_euler", "c_euler")
     max_train_residual = max(
-        float(jnp.max(jnp.abs(train_eval[name]))) for name in residual_names
+        float(jnp.max(jnp.abs(train_eval["q_euler"]))),
+        float(jnp.max(jnp.abs(train_eval["c_euler"]))),
     )
     max_validation_residual = max(
-        float(jnp.max(jnp.abs(diagnostic_eval[name]))) for name in residual_names
+        float(jnp.max(jnp.abs(diagnostic_eval["q_euler"]))),
+        float(jnp.max(jnp.abs(diagnostic_eval["c_euler"]))),
     )
     finite_positive = bool(
         all(

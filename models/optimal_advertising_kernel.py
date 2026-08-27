@@ -44,9 +44,6 @@ class Theta(NamedTuple):
     u_0: jax.Array
 
 
-RESIDUAL_NAMES = ("state", "costate", "shadow_price")
-
-
 def residual_fn(theta, args, p):
     rho_hat, c, beta, kappa = p.rho_hat, p.c, p.beta, p.kappa
     gamma = (beta + rho_hat) / c
@@ -71,7 +68,9 @@ def residual_fn(theta, args, p):
         "costate": dmu_dt - (-gamma + (rho_hat + beta) * mu + mu * u),
         "shadow_price": u**control_power - kappa * mu * (1.0 - x),
     }
-    residual = jnp.concatenate([values[name] for name in RESIDUAL_NAMES])
+    residual = jnp.concatenate(
+        [values["state"], values["costate"], values["shadow_price"]]
+    )
     return residual / jnp.sqrt(residual.size), values
 
 
@@ -171,10 +170,14 @@ def optimal_advertising_kernel(
     validation_eval = evaluate_grid(validation_data)
     test_eval = evaluate_grid(test_data)
     max_train_residual = max(
-        float(jnp.max(jnp.abs(train_eval[name]))) for name in RESIDUAL_NAMES
+        float(jnp.max(jnp.abs(train_eval["state"]))),
+        float(jnp.max(jnp.abs(train_eval["costate"]))),
+        float(jnp.max(jnp.abs(train_eval["shadow_price"]))),
     )
     max_validation_residual = max(
-        float(jnp.max(jnp.abs(validation_eval[name]))) for name in RESIDUAL_NAMES
+        float(jnp.max(jnp.abs(validation_eval["state"]))),
+        float(jnp.max(jnp.abs(validation_eval["costate"]))),
+        float(jnp.max(jnp.abs(validation_eval["shadow_price"]))),
     )
     finite_valid = bool(
         all(

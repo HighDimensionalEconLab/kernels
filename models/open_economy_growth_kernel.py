@@ -64,15 +64,6 @@ class Theta(NamedTuple):
     log_q_0: jax.Array
 
 
-RESIDUAL_NAMES = (
-    "capital",
-    "assets",
-    "tobin_q",
-    "marginal_wealth",
-    "consumption_foc",
-)
-
-
 def residual_fn(theta, args, p):
     # The asset scale enters the min-norm selection metric, so it must be
     # differentiation-inert; time-0 output sets it from the initial conditions.
@@ -110,7 +101,15 @@ def residual_fn(theta, args, p):
         "marginal_wealth": paths["log_mu"].d_dt - (p.r - p.r_star),
         "consumption_foc": mu * c**p.gamma - 1.0,
     }
-    residual = jnp.concatenate([values[name] for name in RESIDUAL_NAMES])
+    residual = jnp.concatenate(
+        [
+            values["capital"],
+            values["assets"],
+            values["tobin_q"],
+            values["marginal_wealth"],
+            values["consumption_foc"],
+        ]
+    )
     return residual / jnp.sqrt(residual.size), values
 
 
@@ -275,10 +274,18 @@ def open_economy_growth_kernel(
         p,
     )
     max_train_residual = max(
-        float(jnp.max(jnp.abs(train_eval[name]))) for name in RESIDUAL_NAMES
+        float(jnp.max(jnp.abs(train_eval["capital"]))),
+        float(jnp.max(jnp.abs(train_eval["assets"]))),
+        float(jnp.max(jnp.abs(train_eval["tobin_q"]))),
+        float(jnp.max(jnp.abs(train_eval["marginal_wealth"]))),
+        float(jnp.max(jnp.abs(train_eval["consumption_foc"]))),
     )
     max_validation_residual = max(
-        float(jnp.max(jnp.abs(validation_eval[name]))) for name in RESIDUAL_NAMES
+        float(jnp.max(jnp.abs(validation_eval["capital"]))),
+        float(jnp.max(jnp.abs(validation_eval["assets"]))),
+        float(jnp.max(jnp.abs(validation_eval["tobin_q"]))),
+        float(jnp.max(jnp.abs(validation_eval["marginal_wealth"]))),
+        float(jnp.max(jnp.abs(validation_eval["consumption_foc"]))),
     )
 
     benchmark, benchmark_diagnostics = open_economy_growth_benchmark(p)

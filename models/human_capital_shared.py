@@ -19,17 +19,6 @@ class StructuralParameters(ParameterPyTree):
     h_0: jax.Array
 
 
-RESIDUAL_NAMES = (
-    "physical_accumulation",
-    "human_accumulation",
-    "physical_euler",
-    "human_euler",
-    "feasibility",
-    "shadow_price",
-    "costate_gap",
-)
-
-
 def production_terms(k, h, p):
     a_k, a_h = p.a_k, p.a_h
     output = (k**a_k) * (h**a_h)

@@ -43,14 +43,6 @@ from models.utilities import (
     value_and_grad_fwd,
 )
 
-RESIDUAL_NAMES = (
-    "capital",
-    "assets",
-    "tobin_q",
-    "marginal_wealth",
-    "consumption_foc",
-)
-
 
 # Acceptance gates, CLI-reachable so a lower-precision caller can pass its
 # own bars.
@@ -165,7 +157,16 @@ def residual_fn(theta, args, p):
     }
     at_zero = model(jnp.asarray(0.0, dtype=t.dtype))
     ic = jnp.stack([at_zero[0] - p.k_0, at_zero[1] - p.a_0])
-    residual = jnp.concatenate([*(values[name] for name in RESIDUAL_NAMES), ic])
+    residual = jnp.concatenate(
+        [
+            values["capital"],
+            values["assets"],
+            values["tobin_q"],
+            values["marginal_wealth"],
+            values["consumption_foc"],
+            ic,
+        ]
+    )
     return residual / jnp.sqrt(residual.size), values
 
 
@@ -302,10 +303,18 @@ def open_economy_growth_nn(
     test_eval = evaluate_grid(test_t)
 
     max_train_residual = max(
-        float(jnp.max(jnp.abs(train_eval[name]))) for name in RESIDUAL_NAMES
+        float(jnp.max(jnp.abs(train_eval["capital"]))),
+        float(jnp.max(jnp.abs(train_eval["assets"]))),
+        float(jnp.max(jnp.abs(train_eval["tobin_q"]))),
+        float(jnp.max(jnp.abs(train_eval["marginal_wealth"]))),
+        float(jnp.max(jnp.abs(train_eval["consumption_foc"]))),
     )
     max_validation_residual = max(
-        float(jnp.max(jnp.abs(validation_eval[name]))) for name in RESIDUAL_NAMES
+        float(jnp.max(jnp.abs(validation_eval["capital"]))),
+        float(jnp.max(jnp.abs(validation_eval["assets"]))),
+        float(jnp.max(jnp.abs(validation_eval["tobin_q"]))),
+        float(jnp.max(jnp.abs(validation_eval["marginal_wealth"]))),
+        float(jnp.max(jnp.abs(validation_eval["consumption_foc"]))),
     )
 
     steady = steady_state(p)
@@ -445,7 +454,11 @@ def open_economy_growth_nn(
         "x",
         "output",
         "current_account",
-        *RESIDUAL_NAMES,
+        "capital",
+        "assets",
+        "tobin_q",
+        "marginal_wealth",
+        "consumption_foc",
     )
     train_df = pd.DataFrame(
         {name: np.asarray(jax.device_get(train_eval[name])) for name in frame_names}

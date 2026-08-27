@@ -62,15 +62,6 @@ from models.utilities import (
     make_sampled_train_grid,
 )
 
-RESIDUAL_NAMES = (
-    "capital",
-    "assets",
-    "tobin_q",
-    "marginal_wealth",
-    "consumption_foc",
-    "asset_clearing",
-)
-
 
 # Alpha blocks first (the metric penalizes the leading flat coordinates);
 # the (N, n_train) blocks ravel country-major. The trailing entries are the
@@ -433,10 +424,20 @@ def multicountry_growth_kernel(
     test_eval = evaluate_grid(test_data)
 
     max_train_residual = max(
-        float(jnp.max(jnp.abs(train_eval[name]))) for name in RESIDUAL_NAMES
+        float(jnp.max(jnp.abs(train_eval["capital"]))),
+        float(jnp.max(jnp.abs(train_eval["assets"]))),
+        float(jnp.max(jnp.abs(train_eval["tobin_q"]))),
+        float(jnp.max(jnp.abs(train_eval["marginal_wealth"]))),
+        float(jnp.max(jnp.abs(train_eval["consumption_foc"]))),
+        float(jnp.max(jnp.abs(train_eval["asset_clearing"]))),
     )
     max_validation_residual = max(
-        float(jnp.max(jnp.abs(validation_eval[name]))) for name in RESIDUAL_NAMES
+        float(jnp.max(jnp.abs(validation_eval["capital"]))),
+        float(jnp.max(jnp.abs(validation_eval["assets"]))),
+        float(jnp.max(jnp.abs(validation_eval["tobin_q"]))),
+        float(jnp.max(jnp.abs(validation_eval["marginal_wealth"]))),
+        float(jnp.max(jnp.abs(validation_eval["consumption_foc"]))),
+        float(jnp.max(jnp.abs(validation_eval["asset_clearing"]))),
     )
     max_resource_gap = float(jnp.max(jnp.abs(validation_eval["resource_gap"])))
     max_asset_clearing = float(jnp.max(jnp.abs(validation_eval["asset_clearing"])))

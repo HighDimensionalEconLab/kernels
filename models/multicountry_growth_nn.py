@@ -47,15 +47,6 @@ from models.utilities import (
     value_and_grad_fwd,
 )
 
-RESIDUAL_NAMES = (
-    "capital",
-    "assets",
-    "tobin_q",
-    "marginal_wealth",
-    "consumption_foc",
-    "asset_clearing",
-)
-
 
 # Acceptance gates, CLI-reachable so a lower-precision caller can pass its
 # own bars.
@@ -388,10 +379,20 @@ def multicountry_growth_nn(
     test_eval = evaluate_grid(test_t)
 
     max_train_residual = max(
-        float(jnp.max(jnp.abs(train_eval[name]))) for name in RESIDUAL_NAMES
+        float(jnp.max(jnp.abs(train_eval["capital"]))),
+        float(jnp.max(jnp.abs(train_eval["assets"]))),
+        float(jnp.max(jnp.abs(train_eval["tobin_q"]))),
+        float(jnp.max(jnp.abs(train_eval["marginal_wealth"]))),
+        float(jnp.max(jnp.abs(train_eval["consumption_foc"]))),
+        float(jnp.max(jnp.abs(train_eval["asset_clearing"]))),
     )
     max_validation_residual = max(
-        float(jnp.max(jnp.abs(validation_eval[name]))) for name in RESIDUAL_NAMES
+        float(jnp.max(jnp.abs(validation_eval["capital"]))),
+        float(jnp.max(jnp.abs(validation_eval["assets"]))),
+        float(jnp.max(jnp.abs(validation_eval["tobin_q"]))),
+        float(jnp.max(jnp.abs(validation_eval["marginal_wealth"]))),
+        float(jnp.max(jnp.abs(validation_eval["consumption_foc"]))),
+        float(jnp.max(jnp.abs(validation_eval["asset_clearing"]))),
     )
     max_resource_gap = float(jnp.max(jnp.abs(validation_eval["resource_gap"])))
     max_asset_clearing = float(jnp.max(jnp.abs(validation_eval["asset_clearing"])))

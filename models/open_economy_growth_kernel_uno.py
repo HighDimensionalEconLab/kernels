@@ -68,11 +68,8 @@ RESIDUAL_NAMES = (
 
 
 def residual_fn(theta, args, p):
-    # The asset block is the one path with no free scalar anchor, so its
-    # scale enters the minimum-norm selection metric; the scale must be
-    # differentiation-inert or every parameter sensitivity picks up a
-    # selection-drift term from the metric moving with p. Time-0 output
-    # sets it from the initial conditions alone.
+    # The asset scale enters the min-norm selection metric, so it must be
+    # differentiation-inert; time-0 output sets it from the initial conditions.
     output_scale_p = jax.lax.stop_gradient(production(p.k_0, 1.0, p))
     paths = integrated_kernel_paths(
         {
@@ -205,10 +202,6 @@ def open_economy_growth_kernel_uno(
     )
     K = (K + K.T) / 2.0
 
-    # Flat alpha blocks carry no saddle-path or present-value information;
-    # the free anchors are seeded from the initial conditions alone:
-    # consumption at the flow sustainable at k_0 (mu consistent via the
-    # FOC), q at the replacement-investment price 1/eta.
     log_c_seed = jnp.log(production(p.k_0, 1.0, p) - p.delta * p.k_0)
     theta_0 = Theta(
         alpha_mu=jnp.zeros(n_train, dtype=jnp.float64),

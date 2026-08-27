@@ -74,11 +74,8 @@ RESIDUAL_NAMES = (
 
 
 def residual_fn(theta, args, p):
-    # The asset block is the one path with no free scalar anchor, so its
-    # scale enters the minimum-norm selection metric; the scale must be
-    # differentiation-inert or every parameter sensitivity picks up a
-    # selection-drift term from the metric moving with p. Time-0 output
-    # sets it from the initial conditions alone.
+    # The asset scale enters the min-norm selection metric, so it must be
+    # differentiation-inert; time-0 output sets it from the initial conditions.
     output_scale_p = jax.lax.stop_gradient(production(p.k_0, 1.0, p))
     paths = integrated_kernel_paths(
         {
@@ -139,11 +136,8 @@ def open_economy_growth_kernel(
     use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(ell=20.0),
     data_set: DataSettings = DataSettings(),
-    # Conjunctive stopping in the whitened variable y = F_bar theta the
-    # solver works in: gtol bounds the whitened stationarity
-    # ||J~'r + ridge [y_m; 0]||, atol additionally demands the scaled
-    # residual norm solved (the converged residual floors at
-    # O(ridge * ||dual||), so atol sits above it).
+    # Conjunctive whitened stopping: gtol bounds the whitened stationarity,
+    # atol the scaled residual norm (its floor is O(ridge * ||dual||)).
     lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=1e-8,
         damping_decrease=0.1,
@@ -152,15 +146,8 @@ def open_economy_growth_kernel(
         atol=5e-7,
         gtol=5e-8,
     ),
-    # The ridge keeps the minimizer O(ridge) from the pure RKHS-seminorm
-    # interpolant with the free offsets unpenalized (no epsilon shift
-    # anywhere). ridge_init enables continuation annealed down to the ridge
-    # floor by factors of ridge_decrease on inner stationarity; the metric's
-    # factorization never involves the ridge, so the anneal composes
-    # unchanged. linear_solver "auto" is the whitened cholesky: the whitened
-    # normal matrix has its spectral floor at the ridge, so the DAE
-    # Jacobian's scale spread stays within float64 ("qr"/"cholesky" remain
-    # valid; all paths run whitened).
+    # ridge_init anneals down to the ridge floor by factors of ridge_decrease
+    # on inner stationarity; every linear solver runs whitened.
     ridge_set: RidgeSettings = RidgeSettings(
         ridge=3e-12,
         ridge_init=1e-7,
@@ -198,21 +185,12 @@ def open_economy_growth_kernel(
     output_scale = steady["output"]
     consumption_scale = steady["g"]
 
-    # There are 5n DAE equations in 5n + 3 unknowns. No terminal equation is
-    # appended: the ridge penalty supplies the three-dimensional selection.
-    # Every linear solver works on the whitened subproblem; the metric takes
-    # the upper Cholesky factor F with K = F'F and the trailing offsets stay
-    # in the unpenalized free block, untransformed.
     K, K_tilde, metric = integrated_metric_factorization(
         train_data, kernel, kernel_set.sigma, kernel_set.ell, repeats=5
     )
 
     residual_args = KernelResidualArgs(K=K, K_tilde=K_tilde)
 
-    # Flat alpha blocks carry no saddle-path or present-value information;
-    # the free anchors are seeded from the initial conditions alone:
-    # consumption at the flow sustainable at k_0 (mu consistent via the
-    # FOC), q at the replacement-investment price 1/eta.
     log_c_seed = jnp.log(production(p.k_0, 1.0, p) - p.delta * p.k_0)
     theta_0 = Theta(
         alpha_mu=jnp.zeros(n_train, dtype=dtype),

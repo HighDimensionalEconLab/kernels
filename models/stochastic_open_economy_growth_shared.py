@@ -22,22 +22,8 @@ from models.utilities import (
 # initialization.
 
 
-# Exogenous driving processes, AR(1) anchors mapped exactly to OU rates:
-# e^(-kappa) = rho over the anchor period and the OU innovation scale matches
-# the AR(1) stationary variance, sigma^2/(2 kappa) = sd^2/(1 - rho^2). Both
-# stochastic recursive solver variants default to the values below.
-# Productivity duplicates the neoclassical family's quarterly TFP anchors
-# deliberately (log-TFP AR(1) rho = 0.95, the high-variance sensitivity
-# column's innovation sd 0.035, from Aruoba, Fernandez-Villaverde &
-# Rubio-Ramirez 2006 JEDC) so every stochastic recursive variant faces the
-# identical z process. World-rate process from Uribe & Yue (2006, eq. 15):
-# quarterly rho = 0.83 on log-devs of the annualized gross rate with
-# innovation sd 0.007, so annual rho = 0.83^4 and stationary sd
-# ~1.04 * 0.007/sqrt(1-0.83^2) ~ 1.3 percentage points in the rate level
-# (kappa ~ 0.75/yr, half-life ~0.9y). Corroborated by the international
-# risk-free real rate in Fernandez-Villaverde et al. (2011 AER "Risk
-# Matters"): monthly rho = 0.95 (kappa ~ 0.62/yr) with a 38bp annualized
-# innovation sd, stationary sd ~1.2pp.
+# OU driving processes from AR(1) anchors (e^(-kappa) = rho, matched
+# stationary variance): AFV-2006 TFP; world rate from Uribe & Yue (2006).
 PROCESS_CONSTANTS = {
     "quarterly_tfp_rho": 0.95,
     "quarterly_tfp_sigma": 0.035,

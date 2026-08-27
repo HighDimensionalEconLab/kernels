@@ -99,9 +99,6 @@ def neoclassical_growth_kernel(
     rho_hat: float = CONSTANTS["rho_hat"],
     sigma_crra: float = CONSTANTS["sigma_crra"],
     k_0: float = 1.0,
-    # Hicks-neutral technology z(t) = z_0 e^{(1-a) g t}: the unit trend enters
-    # the residuals as data, z_0 rides in p; learn_g_hat frees the trend rate
-    # (init 0) instead of fixing it at g.
     z_0: float = 1.0,
     g: float = 0.0,
     learn_g_hat: bool = False,
@@ -121,11 +118,6 @@ def neoclassical_growth_kernel(
         atol=2e-8,
         gtol=1e-9,
     ),
-    # Ridge weight of ||r||^2 + ridge * sum_j alpha_j' K alpha_j with the free
-    # (c_0, mu_0) unpenalized; the converged residual norm is
-    # O(ridge * ||dual||), so ridge must sit low enough that atol stays
-    # reachable. Tuning:
-    # https://highdimensionaleconlab.github.io/nlls_gram/ridge_lm/
     ridge_set: RidgeSettings = RidgeSettings(ridge=1e-10),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     c_0_guess: float | None = None,  # overrides the flat steady-flow warm start
@@ -165,10 +157,6 @@ def neoclassical_growth_kernel(
         k_thr=k_thr,
     )
 
-    # 3n nonlinear residuals in 3n + 2 unknowns: ridge LM on
-    # ||r||^2 + ridge * (a_mu'K a_mu + a_c'K a_c + a_k'K a_k) selects the
-    # interpolant minimizing the summed RKHS norms with the trailing
-    # (c_0, mu_0) in the unpenalized free block.
     K_jax, K_tilde_jax, metric = integrated_metric_factorization(
         train_data, kernel, sigma, ell, repeats=3
     )

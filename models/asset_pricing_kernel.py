@@ -63,11 +63,8 @@ def asset_pricing_kernel(
     use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
-    # atol is on the unscaled residual norm, so it bounds max|residual|; the
-    # converged residual floors at O(ridge * ||dual||), so atol must sit above
-    # it. Convergence requires gtol AND atol, and gtol must be tight enough to
-    # resolve the weakly penalized p_0 direction. Tuning:
-    # https://highdimensionaleconlab.github.io/nlls_gram/ridge_lm/
+    # atol bounds the unscaled residual norm; gtol must resolve the weakly
+    # penalized free p_0. Convergence requires gtol AND atol.
     lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=1e-8,
         damping_decrease=0.5,
@@ -76,7 +73,6 @@ def asset_pricing_kernel(
         atol=1e-9,
         gtol=1e-13,
     ),
-    # Ridge weight of ||r||^2 + ridge * a'Ka with the free p_0 unpenalized.
     ridge_set: RidgeSettings = RidgeSettings(ridge=1e-10),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = False,
@@ -91,10 +87,6 @@ def asset_pricing_kernel(
     n_train = len(train_data)
     p = StructuralParameters.create(dtype=dtype, r=r, c=c, g=g, x_0=x_0)
 
-    # The residual is affine in theta, so each ridge-LM step is an exact
-    # kernel ridge solve converging to the minimizer of ||r||^2 + ridge * a'Ka
-    # with p_0 in the unpenalized free block -- the min-RKHS-norm selection
-    # (the original a'Ka objective) up to an O(ridge) bias.
     K_metric, K_tilde_jax, metric = integrated_metric_factorization(
         train_data, kernel, sigma, ell, repeats=1
     )

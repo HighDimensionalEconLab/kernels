@@ -60,7 +60,9 @@ per-directory READMEs.
   free block (dict thetas flatten by sorted key — keep alpha keys sorting
   first). Minimizer = min-RKHS-norm interpolant up to an O(ridge) bias.
 - Stopping is conjunctive `gtol` AND `atol`; `gtol` must resolve the weakly
-  penalized free constants (asset pricing needs `gtol ~ 1e-3 * ridge`).
+  penalized free constants (asset pricing needs `gtol ~ 1e-3 * ridge`); the
+  converged residual norm floors at O(ridge * ||dual||), so `atol` sits above
+  it. Tuning: https://highdimensionaleconlab.github.io/nlls_gram/ridge_lm/
 - Settings taxonomy: `lm_set: OptimizerSettings` carries exactly the LM
   constructor + `solve()` kwargs (`atol`/`gtol`/`max_steps` named as the
   optimizer names them), `ridge_set: RidgeSettings` the RidgeLM extras

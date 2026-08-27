@@ -84,12 +84,8 @@ def optimal_advertising_kernel(
     use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(ell=15.0),
     data_set: DataSettings = DataSettings(),
-    # Conjunctive stopping: gtol bounds the ridge stationarity
-    # ||J'r + ridge K alpha|| (calibrated per the
-    # ~1e-3 * ridge * info.penalty_grad_norm recipe: ridge*||L'L theta|| is
-    # ~6e-12 at convergence), atol additionally demands the scaled residual
-    # norm solved. The converged residual floor is O(ridge * ||dual||), so
-    # atol must sit above it.
+    # Conjunctive stopping: gtol bounds the ridge stationarity, atol the
+    # scaled residual norm (its floor is O(ridge * ||dual||)).
     lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=1e-8,
         damping_decrease=0.1,
@@ -98,9 +94,6 @@ def optimal_advertising_kernel(
         atol=1e-9,
         gtol=1e-10,
     ),
-    # The ridge keeps the minimizer O(ridge) from the pure RKHS-seminorm
-    # interpolant with the free (mu_0, u_0) unpenalized (no epsilon shift
-    # anywhere).
     ridge_set: RidgeSettings = RidgeSettings(ridge=3e-11),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = False,

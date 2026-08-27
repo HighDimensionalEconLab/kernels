@@ -176,9 +176,6 @@ def neoclassical_growth_nn_k(
     delta: float = CONSTANTS["delta"],
     rho_hat: float = CONSTANTS["rho_hat"],
     k_0: float = 1.0,
-    # Hicks-neutral technology z(t) = z_0 e^{(1-a) g t} enters the residual
-    # analytically; nn_set.learn_g_hat frees the trend rate instead of fixing
-    # it at g.
     z_0: float = 1.0,
     g: float = 0.0,
     A: float | None = None,

@@ -21,17 +21,8 @@ from models.utilities import (
 # paper's F(k, z) = e^z k^a written here with z in levels.
 
 
-# Shared calibration both stochastic recursive solver variants default to,
-# so they solve the identical model on the same windows. From Aruoba,
-# Fernandez-Villaverde & Rubio-Ramirez (2006 JEDC, Tables 1-2): beta =
-# 0.9896, log-TFP AR(1) rho = 0.95 with their high-variance sensitivity
-# column's innovation sd 0.035, capital share 1/3, annual depreciation 0.1.
-# sigma_crra = 2 is their tau and is a free choice rather than a mapped
-# value. Quarterly anchors map exactly: e^(-rho_hat/4) = beta, e^(-eta/4) =
-# rho, and the OU innovation scale matches the AR(1) stationary variance,
-# sigma_z^2/(2 eta) = sigma^2/(1 - rho^2). The values duplicate the
-# deterministic family's calibration deliberately: the two model files stay
-# independent.
+# AFV-2006 (JEDC) calibration; quarterly anchors map exactly to the OU rates
+# (e^(-rho_hat/4) = beta, e^(-eta/4) = rho, matched stationary variance).
 STOCHASTIC_GROWTH_CONSTANTS = {
     "a": 1 / 3,
     "delta": 0.1,

@@ -281,11 +281,7 @@ def multicountry_growth_nn(
         k_0=k_0,
         a_0=a_0_array,
     )
-    # Normalizations from the initial conditions and structural parameters
-    # alone: population-weighted time-0 output for the signed asset paths,
-    # time-0 output net of replacement investment for consumption
-    # (per-country mu consistent via the FOC), the replacement-investment
-    # price 1/eta for q, and r for the world rate.
+    # Normalizations from the initial conditions and structural parameters alone.
     initial_output = production(p.k_0, p.productivities, p)
     a_scale = float(jnp.sum(populations_array * initial_output) / total_population)
     c_scale = float(

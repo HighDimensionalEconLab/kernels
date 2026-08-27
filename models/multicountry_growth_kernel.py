@@ -106,12 +106,8 @@ def path_coordinates(theta, K_eval, K_tilde_eval, p):
     # already clear) and projects AD perturbations of a_0 onto the
     # feasible clearing set, so every direction is meaningful.
     a_0_p = p.a_0 - jnp.sum(populations_p * p.a_0) / jnp.sum(populations_p)
-    # The asset block is the one path with no free scalar anchor, so its
-    # coefficient scale enters the minimum-norm selection metric; the
-    # scale must be differentiation-inert or every parameter sensitivity
-    # picks up a selection-drift term from the metric moving with p.
-    # Population-weighted time-0 output sets it from the initial
-    # conditions alone.
+    # The asset scale enters the min-norm selection metric, so it must be
+    # differentiation-inert; population-weighted time-0 output sets it.
     output_scale_p = jax.lax.stop_gradient(
         jnp.sum(populations_p * production(k_0_p, p.productivities, p))
         / jnp.sum(populations_p)
@@ -177,11 +173,8 @@ def residual_fn(theta, args, p):
         # World bond clearing, per capita so the row size is N-free.
         "asset_clearing": jnp.sum(populations * a, axis=-1) / jnp.sum(populations),
     }
-    # No algebraic row contains the rate (clearing is a stock condition
-    # on the states, so the DAE has index > 1); the rate path is
-    # disciplined by the assets and Euler rows, with the pointwise slack
-    # resolved by the minimum-norm selection. The t=0 clearing row is
-    # identically zero because a_0 clears, and is kept for uniformity.
+    # The t=0 clearing row is identically zero (a_0 clears); kept for
+    # uniformity.
     residual = jnp.concatenate(
         [
             values["capital"].reshape(-1),
@@ -219,10 +212,8 @@ def multicountry_growth_kernel(
     initial_set: InitialConditionSettings = InitialConditionSettings(),
     kernel_set: KernelSettings = KernelSettings(ell=20.0),
     data_set: DataSettings = DataSettings(),
-    # Conjunctive stopping in the whitened variable y = F_bar theta the
-    # solver works in: gtol bounds the whitened stationarity, atol
-    # additionally demands the scaled residual norm solved (the converged
-    # residual floors at O(ridge * ||dual||), so atol sits above it).
+    # Conjunctive whitened stopping: gtol bounds the whitened stationarity,
+    # atol the scaled residual norm (its floor is O(ridge * ||dual||)).
     lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=1e-8,
         damping_decrease=0.1,
@@ -231,16 +222,8 @@ def multicountry_growth_kernel(
         atol=5e-7,
         gtol=5e-8,
     ),
-    # The ridge keeps the minimizer O(ridge) from the pure RKHS-seminorm
-    # interpolant with the free anchors unpenalized; ridge_init enables
-    # continuation annealed down to the ridge floor by factors of
-    # ridge_decrease on inner stationarity. linear_solver "auto" (whitened
-    # cholesky) and "qr" solve dense whitened systems; "cg" is matrix-free
-    # preconditioned CG on the whitened normal operator with the
-    # arrow+Woodbury preconditioner rebuilt every LM step (derivation in
-    # models/multicountry_growth_preconditioner.py). Implicit-AD re-solves
-    # stay dense-only: the undamped system sits at the float64 conditioning
-    # plateau, where CG would silently degrade the tangents.
+    # "cg" is matrix-free preconditioned CG (arrow+Woodbury, rebuilt every LM
+    # step); implicit-AD re-solves stay dense-only (CG degrades the tangents).
     ridge_set: RidgeSettings = RidgeSettings(
         ridge=3e-12,
         ridge_init=1e-7,
@@ -292,23 +275,12 @@ def multicountry_growth_kernel(
     populations_array = jnp.asarray(populations, dtype=dtype)
     total_population = jnp.sum(populations_array)
 
-    # There are (5N+1)n DAE equations in (5N+1)n + 3N + 1 unknowns. No
-    # terminal equation is appended: the ridge penalty supplies the
-    # (3N+1)-dimensional selection. Every linear solver works on the
-    # whitened subproblem; the metric takes the upper Cholesky factor F with
-    # K = F'F and the trailing anchors stay in the unpenalized free block,
-    # untransformed.
     num_rkhs_functions = 5 * num_countries + 1
     num_initial_values = 3 * num_countries + 1
     K, K_tilde, metric = integrated_metric_factorization(
         train_data, kernel, kernel_set.sigma, kernel_set.ell, repeats=num_rkhs_functions
     )
 
-    # The structural parameters and initial conditions ride in the solver's
-    # `p` argument so the solved paths are implicitly differentiable with
-    # respect to every one of them (nlls-gram's implicit JVP/VJP at the
-    # ridge stationary point). All parameter-dependent quantities the paths
-    # consume are recomputed from p inside.
     # Demeaning clears the sub-tolerance clearing residue the validation
     # admits; the demeaned values are what the paths anchor to, so they are
     # also what the benchmark, results, and hyperparameters report.
@@ -330,11 +302,6 @@ def multicountry_growth_kernel(
     steady = steady_state(p, dtype)
     output_scale = steady["output_scale"]
 
-    # Flat alpha blocks carry no saddle-path or present-value information;
-    # the free anchors are seeded from the initial conditions alone:
-    # per-country consumption at the flow sustainable at k_0_i (mu
-    # consistent via the FOC), q at the replacement-investment price
-    # 1/eta, the world rate at r.
     log_c_seed = jnp.log(production(p.k_0, p.productivities, p) - p.delta * p.k_0)
     theta_0 = Theta(
         alpha_k=jnp.zeros((num_countries, n_train), dtype=dtype),

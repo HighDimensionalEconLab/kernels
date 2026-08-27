@@ -217,10 +217,7 @@ def open_economy_growth_nn(
         k_0=k_0,
         a_0=a_0,
     )
-    # Normalizations from the initial conditions and structural parameters
-    # alone: time-0 output for the signed asset path, the flow sustainable at
-    # k_0 for consumption (mu consistent via the FOC), and the replacement-
-    # investment price 1/eta for q.
+    # Normalizations from the initial conditions and structural parameters alone.
     k_scale = float(k_0)
     a_scale = float(k_0**alpha)
     q_scale = 1.0 / float(eta)

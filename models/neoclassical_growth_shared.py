@@ -11,18 +11,8 @@ from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 
 from models.utilities import ParameterPyTree
 
-# Shared calibration every deterministic solver variant defaults to, so all
-# solve the identical model on the same windows. Neoclassical growth from
-# Aruoba, Fernandez-Villaverde & Rubio-Ramirez (2006 JEDC, Tables 1-2):
-# beta = 0.9896 (a 4% annual interest rate), capital share 1/3, annual
-# depreciation 0.1 (King-Rebelo 1999's 0.025 quarterly); the discount rate
-# maps exactly from the quarterly anchor e^(-rho_hat/4) = beta. sigma_crra =
-# 2 is their tau and is a free choice rather than a mapped value. train_T =
-# 100 covers ~10 e-foldings of the calibrated saddle path (|lambda_stable| ~
-# 0.105); the transversality certificate extends to twice that. Sequential
-# drivers evaluate their path solution on a grid extending past train_T to
-# test extrapolation; recursive drivers roll held-out initial conditions for
-# test_T.
+# AFV-2006 (JEDC, Tables 1-2) calibration shared by every deterministic
+# variant; the quarterly anchor maps exactly via e^(-rho_hat/4) = beta.
 NEOCLASSICAL_GROWTH_CONSTANTS = {
     "a": 1 / 3,
     "delta": 0.1,
@@ -70,9 +60,6 @@ class StructuralParameters(ParameterPyTree):
     k_0: jax.Array | None = None
 
 
-# Hicks-neutral technology: Y = z A max(k^a, b_1 k^a - b_2). Balanced growth
-# at per-capita rate g needs the TFP trend (1 - a) g; the labor-augmenting
-# index z^{1/(1-a)} grows at g and is the detrending scale for quantities.
 def production(z, k, p):
     base = k**p.a
     return z * p.A * jnp.maximum(base, p.b_1 * base - p.b_2)

@@ -27,14 +27,16 @@ from models.neoclassical_growth_shared import (
     mpk,
     production,
 )
-from models.utilities import (
+from models.neural_networks import (
     ACTIVATIONS,
     NNXResidualArgs,
+    unit_softplus,
+)
+from models.utilities import (
     OptimizerSettings,
     Stopwatch,
     acceptance_fields,
     make_train_t_grid,
-    unit_softplus,
     value_and_grad_fwd,
 )
 

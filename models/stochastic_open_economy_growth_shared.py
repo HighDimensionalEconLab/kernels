@@ -11,11 +11,11 @@ import pandas as pd
 from flax import nnx
 from tinydiffeq import SaveAt, solve_sde
 
-from models.utilities import (
+from models.neural_networks import (
     ACTIVATIONS,
-    ParameterPyTree,
     unit_softplus,
 )
+from models.utilities import ParameterPyTree
 
 # Recursive stochastic small open economy on (log z, log k, a/output_scale,
 # rate_gap). No benchmark or steady-state information enters the residual or

@@ -36,14 +36,16 @@ from models.multicountry_growth_shared import (
     tvc_diagnostics,
     validate_initial_conditions,
 )
-from models.utilities import (
+from models.neural_networks import (
     ACTIVATIONS,
     NNXResidualArgs,
+    unit_softplus,
+)
+from models.utilities import (
     OptimizerSettings,
     Stopwatch,
     acceptance_fields,
     make_sampled_train_grid,
-    unit_softplus,
     value_and_grad_fwd,
 )
 

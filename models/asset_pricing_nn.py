@@ -18,10 +18,12 @@ from models.asset_pricing_shared import (
     dividends,
     mu_f_array,
 )
-from models.utilities import (
+from models.neural_networks import (
     ACTIVATIONS,
-    STATUS_TO_REASON,
     NNXResidualArgs,
+)
+from models.utilities import (
+    STATUS_TO_REASON,
     OptimizerSettings,
     Stopwatch,
     acceptance_fields,

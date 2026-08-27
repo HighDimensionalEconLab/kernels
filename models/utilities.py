@@ -1,7 +1,6 @@
 import dataclasses
 import hashlib
 import json
-import pathlib
 import time
 from dataclasses import dataclass
 
@@ -9,7 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
-from flax import nnx, struct
+from flax import struct
 from jax.tree_util import Partial
 from nlls_gram import LMStatus
 from tinydiffeq import SRA1, EulerMaruyama, Milstein
@@ -160,13 +159,6 @@ class KernelResidualArgs:
     unravel: Partial | None = None
 
 
-@struct.dataclass
-class NNXResidualArgs:
-    batch: dict
-    graphdef: nnx.GraphDef
-    nondiff: nnx.State
-
-
 def make_train_t_grid(data_set, dtype):
     if data_set.train_points_list is None:
         values = np.linspace(0.0, data_set.train_T, data_set.train_points).tolist()
@@ -207,23 +199,6 @@ def value_and_grad_fwd(f):
     return value_and_grad
 
 
-# U(0) = U'(0) = 1, so a near-zero head starts at its declared output scale
-# without shrinking the local Jacobian by softplus'(0).
-def unit_softplus(raw):
-    log_two = jnp.log(jnp.asarray(2.0, dtype=raw.dtype))
-    return jax.nn.softplus(2.0 * log_two * raw) / log_two
-
-
-ACTIVATIONS = {
-    "tanh": jnp.tanh,
-    "silu": jax.nn.silu,
-    "gelu": jax.nn.gelu,
-    "relu": jax.nn.relu,
-    "softplus": jax.nn.softplus,
-    "unit_softplus": unit_softplus,
-    "identity": nnx.identity,
-}
-
 SDE_SOLVERS = {
     "sra1": SRA1(),
     "milstein": Milstein(),
@@ -249,71 +224,3 @@ def sample_trajectory_noise(
 def cache_key(config):
     canonical = json.dumps(config, sort_keys=True, default=float)
     return hashlib.sha256(canonical.encode()).hexdigest()[:12]
-
-
-# One .npz per trained module: the nnx.Param block and the non-differentiated
-# Variable block as "params/..." and "nondiff/..." flat keys (nnx's supported
-# State.to_pure_dict / replace_by_pure_dict conversion, list indices numeric),
-# plus a JSON __meta__ block. RNG state is never written: a reload rebuilds
-# the structural template from meta, takes the Param and Variable arrays from
-# the file, and keeps the template's RNG state.
-def save_model(path, module, meta):
-    def flatten(namespace, node, out):
-        if isinstance(node, dict):
-            for key, value in node.items():
-                flatten((*namespace, str(key)), value, out)
-        else:
-            out["/".join(namespace)] = np.asarray(node)
-        return out
-
-    _, params, _, nondiff = nnx.split(module, nnx.Param, nnx.RngState, ...)
-    arrays = flatten(("params",), params.to_pure_dict(), {})
-    flatten(("nondiff",), nondiff.to_pure_dict(), arrays)
-    meta = {**meta, "dtype": str(next(iter(arrays.values())).dtype)}
-    pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
-    np.savez(path, __meta__=np.asarray(json.dumps(meta)), **arrays)
-
-
-def load_model(path, make_module):
-    data = np.load(path)
-    meta = json.loads(str(data["__meta__"]))
-    dtype = jnp.dtype(meta["dtype"])
-    blocks = {"params": {}, "nondiff": {}}
-    for name in data.files:
-        if name == "__meta__":
-            continue
-        namespace, _, rest = name.partition("/")
-        if namespace not in blocks:
-            raise ValueError(
-                f"{path}: unknown npz key namespace {namespace!r}; expected "
-                "params/ or nondiff/ (an artifact from the flat pre-namespace "
-                "format must be regenerated)"
-            )
-        node = blocks[namespace]
-        *parents, leaf = rest.split("/")
-        for part in parents:
-            node = node.setdefault(int(part) if part.isdigit() else part, {})
-        array = data[name]
-        node[int(leaf) if leaf.isdigit() else leaf] = jnp.asarray(
-            array, dtype=dtype if np.issubdtype(array.dtype, np.inexact) else None
-        )
-    graphdef, params, rngs, nondiff = nnx.split(
-        make_module(meta, dtype), nnx.Param, nnx.RngState, ...
-    )
-
-    def leaf_paths(node, prefix=()):
-        if isinstance(node, dict):
-            for key, value in node.items():
-                yield from leaf_paths(value, (*prefix, str(key)))
-        else:
-            yield "/".join(prefix)
-
-    # A missing Param subtree in replace_by_pure_dict is a silent no-op that
-    # would keep the template's random initialization for those leaves.
-    missing = set(leaf_paths(params.to_pure_dict())) - set(leaf_paths(blocks["params"]))
-    if missing:
-        raise ValueError(f"{path} is missing params arrays: {sorted(missing)}")
-    params.replace_by_pure_dict(blocks["params"])
-    if blocks["nondiff"]:
-        nondiff.replace_by_pure_dict(blocks["nondiff"])
-    return nnx.merge(graphdef, params, rngs, nondiff), meta

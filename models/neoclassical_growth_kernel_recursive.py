@@ -29,6 +29,7 @@ from models.neoclassical_growth_shared import (
     simulate,
     trajectory_values,
 )
+from models.neural_networks import unit_softplus
 from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
@@ -36,7 +37,6 @@ from models.utilities import (
     Stopwatch,
     acceptance_fields,
     long_df,
-    unit_softplus,
 )
 
 

@@ -12,6 +12,7 @@ from flax import nnx, struct
 from jax.flatten_util import ravel_pytree
 from nlls_gram import LevenbergMarquardt, LMAction, LMStatus, MultiStart
 
+from models.neural_networks import save_model
 from models.stochastic_growth_shared import (
     STOCHASTIC_GROWTH_CONSTANTS as CONSTANTS,
 )
@@ -39,7 +40,6 @@ from models.utilities import (
     cache_key,
     long_df,
     sample_trajectory_noise,
-    save_model,
     standardized_initial_states,
 )
 

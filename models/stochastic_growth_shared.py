@@ -11,10 +11,8 @@ from flax import nnx
 from nlls_gram import DrawNNXModule
 from tinydiffeq import SaveAt, solve_sde
 
-from models.utilities import (
-    ParameterPyTree,
-    unit_softplus,
-)
+from models.neural_networks import unit_softplus
+from models.utilities import ParameterPyTree
 
 # Stochastic neoclassical growth on the state (log z, log k): OU log-TFP
 # deviation around log z_bar with smooth Cobb-Douglas technology, exactly the

@@ -15,6 +15,11 @@ from nlls_gram import (
     MultiStart,
 )
 
+from models.neural_networks import (
+    ACTIVATIONS,
+    NNXResidualArgs,
+    unit_softplus,
+)
 from models.open_economy_growth_benchmark import open_economy_growth_benchmark
 from models.open_economy_growth_shared import (
     OPEN_ECONOMY_GROWTH_CONSTANTS as CONSTANTS,
@@ -33,13 +38,10 @@ from models.open_economy_growth_shared import (
     tvc_diagnostics,
 )
 from models.utilities import (
-    ACTIVATIONS,
-    NNXResidualArgs,
     OptimizerSettings,
     Stopwatch,
     acceptance_fields,
     make_sampled_train_grid,
-    unit_softplus,
     value_and_grad_fwd,
 )
 

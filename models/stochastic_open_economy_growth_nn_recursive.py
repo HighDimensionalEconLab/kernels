@@ -18,6 +18,7 @@ from nlls_gram import (
     MultiStart,
 )
 
+from models.neural_networks import save_model
 from models.stochastic_open_economy_growth_shared import (
     PROCESS_CONSTANTS,
     DataSettings,
@@ -45,7 +46,6 @@ from models.utilities import (
     acceptance_fields,
     cache_key,
     sample_trajectory_noise,
-    save_model,
     standardized_initial_states,
 )
 

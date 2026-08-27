@@ -27,15 +27,17 @@ from models.neoclassical_growth_shared import (
     simulate,
     trajectory_values,
 )
-from models.utilities import (
+from models.neural_networks import (
     ACTIVATIONS,
+    unit_softplus,
+)
+from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
     Stopwatch,
     acceptance_fields,
     long_df,
     standardized_initial_states,
-    unit_softplus,
 )
 
 

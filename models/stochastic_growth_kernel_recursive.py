@@ -16,6 +16,10 @@ from models.kernels import (
     rbf_state_features,
     rbf_state_gram,
 )
+from models.neural_networks import (
+    load_model,
+    unit_softplus,
+)
 from models.stochastic_growth_shared import (
     STOCHASTIC_GROWTH_CONSTANTS as CONSTANTS,
 )
@@ -41,10 +45,8 @@ from models.utilities import (
     Stopwatch,
     acceptance_fields,
     cache_key,
-    load_model,
     long_df,
     sample_trajectory_noise,
-    unit_softplus,
 )
 
 

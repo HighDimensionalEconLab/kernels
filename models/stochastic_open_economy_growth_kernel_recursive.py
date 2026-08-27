@@ -19,6 +19,7 @@ from nlls_gram import (
 )
 
 from models.kernels import state_features
+from models.neural_networks import load_model
 from models.stochastic_open_economy_growth_shared import (
     PROCESS_CONSTANTS,
     DataSettings,
@@ -47,7 +48,6 @@ from models.utilities import (
     Stopwatch,
     acceptance_fields,
     cache_key,
-    load_model,
     sample_trajectory_noise,
     standardized_initial_states,
 )

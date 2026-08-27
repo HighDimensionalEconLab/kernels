@@ -388,24 +388,14 @@ def correlate_noise(noise, corr_zr):
     return jax.tree.map(transform, noise)
 
 
-def drift_field(state, _, args, p):
-    policy, structural = p
-    return state_drift(policy, state, structural)
-
-
-def diffusion_field(state, _, args, p):
-    _, structural = p
-    return state_diffusion(state, structural)
-
-
 @partial(jax.jit, static_argnames=("T", "n_steps"))
 def simulate(sde, policy, initial_states, noise, T, n_steps, p):
     correlated_noise = correlate_noise(noise, p.corr_zr)
 
     def solve_one(initial_state, trajectory_noise):
         return solve_sde(
-            drift_field,
-            diffusion_field,
+            lambda state: state_drift(policy, state, p),
+            lambda state: state_diffusion(state, p),
             sde,
             0.0,
             T,
@@ -413,7 +403,6 @@ def simulate(sde, policy, initial_states, noise, T, n_steps, p):
             noise=trajectory_noise,
             n_steps=n_steps,
             save_at=SaveAt(steps=True),
-            p=(policy, p),
         )
 
     return jax.vmap(solve_one)(initial_states, correlated_noise)

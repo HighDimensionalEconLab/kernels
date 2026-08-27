@@ -167,24 +167,22 @@ def path_values(policy, states, p):
     return jax.vmap(lambda state: policy_values(policy, state[0], state[1], p))(states)
 
 
-def drift_field(state, _, args, p):
-    policy, k_0 = p
-    k = k_0 * jnp.exp(state[0])
-    investment, current_account = policy(k)
-    investment_rate = investment / k
-    chi = args.delta ** (1.0 - args.eta)
-    capital_drift = k * (chi * investment_rate**args.eta - args.delta)
-    return jnp.stack(
-        [
-            capital_drift / k,
-            current_account / policy.flow_scale[...],
-        ]
-    )
-
-
 def simulate(policy, T, budget, k_0, p, *, save_at):
+    def drift(state):
+        k = k_0 * jnp.exp(state[0])
+        investment, current_account = policy(k)
+        investment_rate = investment / k
+        chi = p.delta ** (1.0 - p.eta)
+        capital_drift = k * (chi * investment_rate**p.eta - p.delta)
+        return jnp.stack(
+            [
+                capital_drift / k,
+                current_account / policy.flow_scale[...],
+            ]
+        )
+
     return solve_ode(
-        drift_field,
+        drift,
         RK4(),
         0.0,
         T,
@@ -193,8 +191,6 @@ def simulate(policy, T, budget, k_0, p, *, save_at):
         controller=ConstantStepSize(),
         max_steps=budget,
         save_at=save_at,
-        args=p,
-        p=(policy, k_0),
     )
 
 
@@ -260,8 +256,21 @@ def residual_fn(theta, args, p):
 
 @partial(jax.jit, static_argnames=("budget",))
 def evaluate_path_jit(policy, T, budget, p):
+    def drift(state):
+        k = p.k_0 * jnp.exp(state[0])
+        investment, current_account = policy(k)
+        investment_rate = investment / k
+        chi = p.delta ** (1.0 - p.eta)
+        capital_drift = k * (chi * investment_rate**p.eta - p.delta)
+        return jnp.stack(
+            [
+                capital_drift / k,
+                current_account / policy.flow_scale[...],
+            ]
+        )
+
     solution = solve_ode(
-        drift_field,
+        drift,
         RK4(),
         0.0,
         T,
@@ -269,8 +278,6 @@ def evaluate_path_jit(policy, T, budget, p):
         dt_0=T / budget,
         max_steps=budget,
         save_at=SaveAt(steps=True),
-        args=p,
-        p=(policy, p.k_0),
     )
     states = states_from_solution(solution, p.k_0, p.a_0, policy.flow_scale[...])
     return {"t": solution.ts, **path_values(policy, states, p)}

@@ -271,18 +271,13 @@ def growth_initial_conditions(z_0, k_0, ic_set, dtype):
     )
 
 
-def log_state_drift_field(log_state, _, args, p):
-    policy, structural = p
-    return log_state_drift(policy, log_state, structural)
-
-
 # Fixed-step RK4 simulation of the policy from a batch of initial log states,
 # saving the integrator's own steps.
 @partial(jax.jit, static_argnames=("T", "n_steps"))
 def simulate(policy, initial_log_states, T, n_steps, p):
     def solve_one(initial_log_state):
         return solve_ode(
-            log_state_drift_field,
+            lambda log_state: log_state_drift(policy, log_state, p),
             RK4(),
             0.0,
             T,
@@ -291,7 +286,6 @@ def simulate(policy, initial_log_states, T, n_steps, p):
             controller=ConstantStepSize(),
             max_steps=n_steps,
             save_at=SaveAt(steps=True),
-            p=(policy, p),
         )
 
     return jax.vmap(solve_one)(initial_log_states)

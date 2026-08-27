@@ -22,7 +22,7 @@ from models.neoclassical_growth_shared import (
     StructuralParameters,
     euler_residuals,
     growth_initial_conditions,
-    log_state_drift_field,
+    log_state_drift,
     log_tvc_residual,
     simulate,
     trajectory_values,
@@ -282,7 +282,7 @@ def simulate_train(policy, initial_log_states, p, data_set):
 
     def solve_one(initial_log_state):
         return solve_ode(
-            log_state_drift_field,
+            lambda log_state: log_state_drift(policy, log_state, p),
             solver,
             0.0,
             data_set.train_T,
@@ -291,7 +291,6 @@ def simulate_train(policy, initial_log_states, p, data_set):
             controller=controller,
             max_steps=budget,
             save_at=SaveAt(steps=True),
-            p=(policy, p),
         )
 
     return jax.vmap(solve_one)(initial_log_states)

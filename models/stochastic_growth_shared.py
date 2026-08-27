@@ -155,22 +155,12 @@ def euler_residuals(policy, log_states, p):
     return euler_residual_terms(policy, log_states, p)[0]
 
 
-def log_state_drift_field(log_state, _, args, p):
-    policy, structural = p
-    return log_state_drift(policy, log_state, structural)
-
-
-def log_state_diffusion_field(log_state, _, args, p):
-    _, structural = p
-    return log_state_diffusion(log_state, structural)
-
-
 @partial(jax.jit, static_argnames=("T", "n_steps"))
 def simulate(sde, policy, initial_log_states, noise, T, n_steps, p):
     def solve_one(initial_log_state, trajectory_noise):
         return solve_sde(
-            log_state_drift_field,
-            log_state_diffusion_field,
+            lambda log_state: log_state_drift(policy, log_state, p),
+            lambda log_state: log_state_diffusion(log_state, p),
             sde,
             0.0,
             T,
@@ -178,7 +168,6 @@ def simulate(sde, policy, initial_log_states, noise, T, n_steps, p):
             noise=trajectory_noise,
             n_steps=n_steps,
             save_at=SaveAt(steps=True),
-            p=(policy, p),
         )
 
     return jax.vmap(solve_one)(initial_log_states, noise)

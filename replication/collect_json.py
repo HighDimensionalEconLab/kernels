@@ -174,8 +174,8 @@ def accepted_cell(j):
 # Sequential kernel-vs-NN comparison across models. Error columns use each
 # model's headline benchmark metric (p for asset pricing; k for growth; the
 # max over k/q/c/a-scaled for the open economy); the concave-convex rows
-# report the correct-basin fraction over the 70 initial conditions instead,
-# since the butterfly model has no closed-form benchmark path.
+# report the correct-basin fraction over the 70 initial conditions,
+# scored against the DNSS-selected benchmark destination.
 def write_sequential_comparison_table(out):
     def basin_fraction(name):
         frame = pd.read_parquet(out / f"{name}_threshold_results.parquet")
@@ -842,11 +842,14 @@ def neoclassical_growth_concave_convex_kernel(
         rejected = df.loc[~df["solution_accepted"], "k_0"].tolist()
         raise RuntimeError(f"rejected threshold solves at k_0={rejected}")
     # Empirical basin threshold from the side each path ACTUALLY settles on
-    # (basin_correct = analytic side, false_positive = opposite side), so a
+    # (basin_correct = benchmark side, false_positive = opposite side), so a
     # wrong-basin path moves the bracket instead of being silently dropped.
-    above_thr = df["k_0"] > df["k_thr"]
-    ends_high = (df["basin_correct"] & above_thr) | (df["false_positive"] & ~above_thr)
-    goes_low = (df["basin_correct"] & ~above_thr) | (df["false_positive"] & above_thr)
+    bench_resolved = df["benchmark_ends_high"].notna()
+    bench_high = df["benchmark_ends_high"].fillna(False).astype(bool)
+    ends_high = (df["basin_correct"] & bench_high) | (
+        df["false_positive"] & ~bench_high
+    )
+    goes_low = (df["basin_correct"] & ~bench_high) | (df["false_positive"] & bench_high)
     resolved = ends_high | goes_low
     if require_all and not resolved.all():
         unresolved = df.loc[~(ends_high | goes_low), "k_0"].tolist()
@@ -868,6 +871,11 @@ def neoclassical_growth_concave_convex_kernel(
         # Bracketing grid points around the empirical basin split.
         "k_0_threshold_bracket": [sig(k_0_low_max, 4), sig(k_0_high_min, 4)],
         "k_0_threshold": sig(0.5 * (k_0_low_max + k_0_high_min), 4),
+        # The benchmark's own flip bracket: the empirical DNSS point k*.
+        "k_0_benchmark_bracket": [
+            sig(float(df.loc[bench_resolved & ~bench_high, "k_0"].max()), 4),
+            sig(float(df.loc[bench_resolved & bench_high, "k_0"].min()), 4),
+        ],
     }
     if "final_damping" in df:
         threshold.update(final_damping_summary(df.loc[df["solution_accepted"]]))
@@ -879,6 +887,24 @@ def neoclassical_growth_concave_convex_kernel(
         },
         "threshold": threshold,
         "n_seeds": int(j["n_seeds"]),
+    }
+
+
+def neoclassical_growth_concave_convex_dnss(out):
+    j = load(out, "neoclassical_growth_concave_convex_dnss")
+    return {
+        "parameters": j["parameters"],
+        "k_thr": sig(j["k_thr"], 6),
+        "k_ss_low": sig(j["k_ss_low"], 4),
+        "k_ss_high": sig(j["k_ss_high"], 4),
+        "scenarios": {
+            f"g={s['g']}": {
+                "T": s["T"],
+                "k_dnss": sig(s["k_dnss"], 6),
+                "k_dnss_minus_k_thr": sig(s["k_dnss_minus_k_thr"], 4),
+            }
+            for s in j["scenarios"]
+        },
     }
 
 
@@ -2051,6 +2077,9 @@ def collect(output_dir: str = ".results"):
             ),
             "neoclassical_growth_concave_convex_kernel": (
                 neoclassical_growth_concave_convex_kernel(out)
+            ),
+            "neoclassical_growth_concave_convex_dnss": (
+                neoclassical_growth_concave_convex_dnss(out)
             ),
             # require_all=False for both NNs: solver acceptance is scored
             # separately from basin correctness, so a rejected grid point is

@@ -47,26 +47,36 @@ def run(
         },
     )
 
-    # Ex-post basin classification of each finite-horizon path (side of the
-    # branch switch the trajectory ends on + direction of motion).
+    # Ex-post basin classification of each finite-horizon path (nearest steady
+    # state + direction of motion), scored against the benchmark's
+    # DNSS-selected destination per k_0.
     k_thr, k_ss_low, k_ss_high = butterfly_thresholds(
         StructuralParameters.create(dtype=jnp.float64, **hyperparameters["parameters"])
     )
     test_df = frames["test_df"]
-    outcomes = []
+    outcomes, benchmark_ends_high = [], []
     for _, row in results_df.iterrows():
         k_0 = row["k_0"]
-        path = test_df.loc[test_df["k_0"] == k_0].sort_values("t")["k"].to_numpy()
-        if not bool(row["solution_accepted"]) or len(path) < 2:
+        rows_k = test_df.loc[test_df["k_0"] == k_0].sort_values("t")
+        path = rows_k["k"].to_numpy()
+        if len(path) < 2:
+            benchmark_ends_high.append(np.nan)
             outcomes.append(
                 {"basin_correct": False, "false_positive": False, "basin_failed": True}
             )
             continue
-        outcomes.append(
-            classify_path_basin(path, float(k_0), k_thr, k_ss_low, k_ss_high)
-        )
+        bench_end = float(rows_k["k_benchmark"].to_numpy()[-1])
+        ends_high = bool(abs(bench_end - k_ss_high) < abs(bench_end - k_ss_low))
+        benchmark_ends_high.append(ends_high)
+        if not bool(row["solution_accepted"]):
+            outcomes.append(
+                {"basin_correct": False, "false_positive": False, "basin_failed": True}
+            )
+            continue
+        outcomes.append(classify_path_basin(path, ends_high, k_ss_low, k_ss_high))
     for key in ("basin_correct", "false_positive", "basin_failed"):
         results_df[key] = [outcome[key] for outcome in outcomes]
+    results_df["benchmark_ends_high"] = benchmark_ends_high
     results_df["k_thr"] = k_thr
     results_df["k_ss_low"] = k_ss_low
     results_df["k_ss_high"] = k_ss_high

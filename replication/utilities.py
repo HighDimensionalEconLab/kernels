@@ -238,25 +238,28 @@ def write_summary(output_dir, prefix, experiments=None):
 # --- butterfly (concave-convex) production geometry ---------------------------
 
 
-def classify_path_basin(k_path, k_0, k_thr, k_ss_low, k_ss_high, tol_frac=0.05):
+def classify_path_basin(
+    k_path, benchmark_ends_high, k_ss_low, k_ss_high, tol_frac=0.05
+):
     # Finite-horizon solutions (kernel and sequential-NN paths to test_T) may
-    # end mid-transition near the threshold, so a settle-ball test alone cannot
-    # apply. A path that ends inside the ball (tol_frac of the branch switch) around a
-    # steady state counts as settled there; otherwise classify by the side of
-    # the threshold the path ends on AND whether its tail is still moving
-    # toward that side's steady state (a diverging tail fails).
+    # end mid-transition near the basin boundary, so a settle-ball test alone
+    # cannot apply. A path that ends inside the ball (tol_frac of the
+    # steady-state gap) around a steady state counts as settled there;
+    # otherwise classify by the nearer steady state AND whether the tail is
+    # still moving toward it (a diverging tail fails). basin_correct compares
+    # the destination against the benchmark's DNSS-selected one.
     k_path = np.asarray(k_path, dtype=float)
     k_end, k_prev = float(k_path[-1]), float(k_path[-2])
-    tol = tol_frac * k_thr
+    tol = tol_frac * (k_ss_high - k_ss_low)
     if abs(k_end - k_ss_low) < tol:
         ends_high, resolved = False, True
     elif abs(k_end - k_ss_high) < tol:
         ends_high, resolved = True, True
     else:
-        ends_high = k_end > k_thr
+        ends_high = abs(k_end - k_ss_high) < abs(k_end - k_ss_low)
         target = k_ss_high if ends_high else k_ss_low
         resolved = abs(k_end - target) < abs(k_prev - target)
-    basin_correct = bool(resolved and ends_high == (k_0 > k_thr))
+    basin_correct = bool(resolved and ends_high == benchmark_ends_high)
     false_positive = bool(resolved and not basin_correct)
     return {
         "basin_correct": basin_correct,

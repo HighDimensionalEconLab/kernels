@@ -139,9 +139,9 @@ def neoclassical_growth_kernel_uno(
     k_0: float = 1.0,
     # No trend machinery in this driver: technology is the constant z_0.
     z_0: float = 1.0,
-    A: float | None = None,
-    b_1: float | None = None,
-    b_2: float | None = None,
+    A: float = 1.0,
+    b_1: float = 1.0,
+    b_2: float = 0.0,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
     solver_set: UnoOptimizerSettings | None = None,
@@ -151,13 +151,10 @@ def neoclassical_growth_kernel_uno(
     # IPOPT works in float64 C arrays, so this solver is float64-only.
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
-    # Butterfly production is enabled exactly when all of A, b_1, b_2 are given.
-    use_butterfly_production = not (A is None or b_1 is None or b_2 is None)
-    if use_butterfly_production:
-        A, b_1, b_2 = float(A), float(b_1), float(b_2)
-        k_thr = (b_2 / (b_1 - 1.0)) ** (1.0 / a)
-    else:
-        A, b_1, b_2, k_thr = 1.0, 1.0, 0.0, float("inf")
+    use_butterfly_production = b_1 > 1.0
+    k_thr = (
+        (b_2 / (b_1 - 1.0)) ** (1.0 / a) if use_butterfly_production else float("inf")
+    )
     if solver_set is None:
         solver_set = (
             BUTTERFLY_SOLVER_SETTINGS
@@ -331,9 +328,7 @@ def neoclassical_growth_kernel_uno(
     validation_data = jnp.linspace(
         0, data_set.train_T, data_set.validation_points, dtype=jnp.float64
     )
-    test_benchmark = (
-        None if use_butterfly_production else neoclassical_growth_benchmark(p)
-    )
+    test_benchmark = neoclassical_growth_benchmark(p)
     train_eval = evaluate_grid(train_data)
     validation_eval = evaluate_grid(validation_data)
     test_eval = evaluate_grid(test_data)
@@ -347,16 +342,15 @@ def neoclassical_growth_kernel_uno(
     test_df = pd.DataFrame(
         {name: np.asarray(test_eval[name]) for name in frame_columns}
     )
-    if test_benchmark is not None:
-        k_b, c_b = test_benchmark(test_data)
-        test_df["k_benchmark"] = np.asarray(k_b)
-        test_df["c_benchmark"] = np.asarray(c_b)
-        test_df["k_rel_error"] = np.abs(test_df["k"] - test_df["k_benchmark"]) / np.abs(
-            test_df["k_benchmark"]
-        )
-        test_df["c_rel_error"] = np.abs(test_df["c"] - test_df["c_benchmark"]) / np.abs(
-            test_df["c_benchmark"]
-        )
+    k_b, c_b = test_benchmark(test_data)
+    test_df["k_benchmark"] = np.asarray(k_b)
+    test_df["c_benchmark"] = np.asarray(c_b)
+    test_df["k_rel_error"] = np.abs(test_df["k"] - test_df["k_benchmark"]) / np.abs(
+        test_df["k_benchmark"]
+    )
+    test_df["c_rel_error"] = np.abs(test_df["c"] - test_df["c_benchmark"]) / np.abs(
+        test_df["c_benchmark"]
+    )
 
     residual_names = ("resource", "euler", "shadow_price")
     max_train_residual = max(
@@ -437,6 +431,8 @@ def neoclassical_growth_kernel_uno(
     ):
         rejection_reasons.append("p_bound")
 
+    k_rel_error = test_df["k_rel_error"].to_numpy()
+    c_rel_error = test_df["c_rel_error"].to_numpy()
     results = {
         "parameters": p.to_dict(),
         "kernel_set": asdict(kernel_set),
@@ -453,30 +449,22 @@ def neoclassical_growth_kernel_uno(
         "log_tvc_residual": log_tvc,
         "transversality_ok": transversality_ok,
         "solve_time": solve_time,
-        **acceptance_fields(rejection_reasons),
-    }
-
-    if not use_butterfly_production:
-        k_rel_error = test_df["k_rel_error"].to_numpy()
-        c_rel_error = test_df["c_rel_error"].to_numpy()
         # min/max error statistics exclude the pinned t = 0 point ([1:]): its
         # near-zero error is an artifact of the initial condition, not accuracy.
-        results.update(
-            test_k_rel_error_mean=float(k_rel_error.mean()),
-            test_c_rel_error_mean=float(c_rel_error.mean()),
-            test_k_rel_error_max=float(k_rel_error[1:].max()),
-            test_c_rel_error_max=float(c_rel_error[1:].max()),
-            test_k_rel_error_min=float(k_rel_error[1:].min()),
-            test_c_rel_error_min=float(c_rel_error[1:].min()),
+        "test_k_rel_error_mean": float(k_rel_error.mean()),
+        "test_c_rel_error_mean": float(c_rel_error.mean()),
+        "test_k_rel_error_max": float(k_rel_error[1:].max()),
+        "test_c_rel_error_max": float(c_rel_error[1:].max()),
+        "test_k_rel_error_min": float(k_rel_error[1:].min()),
+        "test_c_rel_error_min": float(c_rel_error[1:].min()),
+        **acceptance_fields(rejection_reasons),
+    }
+    if verbose:
+        print(
+            f"solve_time(s) = {solve_time}, "
+            f"E(|rel_error(k)|) = {results['test_k_rel_error_mean']:.3e}, "
+            f"E(|rel_error(c)|) = {results['test_c_rel_error_mean']:.3e}"
         )
-        if verbose:
-            print(
-                f"solve_time(s) = {solve_time}, "
-                f"E(|rel_error(k)|) = {results['test_k_rel_error_mean']:.3e}, "
-                f"E(|rel_error(c)|) = {results['test_c_rel_error_mean']:.3e}"
-            )
-    elif verbose:
-        print(f"solve_time(s) = {solve_time}")
     return results, {
         "model": kernel_solution,
         "train_df": train_df,

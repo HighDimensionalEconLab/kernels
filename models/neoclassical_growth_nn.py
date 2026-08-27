@@ -130,8 +130,8 @@ def residual_fn(theta, args, p):
 
 
 # Model paths and residuals on a time grid, with relative errors against the
-# benchmark when one exists (the smooth family).
-def snapshot(theta, args, p, benchmark=None):
+# benchmark.
+def snapshot(theta, args, p, benchmark):
     values = residual_fn(theta, args, p)[1]
     df = pd.DataFrame(
         {
@@ -142,16 +142,11 @@ def snapshot(theta, args, p, benchmark=None):
             "euler": np.asarray(values["euler"]),
         }
     )
-    if benchmark is not None:
-        k_b, c_b = benchmark(args.batch["t"])
-        df["k_benchmark"] = np.asarray(k_b)
-        df["c_benchmark"] = np.asarray(c_b)
-        df["k_rel_error"] = np.abs(df["k"] - df["k_benchmark"]) / np.abs(
-            df["k_benchmark"]
-        )
-        df["c_rel_error"] = np.abs(df["c"] - df["c_benchmark"]) / np.abs(
-            df["c_benchmark"]
-        )
+    k_b, c_b = benchmark(args.batch["t"])
+    df["k_benchmark"] = np.asarray(k_b)
+    df["c_benchmark"] = np.asarray(c_b)
+    df["k_rel_error"] = np.abs(df["k"] - df["k_benchmark"]) / np.abs(df["k_benchmark"])
+    df["c_rel_error"] = np.abs(df["c"] - df["c_benchmark"]) / np.abs(df["c_benchmark"])
     return df
 
 
@@ -162,9 +157,9 @@ def neoclassical_growth_nn(
     k_0: float = 1.0,
     z_0: float = 1.0,
     g: float = 0.0,
-    A: float | None = None,
-    b_1: float | None = None,
-    b_2: float | None = None,
+    A: float = 1.0,
+    b_1: float = 1.0,
+    b_2: float = 0.0,
     sigma_crra: float = CONSTANTS["sigma_crra"],
     seed: int = 0,
     use_float64: bool = True,
@@ -186,13 +181,7 @@ def neoclassical_growth_nn(
 ):
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
-    # Butterfly production is enabled exactly when all of A, b_1, b_2 are given.
-    use_butterfly_production = not (A is None or b_1 is None or b_2 is None)
-    if use_butterfly_production:
-        A, b_1, b_2 = float(A), float(b_1), float(b_2)
-        k_thr = (b_2 / (b_1 - 1.0)) ** (1.0 / a)
-    else:
-        A, b_1, b_2, k_thr = 1.0, 1.0, 0.0, float("inf")
+    k_thr = (b_2 / (b_1 - 1.0)) ** (1.0 / a) if b_1 > 1.0 else float("inf")
 
     dtype = jnp.float64 if use_float64 else jnp.float32
     p = StructuralParameters.create(
@@ -279,7 +268,7 @@ def neoclassical_growth_nn(
 
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     z_trend_test = jnp.exp((1.0 - a) * g * test_t)
-    benchmark = None if use_butterfly_production else neoclassical_growth_benchmark(p)
+    benchmark = neoclassical_growth_benchmark(p)
     train_df = snapshot(result.x, residual_args, p, benchmark)
     test_df = snapshot(
         result.x,
@@ -325,15 +314,12 @@ def neoclassical_growth_nn(
         "solve_time": solve_time,
         "solve_time_success": solve_time if not rejection_reasons else np.nan,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
+        "test_k_rel_error_mean": float(test_df["k_rel_error"].mean()),
+        "test_c_rel_error_mean": float(test_df["c_rel_error"].mean()),
+        "test_k_rel_error_max": float(test_df["k_rel_error"].abs().max()),
+        "test_c_rel_error_max": float(test_df["c_rel_error"].abs().max()),
         **acceptance_fields(rejection_reasons),
     }
-    if not use_butterfly_production:
-        results.update(
-            test_k_rel_error_mean=float(test_df["k_rel_error"].mean()),
-            test_c_rel_error_mean=float(test_df["c_rel_error"].mean()),
-            test_k_rel_error_max=float(test_df["k_rel_error"].abs().max()),
-            test_c_rel_error_max=float(test_df["c_rel_error"].abs().max()),
-        )
 
     if verbose:
         print("\nFinal results:")

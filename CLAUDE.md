@@ -35,13 +35,22 @@ per-directory READMEs.
   `residual_fn(...)[1]`, and add derived diagnostics on top — rows are never
   written twice. Initial-condition rows appear only in the flat vector,
   never in the aux dict. Sequence-space drivers share the solver-args
-  structs in `models/utilities.py`: `KernelResidualArgs` (K, K_tilde, the
+  structs: `KernelResidualArgs` in `models/utilities.py` (K, K_tilde, the
   optional `batch` dict of standardized always-plain grid arrays — `t`,
   `z_trend`, `g_hat` — and, for the `_uno` drivers, `ravel_pytree`'s unravel
-  as a `tree_util.Partial`) and `NNXResidualArgs` (batch, graphdef, nondiff);
-  the multicountry kernel's CG path keeps its own
-  `PreconditionedKernelResidualArgs` with the whitened preconditioner
-  factors, and the recursive drivers keep bespoke `ResidualArgs`.
+  as a `tree_util.Partial`) and `NNXResidualArgs` (batch, graphdef, nondiff)
+  in `models/neural_networks.py`; the multicountry kernel's CG path keeps
+  its own `PreconditionedKernelResidualArgs` with the whitened
+  preconditioner factors, and the recursive drivers keep bespoke
+  `ResidualArgs`. `models/neural_networks.py` is a leaf module (like
+  `kernels.py`) holding the NN pieces: the generic batch-aware `TimeMLP`
+  map t -> (..., out_features) that every sequence-space NN driver
+  instantiates (near-zero head, optional `final_activation` — e.g.
+  `unit_softplus`, or the per-output `UnitSoftplusWhere` mask for mixed
+  signed/positive heads — `output_scale` Variable, optional trend Param
+  `g`), plus `unit_softplus`/`ACTIVATIONS`, `NNXResidualArgs`, and the
+  policy-artifact `save_model`/`load_model`; `utilities.py` keeps the
+  non-NN shared pieces and never imports `nnx`.
 - `replication/` — ensemble + figure drivers; `collect_json.py` writes
   `.results/all_results.json`, the only place paper numbers are selected and
   rounded. Generated JSON is gitignored; track one with a targeted `!path` rule.

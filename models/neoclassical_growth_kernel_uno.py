@@ -28,7 +28,6 @@ from models.neoclassical_growth_shared import (
     StructuralParameters,
     mpk,
     production,
-    steady_flow_consumption_guess,
 )
 from models.utilities import (
     ACCEPTED_UNO_SOLUTION_STATUSES,
@@ -190,7 +189,7 @@ def neoclassical_growth_kernel_uno(
         k_thr=k_thr,
     )
 
-    c_flow_guess = steady_flow_consumption_guess(p)
+    c_flow_guess = float(production(p.z_0, p.k_0, p) - p.delta * p.k_0)
     if c_0_guess is not None:
         c_flow_guess = float(c_0_guess)
     theta_0 = Theta(

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 
 from models import neoclassical_growth_kernel_uno
-from models.neoclassical_growth_shared import KINKED_CALIBRATION, kinked_thresholds
+from models.neoclassical_growth_shared import (
+    KINKED_CALIBRATION,
+    StructuralParameters,
+    kinked_thresholds,
+)
 from replication.utilities import (
     classify_path_basin,
     configure_process,
@@ -44,14 +49,8 @@ def run(
 
     # Ex-post basin classification of each finite-horizon path (side of the
     # kink the trajectory ends on + direction of motion).
-    parameters = hyperparameters["parameters"]
     k_thr, k_ss_low, k_ss_high = kinked_thresholds(
-        a=parameters["a"],
-        delta=parameters["delta"],
-        rho_hat=parameters["rho_hat"],
-        A=parameters["A"],
-        b_1=parameters["b_1"],
-        b_2=parameters["b_2"],
+        StructuralParameters.create(dtype=jnp.float64, **hyperparameters["parameters"])
     )
     test_df = frames["test_df"]
     outcomes = []

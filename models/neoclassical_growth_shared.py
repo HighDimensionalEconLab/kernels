@@ -136,14 +136,6 @@ def euler_residuals(policy, log_states, p):
     return jax.vmap(residual_scalar)(log_states)
 
 
-# Flat steady-flow warm start c(0) = f(z_0, k_0) - delta k_0.
-def steady_flow_consumption_guess(p):
-    base = float(p.k_0) ** float(p.a)
-    return float(p.z_0) * float(p.A) * max(
-        base, float(p.b_1) * base - float(p.b_2)
-    ) - float(p.delta) * float(p.k_0)
-
-
 # Closed-form steady state of the static smooth model (z = 1, g = 0):
 # f'(k_ss) = delta + rho_hat with f(k) = k^a gives
 # k_ss = (a / (delta + rho_hat))^(1/(1 - a)) and c_ss = k_ss^a - delta k_ss.
@@ -178,16 +170,11 @@ def neoclassical_steady_state_sensitivities(p):
     }
 
 
-def kinked_thresholds(
-    a=KINKED_CALIBRATION["a"],
-    delta=KINKED_CALIBRATION["delta"],
-    rho_hat=KINKED_CALIBRATION["rho_hat"],
-    A=KINKED_CALIBRATION["A"],
-    b_1=KINKED_CALIBRATION["b_1"],
-    b_2=KINKED_CALIBRATION["b_2"],
-):
+def kinked_thresholds(p):
     # Branch switch k_thr where k^a = b_1 k^a - b_2, and the per-branch steady
     # states from f'(k_ss) = delta + rho_hat (ex-post classification only).
+    a, delta, rho_hat = float(p.a), float(p.delta), float(p.rho_hat)
+    A, b_1, b_2 = float(p.A), float(p.b_1), float(p.b_2)
     k_thr = (b_2 / (b_1 - 1.0)) ** (1.0 / a)
     k_ss_low = ((delta + rho_hat) / (A * a)) ** (1.0 / (a - 1.0))
     k_ss_high = ((delta + rho_hat) / (A * a * b_1)) ** (1.0 / (a - 1.0))

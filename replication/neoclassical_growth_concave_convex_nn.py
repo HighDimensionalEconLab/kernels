@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 
 from models import neoclassical_growth_nn
-from models.neoclassical_growth_shared import KINKED_CALIBRATION, kinked_thresholds
+from models.neoclassical_growth_shared import (
+    KINKED_CALIBRATION,
+    StructuralParameters,
+    kinked_thresholds,
+)
 from replication.utilities import (
     classify_path_basin,
     configure_process,
@@ -44,14 +49,8 @@ def run(
     # Ex-post basin classification of each finite-horizon path, identical to the
     # kernel sweep: a sequence-space solution may still be in motion at test_T,
     # so the settle-ball test the recursive policy uses cannot apply.
-    parameters = hyperparameters["parameters"]
     k_thr, k_ss_low, k_ss_high = kinked_thresholds(
-        a=parameters["a"],
-        delta=parameters["delta"],
-        rho_hat=parameters["rho_hat"],
-        A=parameters["A"],
-        b_1=parameters["b_1"],
-        b_2=parameters["b_2"],
+        StructuralParameters.create(dtype=jnp.float64, **hyperparameters["parameters"])
     )
     test_df = frames["test_df"]
     outcomes = []

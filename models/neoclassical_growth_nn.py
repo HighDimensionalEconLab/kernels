@@ -26,7 +26,6 @@ from models.neoclassical_growth_shared import (
     ToleranceSettings,
     mpk,
     production,
-    steady_flow_consumption_guess,
 )
 from models.utilities import (
     ACTIVATIONS,
@@ -213,7 +212,7 @@ def neoclassical_growth_nn(
 
     t_train = make_train_t_grid(data_set, dtype)
     z_trend_train = jnp.exp((1.0 - a) * g * t_train)
-    c_flow_guess = steady_flow_consumption_guess(p)
+    c_flow_guess = float(production(p.z_0, p.k_0, p) - p.delta * p.k_0)
     input_scale = max(float(data_set.train_T), 1.0)
     k_scale = float(k_0)
     c_scale = c_flow_guess

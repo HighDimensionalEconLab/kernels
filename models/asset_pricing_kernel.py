@@ -17,6 +17,7 @@ from models.asset_pricing_shared import (
     StructuralParameters,
     ToleranceSettings,
     dividends,
+    kernel_horizon_bias_p0,
     mu_f_array,
 )
 from models.kernels import (
@@ -153,32 +154,9 @@ def asset_pricing_kernel(
     p_benchmark = mu_f_array(test_data, p)
     p_rel_error = jnp.abs(p_benchmark - p_test) / p_benchmark
 
-    # Analytic finite-horizon bias of the dense-grid limit of the min-norm
-    # selection (Matern-1/2 only): the continuum criterion ||p'||^2_H over
-    # [0, T] selects p*(t) + zeta_T e^{rt} with
-    # zeta_T = -<p*', r e^{r.}>_H / ||r e^{r.}||^2_H, elementary exponential
-    # integrals under the H-norm (1/2s^2)[ell int f'^2 + (1/ell) int f^2
-    # + f(0)^2 + f(T)^2]. The p_0 bias is zeta_T; the bias at time t is
-    # zeta_T e^{rt}. At ell = 1/r it collapses to -(A/r) e^{(g-r)T}. The
-    # remaining p_0 error is the O(dt^2) grid-spacing selection bias.
-    if kernel == "matern12":
-        T = float(train_data[-1])
-        A = g * (x_0 + c / g) / (r - g)  # p*'(t) = A e^{g t}
-        E, F = np.exp((g + r) * T), np.exp(2 * r * T)
-        I_1, I_2 = (E - 1) / (g + r), (F - 1) / (2 * r)
-        horizon_bias_p0 = float(
-            -(A / r)
-            * ((ell * g * r + 1 / ell) * I_1 + 1 + E)
-            / ((ell * r * r + 1 / ell) * I_2 + 1 + F)
-        )
-    else:
-        horizon_bias_p0 = float("nan")
+    # Analytic finite-horizon bias in the matern12 case.
+    horizon_bias_p0 = kernel_horizon_bias_p0(p, kernel_set, T=float(train_data[-1]))
 
-    # Acceptance certifies the solution, not the stopping code: a solve that
-    # stalls at its residual floor below the train gate is feasible (the
-    # IPOPT baseline's FEASIBLE_SMALL_STEP semantics) -- the smooth kernels
-    # routinely end there because atol is unreachable for their
-    # ill-conditioned Grams. stopping_reason still reports the code.
     train_residual_tolerance = max(
         tolerance_set.train_residual,
         8.0 * float(jnp.finfo(dtype).eps),

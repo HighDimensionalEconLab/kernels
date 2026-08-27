@@ -17,6 +17,7 @@ from models.asset_pricing_shared import (
     StructuralParameters,
     ToleranceSettings,
     dividends,
+    kernel_horizon_bias_p0,
     mu_f_array,
 )
 from models.kernels import (
@@ -235,6 +236,9 @@ def asset_pricing_kernel_uno(
     p_benchmark = mu_f_array(test_data, p)
     p_rel_error = jnp.abs(p_benchmark - p_test) / p_benchmark
 
+    # Analytic finite-horizon bias in the matern12 case.
+    horizon_bias_p0 = kernel_horizon_bias_p0(p, kernel_set, T=float(train_data[-1]))
+
     solve_time = elapsed
     solver_status = str(result.optimization_status).split(".")[-1]
     solution_status = str(result.solution_status).split(".")[-1]
@@ -260,6 +264,7 @@ def asset_pricing_kernel_uno(
         "train_T": float(train_data[-1]),
         "num_train_points": n_train,
         "p_0": float(p_0),
+        "horizon_bias_p0": horizon_bias_p0,
         "rkhs_norm_p": float(rkhs_norm_squared(alpha, K_jax)),
         "max_train_residual": max_train_residual,
         "max_test_residual": float(jnp.max(jnp.abs(test_residual))),

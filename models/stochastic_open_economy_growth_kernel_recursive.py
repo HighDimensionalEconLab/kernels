@@ -19,7 +19,7 @@ from nlls_gram import (
 )
 
 from models.kernels import state_features
-from models.neural_networks import load_model
+from models.neural_networks import anchored_outputs, load_model, normalize_state
 from models.stochastic_open_economy_growth_shared import (
     PROCESS_CONSTANTS,
     DataSettings,
@@ -28,8 +28,6 @@ from models.stochastic_open_economy_growth_shared import (
     StructuralParameters,
     euler_residual_terms,
     make_sequential_policy,
-    normalize_state,
-    policy_outputs,
     problem_cache_config,
     production,
     simulate,
@@ -93,12 +91,14 @@ class ResidualArgs:
     centers: jax.Array
     train_states: jax.Array
     gram: jax.Array
-    state_center: jax.Array
-    state_scale: jax.Array
-    investment_anchor: jax.Array
-    current_account_anchor: jax.Array
-    output_scale: jax.Array
+    center: jax.Array
+    scale: jax.Array
+    anchor: jax.Array
+    out_scale: jax.Array
+    offset: jax.Array
     kernel_set: StateKernelSettings = struct.field(pytree_node=False)
+    positive: tuple = struct.field(pytree_node=False)
+    squash: tuple = struct.field(pytree_node=False)
 
 
 def state_lengthscales(kernel_set):
@@ -113,9 +113,10 @@ def state_lengthscales(kernel_set):
 
 def build_residual_args(train_states, kernel_set, reference_policy):
     flat_states = train_states.reshape(-1, 4)
-    state_center = reference_policy.state_center[...]
-    state_scale = reference_policy.state_scale[...]
-    centers = jax.vmap(lambda state: normalize_state(state, state_center, state_scale))(
+    center = reference_policy.center[...]
+    scale = reference_policy.scale[...]
+    squash = reference_policy.squash
+    centers = jax.vmap(lambda state: normalize_state(state, center, scale, squash))(
         flat_states
     )
     gram = state_features(
@@ -129,12 +130,14 @@ def build_residual_args(train_states, kernel_set, reference_policy):
         centers=centers,
         train_states=flat_states,
         gram=gram,
-        state_center=state_center,
-        state_scale=state_scale,
-        investment_anchor=reference_policy.investment_anchor[...],
-        current_account_anchor=reference_policy.current_account_anchor[...],
-        output_scale=reference_policy.output_scale[...],
+        center=center,
+        scale=scale,
+        anchor=reference_policy.anchor[...],
+        out_scale=reference_policy.out_scale[...],
+        offset=reference_policy.offset[...],
         kernel_set=kernel_set,
+        positive=reference_policy.positive,
+        squash=squash,
     )
 
 
@@ -149,7 +152,7 @@ class KernelSequentialPolicy:
     kernel_set: StateKernelSettings = struct.field(pytree_node=False)
 
     def __call__(self, state):
-        x = normalize_state(state, self.args.state_center, self.args.state_scale)
+        x = normalize_state(state, self.args.center, self.args.scale, self.args.squash)
         features = state_features(
             self.kernel_set.state_kernel,
             x,
@@ -164,11 +167,12 @@ class KernelSequentialPolicy:
             index += 1
         if self.kernel_set.linear_mean:
             raw = raw + x @ self.theta[index]
-        return policy_outputs(
+        return anchored_outputs(
             raw,
-            self.args.investment_anchor,
-            self.args.current_account_anchor,
-            self.args.output_scale,
+            self.args.positive,
+            self.args.anchor,
+            self.args.out_scale,
+            self.args.offset,
         )
 
 
@@ -334,17 +338,16 @@ def stochastic_open_economy_growth_kernel_recursive(
         policy_dir, problem_config
     )
     # A scale mismatch means the artifact's problem differs from its hash.
-    saved_settings = reference_meta["settings"]
     investment_anchor = parameters.delta * k_0
+    saved_out_scale = float(reference_policy.out_scale[...][0])
+    saved_anchor = float(reference_policy.anchor[...][0])
     if not (
-        math.isclose(saved_settings["output_scale"], output_scale)
-        and math.isclose(saved_settings["investment_anchor"], investment_anchor)
+        math.isclose(saved_out_scale, output_scale)
+        and math.isclose(saved_anchor, investment_anchor)
     ):
         raise RuntimeError(
             "reference policy scales disagree with the requested problem: "
-            f"saved (output_scale, investment_anchor) = "
-            f"({saved_settings['output_scale']}, "
-            f"{saved_settings['investment_anchor']}), "
+            f"saved (out_scale, anchor) = ({saved_out_scale}, {saved_anchor}), "
             f"recomputed ({output_scale}, {investment_anchor})"
         )
     if verbose:

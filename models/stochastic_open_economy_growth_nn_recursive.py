@@ -18,18 +18,18 @@ from nlls_gram import (
     MultiStart,
 )
 
-from models.neural_networks import save_model
+from models.neural_networks import StateMLP, save_model
 from models.stochastic_open_economy_growth_shared import (
     PROCESS_CONSTANTS,
     DataSettings,
     InitialConditionSettings,
     ModelParameters,
-    SequentialPolicyNN,
     SequentialPolicySettings,
     StructuralParameters,
     euler_residual_terms,
     problem_cache_config,
     production,
+    sequential_policy_spec,
     simulate,
     simulate_train,
     trajectory_frame,
@@ -79,8 +79,8 @@ class ToleranceSettings:
 # restart_key/epoch_key here (and resetting epoch to 0) is what keeps each
 # retry's epoch-boundary resampling independent of the others.
 class DrawSequentialPolicy:
-    def __init__(self, settings, dtype):
-        self.draw_theta = DrawNNXModule(SequentialPolicyNN, settings, dtype=dtype)
+    def __init__(self, draw_theta):
+        self.draw_theta = draw_theta
 
     def __call__(self, key, _, args):
         theta, _ = self.draw_theta(key, _, args)
@@ -322,25 +322,22 @@ def stochastic_open_economy_growth_nn_recursive(
     test_scales = jnp.sqrt(jnp.asarray(test_variances, dtype=dtype))
     investment_anchor = parameters.delta * k_0
     current_account_anchor = 0.0
-    nn_set = replace(
+    policy_spec = sequential_policy_spec(
         nn_set,
-        log_z_center=math.log(z_bar),
-        log_z_scale=max(
-            math.sqrt(z_ergodic_variance),
-            math.sqrt(train_variances[0]),
+        dtype,
+        center=(math.log(z_bar), math.log(k_0), a_0 / output_scale, 0.0),
+        # NFA travels ~an output unit per decade, so the asset squash scale
+        # floors at 0.1 * train_T; a unit floor saturates the tanh
+        # mid-transition.
+        scale=(
+            max(math.sqrt(z_ergodic_variance), math.sqrt(train_variances[0])),
+            1.0,
+            max(math.sqrt(train_variances[2]), 0.1 * data_set.train_T, 1.0),
+            max(math.sqrt(rate_ergodic_variance), math.sqrt(train_variances[3])),
         ),
-        log_k_center=math.log(k_0),
-        asset_center=a_0 / output_scale,
-        # NFA travels ~an output unit per decade, so the squash scale floors
-        # at 0.1 * train_T; a unit floor saturates the tanh mid-transition.
-        asset_scale=max(math.sqrt(train_variances[2]), 0.1 * data_set.train_T, 1.0),
-        rate_scale=max(
-            math.sqrt(rate_ergodic_variance),
-            math.sqrt(train_variances[3]),
-        ),
-        output_scale=output_scale,
-        investment_anchor=investment_anchor,
-        current_account_anchor=current_account_anchor,
+        anchor=(investment_anchor, 1.0),
+        out_scale=(output_scale, output_scale),
+        offset=(0.0, current_account_anchor),
     )
     p = StructuralParameters.create(
         dtype=dtype,
@@ -411,7 +408,7 @@ def stochastic_open_economy_growth_nn_recursive(
 
     fit_timer = Stopwatch()
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
-    initial_model = SequentialPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(init_key))
+    initial_model = StateMLP(4, rngs=nnx.Rngs(init_key), **policy_spec)
     graphdef, theta_0, nondiff = nnx.split(initial_model, nnx.Param, ...)
     # fold_in(train_ic_key, 1) is the training noise stream; the kernel
     # consumer regenerates this exact stream to rebuild the frozen design.
@@ -517,7 +514,7 @@ def stochastic_open_economy_growth_nn_recursive(
         multi_start=MultiStart(
             key=multi_start_key,
             num_starts=lm_set.num_attempts,
-            draw=DrawSequentialPolicy(nn_set, dtype),
+            draw=DrawSequentialPolicy(DrawNNXModule(StateMLP, 4, **policy_spec)),
             accept=accept_training,
         ),
         max_steps_is_success=False,

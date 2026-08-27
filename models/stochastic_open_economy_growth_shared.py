@@ -11,10 +11,7 @@ import pandas as pd
 from flax import nnx
 from tinydiffeq import SaveAt, solve_sde
 
-from models.neural_networks import (
-    ACTIVATIONS,
-    unit_softplus,
-)
+from models.neural_networks import ACTIVATIONS, StateMLP
 from models.utilities import ParameterPyTree
 
 # Recursive stochastic small open economy on (log z, log k, a/output_scale,
@@ -111,134 +108,27 @@ class SequentialPolicySettings:
     depth: int = 3
     hidden_activation: str = "gelu"
     investment_head_init_scale: float = 1e-3
-    log_z_center: float = 0.0
-    log_z_scale: float = 1.0
-    log_k_center: float = 0.0
-    asset_center: float = 0.0
-    asset_scale: float = 1.0
-    rate_scale: float = 1.0
-    output_scale: float = 1.0
-    investment_anchor: float = 1.0
-    current_account_anchor: float = 0.0
 
 
-# At the draw only log k feeds the net (investment ~ delta k_0, CA = 0);
-# the z/asset/rate columns are zero at the draw, not frozen.
-def capital_only_kernel_init(key, shape, dtype):
-    kernel = nnx.initializers.lecun_normal()(key, shape, dtype)
-    mask = jnp.asarray([0.0, 1.0, 0.0, 0.0], dtype=dtype)[:, None]
-    return kernel * mask
-
-
-# Shared with the kernel policy; the asset squash is bounded in (-2, 2) and
-# ~95% saturated near |u| ~ 3.7.
-def normalize_state(state, center, scale):
-    u = (state - center) / scale
-    return u.at[2].set(2.0 * jnp.tanh(u[2] / 2.0))
-
-
-# Shared with the kernel policy. The pre-scaling gives both heads the same
-# O(output_scale) Jacobian; dropping it shrinks the investment rows ~16x.
-def policy_outputs(raw, investment_anchor, current_account_anchor, output_scale):
-    investment = investment_anchor * unit_softplus(
-        (output_scale / investment_anchor) * raw[0]
+# StateMLP spec on (log z, log k, a/output_scale, rate_gap): the asset axis
+# is tanh-squashed, and at the draw only log k feeds the first layer
+# (investment ~ its anchor, CA at its offset) -- the z/asset/rate columns are
+# zero at the draw, not frozen. The zeros CA kernel keeps its head exactly at
+# the offset; equal out_scales give both heads the same O(output_scale)
+# Jacobian. The driver supplies the resolved center/scale/anchor/out_scale/
+# offset through **normalization.
+def sequential_policy_spec(settings, dtype, **normalization):
+    return dict(
+        width=settings.width,
+        depth=settings.depth,
+        activation=ACTIVATIONS[settings.hidden_activation],
+        heads=((1, settings.investment_head_init_scale), (1, None)),
+        positive=(True, False),
+        squash=(False, False, True, False),
+        input_kernel_mask=(0.0, 1.0, 0.0, 0.0),
+        dtype=dtype,
+        **normalization,
     )
-    current_account = current_account_anchor + output_scale * raw[1]
-    return jnp.stack([investment, current_account])
-
-
-class SequentialPolicyNN(nnx.Module):
-    def __init__(
-        self,
-        settings: SequentialPolicySettings,
-        *,
-        dtype,
-        rngs: nnx.Rngs,
-    ):
-        self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
-        self.state_center = nnx.Variable(
-            jnp.asarray(
-                [
-                    settings.log_z_center,
-                    settings.log_k_center,
-                    settings.asset_center,
-                    0.0,
-                ],
-                dtype=dtype,
-            )
-        )
-        self.state_scale = nnx.Variable(
-            jnp.asarray(
-                [
-                    settings.log_z_scale,
-                    1.0,
-                    settings.asset_scale,
-                    settings.rate_scale,
-                ],
-                dtype=dtype,
-            )
-        )
-        self.output_scale = nnx.Variable(
-            jnp.asarray(settings.output_scale, dtype=dtype)
-        )
-        self.investment_anchor = nnx.Variable(
-            jnp.asarray(settings.investment_anchor, dtype=dtype)
-        )
-        self.current_account_anchor = nnx.Variable(
-            jnp.asarray(settings.current_account_anchor, dtype=dtype)
-        )
-        self.layers = nnx.List(
-            [
-                nnx.Linear(
-                    4,
-                    settings.width,
-                    kernel_init=capital_only_kernel_init,
-                    dtype=dtype,
-                    param_dtype=dtype,
-                    rngs=rngs,
-                )
-            ]
-        )
-        for _ in range(settings.depth - 1):
-            self.layers.append(
-                nnx.Linear(
-                    settings.width,
-                    settings.width,
-                    dtype=dtype,
-                    param_dtype=dtype,
-                    rngs=rngs,
-                )
-            )
-        self.investment_head = nnx.Linear(
-            settings.width,
-            1,
-            kernel_init=nnx.initializers.normal(settings.investment_head_init_scale),
-            bias_init=nnx.initializers.zeros_init(),
-            dtype=dtype,
-            param_dtype=dtype,
-            rngs=rngs,
-        )
-        self.current_account_head = nnx.Linear(
-            settings.width,
-            1,
-            kernel_init=nnx.initializers.zeros_init(),
-            bias_init=nnx.initializers.zeros_init(),
-            dtype=dtype,
-            param_dtype=dtype,
-            rngs=rngs,
-        )
-
-    def __call__(self, state):
-        h = normalize_state(state, self.state_center[...], self.state_scale[...])
-        for layer in self.layers:
-            h = self.hidden_activation(layer(h))
-        raw = jnp.stack([self.investment_head(h)[0], self.current_account_head(h)[0]])
-        return policy_outputs(
-            raw,
-            self.investment_anchor[...],
-            self.current_account_anchor[...],
-            self.output_scale[...],
-        )
 
 
 def state_levels(state, p):
@@ -558,8 +448,14 @@ def problem_cache_config(
 
 
 # The load template only needs the architecture from meta: the resolved
-# scale/anchor Variables ride in the artifact's nondiff block.
+# normalization and anchor Variables ride in the artifact's nondiff block and
+# overwrite the placeholder defaults.
 def make_sequential_policy(meta, dtype):
-    return SequentialPolicyNN(
-        SequentialPolicySettings(**meta["settings"]), dtype=dtype, rngs=nnx.Rngs(0)
+    settings = SequentialPolicySettings(**meta["settings"])
+    return StateMLP(
+        4,
+        rngs=nnx.Rngs(0),
+        **sequential_policy_spec(
+            settings, dtype, anchor=(1.0, 1.0), out_scale=(1.0, 1.0)
+        ),
     )

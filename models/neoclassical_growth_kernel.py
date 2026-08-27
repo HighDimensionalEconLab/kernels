@@ -100,6 +100,7 @@ def neoclassical_growth_kernel(
     z_0: float = 1.0,
     g: float = 0.0,
     learn_g_hat: bool = False,
+    g_hat_init: float = 0.0,  # theta_0 trend entry when learned
     A: float = 1.0,
     b_1: float = 1.0,
     b_2: float = 0.0,
@@ -169,7 +170,7 @@ def neoclassical_growth_kernel(
         alpha_k=jnp.zeros(n_train, dtype=dtype),
         c_0=c_0_init,
         mu_0=c_0_init**-sigma_crra,
-        g_hat=jnp.zeros((), dtype=dtype) if learn_g_hat else None,
+        g_hat=jnp.asarray(g_hat_init, dtype=dtype) if learn_g_hat else None,
     )
 
     # Ridge Levenberg-Marquardt solve.

@@ -342,22 +342,6 @@ class InvestmentPolicySettings:
     head_init_scale: float = 1e-3
 
 
-# The gelu trunk stays hardcoded: the residual differentiates the policy
-# twice, and the mean reversion in z fixes a scale, so the raw (log z, log k)
-# state feeds the trunk unnormalized with the constant delta * k_0 anchor.
-def investment_policy_spec(settings, delta, k_0, dtype):
-    return dict(
-        width=settings.mlp_width,
-        depth=settings.mlp_depth,
-        activation=jax.nn.gelu,
-        heads=((1, settings.head_init_scale),),
-        positive=(True,),
-        anchor=(delta * k_0,),
-        out_scale=(delta * k_0,),
-        dtype=dtype,
-    )
-
-
 # DrawNNXModule redraws theta but passes args through unchanged; multi-start
 # chains each attempt's initial args from the previous draw, so re-chaining
 # restart_key/epoch_key here (and resetting epoch to 0) is what keeps each
@@ -392,6 +376,13 @@ def make_investment_policy(meta, dtype):
     settings = InvestmentPolicySettings(**meta["settings"])
     return StateMLP(
         2,
+        width=settings.mlp_width,
+        depth=settings.mlp_depth,
+        activation=jax.nn.gelu,
+        heads=((1, settings.head_init_scale),),
+        positive=(True,),
+        anchor=(1.0,),
+        out_scale=(1.0,),
+        dtype=dtype,
         rngs=nnx.Rngs(0),
-        **investment_policy_spec(settings, 1.0, 1.0, dtype),
     )

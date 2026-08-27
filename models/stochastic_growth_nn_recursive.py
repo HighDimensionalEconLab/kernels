@@ -30,7 +30,6 @@ from models.stochastic_growth_shared import (
     StructuralParameters,
     euler_residuals,
     growth_initial_conditions,
-    investment_policy_spec,
     log_tvc_residual,
     problem_cache_config,
     simulate,
@@ -255,7 +254,19 @@ def stochastic_growth_nn_recursive(
 
     fit_timer = Stopwatch()
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
-    policy_spec = investment_policy_spec(nn_set, delta, k_0, dtype)
+    # The residual differentiates the policy twice, so the gelu trunk stays
+    # hardcoded; mean reversion in z fixes a scale, so the raw (log z, log k)
+    # state feeds the trunk unnormalized with the constant delta * k_0 anchor.
+    policy_spec = dict(
+        width=nn_set.mlp_width,
+        depth=nn_set.mlp_depth,
+        activation=jax.nn.gelu,
+        heads=((1, nn_set.head_init_scale),),
+        positive=(True,),
+        anchor=(delta * k_0,),
+        out_scale=(delta * k_0,),
+        dtype=dtype,
+    )
     graphdef, _, nondiff = nnx.split(
         StateMLP(2, rngs=nnx.Rngs(0), **policy_spec),
         nnx.Param,

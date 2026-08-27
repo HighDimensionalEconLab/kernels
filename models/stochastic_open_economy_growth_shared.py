@@ -110,27 +110,6 @@ class SequentialPolicySettings:
     investment_head_init_scale: float = 1e-3
 
 
-# StateMLP spec on (log z, log k, a/output_scale, rate_gap): the asset axis
-# is tanh-squashed, and at the draw only log k feeds the first layer
-# (investment ~ its anchor, CA at its offset) -- the z/asset/rate columns are
-# zero at the draw, not frozen. The zeros CA kernel keeps its head exactly at
-# the offset; equal out_scales give both heads the same O(output_scale)
-# Jacobian. The driver supplies the resolved center/scale/anchor/out_scale/
-# offset through **normalization.
-def sequential_policy_spec(settings, dtype, **normalization):
-    return dict(
-        width=settings.width,
-        depth=settings.depth,
-        activation=ACTIVATIONS[settings.hidden_activation],
-        heads=((1, settings.investment_head_init_scale), (1, None)),
-        positive=(True, False),
-        squash=(False, False, True, False),
-        input_kernel_mask=(0.0, 1.0, 0.0, 0.0),
-        dtype=dtype,
-        **normalization,
-    )
-
-
 def state_levels(state, p):
     log_z, log_k, asset_scaled, rate_gap = state
     return {
@@ -454,8 +433,15 @@ def make_sequential_policy(meta, dtype):
     settings = SequentialPolicySettings(**meta["settings"])
     return StateMLP(
         4,
+        width=settings.width,
+        depth=settings.depth,
+        activation=ACTIVATIONS[settings.hidden_activation],
+        heads=((1, settings.investment_head_init_scale), (1, None)),
+        positive=(True, False),
+        squash=(False, False, True, False),
+        input_kernel_mask=(0.0, 1.0, 0.0, 0.0),
+        anchor=(1.0, 1.0),
+        out_scale=(1.0, 1.0),
+        dtype=dtype,
         rngs=nnx.Rngs(0),
-        **sequential_policy_spec(
-            settings, dtype, anchor=(1.0, 1.0), out_scale=(1.0, 1.0)
-        ),
     )

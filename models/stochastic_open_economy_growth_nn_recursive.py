@@ -18,7 +18,7 @@ from nlls_gram import (
     MultiStart,
 )
 
-from models.neural_networks import StateMLP, save_model
+from models.neural_networks import ACTIVATIONS, StateMLP, save_model
 from models.stochastic_open_economy_growth_shared import (
     PROCESS_CONSTANTS,
     DataSettings,
@@ -29,7 +29,6 @@ from models.stochastic_open_economy_growth_shared import (
     euler_residual_terms,
     problem_cache_config,
     production,
-    sequential_policy_spec,
     simulate,
     simulate_train,
     trajectory_frame,
@@ -322,9 +321,17 @@ def stochastic_open_economy_growth_nn_recursive(
     test_scales = jnp.sqrt(jnp.asarray(test_variances, dtype=dtype))
     investment_anchor = parameters.delta * k_0
     current_account_anchor = 0.0
-    policy_spec = sequential_policy_spec(
-        nn_set,
-        dtype,
+    # The asset axis is tanh-squashed; at the draw only log k feeds the first
+    # layer (investment ~ its anchor, CA at its offset) -- the z/asset/rate
+    # columns are zero at the draw, not frozen. The zeros CA kernel keeps its
+    # head exactly at the offset; equal out_scales give both heads the same
+    # O(output_scale) Jacobian.
+    policy_spec = dict(
+        width=nn_set.width,
+        depth=nn_set.depth,
+        activation=ACTIVATIONS[nn_set.hidden_activation],
+        heads=((1, nn_set.investment_head_init_scale), (1, None)),
+        positive=(True, False),
         center=(math.log(z_bar), math.log(k_0), a_0 / output_scale, 0.0),
         # NFA travels ~an output unit per decade, so the asset squash scale
         # floors at 0.1 * train_T; a unit floor saturates the tanh
@@ -335,9 +342,12 @@ def stochastic_open_economy_growth_nn_recursive(
             max(math.sqrt(train_variances[2]), 0.1 * data_set.train_T, 1.0),
             max(math.sqrt(rate_ergodic_variance), math.sqrt(train_variances[3])),
         ),
+        squash=(False, False, True, False),
         anchor=(investment_anchor, 1.0),
         out_scale=(output_scale, output_scale),
         offset=(0.0, current_account_anchor),
+        input_kernel_mask=(0.0, 1.0, 0.0, 0.0),
+        dtype=dtype,
     )
     p = StructuralParameters.create(
         dtype=dtype,

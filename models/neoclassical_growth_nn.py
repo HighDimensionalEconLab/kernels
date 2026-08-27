@@ -30,6 +30,7 @@ from models.neoclassical_growth_shared import (
 from models.neural_networks import (
     ACTIVATIONS,
     NNXResidualArgs,
+    TimeMLP,
     unit_softplus,
 )
 from models.utilities import (
@@ -41,76 +42,10 @@ from models.utilities import (
 )
 
 
-class GrowthPolicyNN(nnx.Module):
-    def __init__(
-        self,
-        settings: GrowthPolicySettings,
-        *,
-        input_scale: float,
-        k_scale: float,
-        c_scale: float,
-        g: float | None,
-        dtype,
-        rngs: nnx.Rngs,
-    ):
-        self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
-        self.input_scale = nnx.static(input_scale)
-        # Non-Param Variables: the output scales are data (no recompilation
-        # when they change) but sit outside the differentiated Param state.
-        self.k_scale = nnx.Variable(jnp.asarray(k_scale, dtype=dtype))
-        self.c_scale = nnx.Variable(jnp.asarray(c_scale, dtype=dtype))
-        # Trend factor e^{g t} on the output heads; None omits it from the
-        # graph entirely. Always a Param when present -- whether it is
-        # learned is the solve's diff filter's decision, not the module's.
-        self.g = None if g is None else nnx.Param(jnp.asarray(g, dtype=dtype))
-        self.layers = nnx.List(
-            [
-                nnx.Linear(
-                    1,
-                    settings.width,
-                    use_bias=settings.hidden_bias,
-                    dtype=dtype,
-                    param_dtype=dtype,
-                    rngs=rngs,
-                )
-            ]
-        )
-        for _ in range(settings.depth - 1):
-            self.layers.append(
-                nnx.Linear(
-                    settings.width,
-                    settings.width,
-                    use_bias=settings.hidden_bias,
-                    dtype=dtype,
-                    param_dtype=dtype,
-                    rngs=rngs,
-                )
-            )
-        self.head = nnx.Linear(
-            settings.width,
-            2,
-            use_bias=settings.output_bias,
-            kernel_init=nnx.initializers.normal(1e-3),
-            dtype=dtype,
-            param_dtype=dtype,
-            rngs=rngs,
-        )
-
-    def __call__(self, t):
-        h = jnp.atleast_1d(t / self.input_scale)
-        for layer in self.layers:
-            h = self.hidden_activation(layer(h))
-        output_scale = jnp.stack([self.k_scale[...], self.c_scale[...]])
-        out = output_scale * unit_softplus(self.head(h))
-        if self.g is not None:
-            out = jnp.exp(self.g[...] * t) * out
-        return out
-
-
 def residual_fn(theta, args, p):
     model = nnx.merge(args.graphdef, theta, args.nondiff)
     t, z_trend = args.batch["t"], args.batch["z_trend"]
-    paths, derivatives = jax.vmap(value_and_grad_fwd(model))(t)
+    paths, derivatives = value_and_grad_fwd(model)(t)
     k = paths[:, 0]
     c = paths[:, 1]
     dk_dt = derivatives[:, 0]
@@ -210,11 +145,16 @@ def neoclassical_growth_nn(
     # The module's trend Param: the init guess when learned, the true rate
     # when fixed, absent entirely for the trendless g = 0 graph.
     g_nn = g_hat_init if learn_g_hat else (g if g != 0.0 else None)
-    model = GrowthPolicyNN(
-        nn_set,
+    model = TimeMLP(
+        2,
+        width=nn_set.width,
+        depth=nn_set.depth,
+        activation=ACTIVATIONS[nn_set.hidden_activation],
+        use_bias=nn_set.hidden_bias,
+        use_output_bias=nn_set.output_bias,
+        final_activation=unit_softplus,
         input_scale=input_scale,
-        k_scale=k_scale,
-        c_scale=c_scale,
+        output_scale=(k_scale, c_scale),
         g=g_nn,
         dtype=dtype,
         rngs=nnx.Rngs(init_key),
@@ -249,12 +189,17 @@ def neoclassical_growth_nn(
         key=multi_start_key,
         num_starts=lm_set.num_attempts,
         draw=DrawNNXModule(
-            GrowthPolicyNN,
-            nn_set,
+            TimeMLP,
+            2,
             wrt=diff_wrt,
+            width=nn_set.width,
+            depth=nn_set.depth,
+            activation=ACTIVATIONS[nn_set.hidden_activation],
+            use_bias=nn_set.hidden_bias,
+            use_output_bias=nn_set.output_bias,
+            final_activation=unit_softplus,
             input_scale=input_scale,
-            k_scale=k_scale,
-            c_scale=c_scale,
+            output_scale=(k_scale, c_scale),
             g=g_nn,
             dtype=dtype,
         ),

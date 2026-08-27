@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import pathlib
 
 import jsonargparse
@@ -12,8 +13,8 @@ PREFIX = "neoclassical_growth_kernel"
 
 def load(out, name):
     test_df = pd.read_parquet(out / f"{PREFIX}_{name}_test_df.parquet")
-    results = pd.read_parquet(out / f"{PREFIX}_{name}_results.parquet")
-    return test_df, float(results["train_T"].iloc[0])
+    hp = json.loads((out / f"{PREFIX}_{name}_hyperparameters.json").read_text())
+    return test_df, float(hp["data_set"]["train_T"])
 
 
 def run(output_dir: str = ".results"):

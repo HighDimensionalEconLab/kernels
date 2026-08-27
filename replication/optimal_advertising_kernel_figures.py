@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import pathlib
 
 import jsonargparse
@@ -13,9 +14,9 @@ PREFIX = "optimal_advertising_kernel"
 
 def run(output_dir: str = ".results"):
     out = pathlib.Path(output_dir)
-    results = pd.read_parquet(out / f"{PREFIX}_baseline_results.parquet")
     test_df = pd.read_parquet(out / f"{PREFIX}_baseline_test_df.parquet")
-    train_T = float(results["train_T"].iloc[0])
+    hp = json.loads((out / f"{PREFIX}_baseline_hyperparameters.json").read_text())
+    train_T = float(hp["data_set"]["train_T"])
 
     style(figsize=(15, 7), fontsize=17, ticksize=16)
     t = test_df["t"].to_numpy()

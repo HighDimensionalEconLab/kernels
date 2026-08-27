@@ -502,8 +502,6 @@ def stochastic_growth_nn_recursive(
         "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),
         "z_ergodic_sd": z_ergodic_sd,
-        "test_z_0": ic_draw.test_z_center,
-        "test_k_0": ic_draw.test_k_center,
         "seed": seed,
         "sde_solver": sde_solver,
         "train_loss": train_loss,
@@ -544,8 +542,6 @@ def stochastic_growth_nn_recursive(
         "observed_log_z_p975": float(np.quantile(observed_log_z, 0.975)),
         "observed_log_k_min": float(observed_log_k.min()),
         "observed_log_k_max": float(observed_log_k.max()),
-        "test_log_z_variance": ic_draw.test_log_z_variance,
-        "test_log_k_variance": ic_draw.test_log_k_variance,
     }
 
     if verbose:

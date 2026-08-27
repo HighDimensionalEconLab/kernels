@@ -356,8 +356,6 @@ def human_capital_kernel_uno(
         "data_set": asdict(data_set),
         "solver_set": asdict(solver_set),
         "tolerance_set": asdict(tolerance_set),
-        "train_T": float(train_data[-1]),
-        "num_train_points": n_train,
         "c_0": float(theta.c_0),
         "i_k_0": float(theta.i_k_0),
         "i_h_0": float(theta.i_h_0),

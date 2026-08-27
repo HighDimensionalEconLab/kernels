@@ -518,7 +518,6 @@ def open_economy_growth_nn_recursive(
         "solve_time_success": solve_time if solution_accepted else np.nan,
         "total_params": int(theta_final.size),
         "unknown_count": int(theta_final.size),
-        "num_train_points": int(train_t.size),
         "num_training_trajectories": 1,
         "ode_solver": "rk4",
         **acceptance,

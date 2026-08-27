@@ -533,8 +533,6 @@ def multicountry_growth_kernel(
         "ridge_set": asdict(ridge_set),
         "cg_set": asdict(cg_set),
         "tolerance_set": asdict(tolerance_set),
-        "train_T": float(train_data[-1]),
-        "num_train_points": n_train,
         "output_scale": float(output_scale),
         "consumption_scale": float(steady["consumption_scale"]),
         "max_train_residual": max_train_residual,

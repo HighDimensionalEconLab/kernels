@@ -445,8 +445,6 @@ def neoclassical_growth_kernel_uno(
         "data_set": asdict(data_set),
         "solver_set": asdict(solver_set),
         "tolerance_set": asdict(tolerance_set),
-        "train_T": float(train_data[-1]),
-        "num_train_points": n_train,
         "c_0": float(c_0),
         "mu_0": float(mu_0),
         "max_train_residual": max_train_residual,

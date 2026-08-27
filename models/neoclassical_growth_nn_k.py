@@ -322,8 +322,6 @@ def neoclassical_growth_nn_k(
         "solve_time_success": solve_time if not rejection_reasons else np.nan,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
         **acceptance_fields(rejection_reasons),
-        "train_T": float(t_train[-1]),
-        "num_train_points": int(t_train.shape[0]),
     }
     if not use_kinked_production:
         results.update(

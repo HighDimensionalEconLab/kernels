@@ -441,8 +441,6 @@ def multicountry_growth_nn(
         "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),
         "seed": seed,
-        "train_T": float(train_t[-1]),
-        "num_train_points": n_train,
         "output_scale": output_scale,
         "consumption_scale": float(steady["consumption_scale"]),
         "max_train_residual": max_train_residual,

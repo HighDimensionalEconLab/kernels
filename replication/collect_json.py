@@ -444,7 +444,7 @@ def accepted_values(out, stem):
     return lambda field: float(accepted[field].median())
 
 
-def neoclassical_sensitivity_payload(value, reference=None):
+def neoclassical_sensitivity_payload(value, data_set, reference=None):
     derivatives = {}
     closed_form_gaps = []
     invariant_magnitudes = []
@@ -471,8 +471,8 @@ def neoclassical_sensitivity_payload(value, reference=None):
             ]
     payload = {
         "sensitivity_time": 120,
-        "train_T": value("train_T"),
-        "num_train_points": int(value("num_train_points")),
+        "train_T": data_set["train_T"],
+        "num_train_points": int(data_set["train_points"]),
         "k_T": sig(value("k_T120"), 6),
         "c_T": sig(value("c_T120"), 6),
         "k_ss": sig(value("k_ss"), 6),
@@ -707,8 +707,8 @@ def neoclassical_growth_kernel(out):
                 "k_0": hp["parameters"]["k_0"],
             },
             "data": {
-                "num_train_points": int(med(baseline["num_train_points"])),
-                "train_T": med(baseline["train_T"]),
+                "num_train_points": int(hp["data_set"]["train_points"]),
+                "train_T": hp["data_set"]["train_T"],
                 "test_T": hp["data_set"]["test_T"],
                 "test_points": int(hp["data_set"]["test_points"]),
             },
@@ -716,12 +716,12 @@ def neoclassical_growth_kernel(out):
         },
         "sparse": {
             "train_points_list": hp_sparse_points(out, prefix),
-            "num_train_points": int(med(sparse["num_train_points"])),
+            "num_train_points": len(hp_sparse_points(out, prefix)),
             **errors(sparse),
         },
         "far_steady_state": {
-            "train_T": med(far["train_T"]),
-            "num_train_points": int(med(far["num_train_points"])),
+            "train_T": far_hp["data_set"]["train_T"],
+            "num_train_points": int(far_hp["data_set"]["train_points"]),
             "test_T": far_hp["data_set"]["test_T"],
             **errors(far),
         },
@@ -767,7 +767,8 @@ def neoclassical_growth_kernel(out):
         if sensitivity["frac_accepted"] != 1.0:
             raise RuntimeError("the neoclassical kernel sensitivity run was rejected")
         payload["sensitivity"] = neoclassical_sensitivity_payload(
-            json_values(sensitivity)
+            json_values(sensitivity),
+            load(out, f"{prefix}_sensitivity_hyperparameters")["data_set"],
         )
     return payload
 
@@ -891,8 +892,8 @@ def asset_pricing_kernel(out, prefix="asset_pricing_kernel"):
             "baseline": {
                 "parameters": {"r": r, "c": c, "g": g, "x_0": x_0},
                 "data": {
-                    "num_train_points": int(med(j["num_train_points"])),
-                    "train_T": med(j["train_T"]),
+                    "num_train_points": int(hp["data_set"]["train_points"]),
+                    "train_T": hp["data_set"]["train_T"],
                     "test_T": hp["data_set"]["test_T"],
                 },
                 "solution_accepted": bool(j["n_accepted"] == 1),
@@ -1010,8 +1011,8 @@ def human_capital_kernel(out):
             "k_0": hp["parameters"]["k_0"],
         },
         "data": {
-            "num_train_points": int(med(j["num_train_points"])),
-            "train_T": med(j["train_T"]),
+            "num_train_points": int(hp["data_set"]["train_points"]),
+            "train_T": hp["data_set"]["train_T"],
             "test_T": hp["data_set"]["test_T"],
         },
         "solution_accepted": True,
@@ -1094,7 +1095,7 @@ def neoclassical_growth_nn(out):
                 "solve_time_median": sig(float(accepted["solve_time"].median())),
                 "steps_median": sig(float(accepted["steps"].median())),
                 **final_damping_summary(accepted),
-                "num_train_points": int(med(baseline_json["num_train_points"])),
+                "num_train_points": int(hp["data_set"]["train_points"]),
             }
         },
     }
@@ -1136,6 +1137,7 @@ def neoclassical_growth_nn(out):
     if (out / f"{prefix}_sensitivity.json").exists():
         payload["sensitivity"] = neoclassical_sensitivity_payload(
             accepted_values(out, f"{prefix}_sensitivity"),
+            load(out, f"{prefix}_sensitivity_hyperparameters")["data_set"],
             reference=json_values(load(out, "neoclassical_growth_kernel_sensitivity")),
         )
     return payload
@@ -1344,8 +1346,8 @@ def open_economy_growth_kernel(
             "r_star": sig(med(j["r_star_resolved"]), 5),
             "k_0": sig(experiment_hp["parameters"]["k_0"], 5),
             "a_0": sig(experiment_hp["parameters"]["a_0"], 5),
-            "num_train_points": int(med(j["num_train_points"])),
-            "train_T": sig(med(j["train_T"]), 5),
+            "num_train_points": int(experiment_hp["data_set"]["train_points"]),
+            "train_T": sig(experiment_hp["data_set"]["train_T"], 5),
             "max_train_residual": sci(med(j["max_train_residual"])),
             "max_validation_residual": sci(med(j["max_validation_residual"])),
             "max_benchmark_error": sci(med(j["max_benchmark_error"])),
@@ -1475,8 +1477,8 @@ def multicountry_growth_kernel(out):
             },
             "solution_accepted": bool(j["frac_accepted"] == 1.0),
             "validation_pass": bool(results["validation_pass"].all()),
-            "num_train_points": int(med(j["num_train_points"])),
-            "train_T": sig(med(j["train_T"]), 5),
+            "num_train_points": int(hp["data_set"]["train_points"]),
+            "train_T": sig(hp["data_set"]["train_T"], 5),
             "max_train_residual": sci(med(j["max_train_residual"])),
             "max_validation_residual": sci(med(j["max_validation_residual"])),
             "max_resource_gap": sci(med(j["max_resource_gap"])),

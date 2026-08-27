@@ -261,8 +261,6 @@ def asset_pricing_kernel_uno(
         "data_set": asdict(data_set),
         "solver_set": asdict(solver_set),
         "tolerance_set": asdict(tolerance_set),
-        "train_T": float(train_data[-1]),
-        "num_train_points": n_train,
         "p_0": float(p_0),
         "horizon_bias_p0": horizon_bias_p0,
         "rkhs_norm_p": float(rkhs_norm_squared(alpha, K_jax)),

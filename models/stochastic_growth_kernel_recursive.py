@@ -474,8 +474,6 @@ def stochastic_growth_kernel_recursive(
         "ridge_set": asdict(ridge_set),
         "tolerance_set": asdict(tolerance_set),
         "reference_test_euler_mean_abs": float(reference_meta["test_euler_mean_abs"]),
-        "test_z_0": ic_draw.test_z_center,
-        "test_k_0": ic_draw.test_k_center,
         "sde_solver": sde_solver,
         "train_loss": train_loss,
         "max_train_euler": max_train_euler,

@@ -414,11 +414,6 @@ def neoclassical_growth_kernel_recursive(
         "lm_set": asdict(lm_set),
         "ridge_set": asdict(ridge_set),
         "tolerance_set": asdict(tolerance_set),
-        "test_z_0": ic_draw.test_z_center,
-        "test_k_0": ic_draw.test_k_center,
-        "kernel": (
-            "rbf" if kernel_set.homothetic_representation else kernel_set.state_kernel
-        ),
         "h_const": h_const,
         "rkhs_norm": float(rkhs_norm_squared(alpha, args.gram)),
         "shifted_metric_norm": float(rkhs_norm_squared(alpha, shifted_gram)),
@@ -446,8 +441,6 @@ def neoclassical_growth_kernel_recursive(
         "total_fit_time": total_fit_time,
         **acceptance_fields(rejection_reasons),
         "num_centers": n_centers,
-        "test_log_z_variance": ic_draw.test_log_z_variance,
-        "test_log_k_variance": ic_draw.test_log_k_variance,
     }
 
     if verbose:

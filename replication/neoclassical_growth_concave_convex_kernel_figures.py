@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import pathlib
 
 import jsonargparse
@@ -23,7 +24,8 @@ def run(output_dir: str = ".results"):
         raise RuntimeError(f"rejected threshold solves at k_0={rejected}")
 
     style(figsize=(15, 8), fontsize=17, ticksize=16)
-    train_T = float(results["train_T"].iloc[0])
+    hp = json.loads((out / f"{PREFIX}_threshold_hyperparameters.json").read_text())
+    train_T = float(hp["data_set"]["train_T"])
     plt.figure(figsize=(15, 8))
 
     ax_k = plt.subplot(1, 2, 1)

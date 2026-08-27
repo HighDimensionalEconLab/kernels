@@ -291,8 +291,6 @@ def optimal_advertising_kernel_uno(
         "data_set": asdict(data_set),
         "solver_set": asdict(solver_set),
         "tolerance_set": asdict(tolerance_set),
-        "train_T": float(train_data[-1]),
-        "num_train_points": n_train,
         "mu_0": float(theta.mu_0),
         "u_0": float(theta.u_0),
         "rkhs_norm_x": float(rkhs_norm_squared(theta.alpha_x, K_jax)),

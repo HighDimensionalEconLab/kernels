@@ -177,13 +177,10 @@ def asset_pricing_kernel(
         "lm_set": asdict(lm_set),
         "ridge_set": asdict(ridge_set),
         "tolerance_set": asdict(tolerance_set),
-        "train_T": float(train_data[-1]),
-        "num_train_points": n_train,
         "p_0": float(p_0),
         "horizon_bias_p0": horizon_bias_p0,
         "rkhs_norm_p": float(rkhs_norm_squared(alpha, K_metric)),
         "max_train_residual": max_train_residual,
-        "train_residual_tolerance": train_residual_tolerance,
         "max_test_residual": float(jnp.max(jnp.abs(test_residual))),
         # min/max error statistics exclude the pinned t = 0 point ([1:]).
         "p_rel_error_mean": float(p_rel_error.mean()),

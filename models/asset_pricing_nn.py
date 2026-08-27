@@ -218,8 +218,6 @@ def asset_pricing_nn(
         "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),
         "seed": seed,
-        "num_train_points": int(train_t.size),
-        "train_T": float(train_t[-1]),
         "p_0": p_0,
         "train_loss": float(result.info.loss),
         "final_damping": float(result.lm_state.damping),

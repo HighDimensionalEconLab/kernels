@@ -438,8 +438,6 @@ def open_economy_growth_kernel_uno(
         "tolerance_set": asdict(tolerance_set),
         "r_star_resolved": r_star,
         "a_0_over_output_ss": a_0 / float(output_scale),
-        "train_T": float(train_data[-1]),
-        "num_train_points": n_train,
         "k_ss": float(steady["k"]),
         "q_ss": float(steady["q"]),
         "output_ss": float(output_scale),

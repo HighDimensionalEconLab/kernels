@@ -305,6 +305,8 @@ def neoclassical_growth_nn_k(
         "train_loss": train_loss,
         "final_damping": float(result.lm_state.damping),
         "test_euler_mean_abs": float(test_df["euler"].abs().mean()),
+        "test_k_rel_error_abs": float(test_df["k_rel_error"].mean()),
+        "test_c_rel_error_abs": float(test_df["c_rel_error"].mean()),
         "max_train_residual": float(train_df["euler"].abs().max()),
         "log_tvc_residual": log_tvc,
         "transversality_ok": transversality_ok,
@@ -313,10 +315,6 @@ def neoclassical_growth_nn_k(
         "solve_time": solve_time,
         "solve_time_success": solve_time if not rejection_reasons else np.nan,
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
-        "test_k_rel_error_mean": float(test_df["k_rel_error"].mean()),
-        "test_c_rel_error_mean": float(test_df["c_rel_error"].mean()),
-        "test_k_rel_error_max": float(test_df["k_rel_error"].abs().max()),
-        "test_c_rel_error_max": float(test_df["c_rel_error"].abs().max()),
         **acceptance_fields(rejection_reasons),
     }
 

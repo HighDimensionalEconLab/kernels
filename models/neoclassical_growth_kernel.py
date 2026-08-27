@@ -270,8 +270,6 @@ def neoclassical_growth_kernel(
         rejection_reasons.append("train_residual")
 
     g_hat_value = float(theta.g_hat) if learn_g_hat else float(g)
-    k_rel_error = test_df["k_rel_error"].to_numpy()
-    c_rel_error = test_df["c_rel_error"].to_numpy()
 
     results = {
         "parameters": {**p.to_dict(), "learn_g_hat": learn_g_hat},
@@ -286,27 +284,21 @@ def neoclassical_growth_kernel(
         "mu_0": float(mu_0),
         "max_train_residual": max_train_residual,
         "test_euler_mean_abs": float(test_df["euler"].abs().mean()),
+        "test_k_rel_error_abs": float(test_df["k_rel_error"].mean()),
+        "test_c_rel_error_abs": float(test_df["c_rel_error"].mean()),
         "log_tvc_residual": log_tvc,
         "transversality_ok": transversality_ok,
         "solve_time": elapsed,
         "train_loss": float(result.info.resid_loss),
         "final_damping": float(result.lm_state.damping),
         "steps": steps,
-        # min/max error statistics exclude the pinned t = 0 point ([1:]): its
-        # near-zero error is an artifact of the initial condition, not accuracy.
-        "test_k_rel_error_mean": float(k_rel_error.mean()),
-        "test_c_rel_error_mean": float(c_rel_error.mean()),
-        "test_k_rel_error_max": float(k_rel_error[1:].max()),
-        "test_c_rel_error_max": float(c_rel_error[1:].max()),
-        "test_k_rel_error_min": float(k_rel_error[1:].min()),
-        "test_c_rel_error_min": float(c_rel_error[1:].min()),
         **acceptance_fields(rejection_reasons),
     }
     if verbose:
         print(
             f"solve_time(s) = {elapsed}, "
-            f"E(|rel_error(k)|) = {results['test_k_rel_error_mean']:.3e}, "
-            f"E(|rel_error(c)|) = {results['test_c_rel_error_mean']:.3e}"
+            f"E(|rel_error(k)|) = {results['test_k_rel_error_abs']:.3e}, "
+            f"E(|rel_error(c)|) = {results['test_c_rel_error_abs']:.3e}"
         )
 
     @jax.jit

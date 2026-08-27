@@ -113,8 +113,8 @@ def run(
             "g_hat_error": sequential_kernel_results["g_hat_error"],
             "log_tvc_residual": sequential_kernel_results["log_tvc_residual"],
             "transversality_ok": bool(sequential_kernel_results["transversality_ok"]),
-            "test_k_rel_error_mean": sequential_kernel_results["test_k_rel_error_mean"],
-            "test_c_rel_error_mean": sequential_kernel_results["test_c_rel_error_mean"],
+            "test_k_rel_error_abs": sequential_kernel_results["test_k_rel_error_abs"],
+            "test_c_rel_error_abs": sequential_kernel_results["test_c_rel_error_abs"],
             "solve_time": sequential_kernel_results["solve_time"],
         },
         {
@@ -124,8 +124,8 @@ def run(
             "g_hat_error": sequential_nn_results["g_hat_error"],
             "log_tvc_residual": sequential_nn_results["log_tvc_residual"],
             "transversality_ok": bool(sequential_nn_results["transversality_ok"]),
-            "test_k_rel_error_mean": sequential_nn_results["test_k_rel_error_mean"],
-            "test_c_rel_error_mean": sequential_nn_results["test_c_rel_error_mean"],
+            "test_k_rel_error_abs": sequential_nn_results["test_k_rel_error_abs"],
+            "test_c_rel_error_abs": sequential_nn_results["test_c_rel_error_abs"],
             "solve_time": sequential_nn_results["solve_time"],
         },
         {
@@ -135,10 +135,10 @@ def run(
             "g_hat_error": None,
             "log_tvc_residual": recursive_kernel_results["max_log_tvc_residual"],
             "transversality_ok": bool(recursive_kernel_results["transversality_ok"]),
-            "test_k_rel_error_mean": recursive_kernel_results[
+            "test_k_rel_error_abs": recursive_kernel_results[
                 "test_mean_abs_k_rel_error"
             ],
-            "test_c_rel_error_mean": recursive_kernel_results[
+            "test_c_rel_error_abs": recursive_kernel_results[
                 "test_mean_abs_c_rel_error"
             ],
             "solve_time": recursive_kernel_results["solve_time"],
@@ -150,8 +150,8 @@ def run(
             "g_hat_error": None,
             "log_tvc_residual": recursive_nn_results["max_log_tvc_residual"],
             "transversality_ok": bool(recursive_nn_results["transversality_ok"]),
-            "test_k_rel_error_mean": recursive_nn_results["test_mean_abs_k_rel_error"],
-            "test_c_rel_error_mean": recursive_nn_results["test_mean_abs_c_rel_error"],
+            "test_k_rel_error_abs": recursive_nn_results["test_mean_abs_k_rel_error"],
+            "test_c_rel_error_abs": recursive_nn_results["test_mean_abs_c_rel_error"],
             "solve_time": recursive_nn_results["solve_time"],
         },
     ]

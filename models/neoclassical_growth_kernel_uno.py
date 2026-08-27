@@ -431,8 +431,6 @@ def neoclassical_growth_kernel_uno(
     ):
         rejection_reasons.append("p_bound")
 
-    k_rel_error = test_df["k_rel_error"].to_numpy()
-    c_rel_error = test_df["c_rel_error"].to_numpy()
     results = {
         "parameters": p.to_dict(),
         "kernel_set": asdict(kernel_set),
@@ -446,24 +444,18 @@ def neoclassical_growth_kernel_uno(
         "p_lower_violation": p_lower_violation,
         "p_upper_violation": p_upper_violation,
         "test_euler_mean_abs": float(test_df["euler"].abs().mean()),
+        "test_k_rel_error_abs": float(test_df["k_rel_error"].mean()),
+        "test_c_rel_error_abs": float(test_df["c_rel_error"].mean()),
         "log_tvc_residual": log_tvc,
         "transversality_ok": transversality_ok,
         "solve_time": solve_time,
-        # min/max error statistics exclude the pinned t = 0 point ([1:]): its
-        # near-zero error is an artifact of the initial condition, not accuracy.
-        "test_k_rel_error_mean": float(k_rel_error.mean()),
-        "test_c_rel_error_mean": float(c_rel_error.mean()),
-        "test_k_rel_error_max": float(k_rel_error[1:].max()),
-        "test_c_rel_error_max": float(c_rel_error[1:].max()),
-        "test_k_rel_error_min": float(k_rel_error[1:].min()),
-        "test_c_rel_error_min": float(c_rel_error[1:].min()),
         **acceptance_fields(rejection_reasons),
     }
     if verbose:
         print(
             f"solve_time(s) = {solve_time}, "
-            f"E(|rel_error(k)|) = {results['test_k_rel_error_mean']:.3e}, "
-            f"E(|rel_error(c)|) = {results['test_c_rel_error_mean']:.3e}"
+            f"E(|rel_error(k)|) = {results['test_k_rel_error_abs']:.3e}, "
+            f"E(|rel_error(c)|) = {results['test_c_rel_error_abs']:.3e}"
         )
     return results, {
         "model": kernel_solution,

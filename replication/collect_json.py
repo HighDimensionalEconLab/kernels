@@ -77,6 +77,23 @@ def load(out, name):
     return json.loads((out / f"{name}.json").read_text())
 
 
+# Rel-error extrema recomputed from an experiment's saved test_df frame (the
+# solver results carry only the test_*_rel_error_abs means). Per-run extrema
+# exclude the pinned t = 0 point (its near-zero error is an initial-condition
+# artifact, not accuracy), medianed across seeds when present.
+def rel_error_extrema(out, name):
+    df = pd.read_parquet(out / f"{name}_test_df.parquet")
+    df = df[df["t"] > 0.0]
+    seed = df["seed"] if "seed" in df.columns else pd.Series(0, index=df.index)
+    grouped = df.groupby(seed)
+    stats = {}
+    for variable in ("k", "c"):
+        column = grouped[f"{variable}_rel_error"]
+        stats[f"test_{variable}_rel_error_max"] = float(column.max().median())
+        stats[f"test_{variable}_rel_error_min"] = float(column.min().median())
+    return stats
+
+
 # Recursive output cleanup: drop None values (unavailable numbers) and print
 # integral floats as integers (steps 20 and k_0 = 1, not 20.0 and 1.0).
 def clean(x):
@@ -226,8 +243,10 @@ def write_sequential_comparison_table(out):
         (
             "Neoclassical growth",
             "Kernel",
-            med(ngm_kernel["test_k_rel_error_mean"]),
-            med(ngm_kernel["test_k_rel_error_max"]),
+            med(ngm_kernel["test_k_rel_error_abs"]),
+            rel_error_extrema(out, "neoclassical_growth_kernel_baseline")[
+                "test_k_rel_error_max"
+            ],
             None,
             med(ngm_kernel["solve_time"]),
             accepted_cell(ngm_kernel),
@@ -235,8 +254,10 @@ def write_sequential_comparison_table(out):
         (
             "",
             "NN",
-            med(ngm_nn["test_k_rel_error_mean"]),
-            med(ngm_nn["test_k_rel_error_max"]),
+            med(ngm_nn["test_k_rel_error_abs"]),
+            rel_error_extrema(out, "neoclassical_growth_nn_baseline")[
+                "test_k_rel_error_max"
+            ],
             None,
             med(ngm_nn["solve_time_success"]),
             accepted_cell(ngm_nn),
@@ -310,17 +331,21 @@ def write_neoclassical_growth_comparison_table(out):
     rows = [
         (
             "Sequential kernel",
-            med(kernel["test_k_rel_error_mean"]),
-            med(kernel["test_k_rel_error_max"]),
-            med(kernel["test_c_rel_error_mean"]),
+            med(kernel["test_k_rel_error_abs"]),
+            rel_error_extrema(out, "neoclassical_growth_kernel_baseline")[
+                "test_k_rel_error_max"
+            ],
+            med(kernel["test_c_rel_error_abs"]),
             med(kernel["solve_time"]),
             accepted_cell(kernel),
         ),
         (
             "Sequential NN",
-            med(nn["test_k_rel_error_mean"]),
-            med(nn["test_k_rel_error_max"]),
-            med(nn["test_c_rel_error_mean"]),
+            med(nn["test_k_rel_error_abs"]),
+            rel_error_extrema(out, "neoclassical_growth_nn_baseline")[
+                "test_k_rel_error_max"
+            ],
+            med(nn["test_c_rel_error_abs"]),
             med(nn["solve_time_success"]),
             accepted_cell(nn),
         ),
@@ -373,7 +398,8 @@ def write_nu_rho_table(out):
         j = load(out, f"neoclassical_growth_kernel_{name}")
         accepted = j["n_accepted"] == 1
         if accepted:
-            cells = [f"{med(j[column]):.1e}" for column in NU_RHO_COLUMNS]
+            extrema = rel_error_extrema(out, f"neoclassical_growth_kernel_{name}")
+            cells = [f"{extrema[column]:.1e}" for column in NU_RHO_COLUMNS]
         else:
             cells = ["--"] * len(NU_RHO_COLUMNS)
         lines.append(f"{nu_label} & {ell} & " + " & ".join(cells) + r" \\")
@@ -680,15 +706,16 @@ def neoclassical_growth_kernel(out):
     hp = load(out, f"{prefix}_baseline_hyperparameters")
     baseline = load(out, f"{prefix}_baseline")
 
-    def errors(j):
+    def errors(j, name):
+        extrema = rel_error_extrema(out, f"{prefix}_{name}")
         return {
             "solution_accepted": bool(j["n_accepted"] == 1),
-            "test_k_rel_error_mean": sci(med(j["test_k_rel_error_mean"])),
-            "test_c_rel_error_mean": sci(med(j["test_c_rel_error_mean"])),
-            "test_k_rel_error_max": sci(med(j["test_k_rel_error_max"])),
-            "test_c_rel_error_max": sci(med(j["test_c_rel_error_max"])),
-            "test_k_rel_error_min": sci(med(j["test_k_rel_error_min"])),
-            "test_c_rel_error_min": sci(med(j["test_c_rel_error_min"])),
+            "test_k_rel_error_abs": sci(med(j["test_k_rel_error_abs"])),
+            "test_c_rel_error_abs": sci(med(j["test_c_rel_error_abs"])),
+            "test_k_rel_error_max": sci(extrema["test_k_rel_error_max"]),
+            "test_c_rel_error_max": sci(extrema["test_c_rel_error_max"]),
+            "test_k_rel_error_min": sci(extrema["test_k_rel_error_min"]),
+            "test_c_rel_error_min": sci(extrema["test_c_rel_error_min"]),
             "max_train_residual": sci(med(j["max_train_residual"]), 2),
             "solve_time": sig(med(j["solve_time"]), 2),
             "timing_repetitions": int(med(j["timing_repetitions"])),
@@ -712,18 +739,18 @@ def neoclassical_growth_kernel(out):
                 "test_T": hp["data_set"]["test_T"],
                 "test_points": int(hp["data_set"]["test_points"]),
             },
-            **errors(baseline),
+            **errors(baseline, "baseline"),
         },
         "sparse": {
             "train_points_list": hp_sparse_points(out, prefix),
             "num_train_points": len(hp_sparse_points(out, prefix)),
-            **errors(sparse),
+            **errors(sparse, "sparse"),
         },
         "far_steady_state": {
             "train_T": far_hp["data_set"]["train_T"],
             "num_train_points": int(far_hp["data_set"]["train_points"]),
             "test_T": far_hp["data_set"]["test_T"],
-            **errors(far),
+            **errors(far, "far_steady_state"),
         },
     }
     for name in ("baseline_g02", "baseline_g02_learned"):
@@ -734,7 +761,7 @@ def neoclassical_growth_kernel(out):
             "learn_g_hat": g02_hp["parameters"]["learn_g_hat"],
             "g_hat": sig(med(j["g_hat"]), 4),
             "g_hat_error": sci(med(j["g_hat_error"]), 3),
-            **errors(j),
+            **errors(j, name),
         }
 
     # Robustness table (the nu = 1/2, ell = 10 row aliases baseline).
@@ -747,7 +774,7 @@ def neoclassical_growth_kernel(out):
             "kernel": kernel_name,
             "nu": KERNEL_NU[kernel_name],
             "ell": ell,
-            **errors(j),
+            **errors(j, name),
         }
 
     baseline_kernel = hp["kernel_set"]["kernel"]
@@ -777,13 +804,14 @@ def neoclassical_growth_kernel_uno(out):
     prefix = "neoclassical_growth_kernel_uno"
     hp = load(out, f"{prefix}_baseline_hyperparameters")
 
-    def errors(j):
+    def errors(j, name):
+        extrema = rel_error_extrema(out, f"{prefix}_{name}")
         return {
             "solution_accepted": bool(j["n_accepted"] == 1),
-            "test_k_rel_error_mean": sci(med(j["test_k_rel_error_mean"])),
-            "test_c_rel_error_mean": sci(med(j["test_c_rel_error_mean"])),
-            "test_k_rel_error_max": sci(med(j["test_k_rel_error_max"])),
-            "test_c_rel_error_max": sci(med(j["test_c_rel_error_max"])),
+            "test_k_rel_error_abs": sci(med(j["test_k_rel_error_abs"])),
+            "test_c_rel_error_abs": sci(med(j["test_c_rel_error_abs"])),
+            "test_k_rel_error_max": sci(extrema["test_k_rel_error_max"]),
+            "test_c_rel_error_max": sci(extrema["test_c_rel_error_max"]),
             "max_train_residual": sci(med(j["max_train_residual"]), 2),
             "solve_time": sig(med(j["solve_time"]), 2),
             "timing_repetitions": int(med(j["timing_repetitions"])),
@@ -792,7 +820,7 @@ def neoclassical_growth_kernel_uno(out):
     experiments = {}
     for name in ("baseline", "sparse", "far_steady_state"):
         result = load(out, f"{prefix}_{name}")
-        experiment = errors(result)
+        experiment = errors(result, name)
         if name == "sparse":
             experiment["train_points_list"] = hp_sparse_points(out, prefix)
         experiments[name] = experiment
@@ -1095,11 +1123,11 @@ def neoclassical_growth_nn(out):
         "experiments": {
             "baseline": {
                 "frac_accepted": sig(baseline_json["frac_accepted"]),
-                "test_k_rel_error_mean_median": sci(
-                    float(accepted["test_k_rel_error_mean"].median())
+                "test_k_rel_error_abs_median": sci(
+                    float(accepted["test_k_rel_error_abs"].median())
                 ),
-                "test_c_rel_error_mean_median": sci(
-                    float(accepted["test_c_rel_error_mean"].median())
+                "test_c_rel_error_abs_median": sci(
+                    float(accepted["test_c_rel_error_abs"].median())
                 ),
                 "test_resource_mean_abs_median": sci(
                     float(accepted["test_resource_mean_abs"].median())
@@ -1142,13 +1170,13 @@ def neoclassical_growth_nn(out):
                 if not accepted_sample.empty
                 else None
             ),
-            "test_k_rel_error_mean_median": (
-                sci(float(accepted_sample["test_k_rel_error_mean"].median()))
+            "test_k_rel_error_abs_median": (
+                sci(float(accepted_sample["test_k_rel_error_abs"].median()))
                 if not accepted_sample.empty
                 else None
             ),
-            "test_c_rel_error_mean_median": (
-                sci(float(accepted_sample["test_c_rel_error_mean"].median()))
+            "test_c_rel_error_abs_median": (
+                sci(float(accepted_sample["test_c_rel_error_abs"].median()))
                 if not accepted_sample.empty
                 else None
             ),
@@ -1799,14 +1827,14 @@ def performance_comparisons(out):
     growth_recursive_nn = accepted("neoclassical_growth_nn_recursive", "single_ic_g0")
     growth_kernel_time = med(growth_kernel["solve_time"])
     growth_kernel_error = max(
-        med(growth_kernel["test_k_rel_error_mean"]),
-        med(growth_kernel["test_c_rel_error_mean"]),
+        med(growth_kernel["test_k_rel_error_abs"]),
+        med(growth_kernel["test_c_rel_error_abs"]),
     )
     growth_uno = load(out, "neoclassical_growth_kernel_uno_baseline")
     growth_uno_time = med(growth_uno["solve_time"])
     growth_uno_error = max(
-        med(growth_uno["test_k_rel_error_mean"]),
-        med(growth_uno["test_c_rel_error_mean"]),
+        med(growth_uno["test_k_rel_error_abs"]),
+        med(growth_uno["test_c_rel_error_abs"]),
     )
 
     # Both NN formulations against the same sequence-space kernel baseline: the
@@ -1907,8 +1935,8 @@ def performance_comparisons(out):
             {
                 "sequential_nn": growth_nn_stats(
                     growth_sequential_nn,
-                    "test_k_rel_error_mean",
-                    "test_c_rel_error_mean",
+                    "test_k_rel_error_abs",
+                    "test_c_rel_error_abs",
                 ),
                 "recursive_nn": growth_nn_stats(
                     growth_recursive_nn,

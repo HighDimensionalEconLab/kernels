@@ -10,6 +10,7 @@ import pandas as pd
 from flax import nnx
 from jax.flatten_util import ravel_pytree
 from nlls_gram import (
+    DrawNNXModule,
     LevenbergMarquardt,
     MultiStart,
 )
@@ -28,7 +29,6 @@ from models.neoclassical_growth_shared import (
 )
 from models.utilities import (
     ACTIVATIONS,
-    DrawNNXModuleFiltered,
     NNXResidualArgs,
     OptimizerSettings,
     Stopwatch,
@@ -255,10 +255,10 @@ def neoclassical_growth_nn_k(
     multi_start = MultiStart(
         key=multi_start_key,
         num_starts=lm_set.num_attempts,
-        draw=DrawNNXModuleFiltered(
-            diff_wrt,
+        draw=DrawNNXModule(
             CapitalPathNN,
             nn_set,
+            wrt=diff_wrt,
             input_scale=input_scale,
             k_scale=k_scale,
             g=g_nn,

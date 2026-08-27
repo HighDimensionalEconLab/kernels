@@ -195,6 +195,16 @@ def make_sampled_train_grid(data_set, dtype):
     return train_data
 
 
+# Forward-mode counterpart of jax.value_and_grad for scalar-input functions:
+# one jvp pass with a unit tangent returns (f(x), df/dx), for any output
+# pytree (reverse-mode value_and_grad requires a scalar output).
+def value_and_grad_fwd(f):
+    def value_and_grad(x):
+        return jax.jvp(f, (x,), (jnp.ones_like(x),))
+
+    return value_and_grad
+
+
 # U(0) = U'(0) = 1, so a near-zero head starts at its declared output scale
 # without shrinking the local Jacobian by softplus'(0).
 def unit_softplus(raw):

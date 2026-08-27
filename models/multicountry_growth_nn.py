@@ -44,6 +44,7 @@ from models.utilities import (
     acceptance_fields,
     make_sampled_train_grid,
     unit_softplus,
+    value_and_grad_fwd,
 )
 
 RESIDUAL_NAMES = (
@@ -154,9 +155,7 @@ class SequencePathNN(nnx.Module):
 def residual_fn(theta, args, p):
     model = nnx.merge(args.graphdef, theta, args.nondiff)
     t = args.batch["t"]
-    paths, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
-        t
-    )
+    paths, derivatives = jax.vmap(value_and_grad_fwd(model))(t)
     k, a, q = paths["k"], paths["a"], paths["q"]
     c, mu = paths["c"], paths["mu"]
     rate_column = paths["interest_rate"][..., None]

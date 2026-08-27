@@ -32,6 +32,7 @@ from models.utilities import (
     Stopwatch,
     acceptance_fields,
     unit_softplus,
+    value_and_grad_fwd,
 )
 
 # Sequential/state-space formulation. The neural policy supplies positive
@@ -130,7 +131,7 @@ class SequentialPolicyNN(nnx.Module):
 
 
 def policy_values(policy, k, a, p):
-    flows, flow_derivatives = jax.jvp(policy, (k,), (jnp.ones_like(k),))
+    flows, flow_derivatives = value_and_grad_fwd(policy)(k)
     investment, current_account = flows
     investment_derivative, current_account_derivative = flow_derivatives
     investment_rate = investment / k

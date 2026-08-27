@@ -35,6 +35,7 @@ from models.utilities import (
     acceptance_fields,
     make_train_t_grid,
     unit_softplus,
+    value_and_grad_fwd,
 )
 
 
@@ -108,7 +109,7 @@ class CapitalPathNN(nnx.Module):
 # c(t) = f(z(t), k(t)) - delta k(t) - k_dot(t): the resource constraint holds
 # identically, leaving only the Euler equation and the initial condition.
 def substituted_consumption(model, t, p):
-    k, dk_dt = jax.jvp(model, (t,), (jnp.ones_like(t),))
+    k, dk_dt = value_and_grad_fwd(model)(t)
     z = p.z_0 * jnp.exp((1.0 - p.a) * p.g * t)
     return production(z, k, p) - p.delta * k - dk_dt
 
@@ -116,11 +117,9 @@ def substituted_consumption(model, t, p):
 # Euler in log-consumption form: dlog(c)/dt = (f'(k) - delta - rho_hat) /
 # sigma_crra, with c substituted from the resource constraint.
 def euler_residual(model, t, p):
-    log_c, dlog_c_dt = jax.jvp(
-        lambda s: jnp.log(substituted_consumption(model, s, p)),
-        (t,),
-        (jnp.ones_like(t),),
-    )
+    log_c, dlog_c_dt = value_and_grad_fwd(
+        lambda s: jnp.log(substituted_consumption(model, s, p))
+    )(t)
     z = p.z_0 * jnp.exp((1.0 - p.a) * p.g * t)
     # Zero on the feasible domain; keeps the residual NaN when c <= 0, where
     # the tangent alone would stay finite.

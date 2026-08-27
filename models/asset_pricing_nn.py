@@ -26,6 +26,7 @@ from models.utilities import (
     Stopwatch,
     acceptance_fields,
     make_train_t_grid,
+    value_and_grad_fwd,
 )
 
 
@@ -93,7 +94,7 @@ class PricePolicyNN(nnx.Module):
 def residual_fn(theta, args, p):
     model = nnx.merge(args.graphdef, theta, args.nondiff)
     t = args.batch["t"]
-    price, dprice_dt = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(t)
+    price, dprice_dt = jax.vmap(value_and_grad_fwd(model))(t)
     residual = dprice_dt - (p.r * price - dividends(t, p))
     values = {"p": price, "dp_dt": dprice_dt, "residual": residual}
     return residual / jnp.sqrt(residual.size), values

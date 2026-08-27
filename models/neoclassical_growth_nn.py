@@ -36,6 +36,7 @@ from models.utilities import (
     acceptance_fields,
     make_train_t_grid,
     unit_softplus,
+    value_and_grad_fwd,
 )
 
 
@@ -109,9 +110,7 @@ class GrowthPolicyNN(nnx.Module):
 def residual_fn(theta, args, p):
     model = nnx.merge(args.graphdef, theta, args.nondiff)
     t, z_trend = args.batch["t"], args.batch["z_trend"]
-    paths, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
-        t
-    )
+    paths, derivatives = jax.vmap(value_and_grad_fwd(model))(t)
     k = paths[:, 0]
     c = paths[:, 1]
     dk_dt = derivatives[:, 0]

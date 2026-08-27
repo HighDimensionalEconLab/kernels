@@ -41,6 +41,7 @@ from models.utilities import (
     SDE_SOLVERS,
     STATUS_TO_REASON,
     OptimizerSettings,
+    ResetEpochStream,
     Stopwatch,
     acceptance_fields,
     cache_key,
@@ -71,33 +72,6 @@ class ToleranceSettings:
     shock_continuation: bool = True
     initial_shock_scale: float = 0.238
     continuation_epochs: int = 2
-
-
-# DrawNNXModule redraws theta but passes args through unchanged; multi-start
-# chains each attempt's initial args from the previous draw, so re-chaining
-# restart_key/epoch_key here (and resetting epoch to 0) is what keeps each
-# retry's epoch-boundary resampling independent of the others.
-class DrawSequentialPolicy:
-    def __init__(self, draw_theta):
-        self.draw_theta = draw_theta
-
-    def __call__(self, key, _, args):
-        theta, _ = self.draw_theta(key, _, args)
-        restart_key, epoch_key = jax.random.split(args.restart_key)
-        return theta, args.replace(
-            epoch_key=epoch_key,
-            restart_key=restart_key,
-            epoch=jnp.asarray(0, dtype=jnp.int32),
-        )
-
-    def __hash__(self):
-        return hash((DrawSequentialPolicy, self.draw_theta))
-
-    def __eq__(self, other):
-        return (
-            isinstance(other, DrawSequentialPolicy)
-            and self.draw_theta == other.draw_theta
-        )
 
 
 # Per-knot Euler residuals over the simulated batch, flattened and scaled by
@@ -524,7 +498,8 @@ def stochastic_open_economy_growth_nn_recursive(
         multi_start=MultiStart(
             key=multi_start_key,
             num_starts=lm_set.num_attempts,
-            draw=DrawSequentialPolicy(DrawNNXModule(StateMLP, 4, **policy_spec)),
+            draw=DrawNNXModule(StateMLP, 4, **policy_spec),
+            reset_args=ResetEpochStream(),
             accept=accept_training,
         ),
         max_steps_is_success=False,

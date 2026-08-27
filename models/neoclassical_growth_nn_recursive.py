@@ -31,6 +31,7 @@ from models.neural_networks import ACTIVATIONS, HomotheticPolicyMLP, StateMLP
 from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
+    ResetEpochStream,
     Stopwatch,
     acceptance_fields,
     long_df,
@@ -156,33 +157,6 @@ class EpochCallback:
             status=status,
             args=args,
             lm_state=replace(ctx.lm_state, damping=damping),
-        )
-
-
-# DrawNNXModule redraws theta but passes args through unchanged; multi-start
-# chains each attempt's initial args from the previous draw, so re-chaining
-# restart_key/epoch_key here (and resetting epoch to 0) is what keeps each
-# retry's epoch-boundary resampling independent of the others.
-class DrawInvestmentPolicy:
-    def __init__(self, draw_theta):
-        self.draw_theta = draw_theta
-
-    def __call__(self, key, _, args):
-        theta, _ = self.draw_theta(key, _, args)
-        restart_key, epoch_key = jax.random.split(args.restart_key)
-        return theta, args.replace(
-            epoch_key=epoch_key,
-            restart_key=restart_key,
-            epoch=jnp.asarray(0, dtype=jnp.int32),
-        )
-
-    def __hash__(self):
-        return hash((DrawInvestmentPolicy, self.draw_theta))
-
-    def __eq__(self, other):
-        return (
-            isinstance(other, DrawInvestmentPolicy)
-            and self.draw_theta == other.draw_theta
         )
 
 
@@ -366,7 +340,6 @@ def neoclassical_growth_nn_recursive(
         log_k_scale=math.sqrt(ic_set.train_log_k_variance),
         epoch_early_stopping=tolerance_set.epoch_early_stopping,
     )
-    draw = DrawInvestmentPolicy(DrawNNXModule(policy_cls, *policy_args, **policy_spec))
     # The per-step tolerance is sound only while the training batch never
     # changes; across epochs, convergence is judged at the boundaries
     # instead.
@@ -378,7 +351,8 @@ def neoclassical_growth_nn_recursive(
     multi_start = MultiStart(
         key=multi_start_key,
         num_starts=lm_set.num_attempts,
-        draw=draw,
+        draw=DrawNNXModule(policy_cls, *policy_args, **policy_spec),
+        reset_args=ResetEpochStream(),
     )
     solve_options = dict(
         max_steps=tolerance_set.num_epochs * tolerance_set.max_steps,

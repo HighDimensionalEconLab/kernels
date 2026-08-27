@@ -62,9 +62,14 @@ per-directory READMEs.
   (load factories rebuild the `StateMLP` template from `meta["settings"]`
   with placeholder Variables the artifact's nondiff block overwrites);
   `utilities.py` keeps the non-NN shared pieces and never imports `nnx`.
-  Each recursive NN driver builds its `StateMLP` kwargs once (a
-  `policy_spec` dict or shared spec helper) and reuses them verbatim in
-  `DrawNNXModule`, so every kwarg stays hashable.
+  Each recursive NN driver builds its `StateMLP` kwargs once as an inline
+  `policy_spec` dict and reuses them verbatim in `DrawNNXModule`, so every
+  kwarg stays hashable (the load factories in the shared modules spell the
+  same architecture out with placeholder Variables). The epoch-recursive
+  drivers pass `models/utilities.ResetEpochStream` as `MultiStart`'s
+  `reset_args` hook: it re-chains `epoch_key`/`restart_key` from the
+  args-carried `restart_key` (data-seed stream, never the multi-start key)
+  and zeroes the epoch counter at each retry.
 - `replication/` — ensemble + figure drivers; `collect_json.py` writes
   `.results/all_results.json`, the only place paper numbers are selected and
   rounded. Generated JSON is gitignored; track one with a targeted `!path` rule.

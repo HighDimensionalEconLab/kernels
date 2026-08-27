@@ -102,6 +102,23 @@ def standardized_initial_states(key, center, scales, num_trajectories):
 # Levenberg-Marquardt settings shared across solvers -- exactly the
 # constructor and solve() kwargs; each solver pins its tuned values inline in
 # its lm_set signature default and threads only the fields it uses.
+# Multi-start reset_args hook shared by the epoch-recursive NN drivers:
+# re-chain the epoch-boundary resampling streams from the args-carried
+# restart_key (never the MultiStart key -- the epoch streams stay on the data
+# seed) and restart the epoch counter, so each retry's resampling is
+# independent of when earlier attempts failed. Field-less frozen dataclass:
+# all instances compare equal and share one jit compilation.
+@dataclass(frozen=True)
+class ResetEpochStream:
+    def __call__(self, _, args):
+        restart_key, epoch_key = jax.random.split(args.restart_key)
+        return args.replace(
+            epoch_key=epoch_key,
+            restart_key=restart_key,
+            epoch=jnp.asarray(0, dtype=jnp.int32),
+        )
+
+
 @dataclass(frozen=True)
 class OptimizerSettings:
     init_damping: float = 1e-5

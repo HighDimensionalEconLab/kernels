@@ -24,7 +24,6 @@ from models.stochastic_growth_shared import (
 )
 from models.stochastic_growth_shared import (
     DataSettings,
-    DrawInvestmentPolicy,
     InitialConditionSettings,
     InvestmentPolicySettings,
     StructuralParameters,
@@ -40,6 +39,7 @@ from models.utilities import (
     SDE_SOLVERS,
     STATUS_TO_REASON,
     OptimizerSettings,
+    ResetEpochStream,
     Stopwatch,
     acceptance_fields,
     cache_key,
@@ -367,7 +367,6 @@ def stochastic_growth_nn_recursive(
         n_steps=n_train_steps,
         dt=train_dt,
     )
-    draw = DrawInvestmentPolicy(DrawNNXModule(StateMLP, 2, **policy_spec))
     # The per-step tolerance is sound only while the training batch never
     # changes; across epochs, convergence is judged at the boundaries
     # instead.
@@ -379,7 +378,8 @@ def stochastic_growth_nn_recursive(
     multi_start = MultiStart(
         key=multi_start_key,
         num_starts=lm_set.num_attempts,
-        draw=draw,
+        draw=DrawNNXModule(StateMLP, 2, **policy_spec),
+        reset_args=ResetEpochStream(),
     )
     solve_options = dict(
         max_steps=tolerance_set.num_epochs * tolerance_set.max_steps,

@@ -11,7 +11,7 @@ dependencies = [
     "jsonargparse>=4.41.0",
     "jupyter-cache>=1.0.1",
     "matplotlib>=3.10.6",
-    "nlls-gram>=2.9.0",
+    "nlls-gram>=2.10.0",
     "pandas>=2.3.2",
     "pyarrow>=24.0.0",
     "scipy>=1.18.0",
@@ -41,4 +41,7 @@ extend-exclude = ["notebooks/*.ipynb"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
 ignore = ["E501"]
+
+[tool.uv.sources]
+nlls-gram = { path = "../nlls_gram", editable = true }
 

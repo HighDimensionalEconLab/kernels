@@ -12,7 +12,6 @@ from __future__ import annotations
 import itertools
 import pathlib
 
-import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
@@ -29,9 +28,7 @@ from models.multicountry_growth_nn import (
 from models.multicountry_growth_shared import (
     MULTICOUNTRY_GROWTH_CONSTANTS,
     InitialConditionSettings,
-    StructuralParameters,
     draw_initial_conditions,
-    steady_state,
 )
 from models.utilities import OptimizerSettings
 from replication.utilities import configure_process
@@ -72,24 +69,24 @@ def kernel_sweep(output):
     drawn_k_0, _ = draw_initial_conditions(
         InitialConditionSettings(), MULTICOUNTRY_GROWTH_CONSTANTS["populations"]
     )
-    half_output = 0.5 * float(
-        steady_state(
-            StructuralParameters.create(
-                dtype=jnp.float64, **MULTICOUNTRY_GROWTH_CONSTANTS
-            )
-        )["output_scale"]
-    )
-    configurations = {
-        "baseline": {},
-        "initial_debt": dict(k_0=drawn_k_0, a_0=(-half_output, half_output)),
-        "initial_assets": dict(k_0=drawn_k_0, a_0=(half_output, -half_output)),
-    }
     rows = []
     for kernel, ell, train_points in itertools.product(*KERNEL_GRID.values()):
         row = {"kernel": kernel, "ell": ell, "train_points": train_points}
         runs = {}
         try:
-            for name, overrides in configurations.items():
+            results, extras = multicountry_growth_kernel(
+                kernel_set=KernelSettings(kernel=kernel, ell=ell),
+                data_set=DataSettings(train_points=train_points),
+            )
+            runs["baseline"] = (results, extras["validation_df"])
+            # Bond configurations sized by the baseline run's own
+            # steady-state output scale.
+            half_output = 0.5 * results["output_scale"]
+            bond_configurations = {
+                "initial_debt": dict(k_0=drawn_k_0, a_0=(-half_output, half_output)),
+                "initial_assets": dict(k_0=drawn_k_0, a_0=(half_output, -half_output)),
+            }
+            for name, overrides in bond_configurations.items():
                 results, extras = multicountry_growth_kernel(
                     kernel_set=KernelSettings(kernel=kernel, ell=ell),
                     data_set=DataSettings(train_points=train_points),

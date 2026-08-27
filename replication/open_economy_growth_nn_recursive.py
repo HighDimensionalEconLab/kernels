@@ -1,14 +1,8 @@
 from __future__ import annotations
 
-import jax.numpy as jnp
 import jsonargparse
 
 from models import open_economy_growth_nn_recursive
-from models.open_economy_growth_shared import (
-    OPEN_ECONOMY_GROWTH_CONSTANTS,
-    StructuralParameters,
-    steady_state,
-)
 from replication.utilities import (
     configure_process,
     ensemble,
@@ -26,13 +20,6 @@ def run(
     verbose: bool = False,
 ):
     configure_process()
-    output_ss = float(
-        steady_state(
-            StructuralParameters.create(
-                dtype=jnp.float64, **OPEN_ECONOMY_GROWTH_CONSTANTS
-            )
-        )["output"]
-    )
 
     def go(name, experiment_n_seeds, **experiment):
         print(f"{name}: {experiment_n_seeds} seeds -> {output_dir}/")
@@ -56,8 +43,12 @@ def run(
             prefix=PREFIX,
             hyperparameters=hyperparameters,
         )
+        return results_df
 
-    go("baseline", n_seeds)
+    baseline = go("baseline", n_seeds)
+    # Debt/asset experiments sized by the baseline run's own
+    # steady-state output.
+    output_ss = float(baseline["output_ss"].iloc[0])
     go("initial_debt", 1, a_0=-0.5 * output_ss)
     go("initial_assets", 1, a_0=0.5 * output_ss)
     write_summary(

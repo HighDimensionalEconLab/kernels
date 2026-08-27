@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import pathlib
 
-import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 
@@ -11,9 +10,7 @@ from models import multicountry_growth_kernel
 from models.multicountry_growth_shared import (
     MULTICOUNTRY_GROWTH_CONSTANTS,
     InitialConditionSettings,
-    StructuralParameters,
     draw_initial_conditions,
-    steady_state,
 )
 from replication.utilities import (
     configure_process,
@@ -92,13 +89,6 @@ def run(output_dir: str = ".results"):
     drawn_k_0, _ = draw_initial_conditions(
         InitialConditionSettings(), MULTICOUNTRY_GROWTH_CONSTANTS["populations"]
     )
-    output_scale = float(
-        steady_state(
-            StructuralParameters.create(
-                dtype=jnp.float64, **MULTICOUNTRY_GROWTH_CONSTANTS
-            )
-        )["output_scale"]
-    )
     meta = dict(n_seeds=1, residual_dtype="float64")
     validation_frames = {}
 
@@ -119,8 +109,12 @@ def run(output_dir: str = ".results"):
             hyperparameters=hyperparameters,
         )
         validation_frames[name] = frames["validation_df"]
+        return results_df
 
-    go("baseline")
+    baseline = go("baseline")
+    # Bond configurations sized by the baseline run's own steady-state
+    # output scale.
+    output_scale = float(baseline["output_scale"].iloc[0])
     go(
         "initial_debt",
         k_0=drawn_k_0,

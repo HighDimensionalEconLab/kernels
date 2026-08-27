@@ -484,6 +484,7 @@ def open_economy_growth_nn_recursive(
         "lm_set": asdict(lm_set),
         "tolerance_set": asdict(tolerance_set),
         "r_star_resolved": r_star,
+        "output_ss": float(output_scale),
         "seed": seed,
         "dae_residual_count": 2 * int(train_t.size),
         "domain_residual_count": int(train_t.size),

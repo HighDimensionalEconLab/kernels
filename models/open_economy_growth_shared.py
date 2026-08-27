@@ -21,8 +21,7 @@ OPEN_ECONOMY_GROWTH_CONSTANTS = {
 
 
 # Deep structural parameters and the initial conditions together, all
-# implicitly differentiable through the solver's `p` argument. The optional
-# ICs let steady-state consumers build a p from the constants alone.
+# implicitly differentiable through the solver's `p` argument.
 class StructuralParameters(ParameterPyTree):
     alpha: jax.Array
     gamma: jax.Array
@@ -30,8 +29,8 @@ class StructuralParameters(ParameterPyTree):
     r: jax.Array
     eta: jax.Array
     r_star: jax.Array
-    k_0: jax.Array | None = None
-    a_0: jax.Array | None = None
+    k_0: jax.Array
+    a_0: jax.Array
 
 
 def production(k, z, p):

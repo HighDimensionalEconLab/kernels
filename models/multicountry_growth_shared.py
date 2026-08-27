@@ -43,9 +43,8 @@ class StructuralParameters(ParameterPyTree):
     eta: jax.Array
     populations: jax.Array
     productivities: jax.Array
-    # Optional ICs let steady-state consumers build a p from the constants.
-    k_0: jax.Array | None = None
-    a_0: jax.Array | None = None
+    k_0: jax.Array
+    a_0: jax.Array
 
 
 @dataclass(frozen=True)

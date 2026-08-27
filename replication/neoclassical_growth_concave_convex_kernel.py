@@ -48,8 +48,10 @@ def run(
 
     # Ex-post basin classification of each finite-horizon path (side of the
     # kink the trajectory ends on + direction of motion).
+    parameters = dict(hyperparameters["parameters"])
+    del parameters["learn_g_hat"]  # derived scalar, not a StructuralParameters field
     k_thr, k_ss_low, k_ss_high = kinked_thresholds(
-        StructuralParameters.create(dtype=jnp.float64, **hyperparameters["parameters"])
+        StructuralParameters.create(dtype=jnp.float64, **parameters)
     )
     test_df = frames["test_df"]
     outcomes = []

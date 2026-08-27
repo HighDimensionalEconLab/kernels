@@ -181,10 +181,13 @@ def investment(theta, args, log_state, p, kernel_set):
 class KernelInvestmentPolicy:
     theta: tuple
     args: ResidualArgs
+    p: StructuralParameters
     kernel_set: StateKernelSettings = struct.field(pytree_node=False)
 
-    def __call__(self, log_state, p):
-        return investment(self.theta, self.args, log_state, p, self.kernel_set)
+    def __call__(self, log_state):
+        return jnp.atleast_1d(
+            investment(self.theta, self.args, log_state, self.p, self.kernel_set)
+        )
 
 
 # Frozen collocation design: the exact benchmark paths of the training
@@ -208,7 +211,7 @@ def fixed_collocation_data(p, initial_conditions, data_set, *, dtype):
 
 
 def residual_fn(theta, args, p):
-    policy = KernelInvestmentPolicy(theta, args, args.kernel_set)
+    policy = KernelInvestmentPolicy(theta, args, p, args.kernel_set)
     residual = euler_residuals(policy, args.train_log_states, p)
     return residual / jnp.sqrt(residual.size)
 
@@ -333,7 +336,7 @@ def neoclassical_growth_kernel_recursive(
     theta = result.x
     alpha = theta[0]
     h_const = float(theta[1]) if kernel_set.free_constant else 0.0
-    policy = KernelInvestmentPolicy(theta, args, kernel_set)
+    policy = KernelInvestmentPolicy(theta, args, p, kernel_set)
 
     train_values = trajectory_values(policy, train_log_states, p)
     train_initial = np.asarray(train_initial_conditions)

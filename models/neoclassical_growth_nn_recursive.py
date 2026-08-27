@@ -27,10 +27,7 @@ from models.neoclassical_growth_shared import (
     simulate,
     trajectory_values,
 )
-from models.neural_networks import (
-    ACTIVATIONS,
-    unit_softplus,
-)
+from models.neural_networks import ACTIVATIONS, HomotheticPolicyMLP, StateMLP
 from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
@@ -95,80 +92,6 @@ class ResidualArgs:
     epoch_steps: jax.Array
     total_steps: jax.Array
     data_set: DataSettings = struct.field(pytree_node=False)
-
-
-# i = anchor * U(h), U the unit softplus with near-zero head: homothetic is
-# h(log kappa) with kappa = k / z^{1/(1-a)} the detrended capital, anchored at
-# delta * k; non-homothetic h(centered log z, log k) anchored at the constant
-# delta * k_scale; consumption Y - i stays unclamped.
-class InvestmentPolicyNN(nnx.Module):
-    def __init__(
-        self,
-        settings: InvestmentPolicySettings,
-        *,
-        z_scale=1.0,
-        k_scale=1.0,
-        dtype,
-        rngs: nnx.Rngs,
-    ):
-        self.homothetic = nnx.static(settings.homothetic_representation)
-        self.log_z_scale = nnx.Variable(jnp.asarray(math.log(z_scale), dtype=dtype))
-        self.log_k_scale = nnx.Variable(jnp.asarray(math.log(k_scale), dtype=dtype))
-        self.k_scale = nnx.Variable(jnp.asarray(k_scale, dtype=dtype))
-        self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
-        in_features = 1 if self.homothetic else 2
-        self.layers = nnx.List(
-            [
-                nnx.Linear(
-                    in_features,
-                    settings.mlp_width,
-                    dtype=dtype,
-                    param_dtype=dtype,
-                    rngs=rngs,
-                )
-            ]
-        )
-        for _ in range(settings.mlp_depth - 1):
-            self.layers.append(
-                nnx.Linear(
-                    settings.mlp_width,
-                    settings.mlp_width,
-                    dtype=dtype,
-                    param_dtype=dtype,
-                    rngs=rngs,
-                )
-            )
-        self.head = nnx.Linear(
-            settings.mlp_width,
-            1,
-            kernel_init=nnx.initializers.normal(settings.head_init_scale),
-            bias_init=nnx.initializers.zeros_init(),
-            dtype=dtype,
-            param_dtype=dtype,
-            rngs=rngs,
-        )
-
-    def __call__(self, log_state, p):
-        log_z, log_k = log_state
-        if self.homothetic:
-            h = jnp.atleast_1d(log_k - log_z / (1.0 - p.a))
-            anchor = p.delta * jnp.exp(log_k)
-        else:
-            h = jnp.stack(
-                [log_z - self.log_z_scale[...], log_k - self.log_k_scale[...]]
-            )
-            anchor = p.delta * self.k_scale[...]
-        for layer in self.layers:
-            h = self.hidden_activation(layer(h))
-        return anchor * unit_softplus(self.head(h)[0])
-
-
-# The load template only needs the architecture from meta: the scale
-# Variables ride in the artifact's nondiff block and overwrite the defaults.
-def make_investment_policy(meta, dtype):
-    return InvestmentPolicyNN(
-        InvestmentPolicySettings(**meta["settings"]), dtype=dtype, rngs=nnx.Rngs(0)
-    )
 
 
 # At each interior epoch boundary: redraw the training ICs, stop on a
@@ -241,10 +164,8 @@ class EpochCallback:
 # restart_key/epoch_key here (and resetting epoch to 0) is what keeps each
 # retry's epoch-boundary resampling independent of the others.
 class DrawInvestmentPolicy:
-    def __init__(self, settings, *, z_scale, k_scale, dtype):
-        self.draw_theta = DrawNNXModule(
-            InvestmentPolicyNN, settings, z_scale=z_scale, k_scale=k_scale, dtype=dtype
-        )
+    def __init__(self, draw_theta):
+        self.draw_theta = draw_theta
 
     def __call__(self, key, _, args):
         theta, _ = self.draw_theta(key, _, args)
@@ -375,10 +296,32 @@ def neoclassical_growth_nn_recursive(
 
     fit_timer = Stopwatch()
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
+    if nn_set.homothetic_representation:
+        policy_cls, policy_args = HomotheticPolicyMLP, ()
+        policy_spec = dict(
+            width=nn_set.mlp_width,
+            depth=nn_set.mlp_depth,
+            activation=ACTIVATIONS[nn_set.hidden_activation],
+            head_kernel_std=nn_set.head_init_scale,
+            a=a,
+            delta=delta,
+            dtype=dtype,
+        )
+    else:
+        policy_cls, policy_args = StateMLP, (2,)
+        policy_spec = dict(
+            width=nn_set.mlp_width,
+            depth=nn_set.mlp_depth,
+            activation=ACTIVATIONS[nn_set.hidden_activation],
+            heads=((1, nn_set.head_init_scale),),
+            positive=(True,),
+            center=(math.log(z_0), math.log(k_0)),
+            anchor=(delta * k_0,),
+            out_scale=(delta * k_0,),
+            dtype=dtype,
+        )
     graphdef, _, nondiff = nnx.split(
-        InvestmentPolicyNN(
-            nn_set, z_scale=z_0, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(0)
-        ),
+        policy_cls(*policy_args, rngs=nnx.Rngs(0), **policy_spec),
         nnx.Param,
         ...,
     )
@@ -411,9 +354,7 @@ def neoclassical_growth_nn_recursive(
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
     _, theta_0, _ = nnx.split(
-        InvestmentPolicyNN(
-            nn_set, z_scale=z_0, k_scale=k_0, dtype=dtype, rngs=nnx.Rngs(init_key)
-        ),
+        policy_cls(*policy_args, rngs=nnx.Rngs(init_key), **policy_spec),
         nnx.Param,
         ...,
     )
@@ -425,7 +366,7 @@ def neoclassical_growth_nn_recursive(
         log_k_scale=math.sqrt(ic_set.train_log_k_variance),
         epoch_early_stopping=tolerance_set.epoch_early_stopping,
     )
-    draw = DrawInvestmentPolicy(nn_set, z_scale=z_0, k_scale=k_0, dtype=dtype)
+    draw = DrawInvestmentPolicy(DrawNNXModule(policy_cls, *policy_args, **policy_spec))
     # The per-step tolerance is sound only while the training batch never
     # changes; across epochs, convergence is judged at the boundaries
     # instead.

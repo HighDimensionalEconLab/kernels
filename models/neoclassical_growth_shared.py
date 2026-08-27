@@ -101,13 +101,13 @@ class GrowthPolicySettings:
 
 def consumption(policy, log_state, p):
     z, k = jnp.exp(log_state)
-    return production(z, k, p) - policy(log_state, p)
+    return production(z, k, p) - policy(log_state)[0]
 
 
 def log_state_drift(policy, log_state, p):
     _, log_k = log_state
     k = jnp.exp(log_k)
-    investment = policy(log_state, p)
+    investment = policy(log_state)[0]
     return jnp.stack([(1.0 - p.a) * p.g, investment / k - p.delta])
 
 
@@ -309,7 +309,7 @@ def log_tvc_residual(policy, initial_log_states, T, n_steps, p):
 def trajectory_values(policy, log_states, p):
     shape = log_states.shape[:-1]
     flat_states = log_states.reshape(-1, 2)
-    investment = jax.vmap(lambda state: policy(state, p))(flat_states).reshape(shape)
+    investment = jax.vmap(lambda state: policy(state)[0])(flat_states).reshape(shape)
     c = jax.vmap(lambda state: consumption(policy, state, p))(flat_states).reshape(
         shape
     )

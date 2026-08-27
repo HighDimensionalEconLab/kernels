@@ -55,6 +55,9 @@ def run(
                 test_T=test_T, test_points=test_points
             ),
             learn_g_hat=True,
+            # From 0 the trend falls into a wrong basin (g_hat drifts
+            # negative) on every multi-start attempt.
+            g_hat_init=0.005,
             lm_set=OptimizerSettings(
                 init_damping=1e-5,
                 damping_decrease=0.5,

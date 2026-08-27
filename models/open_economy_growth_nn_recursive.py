@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+import math
+from dataclasses import asdict, dataclass
 from functools import partial
 
 import jax
@@ -13,10 +14,7 @@ from jax.flatten_util import ravel_pytree
 from nlls_gram import DrawNNXModule, LevenbergMarquardt, MultiStart
 from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 
-from models.neural_networks import (
-    ACTIVATIONS,
-    unit_softplus,
-)
+from models.neural_networks import ACTIVATIONS, StateMLP
 from models.open_economy_growth_benchmark import open_economy_growth_benchmark
 from models.open_economy_growth_shared import (
     OPEN_ECONOMY_GROWTH_CONSTANTS as CONSTANTS,
@@ -72,9 +70,6 @@ class SequentialPolicySettings:
     width: int = 32
     depth: int = 3
     hidden_activation: str = "gelu"
-    flow_scale: float = 1.0
-    investment_anchor: float = 1.0
-    k_0_ref: float = 1.0
 
 
 @struct.dataclass
@@ -82,54 +77,6 @@ class ResidualArgs:
     graphdef: nnx.GraphDef
     nondiff: nnx.State
     data_set: DataSettings = struct.field(pytree_node=False)
-
-
-class SequentialPolicyNN(nnx.Module):
-    def __init__(
-        self,
-        settings: SequentialPolicySettings,
-        *,
-        dtype,
-        rngs: nnx.Rngs,
-    ):
-        self.hidden_activation = nnx.static(ACTIVATIONS[settings.hidden_activation])
-        self.flow_scale = nnx.Variable(jnp.asarray(settings.flow_scale, dtype=dtype))
-        self.investment_anchor = nnx.Variable(
-            jnp.asarray(settings.investment_anchor, dtype=dtype)
-        )
-        self.k_0_ref = nnx.Variable(jnp.asarray(settings.k_0_ref, dtype=dtype))
-        self.layers = nnx.List(
-            [nnx.Linear(1, settings.width, dtype=dtype, param_dtype=dtype, rngs=rngs)]
-        )
-        for _ in range(settings.depth - 1):
-            self.layers.append(
-                nnx.Linear(
-                    settings.width,
-                    settings.width,
-                    dtype=dtype,
-                    param_dtype=dtype,
-                    rngs=rngs,
-                )
-            )
-        self.head = nnx.Linear(
-            settings.width,
-            2,
-            kernel_init=nnx.initializers.normal(1e-3),
-            dtype=dtype,
-            param_dtype=dtype,
-            rngs=rngs,
-        )
-
-    def __call__(self, k):
-        h = jnp.atleast_1d(jnp.log(k / self.k_0_ref[...]))
-        for layer in self.layers:
-            h = self.hidden_activation(layer(h))
-        raw = self.head(h)
-        investment = self.investment_anchor[...] * unit_softplus(
-            (self.flow_scale[...] / self.investment_anchor[...]) * raw[0]
-        )
-        current_account = self.flow_scale[...] * raw[1]
-        return jnp.stack([investment, current_account])
 
 
 def policy_values(policy, k, a, p):
@@ -179,7 +126,7 @@ def simulate(policy, T, budget, k_0, p, *, save_at):
         return jnp.stack(
             [
                 capital_drift / k,
-                current_account / policy.flow_scale[...],
+                current_account / policy.out_scale[...][1],
             ]
         )
 
@@ -229,7 +176,7 @@ def collocation_states(policy, p, data_set):
         solution,
         initial_k,
         initial_a,
-        policy.flow_scale[...],
+        policy.out_scale[...][1],
     )
     safe_states = jnp.where(
         solution.accepted[..., None],
@@ -267,7 +214,7 @@ def evaluate_path_jit(policy, T, budget, p):
         return jnp.stack(
             [
                 capital_drift / k,
-                current_account / policy.flow_scale[...],
+                current_account / policy.out_scale[...][1],
             ]
         )
 
@@ -281,7 +228,7 @@ def evaluate_path_jit(policy, T, budget, p):
         max_steps=budget,
         save_at=SaveAt(steps=True),
     )
-    states = states_from_solution(solution, p.k_0, p.a_0, policy.flow_scale[...])
+    states = states_from_solution(solution, p.k_0, p.a_0, policy.out_scale[...][1])
     return {"t": solution.ts, **path_values(policy, states, p)}
 
 
@@ -331,14 +278,20 @@ def open_economy_growth_nn_recursive(
         a_0=a_0,
     )
     initial_output = float(production(p.k_0, 1.0, p))
-    nn_set = replace(
-        nn_set,
-        flow_scale=initial_output,
-        investment_anchor=delta * k_0,
-        k_0_ref=k_0,
+    policy_spec = dict(
+        width=nn_set.width,
+        depth=nn_set.depth,
+        activation=ACTIVATIONS[nn_set.hidden_activation],
+        heads=((2, 1e-3),),
+        positive=(True, False),
+        log_input=True,
+        center=(math.log(k_0),),
+        anchor=(delta * k_0, 1.0),
+        out_scale=(initial_output, initial_output),
+        dtype=dtype,
     )
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
-    model = SequentialPolicyNN(nn_set, dtype=dtype, rngs=nnx.Rngs(init_key))
+    model = StateMLP(1, rngs=nnx.Rngs(init_key), **policy_spec)
     graphdef, theta_0, nondiff = nnx.split(model, nnx.Param, ...)
     residual_args = ResidualArgs(
         graphdef=graphdef,
@@ -357,7 +310,7 @@ def open_economy_growth_nn_recursive(
     multi_start = MultiStart(
         key=multi_start_key,
         num_starts=lm_set.num_attempts,
-        draw=DrawNNXModule(SequentialPolicyNN, nn_set, dtype=dtype),
+        draw=DrawNNXModule(StateMLP, 1, **policy_spec),
     )
     solve_options = dict(
         max_steps=lm_set.max_steps,

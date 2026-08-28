@@ -90,7 +90,7 @@ kappa_0 = k_0 / z_0 ** (1.0 / (1.0 - a))
 kappa_ss = ((delta + rho_hat + sigma_crra * g) / a) ** (1.0 / (a - 1.0))
 
 
-def kappa_field(t, y):
+def kappa_field(_, y):
     kappa, c_tilde = y
     return jnp.array(
         [

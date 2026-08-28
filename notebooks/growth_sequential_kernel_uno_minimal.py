@@ -46,14 +46,14 @@ def kernel_matrices(t_i, t_j):
 
 # Each path x(t) = x(0) + K_tilde alpha with exact derivative x'(t) = K alpha;
 # k(0) = k_0 is pinned while c(0), mu(0) are free scalars in theta. CRRA
-# first-order condition u'(c) = mu; the euler and resource residuals are
-# utility-free.
+# curvature enters only through the first-order condition u'(c) = mu.
 def residual_fn(theta, args, p):
-    mu = theta["mu_0"] + args["K_tilde"] @ theta["alpha_mu"]
-    dmu_dt = args["K"] @ theta["alpha_mu"]
-    c = theta["c_0"] + args["K_tilde"] @ theta["alpha_c"]
-    k = p["k_0"] + args["K_tilde"] @ theta["alpha_k"]
-    dk_dt = args["K"] @ theta["alpha_k"]
+    K, K_tilde = args["K"], args["K_tilde"]
+    mu = theta["mu_0"] + K_tilde @ theta["alpha_mu"]
+    dmu_dt = K @ theta["alpha_mu"]
+    c = theta["c_0"] + K_tilde @ theta["alpha_c"]
+    k = p["k_0"] + K_tilde @ theta["alpha_k"]
+    dk_dt = K @ theta["alpha_k"]
     resource = dk_dt - (k ** p["a"] - p["delta"] * k - c)
     euler = dmu_dt + mu * (p["a"] * k ** (p["a"] - 1.0) - p["delta"] - p["rho_hat"])
     shadow_price = mu * c ** p["sigma_crra"] - 1.0

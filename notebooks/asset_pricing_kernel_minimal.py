@@ -32,7 +32,8 @@ t_test = jnp.linspace(0.0, TEST_T, N_TEST)
 # Matern-1/2 kernel k(t, t') = sigma^2 e^{-|t - t'|/ell} with antiderivative
 # h(d) = int_0^d k = sigma^2 ell (1 - e^{-d/ell}). The integrated kernel
 # K_tilde(t_i, t_j) = int_0^{t_i} k(s, t_j) ds splits at s = t_j:
-# h(t_j) + sign(t_i - t_j) h(|t_i - t_j|), so K_tilde(0, .) = 0 pins x(0).
+# h(t_j) + sign(t_i - t_j) h(|t_i - t_j|), so K_tilde(0, .) = 0 makes p_0
+# exactly the initial price.
 def antiderivative(d):
     return SIGMA**2 * ELL * (1.0 - jnp.exp(-d / ELL))
 

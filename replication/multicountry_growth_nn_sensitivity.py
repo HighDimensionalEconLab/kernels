@@ -5,7 +5,6 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from flax import nnx
 from nlls_gram import LMStatus
 
 from models import multicountry_growth_nn
@@ -14,6 +13,7 @@ from models.multicountry_growth_shared import (
     sensitivity_observable_labels,
     sensitivity_observables,
 )
+from models.neural_networks import NNXResidualArgs
 from replication.multicountry_growth_kernel import (
     LARGE_COUNTRY_PARAMETERS,
     SENSITIVITY_TIMES,
@@ -70,10 +70,15 @@ def run(
                 solved = solver.solve(
                     result.x, residual_args, p=p_value, **spec["options"]
                 )
-                policy = nnx.merge(
-                    residual_args.graphdef, solved.x, residual_args.nondiff
-                )
-                values = jax.vmap(policy)(t_sens)
+                values = multicountry_growth_nn.residual_fn(
+                    solved.x,
+                    NNXResidualArgs(
+                        batch={"t": t_sens},
+                        graphdef=residual_args.graphdef,
+                        nondiff=residual_args.nondiff,
+                    ),
+                    p_value,
+                )[1]
                 return sensitivity_observables(values, p_value), solved.status
 
             # The full Jacobian: every observable against every parameter,
@@ -88,7 +93,15 @@ def run(
                 raise RuntimeError("the sensitivity re-solve did not converge")
             primal_observables = np.asarray(
                 sensitivity_observables(
-                    jax.vmap(extras["model"])(t_sens),
+                    multicountry_growth_nn.residual_fn(
+                        result.x,
+                        NNXResidualArgs(
+                            batch={"t": t_sens},
+                            graphdef=residual_args.graphdef,
+                            nondiff=residual_args.nondiff,
+                        ),
+                        spec["p"],
+                    )[1],
                     spec["p"],
                 )
             )

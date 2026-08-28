@@ -168,13 +168,12 @@ solve_time = time.perf_counter() - start
 theta = result.x
 
 
-def drift_field(log_state, _, args, p):
-    theta, structural = p
-    return log_state_drift(theta, log_state, structural)
-
-
 # Fixed-step RK4 closed-loop simulation, saving the integrator's own states.
 def simulate(theta, initial_log_state, T, n_steps, p):
+    def drift_field(log_state, _, args, p):
+        theta, structural = p
+        return log_state_drift(theta, log_state, structural)
+
     return solve_ode(
         drift_field,
         RK4(),

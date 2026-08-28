@@ -97,13 +97,12 @@ def euler_residual(policy, log_state, p):
     )
 
 
-def drift_field(log_state, _, args, p):
-    policy, structural = p
-    return log_state_drift(policy, log_state, structural)
-
-
 # Fixed-step RK4 closed-loop simulation, saving the integrator's own states.
 def simulate(policy, initial_log_state, T, n_steps, p):
+    def drift_field(log_state, _, args, p):
+        policy, structural = p
+        return log_state_drift(policy, log_state, structural)
+
     return solve_ode(
         drift_field,
         RK4(),

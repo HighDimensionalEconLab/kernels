@@ -243,12 +243,11 @@ theta = result.x
 The test rolls the learned policy closed-loop with [`tinydiffeq`](https://github.com/HighDimensionalEconLab/tinydiffeq)'s fixed-step RK4 `solve_ode` — no benchmark involved — and evaluates the Euler residual along the roll. The transversality certificate simulates to $T = 200$ and evaluates the log of $e^{-\hat\rho T} c(T)^{-\sigma} k(T)$, normalized by its initial-date value: far negative on the saddle path, positive on a capital bubble.
 
 ```{python}
-def drift_field(log_state, _, args, p):
-    theta, structural = p
-    return log_state_drift(theta, log_state, structural)
-
-
 def simulate(theta, initial_log_state, T, n_steps, p):
+    def drift_field(log_state, _, args, p):
+        theta, structural = p
+        return log_state_drift(theta, log_state, structural)
+
     return solve_ode(
         drift_field,
         RK4(),

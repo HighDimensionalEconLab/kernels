@@ -100,6 +100,8 @@ class PathNN(nnx.Module):
         h = jnp.tanh(self.l1(h))
         h = jnp.tanh(self.l2(h))
         h = jnp.tanh(self.l3(h))
+        # Fixed output scales anchor the parameterization; p["k_0"] imposes
+        # the initial condition.
         return jnp.array([k_0, C_FLOW]) * unit_softplus(self.head(h))
 
 
@@ -125,9 +127,9 @@ The time derivatives come from a forward-mode [`jax.jvp`](https://docs.jax.dev/e
 
 ```{python}
 def residual_fn(theta, args, p):
-    model = nnx.merge(graphdef, theta)
+    model = nnx.merge(args["graphdef"], theta)
     values, derivatives = jax.vmap(lambda s: jax.jvp(model, (s,), (jnp.ones_like(s),)))(
-        args
+        args["t"]
     )
     k, c = values[:, 0], values[:, 1]
     dk_dt, dc_dt = derivatives[:, 0], derivatives[:, 1]
@@ -152,7 +154,7 @@ solver = LevenbergMarquardt(residual_fn, init_damping=INIT_DAMPING)
 start = time.perf_counter()
 result = solver.solve(
     theta_0,
-    t_train,
+    {"graphdef": graphdef, "t": t_train},
     p=p,
     max_steps=MAX_STEPS,
     atol=math.sqrt(LOSS_THRESHOLD),

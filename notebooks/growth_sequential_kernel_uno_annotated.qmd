@@ -265,7 +265,7 @@ k_T = k_0 + K_tilde_tvc @ theta["alpha_k"]
 log_tvc = -rho_hat * TVC_T - sigma_crra * jnp.log(c_T[0]) + jnp.log(k_T[0])
 
 print(f"solve: {result.solution_status.name} in {solve_time:.2f}s (incl. jit)")
-print(f"c_0 = {float(theta["c_0"]):.6f}, mu_0 = {float(theta["mu_0"]):.6f}")
+print(f"c_0 = {float(theta['c_0']):.6f}, mu_0 = {float(theta['mu_0']):.6f}")
 print(f"mean |Euler residual| test: {float(jnp.abs(euler_test).mean()):.3e}")
 print(f"log-TVC at t={TVC_T:.0f}: {float(log_tvc):.1f}   (should be << 0)")
 ```

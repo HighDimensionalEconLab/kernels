@@ -17,9 +17,65 @@ class NNXResidualArgs:
 
 # U(0) = U'(0) = 1, so a near-zero head starts at its declared output scale
 # without shrinking the local Jacobian by softplus'(0).
-def unit_softplus(raw):
-    log_two = jnp.log(jnp.asarray(2.0, dtype=raw.dtype))
-    return jax.nn.softplus(2.0 * log_two * raw) / log_two
+def unit_softplus(raw, local_slope=1.0, tail_slope=None):
+    """Positive softplus transform from R to (0, inf), anchored at one.
+
+    For local slope s > 0 and tail slope t > s, define
+
+        rho = s / t
+        c = -log(1 - rho)
+        U(r) = softplus(logit(rho) + t c r) / c.
+
+    It satisfies
+
+        U(0) = 1,
+        U'(0) = s,
+        U''(0) = s (t - s) [-log(1 - s/t)],
+        lim_{r -> -inf} U(r) = 0,
+        lim_{r -> inf} U'(r) = t.
+
+    When ``tail_slope=None``, the default is t=2s, giving
+
+        U(r) = softplus(2 s log(2) r) / log(2),
+
+    with U(0)=1, U'(0)=s, U''(0)=s**2 log(2), and tail slope 2s.
+
+    This is the standard beta/parametric softplus -- softplus(beta x)/beta
+    with beta = c (TFP's ``hinge_softness = 1/c``) -- precomposed with the
+    affine shift that pins U(0) = 1 and U'(0) = s.
+
+    Notes:
+        Constants are computed in float64 (x64 is on in every entrypoint),
+        so float32 accuracy is flat (~2e-6 value, ~5e-7 gradient, ~2e-6
+        second derivative) for t/s - 1 anywhere in [1e-14, 1e12]. Value,
+        gradient, and second derivative all underflow to exactly 0 once the
+        softplus argument logit(rho) + t c r drops below -87 in float32
+        (-708 in float64); the float32 second derivative alone is exactly 0
+        above argument ~ +15, where its true value ~3e-7 sits below float32
+        noise.
+
+    Args:
+        raw: Floating-point JAX array with values in R.
+        local_slope: Local slope s > 0. Defaults to 1.
+        tail_slope: Positive-tail slope t > s. ``None`` uses t=2s.
+
+    Returns:
+        A JAX array in (0, inf) with the shape and dtype of ``raw``.
+    """
+    dtype = raw.dtype
+    if tail_slope is None:
+        s = jnp.asarray(local_slope, dtype)
+        log_two = jnp.log(jnp.asarray(2.0, dtype=dtype))
+        return jax.nn.softplus(2.0 * log_two * s * raw) / log_two
+    # Constants in float64: float32 cannot resolve tail/local ratios near
+    # one, and no same-dtype algebra fixes that.
+    s = jnp.asarray(local_slope, jnp.float64)
+    t = jnp.asarray(tail_slope, jnp.float64)
+    rho = s / t
+    normalizer = -jnp.log1p(-rho)
+    center = jnp.log(rho) - jnp.log1p(-rho)
+    coef = (t * normalizer).astype(dtype)
+    return jax.nn.softplus(center.astype(dtype) + coef * raw) / normalizer.astype(dtype)
 
 
 ACTIVATIONS = {

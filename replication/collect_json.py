@@ -834,7 +834,7 @@ def neoclassical_growth_kernel_uno(out):
             "kernel": kernel_name,
             "nu": KERNEL_NU[kernel_name],
             "ell": ell,
-            **errors(result),
+            **errors(result, name),
         }
 
     baseline_kernel = hp["kernel_set"]["kernel"]

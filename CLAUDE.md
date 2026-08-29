@@ -49,14 +49,18 @@ per-directory READMEs.
   `unit_softplus`, or the per-output `UnitSoftplusWhere` mask for mixed
   signed/positive heads — `output_scale` Variable, optional trend Param
   `g`); the recursive policy pieces — the generic `StateMLP` map
-  state -> (..., out_features) (optional elementwise log, `normalize_state`
-  affine normalization with a per-coordinate tanh-squash mask, one near-zero
-  Linear head per `(out_width, kernel_std)` entry — `None` draws a zeros
-  kernel — `anchored_outputs` anchored-softplus/affine output map on the
-  per-output `positive` mask, optional `MaskedLecunInit` first-layer column
-  mask; normalization and output constants are non-Param Variables) and the
-  hardcoded `HomotheticPolicyMLP`, with the shared
-  `normalize_state`/`anchored_outputs` also imported by the
+  state -> (..., out_features) (states arrive in the model's natural
+  coordinates, logs of positive states taken by the caller;
+  `normalize_state` affine normalization with a per-coordinate tanh-squash
+  mask, one near-zero Linear head per `(out_width, kernel_std)` entry —
+  `None` draws a zeros kernel — `scaled_outputs` per-output map
+  `output_scale * U(local_slope * raw)` positive / `output_scale * raw`
+  signed, optional `MaskedLecunInit` first-layer column mask; normalization
+  and output constants are non-Param Variables; `local_slope` defaults to
+  ones and is `flow_unit / start_level` — `1/delta` on the open-economy
+  investment slots — so every head carries an O(flow-unit) Jacobian at the
+  draw) and the hardcoded `HomotheticPolicyMLP`, with the shared
+  `normalize_state`/`scaled_outputs` also imported by the
   stochastic-open-economy kernel policy; plus `unit_softplus`/`ACTIVATIONS`,
   `NNXResidualArgs`, and the policy-artifact `save_model`/`load_model`
   (load factories rebuild the `StateMLP` template from `meta["settings"]`
@@ -113,7 +117,7 @@ per-directory READMEs.
   policy call is p-free — `policy(state) -> (out_features,)`, single-output
   consumers index `[0]` — with structural constants baked at construction
   (`HomotheticPolicyMLP` holds a/delta as non-Param Variables, `StateMLP`
-  anchors like `delta * k_0` live in its Variables) and the kernel-recursive
+  output scales like `delta * k_0` live in its Variables) and the kernel-recursive
   policy structs carrying `p` as a pytree field instead. The neoclassical
   `homothetic_representation` flag picks `HomotheticPolicyMLP`
   (`i = delta * k * unit_softplus(h(log kappa))`) vs a general `StateMLP`;

@@ -18,7 +18,7 @@ Deterministic solvers run with JAX's persistent compilation cache enabled;
 `DETERMINISTIC_TIMING_REPETITIONS` in `utilities.py` sets the repetition count,
 the timing runs are saved in `<model>_<experiment>_timing_df.parquet`, and the
 reported solve time is their median. NN ensembles report medians across
-accepted seeds: 11 seeds for the sequence-space baselines, 5 for the recursive
+accepted seeds: 7 seeds for the sequence-space baselines, 5 for the recursive
 baselines, and one for the recursive growth driver's variant experiments. The
 two open-economy asset scenarios used only in the transition figure retain one
 displayed seed each. The multicountry scaling ladder uses a phase-tagged timing

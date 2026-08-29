@@ -115,6 +115,9 @@ class SequentialPolicySettings:
     # output_scale.
     asset_range: float = 0.1
     ergodic_input_scales: bool = True
+    # None derives output_scale/(delta k_0): both heads carry an
+    # O(output_scale) Jacobian at the near-zero draw.
+    investment_local_slope: float | None = None
 
 
 def state_levels(state, p):

@@ -329,7 +329,12 @@ def stochastic_open_economy_growth_nn_recursive(
         ),
         squash=(False, False, nn_set.squash_assets, False),
         output_scale=(investment_anchor, output_scale),
-        local_slope=(output_scale / investment_anchor, 1.0),
+        local_slope=(
+            output_scale / investment_anchor
+            if nn_set.investment_local_slope is None
+            else nn_set.investment_local_slope,
+            1.0,
+        ),
         input_kernel_mask=nn_set.input_kernel_mask,
         dtype=dtype,
     )

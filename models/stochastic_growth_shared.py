@@ -341,6 +341,8 @@ class InvestmentPolicySettings:
     mlp_depth: int = 3
     hidden_activation: str = "gelu"
     head_init_scale: float = 1e-3
+    # dy/draw at the near-zero draw is output_scale * investment_local_slope.
+    investment_local_slope: float = 1.0
 
 
 # The load template only needs the architecture from meta: the output-map

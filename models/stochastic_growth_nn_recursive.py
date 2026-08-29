@@ -264,6 +264,7 @@ def stochastic_growth_nn_recursive(
         heads=((1, nn_set.head_init_scale),),
         positive=(True,),
         output_scale=(delta * k_0,),
+        local_slope=(nn_set.investment_local_slope,),
         dtype=dtype,
     )
     graphdef, _, nondiff = nnx.split(

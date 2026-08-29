@@ -18,7 +18,7 @@ from nlls_gram import (
     MultiStart,
 )
 
-from models.neural_networks import StateMLP, save_model
+from models.neural_networks import ACTIVATIONS, StateMLP, save_model
 from models.stochastic_growth_shared import (
     STOCHASTIC_GROWTH_CONSTANTS as CONSTANTS,
 )
@@ -187,7 +187,8 @@ def residual_fn(theta, args, p):
     ).reshape(-1)
 
 
-# The deterministic model plus its OU log-TFP.
+# The deterministic model plus its OU log-TFP. No benchmark or steady-state
+# information enters the residual or initialization.
 def stochastic_growth_nn_recursive(
     a: float = CONSTANTS["a"],
     delta: float = CONSTANTS["delta"],
@@ -254,13 +255,12 @@ def stochastic_growth_nn_recursive(
 
     fit_timer = Stopwatch()
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
-    # The residual differentiates the policy twice, so the gelu trunk stays
-    # hardcoded; mean reversion in z fixes a scale, so the raw (log z, log k)
-    # state feeds the trunk unnormalized with the constant delta * k_0 anchor.
+    # Mean reversion in z fixes a scale, so the raw (log z, log k) state
+    # feeds the trunk unnormalized with the constant delta * k_0 start level.
     policy_spec = dict(
         width=nn_set.mlp_width,
         depth=nn_set.mlp_depth,
-        activation=jax.nn.gelu,
+        activation=ACTIVATIONS[nn_set.hidden_activation],
         heads=((1, nn_set.head_init_scale),),
         positive=(True,),
         output_scale=(delta * k_0,),
@@ -405,7 +405,7 @@ def stochastic_growth_nn_recursive(
     theta_final, solve_args = result.x, result.args
     r = residual_fn(theta_final, solve_args, p)
     train_loss = float(jnp.sum(r * r))
-    epochs_run = -(-steps // tolerance_set.max_steps)
+    epochs_run = int(solve_args.epoch) + 1
     stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
     attempt = int(result.multi_start.attempt) + 1
     final_damping = float(result.lm_state.damping)
@@ -526,6 +526,11 @@ def stochastic_growth_nn_recursive(
         "max_test_euler": max_test_euler,
         "final_damping": final_damping,
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_values["euler_residual"]))),
+        "test_euler_mean_abs_success": (
+            float(jnp.mean(jnp.abs(test_values["euler_residual"])))
+            if solver_accepted
+            else np.nan
+        ),
         "test_trajectory_euler_mean_abs_p50": float(
             jnp.quantile(test_trajectory_euler, 0.5)
         ),
@@ -545,6 +550,7 @@ def stochastic_growth_nn_recursive(
         "steps": steps,
         "epochs_run": epochs_run,
         "attempt": attempt,
+        "attempts_run": int(result.multi_start.attempts_run),
         "solve_time": solve_time,
         "setup_time": setup_time,
         "total_fit_time": total_fit_time,

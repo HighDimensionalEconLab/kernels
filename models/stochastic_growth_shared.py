@@ -10,7 +10,7 @@ import numpy as np
 from flax import nnx
 from tinydiffeq import SaveAt, solve_sde
 
-from models.neural_networks import StateMLP
+from models.neural_networks import ACTIVATIONS, StateMLP
 from models.utilities import ParameterPyTree
 
 # Stochastic neoclassical growth on the state (log z, log k): OU log-TFP
@@ -339,6 +339,7 @@ def growth_initial_conditions(z_0, k_0, ic_set, dtype):
 class InvestmentPolicySettings:
     mlp_width: int = 32
     mlp_depth: int = 3
+    hidden_activation: str = "gelu"
     head_init_scale: float = 1e-3
 
 
@@ -351,7 +352,7 @@ def make_investment_policy(meta, dtype):
         2,
         width=settings.mlp_width,
         depth=settings.mlp_depth,
-        activation=jax.nn.gelu,
+        activation=ACTIVATIONS[settings.hidden_activation],
         heads=((1, settings.head_init_scale),),
         positive=(True,),
         output_scale=(1.0,),

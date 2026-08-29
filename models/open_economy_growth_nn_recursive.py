@@ -429,6 +429,9 @@ def open_economy_growth_nn_recursive(
         "final_damping": float(result.lm_state.damping),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
+        "max_validation_residual_success": (
+            max_validation_residual if solution_accepted else np.nan
+        ),
         "max_benchmark_error": max_benchmark_error,
         "k_relative_error_max": float(jnp.max(k_relative_error)),
         "q_relative_error_max": float(jnp.max(q_relative_error)),
@@ -449,6 +452,7 @@ def open_economy_growth_nn_recursive(
         ),
         "steps": int(result.steps),
         "attempt": attempt,
+        "attempts_run": int(result.multi_start.attempts_run),
         "solve_time": solve_time,
         "solve_time_success": solve_time if solution_accepted else np.nan,
         "total_params": int(theta_final.size),

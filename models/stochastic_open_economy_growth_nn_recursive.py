@@ -303,27 +303,34 @@ def stochastic_open_economy_growth_nn_recursive(
         width=nn_set.width,
         depth=nn_set.depth,
         activation=ACTIVATIONS[nn_set.hidden_activation],
-        heads=((1, nn_set.investment_head_init_scale), (1, None)),
+        heads=(
+            (1, nn_set.investment_head_init_scale),
+            (1, nn_set.current_account_head_init_scale),
+        ),
         positive=(True, False),
         center=(math.log(z_bar), math.log(k_0), a_0, 0.0),
         # Asset squash scale: assets integrate an O(output_scale) flow over
         # the training horizon at an assumed current-account-to-output ratio
-        # of order 0.1, floored at output_scale (a smaller floor saturates
-        # the tanh mid-transition).
+        # of order asset_range, floored at output_scale (a smaller floor
+        # saturates the tanh mid-transition).
         scale=(
-            max(math.sqrt(z_ergodic_variance), math.sqrt(train_variances[0])),
+            max(math.sqrt(z_ergodic_variance), math.sqrt(train_variances[0]))
+            if nn_set.ergodic_input_scales
+            else 1.0,
             1.0,
             max(
                 math.sqrt(train_variances[2]),
-                0.1 * data_set.train_T * output_scale,
+                nn_set.asset_range * data_set.train_T * output_scale,
                 output_scale,
             ),
-            max(math.sqrt(rate_ergodic_variance), math.sqrt(train_variances[3])),
+            max(math.sqrt(rate_ergodic_variance), math.sqrt(train_variances[3]))
+            if nn_set.ergodic_input_scales
+            else 1.0,
         ),
-        squash=(False, False, True, False),
+        squash=(False, False, nn_set.squash_assets, False),
         output_scale=(investment_anchor, output_scale),
         local_slope=(output_scale / investment_anchor, 1.0),
-        input_kernel_mask=(0.0, 1.0, 0.0, 0.0),
+        input_kernel_mask=nn_set.input_kernel_mask,
         dtype=dtype,
     )
     p = StructuralParameters.create(
@@ -796,6 +803,7 @@ def stochastic_open_economy_growth_nn_recursive(
         "hysteresis_euler_mean_abs": hysteresis_euler_mean_abs,
         "hysteresis_euler_max_abs": hysteresis_euler_max_abs,
         "steps": steps,
+        "attempts_run": int(result.multi_start.attempts_run),
         "epochs_run": epochs_run,
         "shock_continuation_scales": tuple(
             float(value) for value in np.asarray(shock_scales)

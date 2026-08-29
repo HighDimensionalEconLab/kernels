@@ -221,7 +221,8 @@ def residual_fn(theta, args, p):
 
 
 # The stochastic variant (stochastic_growth_nn_recursive) solves this same
-# model with stochastic TFP.
+# model with stochastic TFP. No benchmark or steady-state information enters
+# the residual or initialization; the closed form is ex-post diagnostics only.
 def neoclassical_growth_nn_recursive(
     a: float = CONSTANTS["a"],
     delta: float = CONSTANTS["delta"],
@@ -378,7 +379,7 @@ def neoclassical_growth_nn_recursive(
     theta_final, solve_args = result.x, result.args
     r = residual_fn(theta_final, solve_args, p)
     train_loss = float(jnp.sum(r * r))
-    epochs_run = -(-steps // tolerance_set.max_steps)
+    epochs_run = int(solve_args.epoch) + 1
     stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
     attempt = int(result.multi_start.attempt) + 1
     final_damping = float(result.lm_state.damping)
@@ -498,6 +499,11 @@ def neoclassical_growth_nn_recursive(
         "max_test_euler": max_test_euler,
         "final_damping": final_damping,
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_values["euler_residual"]))),
+        "test_euler_mean_abs_success": (
+            float(jnp.mean(jnp.abs(test_values["euler_residual"])))
+            if solver_accepted
+            else np.nan
+        ),
         "test_trajectory_euler_mean_abs_p50": float(
             jnp.quantile(test_trajectory_euler, 0.5)
         ),
@@ -511,6 +517,7 @@ def neoclassical_growth_nn_recursive(
         "steps": steps,
         "epochs_run": epochs_run,
         "attempt": attempt,
+        "attempts_run": int(result.multi_start.attempts_run),
         "solve_time": solve_time,
         "setup_time": setup_time,
         "total_fit_time": total_fit_time,

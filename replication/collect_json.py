@@ -1303,7 +1303,7 @@ def stochastic_growth_nn_recursive(out):
         "architecture": {
             "width": hp["nn_set"]["mlp_width"],
             "depth": hp["nn_set"]["mlp_depth"],
-            "hidden_activation": "gelu",
+            "hidden_activation": hp["nn_set"]["hidden_activation"],
             "total_params": int(med(j["total_params"])),
         },
         "stopping": {
@@ -2006,6 +2006,7 @@ def validate_replication_contract(out):
         "open_economy_growth_nn_recursive": ("baseline", 5),
         "multicountry_growth_nn": ("baseline", 7),
         "stochastic_growth_nn_recursive": ("baseline", 5),
+        "stochastic_open_economy_growth_nn_recursive": ("baseline", 5),
     }
     for prefix, (experiment, expected) in nn_seed_counts.items():
         summary = load(out, f"{prefix}_{experiment}")

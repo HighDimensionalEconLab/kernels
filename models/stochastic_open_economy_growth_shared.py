@@ -108,6 +108,13 @@ class SequentialPolicySettings:
     depth: int = 3
     hidden_activation: str = "gelu"
     investment_head_init_scale: float = 1e-3
+    current_account_head_init_scale: float | None = None  # None: zeros kernel
+    squash_assets: bool = True
+    input_kernel_mask: tuple[float, ...] | None = (0.0, 1.0, 0.0, 0.0)
+    # Asset squash scale = asset_range * output_scale * train_T, floored at
+    # output_scale.
+    asset_range: float = 0.1
+    ergodic_input_scales: bool = True
 
 
 def state_levels(state, p):
@@ -436,9 +443,12 @@ def make_sequential_policy(meta, dtype):
         width=settings.width,
         depth=settings.depth,
         activation=ACTIVATIONS[settings.hidden_activation],
-        heads=((1, settings.investment_head_init_scale), (1, None)),
+        heads=(
+            (1, settings.investment_head_init_scale),
+            (1, settings.current_account_head_init_scale),
+        ),
         positive=(True, False),
-        squash=(False, False, True, False),
+        squash=(False, False, settings.squash_assets, False),
         output_scale=(1.0, 1.0),
         dtype=dtype,
         rngs=nnx.Rngs(0),

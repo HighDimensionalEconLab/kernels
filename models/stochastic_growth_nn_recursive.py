@@ -263,8 +263,7 @@ def stochastic_growth_nn_recursive(
         activation=jax.nn.gelu,
         heads=((1, nn_set.head_init_scale),),
         positive=(True,),
-        anchor=(delta * k_0,),
-        out_scale=(delta * k_0,),
+        output_scale=(delta * k_0,),
         dtype=dtype,
     )
     graphdef, _, nondiff = nnx.split(

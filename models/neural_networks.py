@@ -184,14 +184,12 @@ def normalize_state(state, center, scale, squash=None):
     return jnp.where(jnp.asarray(squash), 2.0 * jnp.tanh(u / 2.0), u)
 
 
-# Positive outputs: anchor * U((out_scale/anchor) * raw) -- a near-zero raw
-# starts at anchor with an O(out_scale) Jacobian. Signed outputs:
-# offset + out_scale * raw.
-def anchored_outputs(raw, positive, anchor, out_scale, offset):
-    return jnp.where(
-        jnp.asarray(positive),
-        anchor * unit_softplus((out_scale / anchor) * raw),
-        offset + out_scale * raw,
+# Positive outputs: output_scale * U(local_slope * raw) -- a near-zero raw
+# starts at output_scale with an (output_scale * local_slope) Jacobian.
+# Signed outputs: output_scale * raw.
+def scaled_outputs(raw, positive, output_scale, local_slope):
+    return output_scale * jnp.where(
+        jnp.asarray(positive), unit_softplus(local_slope * raw), raw
     )
 
 
@@ -209,7 +207,7 @@ class MaskedLecunInit:
 # p-free MLP policy map state (..., in_features) -> (..., out_features):
 # affine normalization with optional per-coordinate tanh squash, trunk, one
 # Linear head per (out_width, kernel_std) entry (None kernel_std draws a
-# zeros kernel), then anchored_outputs with the per-output positive mask.
+# zeros kernel), then scaled_outputs with the per-output positive mask.
 # Positive states enter in logs, taken by the caller. A scalar state
 # broadcasts against the (in_features,) normalization for in_features = 1.
 # Every constructor kwarg is hashable so DrawNNXModule specs stay
@@ -226,9 +224,8 @@ class StateMLP(nnx.Module):
         positive,
         center=None,
         scale=None,
-        anchor,
-        out_scale,
-        offset=None,
+        output_scale,
+        local_slope=None,
         squash=None,
         input_kernel_mask=None,
         dtype,
@@ -240,9 +237,8 @@ class StateMLP(nnx.Module):
         out_features = sum(out_width for out_width, _ in heads)
         # Non-Param Variables: normalization and output-map constants are data
         # outside the differentiated Param state, restored from an artifact's
-        # nondiff block on load_model. Placeholders keep the where-select in
-        # anchored_outputs safe: anchor 1.0 in signed slots, offset 0.0 in
-        # positive slots.
+        # nondiff block on load_model. The all-ones local_slope default keeps
+        # the where-select in scaled_outputs safe in signed slots.
         self.center = nnx.Variable(
             jnp.zeros(in_features, dtype=dtype)
             if center is None
@@ -253,12 +249,11 @@ class StateMLP(nnx.Module):
             if scale is None
             else jnp.asarray(scale, dtype=dtype)
         )
-        self.anchor = nnx.Variable(jnp.asarray(anchor, dtype=dtype))
-        self.out_scale = nnx.Variable(jnp.asarray(out_scale, dtype=dtype))
-        self.offset = nnx.Variable(
-            jnp.zeros(out_features, dtype=dtype)
-            if offset is None
-            else jnp.asarray(offset, dtype=dtype)
+        self.output_scale = nnx.Variable(jnp.asarray(output_scale, dtype=dtype))
+        self.local_slope = nnx.Variable(
+            jnp.ones(out_features, dtype=dtype)
+            if local_slope is None
+            else jnp.asarray(local_slope, dtype=dtype)
         )
         layers = [
             nnx.Linear(
@@ -303,8 +298,8 @@ class StateMLP(nnx.Module):
         for layer in self.layers:
             h = self.activation(layer(h))
         raw = jnp.concatenate([head(h) for head in self.heads], axis=-1)
-        return anchored_outputs(
-            raw, self.positive, self.anchor[...], self.out_scale[...], self.offset[...]
+        return scaled_outputs(
+            raw, self.positive, self.output_scale[...], self.local_slope[...]
         )
 
 
@@ -399,11 +394,15 @@ def load_model(path, make_module):
         else:
             yield "/".join(prefix)
 
-    # A missing Param subtree in replace_by_pure_dict is a silent no-op that
-    # would keep the template's random initialization for those leaves.
+    # A missing subtree in replace_by_pure_dict is a silent no-op that would
+    # keep the template's initialization for those leaves -- Params and
+    # nondiff Variables alike.
     missing = set(leaf_paths(params.to_pure_dict())) - set(leaf_paths(blocks["params"]))
+    missing |= set(leaf_paths(nondiff.to_pure_dict())) - set(
+        leaf_paths(blocks["nondiff"])
+    )
     if missing:
-        raise ValueError(f"{path} is missing params arrays: {sorted(missing)}")
+        raise ValueError(f"{path} is missing arrays: {sorted(missing)}")
     params.replace_by_pure_dict(blocks["params"])
     if blocks["nondiff"]:
         nondiff.replace_by_pure_dict(blocks["nondiff"])

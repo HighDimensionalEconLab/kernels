@@ -427,8 +427,8 @@ def problem_cache_config(
 
 
 # The load template only needs the architecture from meta: the resolved
-# normalization and anchor Variables ride in the artifact's nondiff block and
-# overwrite the placeholder defaults.
+# normalization and output-map Variables ride in the artifact's nondiff
+# block and overwrite the placeholder defaults.
 def make_sequential_policy(meta, dtype):
     settings = SequentialPolicySettings(**meta["settings"])
     return StateMLP(
@@ -439,9 +439,7 @@ def make_sequential_policy(meta, dtype):
         heads=((1, settings.investment_head_init_scale), (1, None)),
         positive=(True, False),
         squash=(False, False, True, False),
-        input_kernel_mask=(0.0, 1.0, 0.0, 0.0),
-        anchor=(1.0, 1.0),
-        out_scale=(1.0, 1.0),
+        output_scale=(1.0, 1.0),
         dtype=dtype,
         rngs=nnx.Rngs(0),
     )

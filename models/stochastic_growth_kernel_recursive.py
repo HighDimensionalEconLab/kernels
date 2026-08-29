@@ -261,6 +261,18 @@ def stochastic_growth_kernel_recursive(
     reference_policy, reference_meta, reference_path = load_reference_policy(
         policy_dir, problem_config
     )
+    # A scale mismatch means the artifact's problem differs from its hash.
+    saved = (
+        float(reference_policy.output_scale[...][0]),
+        float(reference_policy.local_slope[...][0]),
+    )
+    recomputed = (delta * k_0, 1.0)
+    if not all(np.isclose(s, r) for s, r in zip(saved, recomputed, strict=True)):
+        raise RuntimeError(
+            "reference policy scales disagree with the requested problem: "
+            f"saved (output_scale, local_slope) = {saved}, "
+            f"recomputed {recomputed}"
+        )
     if verbose:
         print(
             f"reference NN policy {reference_path} "

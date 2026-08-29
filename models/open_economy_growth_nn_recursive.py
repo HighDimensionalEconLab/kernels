@@ -257,8 +257,10 @@ def open_economy_growth_nn_recursive(
         heads=((2, 1e-3),),
         positive=(True, False),
         center=(math.log(k_0),),
-        anchor=(delta * k_0, 1.0),
-        out_scale=(initial_output, initial_output),
+        # Both heads carry an O(initial_output) Jacobian; investment starts
+        # at replacement investment delta * k_0.
+        output_scale=(delta * k_0, initial_output),
+        local_slope=(initial_output / (delta * k_0), 1.0),
         dtype=dtype,
     )
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))

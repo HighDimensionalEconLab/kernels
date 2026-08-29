@@ -342,9 +342,9 @@ class InvestmentPolicySettings:
     head_init_scale: float = 1e-3
 
 
-# The load template only needs the architecture from meta: the anchor and
-# normalization Variables ride in the artifact's nondiff block and overwrite
-# the placeholder defaults.
+# The load template only needs the architecture from meta: the output-map
+# and normalization Variables ride in the artifact's nondiff block and
+# overwrite the placeholder defaults.
 def make_investment_policy(meta, dtype):
     settings = InvestmentPolicySettings(**meta["settings"])
     return StateMLP(
@@ -354,8 +354,7 @@ def make_investment_policy(meta, dtype):
         activation=jax.nn.gelu,
         heads=((1, settings.head_init_scale),),
         positive=(True,),
-        anchor=(1.0,),
-        out_scale=(1.0,),
+        output_scale=(1.0,),
         dtype=dtype,
         rngs=nnx.Rngs(0),
     )

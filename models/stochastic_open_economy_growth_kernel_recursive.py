@@ -19,7 +19,7 @@ from nlls_gram import (
 )
 
 from models.kernels import state_features
-from models.neural_networks import anchored_outputs, load_model, normalize_state
+from models.neural_networks import load_model, normalize_state, scaled_outputs
 from models.stochastic_open_economy_growth_shared import (
     PROCESS_CONSTANTS,
     DataSettings,
@@ -93,9 +93,8 @@ class ResidualArgs:
     gram: jax.Array
     center: jax.Array
     scale: jax.Array
-    anchor: jax.Array
-    out_scale: jax.Array
-    offset: jax.Array
+    output_scale: jax.Array
+    local_slope: jax.Array
     kernel_set: StateKernelSettings = struct.field(pytree_node=False)
     positive: tuple = struct.field(pytree_node=False)
     squash: tuple = struct.field(pytree_node=False)
@@ -132,9 +131,8 @@ def build_residual_args(train_states, kernel_set, reference_policy):
         gram=gram,
         center=center,
         scale=scale,
-        anchor=reference_policy.anchor[...],
-        out_scale=reference_policy.out_scale[...],
-        offset=reference_policy.offset[...],
+        output_scale=reference_policy.output_scale[...],
+        local_slope=reference_policy.local_slope[...],
         kernel_set=kernel_set,
         positive=reference_policy.positive,
         squash=squash,
@@ -167,12 +165,11 @@ class KernelSequentialPolicy:
             index += 1
         if self.kernel_set.linear_mean:
             raw = raw + x @ self.theta[index]
-        return anchored_outputs(
+        return scaled_outputs(
             raw,
             self.args.positive,
-            self.args.anchor,
-            self.args.out_scale,
-            self.args.offset,
+            self.args.output_scale,
+            self.args.local_slope,
         )
 
 
@@ -339,16 +336,21 @@ def stochastic_open_economy_growth_kernel_recursive(
     )
     # A scale mismatch means the artifact's problem differs from its hash.
     investment_anchor = parameters.delta * k_0
-    saved_out_scale = float(reference_policy.out_scale[...][0])
-    saved_anchor = float(reference_policy.anchor[...][0])
-    if not (
-        math.isclose(saved_out_scale, output_scale)
-        and math.isclose(saved_anchor, investment_anchor)
-    ):
+    saved = (
+        float(reference_policy.output_scale[...][0]),
+        float(reference_policy.local_slope[...][0]),
+        float(reference_policy.output_scale[...][1]),
+    )
+    recomputed = (
+        investment_anchor,
+        output_scale / investment_anchor,
+        output_scale,
+    )
+    if not all(math.isclose(s, r) for s, r in zip(saved, recomputed, strict=True)):
         raise RuntimeError(
             "reference policy scales disagree with the requested problem: "
-            f"saved (out_scale, anchor) = ({saved_out_scale}, {saved_anchor}), "
-            f"recomputed ({output_scale}, {investment_anchor})"
+            f"saved (investment output_scale, investment local_slope, CA "
+            f"output_scale) = {saved}, recomputed {recomputed}"
         )
     if verbose:
         print(

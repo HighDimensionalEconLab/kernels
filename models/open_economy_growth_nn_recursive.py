@@ -80,9 +80,10 @@ class ResidualArgs:
 
 
 def policy_values(policy, k, a, p):
-    flows, flow_derivatives = value_and_grad_fwd(policy)(k)
+    flows, flow_log_derivatives = value_and_grad_fwd(policy)(jnp.log(k))
     investment, current_account = flows
-    investment_derivative, current_account_derivative = flow_derivatives
+    # The policy maps log k; level derivatives divide the log-derivatives by k.
+    investment_derivative, current_account_derivative = flow_log_derivatives / k
     investment_rate = investment / k
     eta = p.eta
     chi = p.delta ** (1.0 - eta)
@@ -116,26 +117,24 @@ def path_values(policy, states, p):
     return jax.vmap(lambda state: policy_values(policy, state[0], state[1], p))(states)
 
 
-def simulate(policy, T, budget, k_0, p, *, save_at):
+def simulate(policy, T, budget, k_0, a_0, p, *, save_at):
+    log_k_0 = jnp.log(k_0)
+
     def drift(state):
         k = k_0 * jnp.exp(state[0])
-        investment, current_account = policy(k)
+        investment, current_account = policy(log_k_0 + state[0])
         investment_rate = investment / k
         chi = p.delta ** (1.0 - p.eta)
         capital_drift = k * (chi * investment_rate**p.eta - p.delta)
-        return jnp.stack(
-            [
-                capital_drift / k,
-                current_account / policy.out_scale[...][1],
-            ]
-        )
+        return jnp.stack([capital_drift / k, current_account])
 
+    dtype = jnp.asarray(k_0).dtype
     return solve_ode(
         drift,
         RK4(),
         0.0,
         T,
-        jnp.zeros(2, dtype=jnp.asarray(k_0).dtype),
+        jnp.stack([jnp.zeros((), dtype=dtype), jnp.asarray(a_0, dtype=dtype)]),
         dt_0=T / budget,
         controller=ConstantStepSize(),
         max_steps=budget,
@@ -143,26 +142,26 @@ def simulate(policy, T, budget, k_0, p, *, save_at):
     )
 
 
-def states_from_solution(solution, k_0, a_0, flow_scale):
+def states_from_solution(solution, k_0):
     k = k_0 * jnp.exp(solution.xs[:, 0])
-    a = a_0 + flow_scale * solution.xs[:, 1]
-    states = jnp.stack([k, a], axis=1)
+    states = jnp.stack([k, solution.xs[:, 1]], axis=1)
     return jnp.where(solution.ok, states, jnp.full_like(states, jnp.inf))
 
 
 @partial(jax.jit, static_argnames=("data_set",))
-def simulate_train(policy, initial_k, p, data_set):
-    def solve_one(k_0):
+def simulate_train(policy, initial_k, initial_a, p, data_set):
+    def solve_one(k_0, a_0):
         return simulate(
             policy,
             data_set.train_T,
             data_set.train_points - 1,
             k_0,
+            a_0,
             p,
             save_at=SaveAt(steps=True),
         )
 
-    return jax.vmap(solve_one)(initial_k)
+    return jax.vmap(solve_one)(initial_k, initial_a)
 
 
 # Collocation states, the active-state mask, and the raw solution. Every step
@@ -171,13 +170,8 @@ def simulate_train(policy, initial_k, p, data_set):
 def collocation_states(policy, p, data_set):
     initial_k = jnp.reshape(p.k_0, (1,))
     initial_a = jnp.reshape(p.a_0, (1,))
-    solution = simulate_train(policy, initial_k, p, data_set)
-    states = jax.vmap(states_from_solution, in_axes=(0, 0, 0, None))(
-        solution,
-        initial_k,
-        initial_a,
-        policy.out_scale[...][1],
-    )
+    solution = simulate_train(policy, initial_k, initial_a, p, data_set)
+    states = jax.vmap(states_from_solution)(solution, initial_k)
     safe_states = jnp.where(
         solution.accepted[..., None],
         states,
@@ -205,30 +199,8 @@ def residual_fn(theta, args, p):
 
 @partial(jax.jit, static_argnames=("budget",))
 def evaluate_path_jit(policy, T, budget, p):
-    def drift(state):
-        k = p.k_0 * jnp.exp(state[0])
-        investment, current_account = policy(k)
-        investment_rate = investment / k
-        chi = p.delta ** (1.0 - p.eta)
-        capital_drift = k * (chi * investment_rate**p.eta - p.delta)
-        return jnp.stack(
-            [
-                capital_drift / k,
-                current_account / policy.out_scale[...][1],
-            ]
-        )
-
-    solution = solve_ode(
-        drift,
-        RK4(),
-        0.0,
-        T,
-        jnp.zeros(2, dtype=p.k_0.dtype),
-        dt_0=T / budget,
-        max_steps=budget,
-        save_at=SaveAt(steps=True),
-    )
-    states = states_from_solution(solution, p.k_0, p.a_0, policy.out_scale[...][1])
+    solution = simulate(policy, T, budget, p.k_0, p.a_0, p, save_at=SaveAt(steps=True))
+    states = states_from_solution(solution, p.k_0)
     return {"t": solution.ts, **path_values(policy, states, p)}
 
 
@@ -284,7 +256,6 @@ def open_economy_growth_nn_recursive(
         activation=ACTIVATIONS[nn_set.hidden_activation],
         heads=((2, 1e-3),),
         positive=(True, False),
-        log_input=True,
         center=(math.log(k_0),),
         anchor=(delta * k_0, 1.0),
         out_scale=(initial_output, initial_output),
@@ -425,14 +396,14 @@ def open_economy_growth_nn_recursive(
     grid_lo = min(k_0, float(steady["k"]))
     grid_hi = max(k_0, float(steady["k"]))
     margin = 0.05 * (grid_hi - grid_lo) + 1e-6
-    # Floor at a positive value: the policy evaluates log k.
+    # Floor at a positive value: the grid feeds the policy in log k.
     policy_k = jnp.linspace(
         max(grid_lo - margin, 1e-8),
         grid_hi + margin,
         data_set.policy_grid_size,
         dtype=dtype,
     )
-    policy_flows = jax.vmap(policy)(policy_k)
+    policy_flows = jax.vmap(policy)(jnp.log(policy_k))
     jax.block_until_ready(policy_flows)
     policy_x = policy_flows[:, 0]
     policy_ca = policy_flows[:, 1]

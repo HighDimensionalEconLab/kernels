@@ -207,12 +207,13 @@ class MaskedLecunInit:
 
 
 # p-free MLP policy map state (..., in_features) -> (..., out_features):
-# optional elementwise log, affine normalization with optional per-coordinate
-# tanh squash, trunk, one Linear head per (out_width, kernel_std) entry (None
-# kernel_std draws a zeros kernel), then anchored_outputs with the per-output
-# positive mask. A scalar state broadcasts against the (in_features,)
-# normalization for in_features = 1. Every constructor kwarg is hashable so
-# DrawNNXModule specs stay value-hashable.
+# affine normalization with optional per-coordinate tanh squash, trunk, one
+# Linear head per (out_width, kernel_std) entry (None kernel_std draws a
+# zeros kernel), then anchored_outputs with the per-output positive mask.
+# Positive states enter in logs, taken by the caller. A scalar state
+# broadcasts against the (in_features,) normalization for in_features = 1.
+# Every constructor kwarg is hashable so DrawNNXModule specs stay
+# value-hashable.
 class StateMLP(nnx.Module):
     def __init__(
         self,
@@ -229,7 +230,6 @@ class StateMLP(nnx.Module):
         out_scale,
         offset=None,
         squash=None,
-        log_input=False,
         input_kernel_mask=None,
         dtype,
         rngs,
@@ -237,7 +237,6 @@ class StateMLP(nnx.Module):
         self.activation = nnx.static(activation)
         self.positive = nnx.static(positive)
         self.squash = nnx.static(squash)
-        self.log_input = nnx.static(log_input)
         out_features = sum(out_width for out_width, _ in heads)
         # Non-Param Variables: normalization and output-map constants are data
         # outside the differentiated Param state, restored from an artifact's
@@ -300,8 +299,7 @@ class StateMLP(nnx.Module):
         )
 
     def __call__(self, state):
-        h = jnp.log(state) if self.log_input else state
-        h = normalize_state(h, self.center[...], self.scale[...], self.squash)
+        h = normalize_state(state, self.center[...], self.scale[...], self.squash)
         for layer in self.layers:
             h = self.activation(layer(h))
         raw = jnp.concatenate([head(h) for head in self.heads], axis=-1)

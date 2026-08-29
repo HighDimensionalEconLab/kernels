@@ -273,7 +273,7 @@ def stochastic_open_economy_growth_kernel_recursive(
     )
     output_scale = float(production(k_0, z_0, parameters))
     initial_center = jnp.asarray(
-        [math.log(z_0), math.log(k_0), a_0 / output_scale, rate_gap_0],
+        [math.log(z_0), math.log(k_0), a_0, rate_gap_0],
         dtype=dtype,
     )
     train_scales = jnp.sqrt(jnp.asarray(train_variances, dtype=dtype))

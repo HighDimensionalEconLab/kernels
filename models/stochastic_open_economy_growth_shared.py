@@ -14,8 +14,8 @@ from tinydiffeq import SaveAt, solve_sde
 from models.neural_networks import ACTIVATIONS, StateMLP
 from models.utilities import ParameterPyTree
 
-# Recursive stochastic small open economy on (log z, log k, a/output_scale,
-# rate_gap). No benchmark or steady-state information enters the residual or
+# Recursive stochastic small open economy on (log z, log k, a, rate_gap).
+# No benchmark or steady-state information enters the residual or
 # initialization.
 
 
@@ -111,11 +111,11 @@ class SequentialPolicySettings:
 
 
 def state_levels(state, p):
-    log_z, log_k, asset_scaled, rate_gap = state
+    log_z, log_k, a, rate_gap = state
     return {
         "z": jnp.exp(log_z),
         "k": jnp.exp(log_k),
-        "a": p.output_scale * asset_scaled,
+        "a": a,
         "interest_rate": p.interest_rate_mean + rate_gap,
     }
 
@@ -150,7 +150,7 @@ def state_drift(policy, state, p):
         [
             p.kappa_z * (p.log_z_bar - log_z),
             values["capital_drift"] / values["k"],
-            values["current_account"] / p.output_scale,
+            values["current_account"],
             -p.kappa_r * rate_gap,
         ]
     )

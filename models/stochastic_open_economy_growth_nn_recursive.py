@@ -49,8 +49,8 @@ from models.utilities import (
     standardized_initial_states,
 )
 
-# Recursive stochastic small open economy on (log z, log k, a/output_scale,
-# rate_gap). No benchmark or steady-state information enters the residual or
+# Recursive stochastic small open economy on (log z, log k, a, rate_gap).
+# No benchmark or steady-state information enters the residual or
 # initialization; the deterministic benchmark is ex-post diagnostics only.
 
 
@@ -288,7 +288,7 @@ def stochastic_open_economy_growth_nn_recursive(
     rate_ergodic_variance = sigma_r**2 / (2.0 * kappa_r)
     output_scale = float(production(k_0, z_0, parameters))
     initial_center = jnp.asarray(
-        [math.log(z_0), math.log(k_0), a_0 / output_scale, rate_gap_0],
+        [math.log(z_0), math.log(k_0), a_0, rate_gap_0],
         dtype=dtype,
     )
     train_scales = jnp.sqrt(jnp.asarray(train_variances, dtype=dtype))
@@ -306,14 +306,19 @@ def stochastic_open_economy_growth_nn_recursive(
         activation=ACTIVATIONS[nn_set.hidden_activation],
         heads=((1, nn_set.investment_head_init_scale), (1, None)),
         positive=(True, False),
-        center=(math.log(z_bar), math.log(k_0), a_0 / output_scale, 0.0),
-        # NFA travels ~an output unit per decade, so the asset squash scale
-        # floors at 0.1 * train_T; a unit floor saturates the tanh
-        # mid-transition.
+        center=(math.log(z_bar), math.log(k_0), a_0, 0.0),
+        # Asset squash scale: assets integrate an O(output_scale) flow over
+        # the training horizon at an assumed current-account-to-output ratio
+        # of order 0.1, floored at output_scale (a smaller floor saturates
+        # the tanh mid-transition).
         scale=(
             max(math.sqrt(z_ergodic_variance), math.sqrt(train_variances[0])),
             1.0,
-            max(math.sqrt(train_variances[2]), 0.1 * data_set.train_T, 1.0),
+            max(
+                math.sqrt(train_variances[2]),
+                0.1 * data_set.train_T * output_scale,
+                output_scale,
+            ),
             max(math.sqrt(rate_ergodic_variance), math.sqrt(train_variances[3])),
         ),
         squash=(False, False, True, False),
@@ -636,8 +641,8 @@ def stochastic_open_economy_growth_nn_recursive(
         (ic_set.num_test_trajectories, initial_center.size),
     )
     asset_shift = asset_shift_scale * output_scale
-    low_states = paired_states.at[:, 2].set((a_0 - asset_shift) / output_scale)
-    high_states = paired_states.at[:, 2].set((a_0 + asset_shift) / output_scale)
+    low_states = paired_states.at[:, 2].set(a_0 - asset_shift)
+    high_states = paired_states.at[:, 2].set(a_0 + asset_shift)
     low_solution = simulate(
         sde,
         policy,

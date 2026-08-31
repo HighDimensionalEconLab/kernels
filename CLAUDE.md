@@ -18,8 +18,9 @@ per-directory READMEs.
   `results` is the full serializable record: nested input blocks first
   (`"parameters": p.to_dict()`, plus the rare named derived scalar a paper
   table consumes — optimal advertising's `gamma`, the neoclassical kernel's
-  `learn_g_hat` — and one `"<name>_set": asdict(...)` per
-  settings object; recursive drivers add an `"initial_conditions"` block for
+  `learn_g_hat` — and one `"<name>_set"` dict per settings object holding
+  ONLY the fields the driver threads into the solver (`asdict(...)` when it
+  threads them all); recursive drivers add an `"initial_conditions"` block for
   draw centers not on `p`), then flat measured outcomes only — never plain
   copies of settings fields or parameters. `extras` carries live objects
   (solve spec, DataFrames, model, result); there is no

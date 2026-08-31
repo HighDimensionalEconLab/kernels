@@ -29,6 +29,7 @@ from models.kernels import (
     rkhs_norm_squared,
 )
 from models.utilities import (
+    STATUS_TO_REASON,
     KernelResidualArgs,
     OptimizerSettings,
     RidgeSettings,
@@ -158,8 +159,15 @@ def asset_pricing_kernel(
         "parameters": p.to_dict(),
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
-        "lm_set": asdict(lm_set),
-        "ridge_set": asdict(ridge_set),
+        "lm_set": {
+            "init_damping": lm_set.init_damping,
+            "damping_decrease": lm_set.damping_decrease,
+            "damping_increase": lm_set.damping_increase,
+            "max_steps": lm_set.max_steps,
+            "atol": lm_set.atol,
+            "gtol": lm_set.gtol,
+        },
+        "ridge_set": {"ridge": ridge_set.ridge},
         "tolerance_set": asdict(tolerance_set),
         "p_0": float(p_0),
         "horizon_bias_p0": horizon_bias_p0,
@@ -174,6 +182,7 @@ def asset_pricing_kernel(
         "train_loss": float(result.info.resid_loss),
         "final_damping": float(result.lm_state.damping),
         "steps": steps,
+        "solver_status": STATUS_TO_REASON.get(int(result.status), "unknown"),
         **acceptance_fields(rejection_reasons),
     }
     if verbose:

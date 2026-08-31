@@ -26,6 +26,7 @@ from models.optimal_advertising_shared import (
     ToleranceSettings,
 )
 from models.utilities import (
+    STATUS_TO_REASON,
     KernelResidualArgs,
     OptimizerSettings,
     RidgeSettings,
@@ -207,8 +208,15 @@ def optimal_advertising_kernel(
         "parameters": {**p.to_dict(), "gamma": gamma},
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
-        "lm_set": asdict(lm_set),
-        "ridge_set": asdict(ridge_set),
+        "lm_set": {
+            "init_damping": lm_set.init_damping,
+            "damping_decrease": lm_set.damping_decrease,
+            "damping_increase": lm_set.damping_increase,
+            "max_steps": lm_set.max_steps,
+            "atol": lm_set.atol,
+            "gtol": lm_set.gtol,
+        },
+        "ridge_set": {"ridge": ridge_set.ridge},
         "tolerance_set": asdict(tolerance_set),
         "mu_0": float(mu_0),
         "u_0": float(u_0),
@@ -219,6 +227,7 @@ def optimal_advertising_kernel(
         "train_loss": float(result.info.resid_loss),
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
+        "solver_status": STATUS_TO_REASON.get(int(result.status), "unknown"),
         **acceptance_fields(rejection_reasons),
     }
     if verbose:

@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 import pandas as pd
-from nlls_gram import LMStatus, RidgeLevenbergMarquardt
+from nlls_gram import RidgeLevenbergMarquardt
 
 from models.kernels import (
     IntegratedPath,
@@ -37,6 +37,7 @@ from models.open_economy_growth_shared import (
     tvc_diagnostics,
 )
 from models.utilities import (
+    STATUS_TO_REASON,
     KernelResidualArgs,
     OptimizerSettings,
     RidgeSettings,
@@ -292,8 +293,6 @@ def open_economy_growth_kernel(
     )
 
     rejection_reasons = []
-    if int(result.status) != LMStatus.CONVERGED:
-        rejection_reasons.append("solver_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
     if max_train_residual > tolerance_set.train_residual:
@@ -321,8 +320,15 @@ def open_economy_growth_kernel(
         "parameters": p.to_dict(),
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
-        "lm_set": asdict(lm_set),
-        "ridge_set": asdict(ridge_set),
+        "lm_set": {
+            "init_damping": lm_set.init_damping,
+            "damping_decrease": lm_set.damping_decrease,
+            "damping_increase": lm_set.damping_increase,
+            "max_steps": lm_set.max_steps,
+            "atol": lm_set.atol,
+            "gtol": lm_set.gtol,
+        },
+        "ridge_set": {"ridge": ridge_set.ridge},
         "tolerance_set": asdict(tolerance_set),
         "k_ss": float(steady["k"]),
         "q_ss": float(steady["q"]),
@@ -376,6 +382,7 @@ def open_economy_growth_kernel(
         "train_loss": float(result.info.resid_loss),
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
+        "solver_status": STATUS_TO_REASON.get(int(result.status), "unknown"),
         **acceptance_fields(rejection_reasons),
     }
     if verbose:

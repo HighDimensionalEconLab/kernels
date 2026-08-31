@@ -53,6 +53,7 @@ from models.multicountry_growth_shared import (
     validate_initial_conditions,
 )
 from models.utilities import (
+    STATUS_TO_REASON,
     CGSettings,
     KernelResidualArgs,
     OptimizerSettings,
@@ -497,7 +498,14 @@ def multicountry_growth_kernel(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "initial_set": asdict(initial_set),
-        "lm_set": asdict(lm_set),
+        "lm_set": {
+            "init_damping": lm_set.init_damping,
+            "damping_decrease": lm_set.damping_decrease,
+            "damping_increase": lm_set.damping_increase,
+            "max_steps": lm_set.max_steps,
+            "atol": lm_set.atol,
+            "gtol": lm_set.gtol,
+        },
         "ridge_set": asdict(ridge_set),
         "cg_set": asdict(cg_set),
         "tolerance_set": asdict(tolerance_set),
@@ -539,6 +547,7 @@ def multicountry_growth_kernel(
         "train_loss": float(result.info.resid_loss),
         "final_damping": float(result.lm_state.damping),
         "steps": int(result.steps),
+        "solver_status": STATUS_TO_REASON.get(int(result.status), "unknown"),
         **acceptance_fields(rejection_reasons),
     }
     if long_run["common_gamma"]:

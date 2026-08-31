@@ -143,6 +143,12 @@ def investment_expenditure(k, q, p):
     return k * investment_rate_from_q(q, p)
 
 
+def capital_drift(k, q, p):
+    chi = p.delta ** (1.0 - p.eta)
+    investment_rate = investment_rate_from_q(q, p)
+    return k * (chi * investment_rate**p.eta - p.delta)
+
+
 def consumption_from_mu(mu, p):
     gammas = jnp.asarray(p.gammas, dtype=mu.dtype)
     return mu ** (-1.0 / gammas)

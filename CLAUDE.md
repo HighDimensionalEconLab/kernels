@@ -105,12 +105,15 @@ per-directory READMEs.
   keep their training-schedule fields there).
 - Every sequence-space driver represents paths in LEVELS (anchored
   representer: value = init + K_tilde @ alpha, the form the RKHS theory
-  covers) except `multicountry`, which still integrates logs. The
-  sequence-space drivers pin a fixed small ridge, except `multicountry`,
-  which anneals via `ridge_set.ridge_init`. `multicountry` with
-  `ridge_set.linear_solver="cg"` is the large-N path: matrix-free
-  preconditioned CG using the arrowhead + Woodbury structure assembled in
-  `multicountry_growth_preconditioner.py`.
+  covers). The sequence-space drivers pin a fixed small ridge, except
+  `multicountry`, which keeps the ridge anneal (`ridge_set.ridge_init`):
+  its binding row is world bond clearing, whose residual floors at
+  O(ridge * ||dual||) with a dual that grows with the country count, so
+  the solve homotopes down to a per-configuration ridge floor (the
+  scaling ladder runs a uniformly deeper one than the experiment matrix).
+  `multicountry` with `ridge_set.linear_solver="cg"` is the large-N path:
+  matrix-free preconditioned CG using the arrowhead + Woodbury structure
+  assembled in `multicountry_growth_preconditioner.py`.
 - Every driver threads structural parameters and initial conditions through
   the implicit-AD `p` argument; the NLLS drivers return `extras["solve"]`
   (solver, residual_fn, theta_0, p, args, options) and the sensitivity

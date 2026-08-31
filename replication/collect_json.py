@@ -1974,7 +1974,9 @@ def performance_comparisons(out):
         # No benchmark solution exists for the multicountry model, so the
         # accuracy columns are the held-out DAE residuals (Euler-type FOCs,
         # budgets, and market clearing on the dense validation grid) rather
-        # than errors against a reference path.
+        # than errors against a reference path. The kernel writes level-form
+        # rows and the NN rate-form rows, so the ratio compares the NN's
+        # level-units restatement against the kernel's own residual.
         "multicountry_growth": {
             "kernel_solve_time_median": sig(multicountry_kernel_time),
             "kernel_validation_residual": sci(
@@ -1984,11 +1986,11 @@ def performance_comparisons(out):
             "nn_to_kernel_time_ratio": sig(
                 multicountry_nn_time / multicountry_kernel_time
             ),
-            "nn_validation_residual_median": sci(
-                float(multicountry_nn_frame["max_validation_residual"].median())
+            "nn_validation_residual_level_median": sci(
+                float(multicountry_nn_frame["max_validation_residual_level"].median())
             ),
             "nn_to_kernel_residual_ratio": sig(
-                float(multicountry_nn_frame["max_validation_residual"].median())
+                float(multicountry_nn_frame["max_validation_residual_level"].median())
                 / med(multicountry_kernel["max_validation_residual"])
             ),
         },

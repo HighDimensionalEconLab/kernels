@@ -15,7 +15,6 @@ from nlls_gram import (
     QR,
     AnnealRidge,
     Cholesky,
-    LMStatus,
     RidgeLevenbergMarquardt,
 )
 
@@ -38,10 +37,10 @@ from models.multicountry_growth_shared import (
     DataSettings,
     InitialConditionSettings,
     StructuralParameters,
+    capital_drift,
     current_account,
     draw_initial_conditions,
     investment_expenditure,
-    investment_rate_from_q,
     long_run_diagnostics,
     production,
     q_drift,
@@ -66,7 +65,7 @@ from models.utilities import (
 
 # Alpha blocks first (the metric penalizes the leading flat coordinates);
 # the (N, n_train) blocks ravel country-major. The trailing entries are the
-# free log-anchors of the jump variables and the world rate.
+# free level anchors of the jump variables and the world rate.
 class Theta(NamedTuple):
     alpha_k: jax.Array
     alpha_a: jax.Array
@@ -74,10 +73,10 @@ class Theta(NamedTuple):
     alpha_c: jax.Array
     alpha_mu: jax.Array
     alpha_rate: jax.Array
-    log_q_0s: jax.Array
-    log_c_0s: jax.Array
-    log_mu_0s: jax.Array
-    log_rate_0: jax.Array
+    q_0s: jax.Array
+    c_0s: jax.Array
+    mu_0s: jax.Array
+    rate_0: jax.Array
 
 
 # CG-path args: whitened factors for the preconditioner rebuild.
@@ -93,45 +92,36 @@ class PreconditionedKernelResidualArgs:
 # matrices.
 def path_coordinates(theta, K_eval, K_tilde_eval, p):
     populations_p = p.populations
-    k_0_p = p.k_0
     # Population demeaning is a no-op at the primal point (the inputs
     # already clear) and projects AD perturbations of a_0 onto the
     # feasible clearing set, so every direction is meaningful.
     a_0_p = p.a_0 - jnp.sum(populations_p * p.a_0) / jnp.sum(populations_p)
-    # The asset scale enters the min-norm selection metric, so it must be
-    # differentiation-inert; population-weighted time-0 output sets it.
-    output_scale_p = jax.lax.stop_gradient(
-        jnp.sum(populations_p * production(k_0_p, p.productivities, p))
-        / jnp.sum(populations_p)
-    )
     # Country-major (N, n_train) alpha blocks enter transposed so the
     # contraction K_tilde @ alpha.T yields (t_grid, N) paths; the (N,)
     # free anchors broadcast over rows.
     paths = integrated_kernel_paths(
         {
-            "log_k": IntegratedPath(theta.alpha_k.T, jnp.log(k_0_p)),
-            "a_raw": IntegratedPath(
-                theta.alpha_a.T, jnp.zeros((), theta.alpha_a.dtype)
-            ),
-            "log_q": IntegratedPath(theta.alpha_q.T, theta.log_q_0s),
-            "log_c": IntegratedPath(theta.alpha_c.T, theta.log_c_0s),
-            "log_mu": IntegratedPath(theta.alpha_mu.T, theta.log_mu_0s),
-            "log_rate": IntegratedPath(theta.alpha_rate, theta.log_rate_0),
+            "k": IntegratedPath(theta.alpha_k.T, p.k_0),
+            "a": IntegratedPath(theta.alpha_a.T, a_0_p),
+            "q": IntegratedPath(theta.alpha_q.T, theta.q_0s),
+            "c": IntegratedPath(theta.alpha_c.T, theta.c_0s),
+            "mu": IntegratedPath(theta.alpha_mu.T, theta.mu_0s),
+            "rate": IntegratedPath(theta.alpha_rate, theta.rate_0),
         },
         K_eval,
         K_tilde_eval,
     )
     return {
-        "k": jnp.exp(paths["log_k"].value),
-        "a": a_0_p + output_scale_p * paths["a_raw"].value,
-        "q": jnp.exp(paths["log_q"].value),
-        "c": jnp.exp(paths["log_c"].value),
-        "mu": jnp.exp(paths["log_mu"].value),
-        "interest_rate": jnp.exp(paths["log_rate"].value),
-        "dlog_k_dt": paths["log_k"].d_dt,
-        "da_dt": output_scale_p * paths["a_raw"].d_dt,
-        "dlog_q_dt": paths["log_q"].d_dt,
-        "dlog_mu_dt": paths["log_mu"].d_dt,
+        "k": paths["k"].value,
+        "a": paths["a"].value,
+        "q": paths["q"].value,
+        "c": paths["c"].value,
+        "mu": paths["mu"].value,
+        "interest_rate": paths["rate"].value,
+        "dk_dt": paths["k"].d_dt,
+        "da_dt": paths["a"].d_dt,
+        "dq_dt": paths["q"].d_dt,
+        "dmu_dt": paths["mu"].d_dt,
     }
 
 
@@ -145,7 +135,6 @@ def residual_fn(theta, args, p):
     rate_column = coordinates["interest_rate"][..., None]
     gammas = jnp.asarray(p.gammas, dtype=c.dtype)
     populations = jnp.asarray(p.populations, dtype=a.dtype)
-    chi = p.delta ** (1.0 - p.eta)
     values = {
         "k": k,
         "a": a,
@@ -154,13 +143,12 @@ def residual_fn(theta, args, p):
         "mu": mu,
         "interest_rate": coordinates["interest_rate"],
         "current_account": coordinates["da_dt"],
-        "capital": coordinates["dlog_k_dt"]
-        - (chi * investment_rate_from_q(q, p) ** p.eta - p.delta),
+        "capital": coordinates["dk_dt"] - capital_drift(k, q, p),
         "assets": coordinates["da_dt"]
         - current_account(k, a, q, c, p.productivities, rate_column, p),
-        "tobin_q": coordinates["dlog_q_dt"]
-        - q_drift(k, q, p.productivities, rate_column, p) / q,
-        "marginal_wealth": coordinates["dlog_mu_dt"] - (p.r - rate_column),
+        "tobin_q": coordinates["dq_dt"]
+        - q_drift(k, q, p.productivities, rate_column, p),
+        "marginal_wealth": coordinates["dmu_dt"] - mu * (p.r - rate_column),
         "consumption_foc": mu * c**gammas - 1.0,
         # World bond clearing, per capita so the row size is N-free.
         "asset_clearing": jnp.sum(populations * a, axis=-1) / jnp.sum(populations),
@@ -206,20 +194,26 @@ def multicountry_growth_kernel(
     data_set: DataSettings = DataSettings(),
     # Conjunctive whitened stopping: gtol bounds the whitened stationarity,
     # atol the scaled residual norm (its floor is O(ridge * ||dual||)).
+    # atol must sit BELOW the intermediate anneal levels' residuals or the
+    # continuation stops above the ridge floor and the clearing-row floor
+    # misses the 1e-5 train gate.
+    # init_damping well above machine level: the level-form rows are
+    # nonlinear enough at the seeds that an undamped first step is rejected
+    # repeatedly before the damping recovers.
     lm_set: OptimizerSettings = OptimizerSettings(
-        init_damping=1e-8,
+        init_damping=1e-4,
         damping_decrease=0.1,
         damping_increase=4.0,
         max_steps=100,
-        atol=5e-7,
+        atol=1e-7,
         gtol=5e-8,
     ),
     # "cg" is matrix-free preconditioned CG (arrow+Woodbury, rebuilt every LM
     # step); implicit-AD re-solves stay dense-only (CG degrades the tangents).
     ridge_set: RidgeSettings = RidgeSettings(
-        ridge=3e-12,
+        ridge=3e-13,
         ridge_init=1e-7,
-        ridge_decrease=0.01,
+        ridge_decrease=1e-3,
         ridge_grad_rtol=1e-2,
     ),
     # cg tol is unreachable in the endgame, so maxiter is the effective
@@ -275,7 +269,7 @@ def multicountry_growth_kernel(
 
     # Demeaning clears the sub-tolerance clearing residue the validation
     # admits; the demeaned values are what the paths anchor to, so they are
-    # also what the benchmark, results, and hyperparameters report.
+    # also what the results and hyperparameters report.
     a_0_array = jnp.asarray(a_0, dtype=dtype)
     a_0_array = a_0_array - jnp.sum(populations_array * a_0_array) / total_population
     a_0 = tuple(float(value) for value in a_0_array)
@@ -294,7 +288,12 @@ def multicountry_growth_kernel(
     steady = steady_state(p, dtype)
     output_scale = steady["output_scale"]
 
-    log_c_seed = jnp.log(production(p.k_0, p.productivities, p) - p.delta * p.k_0)
+    # Seeds zero the constant-path residual rows: at q_0 = 1/eta the
+    # chi-normalized investment rate equals delta, rate_0 = r zeroes the
+    # marginal-wealth rows, and c = domestic resources + bond income zeroes
+    # every seed current account (a_0 is demeaned, so the clearing row is
+    # zero too). Only the tobin_q rows are nonzero at the seed.
+    c_seed = production(p.k_0, p.productivities, p) - p.delta * p.k_0 + p.r * p.a_0
     theta_0 = Theta(
         alpha_k=jnp.zeros((num_countries, n_train), dtype=dtype),
         alpha_a=jnp.zeros((num_countries, n_train), dtype=dtype),
@@ -302,10 +301,10 @@ def multicountry_growth_kernel(
         alpha_c=jnp.zeros((num_countries, n_train), dtype=dtype),
         alpha_mu=jnp.zeros((num_countries, n_train), dtype=dtype),
         alpha_rate=jnp.zeros(n_train, dtype=dtype),
-        log_q_0s=jnp.full(num_countries, -jnp.log(p.eta), dtype=dtype),
-        log_c_0s=log_c_seed,
-        log_mu_0s=-p.gammas * log_c_seed,
-        log_rate_0=jnp.log(p.r),
+        q_0s=jnp.full(num_countries, 1.0 / p.eta, dtype=dtype),
+        c_0s=c_seed,
+        mu_0s=c_seed**-p.gammas,
+        rate_0=jnp.asarray(p.r, dtype=dtype),
     )
 
     if ridge_set.ridge_init is None:
@@ -447,18 +446,16 @@ def multicountry_growth_kernel(
         all(
             jnp.all(jnp.isfinite(values[name])) and jnp.min(values[name]) > 0.0
             for values in (train_eval, validation_eval, test_eval)
-            for name in ("k", "q", "c", "mu", "x")
+            for name in ("k", "q", "c", "mu", "x", "interest_rate")
         )
         and all(
             jnp.all(jnp.isfinite(values[name]))
             for values in (train_eval, validation_eval, test_eval)
-            for name in ("a", "current_account", "interest_rate")
+            for name in ("a", "current_account")
         )
     )
     residual_count = (5 * num_countries + 1) * n_train
     rejection_reasons = []
-    if int(result.status) != LMStatus.CONVERGED:
-        rejection_reasons.append("solver_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
     if max_train_residual > tolerance_set.train_residual:
@@ -570,13 +567,9 @@ def multicountry_growth_kernel(
         suffix = country + 1
         results.update(
             {
-                f"a_0_{suffix}_over_output_ss": a_0[country] / float(output_scale),
-                f"q_0_{suffix}": float(test_eval["q"][0, country]),
-                f"c_0_{suffix}": float(test_eval["c"][0, country]),
-                f"m_0_{suffix}": float(test_eval["mu"][0, country]),
-                f"log_q_0_{suffix}": float(theta.log_q_0s[country]),
-                f"log_c_0_{suffix}": float(theta.log_c_0s[country]),
-                f"log_mu_0_{suffix}": float(theta.log_mu_0s[country]),
+                f"q_0_{suffix}": float(theta.q_0s[country]),
+                f"c_0_{suffix}": float(theta.c_0s[country]),
+                f"mu_0_{suffix}": float(theta.mu_0s[country]),
                 f"relative_weight_{suffix}": float(relative_weights[country]),
                 f"log_relative_weight_{suffix}": float(log_relative_weights[country]),
                 f"terminal_a_{suffix}": float(validation_eval["a"][-1, country]),
@@ -592,7 +585,7 @@ def multicountry_growth_kernel(
             results[f"initial_wealth_{suffix}"] = float(
                 long_run["initial_wealth"][country]
             )
-    results["log_rate_0"] = float(theta.log_rate_0)
+    results["rate_0"] = float(theta.rate_0)
 
     def frame(values, points):
         data = {

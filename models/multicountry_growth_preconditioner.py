@@ -35,9 +35,8 @@ import numpy as np
 from nlls_gram import AnnealRidge, LMAction, Preconditioner, register_pytree_dataclass
 
 from models.multicountry_growth_shared import (
+    capital_drift,
     current_account,
-    investment_rate_from_q,
-    production,
     q_drift,
 )
 
@@ -71,16 +70,16 @@ def arrow_woodbury_indices(theta):
             index.alpha_mu,
             jnp.stack(
                 [
-                    index.log_q_0s,
-                    index.log_c_0s,
-                    index.log_mu_0s,
+                    index.q_0s,
+                    index.c_0s,
+                    index.mu_0s,
                 ],
                 axis=1,
             ),
         ],
         axis=1,
     )
-    border_index = jnp.concatenate([index.alpha_rate, index.log_rate_0[None]])
+    border_index = jnp.concatenate([index.alpha_rate, index.rate_0[None]])
     return country_index, border_index
 
 
@@ -165,10 +164,6 @@ def build_arrow_woodbury(theta, kernel_args, p, ridge, damping, num_countries):
 
     populations_p = p.populations
     a_0_p = p.a_0 - jnp.sum(populations_p * p.a_0) / jnp.sum(populations_p)
-    output_scale_p = jnp.sum(
-        populations_p * production(p.k_0, p.productivities, p)
-    ) / jnp.sum(populations_p)
-    log_k_0 = jnp.log(p.k_0)
 
     coefficients = jnp.concatenate(
         [
@@ -183,10 +178,10 @@ def build_arrow_woodbury(theta, kernel_args, p, ridge, damping, num_countries):
     )
     anchors_flat = jnp.concatenate(
         [
-            theta.log_q_0s,
-            theta.log_c_0s,
-            theta.log_mu_0s,
-            theta.log_rate_0[None],
+            theta.q_0s,
+            theta.c_0s,
+            theta.mu_0s,
+            theta.rate_0[None],
         ]
     )
     levels = K_tilde @ coefficients.T
@@ -201,22 +196,21 @@ def build_arrow_woodbury(theta, kernel_args, p, ridge, damping, num_countries):
         lv = w[:num_blocks]
         dv = w[num_blocks : 2 * num_blocks]
         anchors = w[2 * num_blocks :]
-        k = jnp.exp(log_k_0 + lv[0:N])
-        a = a_0_p + output_scale_p * lv[N : 2 * N]
-        q = jnp.exp(anchors[:N] + lv[2 * N : 3 * N])
-        c = jnp.exp(anchors[N : 2 * N] + lv[3 * N : 4 * N])
-        mu = jnp.exp(anchors[2 * N : 3 * N] + lv[4 * N : 5 * N])
-        rate_column = jnp.exp(anchors[-1] + lv[5 * N])[..., None]
+        k = p.k_0 + lv[0:N]
+        a = a_0_p + lv[N : 2 * N]
+        q = anchors[:N] + lv[2 * N : 3 * N]
+        c = anchors[N : 2 * N] + lv[3 * N : 4 * N]
+        mu = anchors[2 * N : 3 * N] + lv[4 * N : 5 * N]
+        rate_column = (anchors[-1] + lv[5 * N])[..., None]
         gammas = jnp.asarray(p.gammas, dtype=c.dtype)
         populations = jnp.asarray(p.populations, dtype=a.dtype)
-        chi = p.delta ** (1.0 - p.eta)
         return residual_scale * jnp.concatenate(
             [
-                dv[0:N] - (chi * investment_rate_from_q(q, p) ** p.eta - p.delta),
-                output_scale_p * dv[N : 2 * N]
+                dv[0:N] - capital_drift(k, q, p),
+                dv[N : 2 * N]
                 - current_account(k, a, q, c, p.productivities, rate_column, p),
-                dv[2 * N : 3 * N] - q_drift(k, q, p.productivities, rate_column, p) / q,
-                dv[4 * N : 5 * N] - (p.r - rate_column),
+                dv[2 * N : 3 * N] - q_drift(k, q, p.productivities, rate_column, p),
+                dv[4 * N : 5 * N] - mu * (p.r - rate_column),
                 mu * c**gammas - 1.0,
                 (jnp.sum(populations * a, axis=-1) / jnp.sum(populations))[None],
             ]
@@ -286,7 +280,7 @@ def build_arrow_woodbury(theta, kernel_args, p, ridge, damping, num_countries):
     H_factor = jnp.linalg.cholesky(0.5 * (H + jnp.swapaxes(H, 1, 2)))
 
     # Border group: rate coefficient block + rate offset. The rate offset's
-    # columns coincide with the rate level's (both add to log rate), so its
+    # columns coincide with the rate level's (both add to the rate), so its
     # couplings come out of the same weights.
     def rate_contract(left, weights, right):
         return jnp.einsum("ta,t,tb->ab", left, weights, right)

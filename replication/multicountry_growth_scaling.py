@@ -31,9 +31,7 @@ DENSE_MAX_COUNTRIES = 10
 POPULATION_LOG_SIGMA = 0.15
 PRODUCTIVITY_LOG_SIGMA = 0.1
 KERNEL_SET = {"kernel": "matern12", "ell": 20.0}
-NARROW_RESIDUAL_ATOL = 2e-7
-WIDE_RESIDUAL_ATOL = 5e-8
-WIDE_STOPPING_START = 25
+RESIDUAL_ATOL = 5e-8
 WARM_TIMING_REPETITIONS = 2
 
 
@@ -53,42 +51,34 @@ def rung_parameters(num_countries):
             float(value)
             for value in jnp.exp(
                 POPULATION_LOG_SIGMA
-                * jax.random.normal(population_key, (num_countries,))
+                * jax.random.normal(population_key, (num_countries,), dtype=jnp.float64)
             )
         ),
         productivities=tuple(
             float(value)
             for value in jnp.exp(
                 PRODUCTIVITY_LOG_SIGMA
-                * jax.random.normal(productivity_key, (num_countries,))
+                * jax.random.normal(
+                    productivity_key, (num_countries,), dtype=jnp.float64
+                )
             )
         ),
     )
 
 
 def rung_lm_overrides(num_countries):
-    # The converged residual floors at O(ridge * ||dual||) and the dual
-    # norm grows with the cross-section, so the fixed 1e-5 train gate
-    # needs a deeper ridge floor at the wide rungs; the cg build-shift
-    # floor deepens with it so the preconditioned condition number
+    # The converged residual floors at O(ridge * ||dual||); the binding row
+    # is world bond clearing, whose dual grows with the cross-section, so
+    # the ladder runs at a deeper uniform ridge floor than the experiment
+    # matrix (one notch deeper still at N >= 100), with the strict
+    # scaled-residual stop that floor makes reachable; the cg build-shift
+    # floor deepens with the ridge so the preconditioned condition number
     # ~ floor/ridge stays small.
     if num_countries >= 100:
-        deep = {"ridge_set": {"ridge": 1e-13}, "cg_set": {"damping_floor": 3e-12}}
-    elif num_countries >= 25:
-        deep = {"ridge_set": {"ridge": 3e-13}, "cg_set": {"damping_floor": 1e-11}}
+        deep = {"ridge_set": {"ridge": 1e-14}, "cg_set": {"damping_floor": 3e-13}}
     else:
-        deep = {}
-    # Wide systems need the stricter scaled-residual stop to descend from
-    # the 1e-11 continuation level to their configured ridge floor. The
-    # narrow CG systems use the looser reachable stop; 5e-8 would keep the
-    # N=2 solve running after its pointwise residual already clears the
-    # uniform 1e-5 numerical gate.
-    residual_atol = (
-        WIDE_RESIDUAL_ATOL
-        if num_countries >= WIDE_STOPPING_START
-        else NARROW_RESIDUAL_ATOL
-    )
-    return {"lm_set": {"atol": residual_atol}, **deep}
+        deep = {"ridge_set": {"ridge": 3e-14}, "cg_set": {"damping_floor": 1e-12}}
+    return {"lm_set": {"atol": RESIDUAL_ATOL}, **deep}
 
 
 def run(
@@ -133,6 +123,10 @@ def run(
                 raise RuntimeError(
                     f"{name} was rejected: {compile_results['rejection_reason'].iloc[0]}"
                 )
+            # Acceptance gates residual quality only; a max_steps stall can
+            # pass it, and a stalled solve is not a valid timing point.
+            if (compile_results["solver_status"] != "converged").any():
+                raise RuntimeError(f"{name} stopped without converging")
             timing_columns = [
                 column
                 for column in compile_results.select_dtypes("number")
@@ -161,6 +155,10 @@ def run(
                     raise RuntimeError(
                         f"{name} timing run {timing_run} was rejected: "
                         f"{timed_results['rejection_reason'].iloc[0]}"
+                    )
+                if (timed_results["solver_status"] != "converged").any():
+                    raise RuntimeError(
+                        f"{name} timing run {timing_run} stopped without converging"
                     )
                 warm_results.append(timed_results)
                 timing_rows.append(

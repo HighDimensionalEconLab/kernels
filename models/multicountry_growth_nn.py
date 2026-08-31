@@ -338,6 +338,20 @@ def multicountry_growth_nn(
         float(jnp.max(jnp.abs(validation_eval["consumption_foc"]))),
         float(jnp.max(jnp.abs(validation_eval["asset_clearing"]))),
     )
+    # The capital/tobin_q/marginal_wealth rows here are rate-form; scaling
+    # them by the matching path level pointwise restates the held-out
+    # residual in the kernel driver's level units, so kernel-vs-NN residual
+    # ratios compare like with like.
+    max_validation_residual_level = max(
+        float(jnp.max(jnp.abs(validation_eval["capital"] * validation_eval["k"]))),
+        float(jnp.max(jnp.abs(validation_eval["assets"]))),
+        float(jnp.max(jnp.abs(validation_eval["tobin_q"] * validation_eval["q"]))),
+        float(
+            jnp.max(jnp.abs(validation_eval["marginal_wealth"] * validation_eval["mu"]))
+        ),
+        float(jnp.max(jnp.abs(validation_eval["consumption_foc"]))),
+        float(jnp.max(jnp.abs(validation_eval["asset_clearing"]))),
+    )
     max_resource_gap = float(jnp.max(jnp.abs(validation_eval["resource_gap"])))
     max_asset_clearing = float(jnp.max(jnp.abs(validation_eval["asset_clearing"])))
     validation_pass = max_validation_residual <= tolerance_set.validation_residual
@@ -401,6 +415,7 @@ def multicountry_growth_nn(
         "consumption_scale": float(steady["consumption_scale"]),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
+        "max_validation_residual_level": max_validation_residual_level,
         "validation_pass": validation_pass,
         "max_resource_gap": max_resource_gap,
         "max_asset_clearing": max_asset_clearing,
@@ -451,7 +466,7 @@ def multicountry_growth_nn(
                 f"a_0_{suffix}_over_output_ss": a_0[country] / output_scale,
                 f"q_0_{suffix}": float(test_eval["q"][0, country]),
                 f"c_0_{suffix}": float(test_eval["c"][0, country]),
-                f"m_0_{suffix}": float(test_eval["mu"][0, country]),
+                f"mu_0_{suffix}": float(test_eval["mu"][0, country]),
                 f"relative_weight_{suffix}": float(relative_weights[country]),
                 f"log_relative_weight_{suffix}": float(log_relative_weights[country]),
                 f"terminal_a_{suffix}": float(validation_eval["a"][-1, country]),

@@ -44,7 +44,7 @@ def run(output_dir: str = ".results"):
         )
         test_frames[name] = frames["test_df"]
         initial_assets[name] = hyperparameters["parameters"]["a_0"]
-        resolved_rates[name] = float(results_df["r_star_resolved"].iloc[0])
+        resolved_rates[name] = float(hyperparameters["parameters"]["r_star"])
         return results_df
 
     baseline = go("baseline")

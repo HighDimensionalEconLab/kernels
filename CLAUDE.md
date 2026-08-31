@@ -102,8 +102,11 @@ per-directory READMEs.
   `solver_set: UnoOptimizerSettings` the Uno/IPOPT options; `tolerance_set`
   holds ex-post acceptance gates only (the epoch-recursive NN drivers also
   keep their training-schedule fields there).
-- Simple ODE drivers pin a fixed small ridge; the DAE drivers (`open_economy`,
-  `multicountry`) anneal via `ridge_set.ridge_init`. `multicountry` with
+- Every sequence-space driver represents paths in LEVELS (anchored
+  representer: value = init + K_tilde @ alpha, the form the RKHS theory
+  covers) except `multicountry`, which still integrates logs. The
+  sequence-space drivers pin a fixed small ridge, except `multicountry`,
+  which anneals via `ridge_set.ridge_init`. `multicountry` with
   `ridge_set.linear_solver="cg"` is the large-N path: matrix-free
   preconditioned CG using the arrowhead + Woodbury structure assembled in
   `multicountry_growth_preconditioner.py`.

@@ -1411,7 +1411,7 @@ def open_economy_growth_kernel(
                 if "validation_pass" in results
                 else {}
             ),
-            "r_star": sig(med(j["r_star_resolved"]), 5),
+            "r_star": sig(experiment_hp["parameters"]["r_star"], 5),
             "k_0": sig(experiment_hp["parameters"]["k_0"], 5),
             "a_0": sig(experiment_hp["parameters"]["a_0"], 5),
             "num_train_points": int(experiment_hp["data_set"]["train_points"]),

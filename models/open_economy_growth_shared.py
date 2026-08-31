@@ -137,6 +137,13 @@ class DataSettings:
     validation_points: int = 401
 
 
+# Ex-post acceptance bars shared by the NLLS and uno kernel drivers.
+@dataclass(frozen=True)
+class ToleranceSettings:
+    train_residual: float = 1e-5
+    validation_residual: float = 1e-2
+
+
 def tail_diagnostics(k, a, q, c, p):
     steady = steady_state(p)
     tail = stable_tail_terms(p)

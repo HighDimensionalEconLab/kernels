@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from typing import NamedTuple
 
 import jax
@@ -26,9 +26,10 @@ from models.open_economy_growth_shared import (
 from models.open_economy_growth_shared import (
     DataSettings,
     StructuralParameters,
+    ToleranceSettings,
+    capital_drift,
     current_account,
     investment_expenditure,
-    investment_rate_from_q,
     present_value_gap,
     production,
     q_drift,
@@ -46,41 +47,38 @@ from models.utilities import (
 )
 
 
-# Alpha blocks first (the metric penalizes the leading flat coordinates).
+# Alpha blocks first (the metric penalizes the leading flat coordinates);
+# the trailing scalars are the free level anchors of the jump variables.
 class Theta(NamedTuple):
     alpha_mu: jax.Array
     alpha_c: jax.Array
     alpha_k: jax.Array
     alpha_a: jax.Array
     alpha_q: jax.Array
-    log_c_0: jax.Array
-    log_mu_0: jax.Array
-    log_q_0: jax.Array
+    c_0: jax.Array
+    mu_0: jax.Array
+    q_0: jax.Array
 
 
+# CRRA first-order condition u'(c) = mu; assets are the one signed path.
 def residual_fn(theta, args, p):
-    # The asset scale enters the min-norm selection metric, so it must be
-    # differentiation-inert; time-0 output sets it from the initial conditions.
-    output_scale_p = jax.lax.stop_gradient(production(p.k_0, 1.0, p))
     paths = integrated_kernel_paths(
         {
-            "log_mu": IntegratedPath(theta.alpha_mu, theta.log_mu_0),
-            "log_c": IntegratedPath(theta.alpha_c, theta.log_c_0),
-            "log_k": IntegratedPath(theta.alpha_k, jnp.log(p.k_0)),
-            "a_raw": IntegratedPath(theta.alpha_a, jnp.zeros((), theta.alpha_a.dtype)),
-            "log_q": IntegratedPath(theta.alpha_q, theta.log_q_0),
+            "mu": IntegratedPath(theta.alpha_mu, theta.mu_0),
+            "c": IntegratedPath(theta.alpha_c, theta.c_0),
+            "k": IntegratedPath(theta.alpha_k, p.k_0),
+            "a": IntegratedPath(theta.alpha_a, p.a_0),
+            "q": IntegratedPath(theta.alpha_q, theta.q_0),
         },
         args.K,
         args.K_tilde,
     )
-    k = jnp.exp(paths["log_k"].value)
-    a = p.a_0 + output_scale_p * paths["a_raw"].value
-    q = jnp.exp(paths["log_q"].value)
-    c = jnp.exp(paths["log_c"].value)
-    mu = jnp.exp(paths["log_mu"].value)
-    da_dt = output_scale_p * paths["a_raw"].d_dt
+    k, dk_dt = paths["k"]
+    a, da_dt = paths["a"]
+    q, dq_dt = paths["q"]
+    mu, dmu_dt = paths["mu"]
+    c = paths["c"].value
     z = jnp.ones_like(k)
-    chi = p.delta ** (1.0 - p.eta)
     values = {
         "k": k,
         "a": a,
@@ -88,11 +86,10 @@ def residual_fn(theta, args, p):
         "c": c,
         "mu": mu,
         "current_account": da_dt,
-        "capital": paths["log_k"].d_dt
-        - (chi * investment_rate_from_q(q, p) ** p.eta - p.delta),
+        "capital": dk_dt - capital_drift(k, q, p),
         "assets": da_dt - current_account(k, a, q, c, z, p),
-        "tobin_q": paths["log_q"].d_dt - q_drift(k, q, z, p) / q,
-        "marginal_wealth": paths["log_mu"].d_dt - (p.r - p.r_star),
+        "tobin_q": dq_dt - q_drift(k, q, z, p),
+        "marginal_wealth": dmu_dt - mu * (p.r - p.r_star),
         "consumption_foc": mu * c**p.gamma - 1.0,
     }
     residual = jnp.concatenate(
@@ -138,12 +135,6 @@ constraint_jacobian = jax.jit(jax.jacfwd(constraints))
 lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
 
 
-@dataclass(frozen=True)
-class ToleranceSettings:
-    train_residual: float = 1e-5
-    validation_residual: float = 1e-2
-
-
 def open_economy_growth_kernel_uno(
     alpha: float = CONSTANTS["alpha"],
     gamma: float = CONSTANTS["gamma"],
@@ -166,6 +157,7 @@ def open_economy_growth_kernel_uno(
     jax.config.update("jax_default_matmul_precision", "highest")
 
     kernel = kernel_set.kernel
+    ell, sigma = kernel_set.ell, kernel_set.sigma
     train_data = make_sampled_train_grid(data_set, jnp.float64)
 
     test_data = jnp.linspace(
@@ -192,24 +184,21 @@ def open_economy_growth_kernel_uno(
     output_scale = steady["output"]
     consumption_scale = steady["g"]
 
-    K, K_tilde = integrated_kernel_matrices(
-        train_data,
-        train_data,
-        kernel,
-        kernel_set.sigma,
-        kernel_set.ell,
-    )
+    K, K_tilde = integrated_kernel_matrices(train_data, train_data, kernel, sigma, ell)
 
-    log_c_seed = jnp.log(production(p.k_0, 1.0, p) - p.delta * p.k_0)
+    # Seeds zero the constant-path residual rows: at q_0 = 1/eta the
+    # chi-normalized investment rate equals delta, and c = domestic
+    # resources + bond income then zeros the seed current account.
+    c_seed = production(p.k_0, 1.0, p) - p.delta * p.k_0 + p.r_star * p.a_0
     theta_0 = Theta(
         alpha_mu=jnp.zeros(n_train, dtype=jnp.float64),
         alpha_c=jnp.zeros(n_train, dtype=jnp.float64),
         alpha_k=jnp.zeros(n_train, dtype=jnp.float64),
         alpha_a=jnp.zeros(n_train, dtype=jnp.float64),
         alpha_q=jnp.zeros(n_train, dtype=jnp.float64),
-        log_c_0=log_c_seed,
-        log_mu_0=-p.gamma * log_c_seed,
-        log_q_0=-jnp.log(p.eta),
+        c_0=c_seed,
+        mu_0=c_seed**-p.gamma,
+        q_0=1.0 / p.eta,
     )
     x_initial, unravel = ravel_pytree(theta_0)
     args = KernelResidualArgs(K=K, K_tilde=K_tilde, unravel=Partial(unravel))
@@ -310,11 +299,7 @@ def open_economy_growth_kernel_uno(
     # through fresh cross-kernel matrices against the training grid.
     def evaluate_grid(points):
         K_eval, K_tilde_eval = integrated_kernel_matrices(
-            points,
-            train_data,
-            kernel_set.kernel,
-            kernel_set.sigma,
-            kernel_set.ell,
+            points, train_data, kernel, sigma, ell
         )
         values = residual_fn(
             theta, KernelResidualArgs(K=K_eval, K_tilde=K_tilde_eval), p
@@ -411,7 +396,8 @@ def open_economy_growth_kernel_uno(
         rejection_reasons.append("nonfinite_or_nonpositive")
     if max_train_residual > tolerance_set.train_residual:
         rejection_reasons.append("train_residual")
-    if max_validation_residual > tolerance_set.validation_residual:
+    validation_pass = max_validation_residual <= tolerance_set.validation_residual
+    if not validation_pass:
         rejection_reasons.append("validation_residual")
 
     rkhs_norm_mu = rkhs_norm_squared(theta.alpha_mu, K)
@@ -422,7 +408,6 @@ def open_economy_growth_kernel_uno(
     rkhs_norm_total = (
         rkhs_norm_mu + rkhs_norm_c + rkhs_norm_k + rkhs_norm_a + rkhs_norm_q
     )
-    objective_norm_squared = objective(jnp.asarray(x), args)
 
     @jax.jit
     def kernel_solution(points):
@@ -435,16 +420,16 @@ def open_economy_growth_kernel_uno(
         "data_set": asdict(data_set),
         "solver_set": asdict(solver_set),
         "tolerance_set": asdict(tolerance_set),
-        "r_star_resolved": r_star,
-        "a_0_over_output_ss": a_0 / float(output_scale),
         "k_ss": float(steady["k"]),
         "q_ss": float(steady["q"]),
         "output_ss": float(output_scale),
         "g_ss": float(consumption_scale),
-        "c": float(train_eval["c"][0]),
-        "q_0": float(jnp.exp(theta.log_q_0)),
+        "c_0": float(theta.c_0),
+        "mu_0": float(theta.mu_0),
+        "q_0": float(theta.q_0),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
+        "validation_pass": validation_pass,
         "max_benchmark_error": max_benchmark_error,
         "differential_residual_count": 4 * n_train,
         "algebraic_residual_count": n_train,
@@ -483,14 +468,10 @@ def open_economy_growth_kernel_uno(
         "rkhs_norm_a": float(rkhs_norm_a),
         "rkhs_norm_q": float(rkhs_norm_q),
         "rkhs_norm_total": float(rkhs_norm_total),
-        "objective_value": float(objective_norm_squared),
         "solve_time": solve_time,
         "stationarity": result.solution_stationarity,
         "primal_feasibility": result.solution_primal_feasibility,
         **acceptance_fields(rejection_reasons),
-        "log_c_0": float(theta.log_c_0),
-        "log_mu_0": float(theta.log_mu_0),
-        "log_q_0": float(theta.log_q_0),
     }
 
     frame_names = (

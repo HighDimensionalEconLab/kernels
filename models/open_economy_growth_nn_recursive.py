@@ -70,9 +70,6 @@ class SequentialPolicySettings:
     width: int = 32
     depth: int = 3
     hidden_activation: str = "gelu"
-    # None derives Y_0/(delta k_0): both heads carry an O(Y_0) Jacobian at
-    # the near-zero draw.
-    investment_local_slope: float | None = None
 
 
 @struct.dataclass
@@ -260,14 +257,10 @@ def open_economy_growth_nn_recursive(
         heads=((2, 1e-3),),
         positive=(True, False),
         center=(math.log(k_0),),
-        # Investment starts at replacement investment delta * k_0.
+        # Investment starts at replacement investment delta * k_0; the
+        # local_slope gives both heads the same O(initial_output) Jacobian.
         output_scale=(delta * k_0, initial_output),
-        local_slope=(
-            initial_output / (delta * k_0)
-            if nn_set.investment_local_slope is None
-            else nn_set.investment_local_slope,
-            1.0,
-        ),
+        local_slope=(initial_output / (delta * k_0), 1.0),
         dtype=dtype,
     )
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))

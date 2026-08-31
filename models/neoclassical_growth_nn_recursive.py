@@ -77,9 +77,6 @@ class InvestmentPolicySettings:
     hidden_activation: str = "gelu"
     head_init_scale: float = 1e-3
     homothetic_representation: bool = True
-    # dy/draw at the near-zero draw is output_scale * investment_local_slope
-    # (general branch only; the homothetic branch has no such knob).
-    investment_local_slope: float = 1.0
 
 
 # Training ICs and keys live in args (the epoch callback may rewrite args
@@ -295,7 +292,6 @@ def neoclassical_growth_nn_recursive(
             positive=(True,),
             center=(math.log(z_0), math.log(k_0)),
             output_scale=(delta * k_0,),
-            local_slope=(nn_set.investment_local_slope,),
             dtype=dtype,
         )
     graphdef, _, nondiff = nnx.split(

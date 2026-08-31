@@ -294,48 +294,34 @@ def stochastic_open_economy_growth_nn_recursive(
     train_scales = jnp.sqrt(jnp.asarray(train_variances, dtype=dtype))
     test_scales = jnp.sqrt(jnp.asarray(test_variances, dtype=dtype))
     investment_anchor = parameters.delta * k_0
-    # The asset axis is tanh-squashed; at the draw only log k feeds the first
-    # layer (investment ~ its start level, CA at zero) -- the z/asset/rate
-    # columns are zero at the draw, not frozen. The zeros CA kernel keeps its
-    # head exactly at zero; the investment local_slope gives both heads the
-    # same O(output_scale) Jacobian.
+    # At the draw only log k feeds the first layer (investment ~ its start
+    # level, CA at zero) -- the z/asset/rate columns are zero at the draw,
+    # not frozen. The zeros CA kernel keeps its head exactly at zero; the
+    # investment local_slope gives both heads the same O(output_scale)
+    # Jacobian.
     policy_spec = dict(
         width=nn_set.width,
         depth=nn_set.depth,
         activation=ACTIVATIONS[nn_set.hidden_activation],
-        heads=(
-            (1, nn_set.investment_head_init_scale),
-            (1, nn_set.current_account_head_init_scale),
-        ),
+        heads=((1, nn_set.investment_head_init_scale), (1, None)),
         positive=(True, False),
         center=(math.log(z_bar), math.log(k_0), a_0, 0.0),
-        # Asset squash scale: assets integrate an O(output_scale) flow over
-        # the training horizon at an assumed current-account-to-output ratio
-        # of order asset_range, floored at output_scale (a smaller floor
-        # saturates the tanh mid-transition).
+        # Asset scale: assets integrate an O(output_scale) flow over the
+        # training horizon at an assumed current-account-to-output ratio of
+        # order 0.1, floored at output_scale.
         scale=(
-            max(math.sqrt(z_ergodic_variance), math.sqrt(train_variances[0]))
-            if nn_set.ergodic_input_scales
-            else 1.0,
+            max(math.sqrt(z_ergodic_variance), math.sqrt(train_variances[0])),
             1.0,
             max(
                 math.sqrt(train_variances[2]),
-                nn_set.asset_range * data_set.train_T * output_scale,
+                0.1 * data_set.train_T * output_scale,
                 output_scale,
             ),
-            max(math.sqrt(rate_ergodic_variance), math.sqrt(train_variances[3]))
-            if nn_set.ergodic_input_scales
-            else 1.0,
+            max(math.sqrt(rate_ergodic_variance), math.sqrt(train_variances[3])),
         ),
-        squash=(False, False, nn_set.squash_assets, False),
         output_scale=(investment_anchor, output_scale),
-        local_slope=(
-            output_scale / investment_anchor
-            if nn_set.investment_local_slope is None
-            else nn_set.investment_local_slope,
-            1.0,
-        ),
-        input_kernel_mask=nn_set.input_kernel_mask,
+        local_slope=(output_scale / investment_anchor, 1.0),
+        input_kernel_mask=(0.0, 1.0, 0.0, 0.0),
         dtype=dtype,
     )
     p = StructuralParameters.create(

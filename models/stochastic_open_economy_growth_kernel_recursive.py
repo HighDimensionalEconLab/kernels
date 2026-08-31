@@ -60,8 +60,7 @@ class ToleranceSettings:
 
 
 # Kernel geometry lives in the NN's normalized coordinates, so one
-# lengthscale is meaningful on every axis and the bounded asset squash never
-# forces a retune when dispersion widens. Per-axis overrides default to
+# lengthscale is meaningful on every axis. Per-axis overrides default to
 # `lengthscale`.
 @dataclass(frozen=True)
 class StateKernelSettings:
@@ -97,7 +96,6 @@ class ResidualArgs:
     local_slope: jax.Array
     kernel_set: StateKernelSettings = struct.field(pytree_node=False)
     positive: tuple = struct.field(pytree_node=False)
-    squash: tuple = struct.field(pytree_node=False)
 
 
 def state_lengthscales(kernel_set):
@@ -114,10 +112,7 @@ def build_residual_args(train_states, kernel_set, reference_policy):
     flat_states = train_states.reshape(-1, 4)
     center = reference_policy.center[...]
     scale = reference_policy.scale[...]
-    squash = reference_policy.squash
-    centers = jax.vmap(lambda state: normalize_state(state, center, scale, squash))(
-        flat_states
-    )
+    centers = jax.vmap(lambda state: normalize_state(state, center, scale))(flat_states)
     gram = state_features(
         kernel_set.state_kernel,
         centers,
@@ -135,7 +130,6 @@ def build_residual_args(train_states, kernel_set, reference_policy):
         local_slope=reference_policy.local_slope[...],
         kernel_set=kernel_set,
         positive=reference_policy.positive,
-        squash=squash,
     )
 
 
@@ -150,7 +144,7 @@ class KernelSequentialPolicy:
     kernel_set: StateKernelSettings = struct.field(pytree_node=False)
 
     def __call__(self, state):
-        x = normalize_state(state, self.args.center, self.args.scale, self.args.squash)
+        x = normalize_state(state, self.args.center, self.args.scale)
         features = state_features(
             self.kernel_set.state_kernel,
             x,

@@ -51,8 +51,8 @@ per-directory READMEs.
   `g`); the recursive policy pieces — the generic `StateMLP` map
   state -> (..., out_features) (states arrive in the model's natural
   coordinates, logs of positive states taken by the caller;
-  `normalize_state` affine normalization with a per-coordinate tanh-squash
-  mask, one near-zero Linear head per `(out_width, kernel_std)` entry —
+  `normalize_state` affine normalization,
+  one near-zero Linear head per `(out_width, kernel_std)` entry —
   `None` draws a zeros kernel — `scaled_outputs` per-output map
   `output_scale * U(local_slope * raw)` positive / `output_scale * raw`
   signed, optional `MaskedLecunInit` first-layer column mask; normalization

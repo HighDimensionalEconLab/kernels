@@ -175,13 +175,8 @@ class TimeMLP(nnx.Module):
         return out
 
 
-def normalize_state(state, center, scale, squash=None):
-    u = (state - center) / scale
-    if squash is None:
-        return u
-    # Bounded squash on the flagged coordinates only: (-2, 2), ~95% saturated
-    # near |u| ~ 3.7.
-    return jnp.where(jnp.asarray(squash), 2.0 * jnp.tanh(u / 2.0), u)
+def normalize_state(state, center, scale):
+    return (state - center) / scale
 
 
 # Positive outputs: output_scale * U(local_slope * raw) -- a near-zero raw
@@ -205,7 +200,7 @@ class MaskedLecunInit:
 
 
 # p-free MLP policy map state (..., in_features) -> (..., out_features):
-# affine normalization with optional per-coordinate tanh squash, trunk, one
+# affine normalization, trunk, one
 # Linear head per (out_width, kernel_std) entry (None kernel_std draws a
 # zeros kernel), then scaled_outputs with the per-output positive mask.
 # Positive states enter in logs, taken by the caller. A scalar state
@@ -226,14 +221,12 @@ class StateMLP(nnx.Module):
         scale=None,
         output_scale,
         local_slope=None,
-        squash=None,
         input_kernel_mask=None,
         dtype,
         rngs,
     ):
         self.activation = nnx.static(activation)
         self.positive = nnx.static(positive)
-        self.squash = nnx.static(squash)
         out_features = sum(out_width for out_width, _ in heads)
         # Non-Param Variables: normalization and output-map constants are data
         # outside the differentiated Param state, restored from an artifact's
@@ -294,7 +287,7 @@ class StateMLP(nnx.Module):
         )
 
     def __call__(self, state):
-        h = normalize_state(state, self.center[...], self.scale[...], self.squash)
+        h = normalize_state(state, self.center[...], self.scale[...])
         for layer in self.layers:
             h = self.activation(layer(h))
         raw = jnp.concatenate([head(h) for head in self.heads], axis=-1)

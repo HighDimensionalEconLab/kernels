@@ -255,16 +255,15 @@ def stochastic_growth_nn_recursive(
 
     fit_timer = Stopwatch()
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
-    # Mean reversion in z fixes a scale, so the raw (log z, log k) state
-    # feeds the trunk unnormalized with the constant delta * k_0 start level.
+    # Unit scales: mean reversion in z fixes the coordinate's own scale.
     policy_spec = dict(
         width=nn_set.mlp_width,
         depth=nn_set.mlp_depth,
         activation=ACTIVATIONS[nn_set.hidden_activation],
         heads=((1, nn_set.head_init_scale),),
         positive=(True,),
+        center=(math.log(z_bar), math.log(k_0)),
         output_scale=(delta * k_0,),
-        local_slope=(nn_set.investment_local_slope,),
         dtype=dtype,
     )
     graphdef, _, nondiff = nnx.split(

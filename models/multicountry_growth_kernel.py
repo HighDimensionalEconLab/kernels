@@ -464,6 +464,8 @@ def multicountry_growth_kernel(
     if max_train_residual > tolerance_set.train_residual:
         rejection_reasons.append("train_residual")
     validation_pass = max_validation_residual <= tolerance_set.validation_residual
+    if not validation_pass:
+        rejection_reasons.append("validation_residual")
 
     resolved_steady = resolved_steady_state(validation_eval["mu"][-1], p)
     tail = tail_diagnostics(validation_eval, p)

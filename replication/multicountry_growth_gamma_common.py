@@ -35,16 +35,21 @@ from replication.utilities import (
 GAMMA_COMMON_COUNT = 40
 GAMMA_COMMON_TIMES = [10.0]
 
+# The undamped implicit-AD system's conditioning scales like 1/ridge, so the
+# tangent re-solve never runs deeper than the experiment-matrix ridge floor;
+# the tangent value itself is insensitive to the ridge at this level.
+TANGENT_RIDGE = 3e-13
+
 
 # d rate(T10)/d gamma along (1, ..., 1) -- the representative-agent CRRA
 # comparative static, comparable against the N=2/N=10 sensitivity tables --
 # as one implicit-AD forward tangent through a re-solve of the returned
 # solve handle, on the ladder's compile-then-warm timing schedule.
-# Warm-started at the solved coefficients with the ridge pinned at the level
-# the continuation actually reached; both the damped re-solve and the
-# undamped implicit-AD system are preconditioned by the arrow-Woodbury
-# inverse built at the solution, so no dense factorization enters at any
-# width.
+# Warm-started at the solved coefficients with the ridge pinned at
+# TANGENT_RIDGE (or the achieved ridge, if shallower still); both the damped
+# re-solve and the undamped implicit-AD system are preconditioned by the
+# arrow-Woodbury inverse built at the solution, so no dense factorization
+# enters at any width.
 def run(output_dir: str = ".results"):
     configure_process()
     print(f"gamma_common (N={GAMMA_COMMON_COUNT}, cg) -> {output_dir}/")
@@ -72,17 +77,18 @@ def run(output_dir: str = ".results"):
         results["kernel_set"]["ell"],
     )
     primal_solver = spec["solver"]
+    tangent_ridge = max(float(result.lm_state.ridge), TANGENT_RIDGE)
     gamma_common_solver = RidgeLevenbergMarquardt(
         spec["residual_fn"],
         has_aux=True,
         metric=primal_solver.initial_metric,
-        ridge=float(result.lm_state.ridge),
+        ridge=tangent_ridge,
         linear_solver=CG(
             build_arrow_woodbury(
                 theta,
                 spec["residual_args"],
                 spec["p"],
-                float(result.lm_state.ridge),
+                tangent_ridge,
                 cg_settings.damping_floor,
                 num_countries,
             ),
@@ -90,8 +96,12 @@ def run(output_dir: str = ".results"):
             maxiter=cg_settings.maxiter,
         ),
         # The undamped AD system runs once, so it gets a deeper budget than
-        # the damped inner solves.
-        ad_solver=CG(None, maxiter=10 * cg_settings.maxiter),
+        # the damped inner solves. The preconditioned AD residual stalls near
+        # 1e-8 (the arrow-Woodbury build is structurally approximate away
+        # from the seed), so the dtype-default 1e-10 tolerance is unreachable
+        # and CG burns the whole budget with no accuracy gain; the explicit
+        # tolerance stops at the stall.
+        ad_solver=CG(None, tol=1e-8, maxiter=10 * cg_settings.maxiter),
         init_damping=primal_solver.init_damping,
         damping_decrease=primal_solver.damping_decrease,
         damping_increase=primal_solver.damping_increase,

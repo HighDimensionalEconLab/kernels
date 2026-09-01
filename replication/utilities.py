@@ -213,7 +213,17 @@ def save_experiment(
     # Full distributions first, then the collapsed constant scalars at the end.
     expanded = {k: v for k, v in col_stats.items() if isinstance(v, dict)}
     collapsed = {k: v for k, v in col_stats.items() if not isinstance(v, dict)}
-    scalars = {**header, **expanded, **collapsed}
+    # String columns (solver_status, rejection_reason, ...) follow: a single
+    # unique value collapses to that value, a column varying across rows
+    # becomes its value counts keyed by value.
+    strings = {}
+    for col in results_df.select_dtypes(exclude=["number", "bool"]).columns:
+        counts = results_df[col].value_counts()
+        if len(counts) == 1:
+            strings[col] = counts.index[0]
+        elif len(counts) > 1:
+            strings[col] = {str(k): int(v) for k, v in sorted(counts.items())}
+    scalars = {**header, **expanded, **collapsed, **strings}
     (out / f"{stem}.json").write_text(json.dumps(scalars, indent=2))
 
 

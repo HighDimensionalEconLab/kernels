@@ -72,7 +72,9 @@ def matches(token, value):
             # A clean power like 10^{-14} against the raw float 1e-14.
             return float(value) == token[1] or 10.0 ** token[1] == float(value)
         if kind == "sci":
-            return float(value) == token[1] * 10 ** token[2]
+            # Parse as a decimal literal: m * 10**e in binary drifts from the
+            # correctly rounded double the JSON parser produced.
+            return float(value) == float(f"{token[1]}e{token[2]}")
     return None  # lists/dicts: prose references, not comparable
 
 

@@ -11,7 +11,7 @@ import pandas as pd
 from flax import nnx
 from tinydiffeq import SaveAt, solve_sde
 
-from models.neural_networks import ACTIVATIONS, StateMLP
+from models.neural_networks import ACTIVATIONS, StateMLP, UnitSoftplusWhere
 from models.utilities import ParameterPyTree
 
 # Recursive stochastic small open economy on (log z, log k, a, rate_gap).
@@ -426,18 +426,26 @@ def problem_cache_config(
     }
 
 
-# The load template only needs the architecture from meta: the resolved
-# normalization and output-map Variables ride in the artifact's nondiff
-# block and overwrite the placeholder defaults.
+# The load template spells out the architecture and the output map from
+# meta (the investment slope from the structural/initial_state blocks);
+# only the normalization and output-scale Variables ride in the artifact's
+# nondiff block and overwrite the placeholder defaults.
 def make_sequential_policy(meta, dtype):
     settings = SequentialPolicySettings(**meta["settings"])
+    structural = meta["structural"]
     return StateMLP(
         4,
         width=settings.width,
         depth=settings.depth,
         activation=ACTIVATIONS[settings.hidden_activation],
         heads=((1, settings.investment_head_init_scale), (1, None)),
-        positive=(True, False),
+        final_activation=UnitSoftplusWhere(
+            local_slope=(
+                structural["output_scale"]
+                / (structural["delta"] * meta["initial_state"]["k_0"]),
+                None,
+            ),
+        ),
         output_scale=(1.0, 1.0),
         dtype=dtype,
         rngs=nnx.Rngs(0),

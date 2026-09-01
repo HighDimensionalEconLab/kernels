@@ -158,12 +158,13 @@ def open_economy_growth_nn(
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     # Assets are signed, so the a head output scales linearly; the other
     # four paths are positive via unit_softplus.
+    final_activation = UnitSoftplusWhere(local_slope=(1.0, None, 1.0, 1.0, 1.0))
     model = TimeMLP(
         5,
         width=nn_set.width,
         depth=nn_set.depth,
         activation=ACTIVATIONS[nn_set.hidden_activation],
-        final_activation=UnitSoftplusWhere((True, False, True, True, True)),
+        final_activation=final_activation,
         input_scale=input_scale,
         output_scale=(k_scale, a_scale, q_scale, c_scale, mu_scale),
         dtype=dtype,
@@ -197,7 +198,7 @@ def open_economy_growth_nn(
             width=nn_set.width,
             depth=nn_set.depth,
             activation=ACTIVATIONS[nn_set.hidden_activation],
-            final_activation=UnitSoftplusWhere((True, False, True, True, True)),
+            final_activation=final_activation,
             input_scale=input_scale,
             output_scale=(k_scale, a_scale, q_scale, c_scale, mu_scale),
             dtype=dtype,

@@ -14,7 +14,7 @@ from jax.flatten_util import ravel_pytree
 from nlls_gram import DrawNNXModule, LevenbergMarquardt, MultiStart
 from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
 
-from models.neural_networks import ACTIVATIONS, StateMLP
+from models.neural_networks import ACTIVATIONS, StateMLP, UnitSoftplusWhere
 from models.open_economy_growth_benchmark import open_economy_growth_benchmark
 from models.open_economy_growth_shared import (
     OPEN_ECONOMY_GROWTH_CONSTANTS as CONSTANTS,
@@ -255,12 +255,13 @@ def open_economy_growth_nn_recursive(
         depth=nn_set.depth,
         activation=ACTIVATIONS[nn_set.hidden_activation],
         heads=((2, 1e-3),),
-        positive=(True, False),
-        center=(math.log(k_0),),
         # Investment starts at replacement investment delta * k_0; the
         # local_slope gives both heads the same O(initial_output) Jacobian.
+        final_activation=UnitSoftplusWhere(
+            local_slope=(initial_output / (delta * k_0), None)
+        ),
+        center=(math.log(k_0),),
         output_scale=(delta * k_0, initial_output),
-        local_slope=(initial_output / (delta * k_0), 1.0),
         dtype=dtype,
     )
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))

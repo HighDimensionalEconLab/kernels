@@ -52,21 +52,24 @@ per-directory READMEs.
   `g`); the recursive policy pieces — the generic `StateMLP` map
   state -> (..., out_features) (states arrive in the model's natural
   coordinates, logs of positive states taken by the caller;
-  `normalize_state` affine normalization,
-  one near-zero Linear head per `(out_width, kernel_std)` entry —
-  `None` draws a zeros kernel — `scaled_outputs` per-output map
-  `output_scale * U(local_slope * raw)` positive / `output_scale * raw`
-  signed, optional `MaskedLecunInit` first-layer column mask; normalization
-  and output constants are non-Param Variables; `local_slope` defaults to
-  ones and is `flow_unit / start_level` — `1/delta` on the open-economy
-  investment slots — so every head carries an O(flow-unit) Jacobian at the
-  draw) and the hardcoded `HomotheticPolicyMLP`, with the shared
-  `normalize_state`/`scaled_outputs` also imported by the
+  `normalize_state` affine normalization, trunk, one near-zero Linear head
+  per `(out_width, kernel_std)` entry — `None` draws a zeros kernel —
+  optional static `final_activation` (bare `unit_softplus`, or
+  `UnitSoftplusWhere(local_slope=...)` for mixed heads — one entry per
+  output, `None` on the signed slots for a linear pass-through, `1.0` for a
+  unit slope, and `flow_unit / start_level` = `1/delta` on the open-economy
+  investment slot so every head carries an O(flow-unit) Jacobian at the
+  draw), then the `output_scale` Variable multiply, with optional
+  `MaskedLecunInit` first-layer column mask; normalization and output scales
+  are the non-Param Variables) and the hardcoded `HomotheticPolicyMLP`, with
+  `normalize_state`/`UnitSoftplusWhere` also imported by the
   stochastic-open-economy kernel policy; plus `unit_softplus`/`ACTIVATIONS`,
   `NNXResidualArgs`, and the policy-artifact `save_model`/`load_model`
-  (load factories rebuild the `StateMLP` template from `meta["settings"]`
-  with placeholder Variables the artifact's nondiff block overwrites);
-  `utilities.py` keeps the non-NN shared pieces and never imports `nnx`.
+  (load factories rebuild the `StateMLP` architecture and `final_activation`
+  from meta — the open-economy slope from the artifact's
+  `structural`/`initial_state` blocks — with placeholder Variables the
+  nondiff block overwrites); `utilities.py` keeps the non-NN shared pieces
+  and never imports `nnx`.
   Each recursive NN driver builds its `StateMLP` kwargs once as an inline
   `policy_spec` dict and reuses them verbatim in `DrawNNXModule`, so every
   kwarg stays hashable (the load factories in the shared modules spell the

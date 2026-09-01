@@ -10,7 +10,7 @@ import numpy as np
 from flax import nnx
 from tinydiffeq import SaveAt, solve_sde
 
-from models.neural_networks import ACTIVATIONS, StateMLP
+from models.neural_networks import ACTIVATIONS, StateMLP, unit_softplus
 from models.utilities import ParameterPyTree
 
 # Stochastic neoclassical growth on the state (log z, log k): OU log-TFP
@@ -343,9 +343,9 @@ class InvestmentPolicySettings:
     head_init_scale: float = 1e-3
 
 
-# The load template only needs the architecture from meta: the output-map
-# and normalization Variables ride in the artifact's nondiff block and
-# overwrite the placeholder defaults.
+# The load template spells out the architecture and the output map from
+# meta; only the normalization and output-scale Variables ride in the
+# artifact's nondiff block and overwrite the placeholder defaults.
 def make_investment_policy(meta, dtype):
     settings = InvestmentPolicySettings(**meta["settings"])
     return StateMLP(
@@ -354,7 +354,7 @@ def make_investment_policy(meta, dtype):
         depth=settings.mlp_depth,
         activation=ACTIVATIONS[settings.hidden_activation],
         heads=((1, settings.head_init_scale),),
-        positive=(True,),
+        final_activation=unit_softplus,
         output_scale=(1.0,),
         dtype=dtype,
         rngs=nnx.Rngs(0),

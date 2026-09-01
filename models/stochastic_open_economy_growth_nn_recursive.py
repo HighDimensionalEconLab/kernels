@@ -18,7 +18,12 @@ from nlls_gram import (
     MultiStart,
 )
 
-from models.neural_networks import ACTIVATIONS, StateMLP, save_model
+from models.neural_networks import (
+    ACTIVATIONS,
+    StateMLP,
+    UnitSoftplusWhere,
+    save_model,
+)
 from models.stochastic_open_economy_growth_shared import (
     PROCESS_CONSTANTS,
     DataSettings,
@@ -304,7 +309,9 @@ def stochastic_open_economy_growth_nn_recursive(
         depth=nn_set.depth,
         activation=ACTIVATIONS[nn_set.hidden_activation],
         heads=((1, nn_set.investment_head_init_scale), (1, None)),
-        positive=(True, False),
+        final_activation=UnitSoftplusWhere(
+            local_slope=(output_scale / investment_anchor, None)
+        ),
         center=(math.log(z_bar), math.log(k_0), a_0, 0.0),
         # Asset scale: assets integrate an O(output_scale) flow over the
         # training horizon at an assumed current-account-to-output ratio of
@@ -320,7 +327,6 @@ def stochastic_open_economy_growth_nn_recursive(
             max(math.sqrt(rate_ergodic_variance), math.sqrt(train_variances[3])),
         ),
         output_scale=(investment_anchor, output_scale),
-        local_slope=(output_scale / investment_anchor, 1.0),
         input_kernel_mask=(0.0, 1.0, 0.0, 0.0),
         dtype=dtype,
     )

@@ -41,14 +41,19 @@ ACTIVATIONS = {
 }
 
 
-# unit_softplus on the head outputs flagged True; signed outputs pass through
-# linearly. One flag per output.
+# One local_slope entry per head output: a float applies unit_softplus with
+# that slope (1.0 for the unit slope), None passes the signed output through
+# linearly.
 @dataclass(frozen=True)  # value-hashable: shares DrawNNXModule/jit compilations
 class UnitSoftplusWhere:
-    positive: tuple[bool, ...]
+    local_slope: tuple[float | None, ...]
 
     def __call__(self, raw):
-        return jnp.where(jnp.asarray(self.positive), unit_softplus(raw), raw)
+        positive = jnp.asarray([s is not None for s in self.local_slope])
+        slope = jnp.asarray(
+            [1.0 if s is None else s for s in self.local_slope], raw.dtype
+        )
+        return jnp.where(positive, unit_softplus(raw, slope), raw)
 
 
 # MLP map t -> (..., out_features), batch-aware through the trailing feature
@@ -131,15 +136,6 @@ def normalize_state(state, center, scale):
     return (state - center) / scale
 
 
-# Positive outputs: output_scale * U(local_slope * raw) -- a near-zero raw
-# starts at output_scale with an (output_scale * local_slope) Jacobian.
-# Signed outputs: output_scale * raw.
-def scaled_outputs(raw, positive, output_scale, local_slope):
-    return output_scale * jnp.where(
-        jnp.asarray(positive), unit_softplus(local_slope * raw), raw
-    )
-
-
 @dataclass(frozen=True)  # value-hashable: shares DrawNNXModule/jit compilations
 class MaskedLecunInit:
     mask: tuple[float, ...]  # one flag per input coordinate
@@ -152,13 +148,13 @@ class MaskedLecunInit:
 
 
 # p-free MLP policy map state (..., in_features) -> (..., out_features):
-# affine normalization, trunk, one
-# Linear head per (out_width, kernel_std) entry (None kernel_std draws a
-# zeros kernel), then scaled_outputs with the per-output positive mask.
-# Positive states enter in logs, taken by the caller. A scalar state
-# broadcasts against the (in_features,) normalization for in_features = 1.
-# Every constructor kwarg is hashable so DrawNNXModule specs stay
-# value-hashable.
+# affine normalization, trunk, one Linear head per (out_width, kernel_std)
+# entry (None kernel_std draws a zeros kernel) concatenated, the optional
+# final_activation (unit_softplus, or UnitSoftplusWhere for mixed
+# signed/positive heads), then the output_scale multiply. Positive states
+# enter in logs, taken by the caller. A scalar state broadcasts against the
+# (in_features,) normalization for in_features = 1. Every constructor kwarg
+# is hashable so DrawNNXModule specs stay value-hashable.
 class StateMLP(nnx.Module):
     def __init__(
         self,
@@ -168,22 +164,19 @@ class StateMLP(nnx.Module):
         depth,
         activation,
         heads,
-        positive,
+        final_activation=None,
         center=None,
         scale=None,
         output_scale,
-        local_slope=None,
         input_kernel_mask=None,
         dtype,
         rngs,
     ):
         self.activation = nnx.static(activation)
-        self.positive = nnx.static(positive)
-        out_features = sum(out_width for out_width, _ in heads)
-        # Non-Param Variables: normalization and output-map constants are data
+        self.final_activation = nnx.static(final_activation)
+        # Non-Param Variables: normalization and output scales are data
         # outside the differentiated Param state, restored from an artifact's
-        # nondiff block on load_model. The all-ones local_slope default keeps
-        # the where-select in scaled_outputs safe in signed slots.
+        # nondiff block on load_model.
         self.center = nnx.Variable(
             jnp.zeros(in_features, dtype=dtype)
             if center is None
@@ -195,11 +188,6 @@ class StateMLP(nnx.Module):
             else jnp.asarray(scale, dtype=dtype)
         )
         self.output_scale = nnx.Variable(jnp.asarray(output_scale, dtype=dtype))
-        self.local_slope = nnx.Variable(
-            jnp.ones(out_features, dtype=dtype)
-            if local_slope is None
-            else jnp.asarray(local_slope, dtype=dtype)
-        )
         layers = [
             nnx.Linear(
                 in_features,
@@ -242,10 +230,10 @@ class StateMLP(nnx.Module):
         h = normalize_state(state, self.center[...], self.scale[...])
         for layer in self.layers:
             h = self.activation(layer(h))
-        raw = jnp.concatenate([head(h) for head in self.heads], axis=-1)
-        return scaled_outputs(
-            raw, self.positive, self.output_scale[...], self.local_slope[...]
-        )
+        out = jnp.concatenate([head(h) for head in self.heads], axis=-1)
+        if self.final_activation is not None:
+            out = self.final_activation(out)
+        return self.output_scale[...] * out
 
 
 # Homothetic neoclassical investment policy i = delta * k * U(h(log kappa)),

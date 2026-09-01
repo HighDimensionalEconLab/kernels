@@ -19,7 +19,7 @@ from nlls_gram import (
 )
 
 from models.kernels import state_features
-from models.neural_networks import load_model, normalize_state, scaled_outputs
+from models.neural_networks import UnitSoftplusWhere, load_model, normalize_state
 from models.stochastic_open_economy_growth_shared import (
     PROCESS_CONSTANTS,
     DataSettings,
@@ -93,9 +93,8 @@ class ResidualArgs:
     center: jax.Array
     scale: jax.Array
     output_scale: jax.Array
-    local_slope: jax.Array
     kernel_set: StateKernelSettings = struct.field(pytree_node=False)
-    positive: tuple = struct.field(pytree_node=False)
+    final_activation: UnitSoftplusWhere = struct.field(pytree_node=False)
 
 
 def state_lengthscales(kernel_set):
@@ -127,9 +126,8 @@ def build_residual_args(train_states, kernel_set, reference_policy):
         center=center,
         scale=scale,
         output_scale=reference_policy.output_scale[...],
-        local_slope=reference_policy.local_slope[...],
         kernel_set=kernel_set,
-        positive=reference_policy.positive,
+        final_activation=reference_policy.final_activation,
     )
 
 
@@ -159,12 +157,7 @@ class KernelSequentialPolicy:
             index += 1
         if kernel_set.linear_mean:
             raw = raw + x @ self.theta[index]
-        return scaled_outputs(
-            raw,
-            self.args.positive,
-            self.args.output_scale,
-            self.args.local_slope,
-        )
+        return self.args.output_scale * self.args.final_activation(raw)
 
 
 def residual_fn(theta, args, p):
@@ -332,7 +325,7 @@ def stochastic_open_economy_growth_kernel_recursive(
     investment_anchor = parameters.delta * k_0
     saved = (
         float(reference_policy.output_scale[...][0]),
-        float(reference_policy.local_slope[...][0]),
+        float(reference_policy.final_activation.local_slope[0]),
         float(reference_policy.output_scale[...][1]),
     )
     recomputed = (

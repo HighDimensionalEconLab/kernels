@@ -221,10 +221,10 @@ def multicountry_growth_nn(
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     # Assets are signed, so their head block scales linearly; the other
     # paths and the world rate are positive via unit_softplus.
-    positive = (
-        (True,) * num_countries
-        + (False,) * num_countries
-        + (True,) * (3 * num_countries + 1)
+    final_activation = UnitSoftplusWhere(
+        local_slope=(1.0,) * num_countries
+        + (None,) * num_countries
+        + (1.0,) * (3 * num_countries + 1)
     )
     output_scale = (
         *k_scale,
@@ -239,7 +239,7 @@ def multicountry_growth_nn(
         width=nn_set.width,
         depth=nn_set.depth,
         activation=ACTIVATIONS[nn_set.hidden_activation],
-        final_activation=UnitSoftplusWhere(positive),
+        final_activation=final_activation,
         input_scale=input_scale,
         output_scale=output_scale,
         dtype=dtype,
@@ -273,7 +273,7 @@ def multicountry_growth_nn(
             width=nn_set.width,
             depth=nn_set.depth,
             activation=ACTIVATIONS[nn_set.hidden_activation],
-            final_activation=UnitSoftplusWhere(positive),
+            final_activation=final_activation,
             input_scale=input_scale,
             output_scale=output_scale,
             dtype=dtype,

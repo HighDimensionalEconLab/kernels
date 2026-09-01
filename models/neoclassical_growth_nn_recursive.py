@@ -27,7 +27,12 @@ from models.neoclassical_growth_shared import (
     simulate,
     trajectory_values,
 )
-from models.neural_networks import ACTIVATIONS, HomotheticPolicyMLP, StateMLP
+from models.neural_networks import (
+    ACTIVATIONS,
+    HomotheticPolicyMLP,
+    StateMLP,
+    unit_softplus,
+)
 from models.utilities import (
     STATUS_TO_REASON,
     OptimizerSettings,
@@ -289,7 +294,7 @@ def neoclassical_growth_nn_recursive(
             depth=nn_set.mlp_depth,
             activation=ACTIVATIONS[nn_set.hidden_activation],
             heads=((1, nn_set.head_init_scale),),
-            positive=(True,),
+            final_activation=unit_softplus,
             center=(math.log(z_0), math.log(k_0)),
             output_scale=(delta * k_0,),
             dtype=dtype,

@@ -18,7 +18,7 @@ from nlls_gram import (
     MultiStart,
 )
 
-from models.neural_networks import ACTIVATIONS, StateMLP, save_model
+from models.neural_networks import ACTIVATIONS, StateMLP, save_model, unit_softplus
 from models.stochastic_growth_shared import (
     STOCHASTIC_GROWTH_CONSTANTS as CONSTANTS,
 )
@@ -261,7 +261,7 @@ def stochastic_growth_nn_recursive(
         depth=nn_set.mlp_depth,
         activation=ACTIVATIONS[nn_set.hidden_activation],
         heads=((1, nn_set.head_init_scale),),
-        positive=(True,),
+        final_activation=unit_softplus,
         center=(math.log(z_bar), math.log(k_0)),
         output_scale=(delta * k_0,),
         dtype=dtype,

@@ -626,6 +626,12 @@ def multicountry_sensitivity_payload(value, reference=None):
         "times": list(MULTICOUNTRY_SENSITIVITY_TIMES),
         "levels": levels,
         "derivatives": derivatives,
+        # max_i |d r*/d b_{i,0}| per date: the redistribution-neutrality
+        # certificate, exactly zero in the common-gamma theory.
+        "rate_redistribution_neutrality": {
+            f"T{time}": sci(value(f"rate_T{time}_a_0_neutrality"))
+            for time in MULTICOUNTRY_SENSITIVITY_TIMES
+        },
     }
     if reference is not None:
         payload["max_abs_gap_vs_kernel"] = sig(max(cross_solver_gaps), 3)
@@ -821,6 +827,7 @@ def neoclassical_growth_kernel(out):
                 "a": sig(hp["parameters"]["a"], 6),
                 "delta": hp["parameters"]["delta"],
                 "rho_hat": hp["parameters"]["rho_hat"],
+                "sigma_crra": hp["parameters"]["sigma_crra"],
                 "k_0": hp["parameters"]["k_0"],
             },
             "data": {
@@ -991,11 +998,33 @@ def neoclassical_growth_concave_convex_kernel(
     }
     if "final_damping" in df:
         threshold.update(final_damping_summary(df.loc[df["solution_accepted"]]))
+    # The NN prefix carries nn_set instead of kernel_set.
+    kernel = {}
+    if "kernel_set" in hp:
+        kernel_name = hp["kernel_set"]["kernel"]
+        kernel = {
+            "kernel": {
+                "name": kernel_name,
+                "nu": KERNEL_NU[kernel_name],
+                "ell": hp["kernel_set"]["ell"],
+                "sigma": hp["kernel_set"]["sigma"],
+            }
+        }
     return {
         "parameters": {
             "A": hp["parameters"]["A"],
             "b_1": hp["parameters"]["b_1"],
             "b_2": hp["parameters"]["b_2"],
+            "a": sig(hp["parameters"]["a"], 6),
+            "delta": hp["parameters"]["delta"],
+            "rho_hat": hp["parameters"]["rho_hat"],
+            "sigma_crra": hp["parameters"]["sigma_crra"],
+        },
+        **kernel,
+        "data": {
+            "num_train_points": int(hp["data_set"]["train_points"]),
+            "train_T": hp["data_set"]["train_T"],
+            "test_T": hp["data_set"]["test_T"],
         },
         "threshold": threshold,
         "n_seeds": int(j["n_seeds"]),
@@ -1857,6 +1886,9 @@ def multicountry_growth_kernel(out):
             )
         },
     }
+    kernel_name = baseline_hp["kernel_set"]["kernel"]
+    bond_configurations = ("baseline", "initial_debt", "initial_assets")
+    bond_summaries = [load(out, f"{prefix}_{name}") for name in bond_configurations]
     payload = {
         "parameters": select(
             baseline_hp["parameters"],
@@ -1868,13 +1900,39 @@ def multicountry_growth_kernel(out):
             "populations",
             "productivities",
         ),
-        "kernel": baseline_hp["kernel_set"],
+        "kernel": {
+            "name": kernel_name,
+            "nu": KERNEL_NU[kernel_name],
+            "ell": baseline_hp["kernel_set"]["ell"],
+            "sigma": baseline_hp["kernel_set"]["sigma"],
+        },
+        "initial_set": baseline_hp["initial_set"],
+        "data": {
+            "num_train_points": int(baseline_hp["data_set"]["train_points"]),
+            "train_T": baseline_hp["data_set"]["train_T"],
+            "dense_T": baseline_hp["data_set"]["dense_T"],
+            "tail_points": int(baseline_hp["data_set"]["tail_points"]),
+            "num_dense_points": int(
+                baseline_hp["data_set"]["train_points"]
+                - baseline_hp["data_set"]["tail_points"]
+            ),
+            "test_T": baseline_hp["data_set"]["test_T"],
+            "test_points": int(baseline_hp["data_set"]["test_points"]),
+        },
         "selection": "minimum_rkhs_norm_ridge",
         "training_information": {"terminal_residual_count": 0},
         # Max gap in (r*, k_i, q_i) paths across the three bond
         # configurations: exactly zero in the common-gamma theory, so the
         # measured gap is a solver-accuracy certificate.
         "bond_invariance": bond_invariance,
+        # Bounds over the three plotted bond configurations, the maxima the
+        # prose cites.
+        "max_train_residual_across_configurations": sci(
+            max(med(summary["max_train_residual"]) for summary in bond_summaries)
+        ),
+        "max_asset_clearing_across_configurations": sci(
+            max(med(summary["max_asset_clearing"]) for summary in bond_summaries)
+        ),
         "experiments": {
             name: experiment(name)
             for name in (
@@ -2048,8 +2106,14 @@ def multicountry_growth_matern32(out):
         }
         for name in ("baseline", "initial_debt", "initial_assets")
     }
+    kernel_name = hp["kernel_set"]["kernel"]
     return {
-        "kernel": hp["kernel_set"],
+        "kernel": {
+            "name": kernel_name,
+            "nu": KERNEL_NU[kernel_name],
+            "ell": hp["kernel_set"]["ell"],
+            "sigma": hp["kernel_set"]["sigma"],
+        },
         "num_train_points": int(hp["data_set"]["train_points"]),
         "bond_invariance": bond_invariance,
         "experiments": experiments,

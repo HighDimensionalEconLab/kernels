@@ -39,6 +39,7 @@ python -m replication.open_economy_growth_nn_recursive
 python -m replication.stochastic_open_economy_growth_nn_recursive
 python -m replication.stochastic_open_economy_growth_kernel_recursive
 python -m replication.multicountry_growth_kernel
+python -m replication.multicountry_growth_kernel_matern32
 python -m replication.multicountry_growth_kernel_sensitivity
 python -m replication.multicountry_growth_nn
 python -m replication.multicountry_growth_nn_sensitivity

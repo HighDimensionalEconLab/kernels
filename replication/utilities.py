@@ -10,7 +10,6 @@ import numpy as np
 import pandas as pd
 from mpl_toolkits.axes_grid1.inset_locator import mark_inset, zoomed_inset_axes
 
-QUANTILES = [0.1, 0.5, 0.9]
 DETERMINISTIC_TIMING_REPETITIONS = 1
 
 # Shared butterfly-production basin experiment: the k_0 grid crosses the

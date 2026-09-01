@@ -65,19 +65,7 @@ def run(
     # Single initial condition (the module default): trajectories differ only
     # by their shock realization.
     go("baseline", n_seeds)
-    # Initial-condition dispersion is an experiment, never a default: wide
-    # NFA variation relative to log k is the point of the model.
-    go(
-        "dispersed_ic",
-        1,
-        ic_set={"train_asset_variance": 0.25, "train_log_k_variance": 0.01},
-    )
-    go("correlated_shocks", 1, corr_zr=-0.4)
-    write_summary(
-        output_dir,
-        PREFIX,
-        experiments={"baseline", "dispersed_ic", "correlated_shocks"},
-    )
+    write_summary(output_dir, PREFIX, experiments={"baseline"})
 
 
 if __name__ == "__main__":

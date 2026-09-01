@@ -1105,10 +1105,17 @@ def asset_pricing_kernel(out, prefix="asset_pricing_kernel"):
         # Corrected no-bubble fundamental (QE eq. 19/20 replacement):
         #   mu_f(t) = (x_0 + c/g) e^{g t} / (r - g) - c / (g r),
         # general solution mu = mu_f + zeta e^{r t}, zeta = 0 by no-bubble.
-        "benchmark": {
-            "mu_f_0": sig((x_0 + c / g) / (r - g) - c / (g * r), 4),
-            "r_minus_g": sig(r - g, 4),
-        },
+        # Identical parameters make the uno block's copy pure duplication.
+        **(
+            {
+                "benchmark": {
+                    "mu_f_0": sig((x_0 + c / g) / (r - g) - c / (g * r), 4),
+                    "r_minus_g": sig(r - g, 4),
+                }
+            }
+            if prefix == "asset_pricing_kernel"
+            else {}
+        ),
     }
 
 

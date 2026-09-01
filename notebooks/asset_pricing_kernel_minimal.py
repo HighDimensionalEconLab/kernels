@@ -21,7 +21,7 @@ TEST_T = 50.0
 N_TEST = 100
 RIDGE = 1e-10  # disappearing penalty weight
 ATOL = 1e-9  # unscaled residual norm
-GTOL = 1e-13
+GTOL = 1e-13  # must resolve the weakly penalized free p_0
 INIT_DAMPING = 1e-8
 MAX_STEPS = 100
 

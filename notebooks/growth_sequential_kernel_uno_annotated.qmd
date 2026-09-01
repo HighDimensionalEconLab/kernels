@@ -271,7 +271,7 @@ print(f"mean |Euler residual| test: {float(jnp.abs(euler_test).mean()):.3e}")
 print(f"log-TVC at t={TVC_T:.0f}: {float(log_tvc):.1f}   (should be << 0)")
 ```
 
-Capital and consumption rise toward their steady states; the costate (Euler) residual sits on zero inside the training horizon (dotted) and degrades gracefully past it.
+Capital and consumption rise toward their steady states. As in the ridgeless notebook the costate (Euler) residual vanishes at the training dates and is largest between the earliest of them; past the training horizon (dotted) the paths have already settled at the steady state.
 
 ```{python}
 c_test = theta["c_0"] + K_tilde_test @ theta["alpha_c"]

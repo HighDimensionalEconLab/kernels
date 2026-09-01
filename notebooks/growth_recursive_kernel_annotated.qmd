@@ -21,7 +21,7 @@ from nlls_gram import RepeatedFactorMetric, RidgeLevenbergMarquardt
 from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_bvp, solve_ode
 ```
 
-Structural parameters: the sequential calibration plus balanced growth at rate $g$. Technology is Hicks-neutral, $f(z, k) = z k^a$ with $z(t) = z_0 e^{(1-a) g t}$, so the labor-augmenting index $z^{1/(1-a)}$ grows at $g$ and detrended quantities are stationary. The dict `p` is the solver's differentiable-parameter pytree — [`nlls-gram`](https://pypi.org/project/nlls-gram/) differentiates the solve implicitly with respect to every leaf.
+Structural parameters: the sequential calibration plus balanced growth at rate $g$. Technology is Hicks-neutral, $f(z, k) = z k^a$ with $z(t) = z_0 e^{(1-a) g t}$, so the labor-augmenting index $z^{1/(1-a)}$ grows at $g$ and detrended quantities are stationary. The dict `p` is the solver's differentiable-parameter pytree — [`nlls-gram`](https://pypi.org/project/nlls-gram/) differentiates the solve implicitly with respect to every leaf. The initial state $(z_0, k_0)$ is not a leaf: nothing is integrated during training, so it enters only the collocation design and the held-out rollouts.
 
 ```{python}
 a = 1.0 / 3.0  # capital share in f(z, k) = z k^a
@@ -49,7 +49,8 @@ TVC_STEPS = 256
 RIDGE = 1e-12  # disappearing penalty weight
 ATOL = 1e-5
 GTOL = 1e-7
-INIT_DAMPING = 1e-8
+INIT_DAMPING = 1e-6
+DAMPING_DECREASE = 0.25
 MAX_STEPS = 100
 BVP_T = 200.0
 BVP_POINTS = 201
@@ -119,7 +120,7 @@ benchmark = solve_bvp(
 )
 ```
 
-The benchmark is used **only** to place the training states: its path, sampled on the training dates and re-trended to $(\log z, \log k)$, is the collocation design, and the sampled $\log \kappa$ values double as the kernel centers. Unlike the recursive NN notebook, which trains on the closed-loop rollout its own policy generates, this collocation design is fixed data.
+The benchmark places the training states: its path, sampled on the training dates and re-trended to $(\log z, \log k)$, is the collocation design, and the sampled $\log \kappa$ values double as the kernel centers. Nothing is integrated during training — this is a representation size, not a simulation grid. Unlike the recursive NN notebook, which trains on the closed-loop rollout its own policy generates, this collocation design is fixed data. The same benchmark returns at the end as the accuracy reference on the held-out rollout.
 
 ```{python}
 t_train = jnp.linspace(0.0, TRAIN_T, TRAIN_POINTS)
@@ -160,19 +161,9 @@ def investment(theta, log_state, p):
     )
 ```
 
-## Ridgeless least squares
+## Model functions
 
-The residual is Euler-only — the resource constraint is built into $c(x) = z k^a - i(x)$ — with $d \log c / dt$ as a forward-mode [`jax.jvp`](https://docs.jax.dev/en/latest/automatic-differentiation.html) of $\log c$ along the state drift, enforced at the fixed collocation states:
-
-$$
-\min_{\alpha, b}\ \| r(\alpha, b) \|^2 + \lambda\, \alpha^\top (K + \varepsilon I)\, \alpha,
-\qquad
-r_j = \frac{1}{\sqrt n}\Big(
-\frac{d \log c}{dt}\Big|_{x_j} - \frac{1}{\sigma}\big(a z_j k_j^{a-1} - \delta - \hat\rho\big)
-\Big).
-$$
-
-As $\lambda \to 0$ this selects the interpolant of minimal RKHS norm with the free constant $b$ unpenalized; $\varepsilon$ shifts the Gram's near-zero eigenvalues so its Cholesky factor exists.
+Consumption clears the resource constraint, the drift is the model's law of motion under the policy, and the Euler residual takes $d \log c / dt$ as a forward-mode [`jax.jvp`](https://docs.jax.dev/en/latest/automatic-differentiation.html) of $\log c(x)$ along that drift. Held-out trajectories come from [`tinydiffeq`](https://github.com/HighDimensionalEconLab/tinydiffeq)'s fixed-step RK4 `solve_ode`, saving the integrator's own states.
 
 ```{python}
 def consumption(theta, log_state, p):
@@ -192,17 +183,48 @@ def log_state_drift(theta, log_state, p):
 
 def euler_residual(theta, log_state, p):
     drift = log_state_drift(theta, log_state, p)
-    _, dlog_c_dt = jax.jvp(
+    log_c, dlog_c_dt = jax.jvp(
         lambda state: jnp.log(consumption(theta, state, p)), (log_state,), (drift,)
     )
     z, k = jnp.exp(log_state)
+    # 0 * log_c is NaN where c <= 0; the tangent alone would stay finite there.
     return (
         dlog_c_dt
+        + 0.0 * log_c
         - (p["a"] * z * k ** (p["a"] - 1.0) - p["delta"] - p["rho_hat"])
         / p["sigma_crra"]
     )
 
 
+def simulate(theta, initial_log_state, T, n_steps, p):
+    return solve_ode(
+        lambda log_state: log_state_drift(theta, log_state, p),
+        RK4(),
+        0.0,
+        T,
+        initial_log_state,
+        dt_0=T / n_steps,
+        controller=ConstantStepSize(),
+        max_steps=n_steps,
+        save_at=SaveAt(steps=True),
+    )
+```
+
+## Ridgeless least squares
+
+The residual is Euler-only — the resource constraint is built into $c(x) = z k^a - i(x)$ — enforced at the fixed collocation states:
+
+$$
+\min_{\alpha, b}\ \| r(\alpha, b) \|^2 + \lambda\, \alpha^\top (K + \varepsilon I)\, \alpha,
+\qquad
+r_j = \frac{1}{\sqrt n}\Big(
+\frac{d \log c}{dt}\Big|_{x_j} - \frac{1}{\sigma}\big(a z_j k_j^{a-1} - \delta - \hat\rho\big)
+\Big).
+$$
+
+As $\lambda \to 0$ this selects the interpolant of minimal RKHS norm with the free constant $b$ unpenalized; $\varepsilon$ shifts the Gram's near-zero eigenvalues so its Cholesky factor exists.
+
+```{python}
 def residual_fn(theta, args, p):
     euler = jax.vmap(lambda s: euler_residual(theta, s, p))(args)
     return euler / jnp.sqrt(euler.size)
@@ -210,7 +232,7 @@ def residual_fn(theta, args, p):
 
 ## Solve
 
-The penalty enters through a `RepeatedFactorMetric` holding the upper Cholesky factor of the shifted Gram: it penalizes the leading block of the flattened `theta` — dicts flatten by sorted key, so `"alpha"` leads — and leaves the trailing scalar $b$ as the unpenalized free block. Convergence requires both the gradient (`gtol`) and residual (`atol`) tests.
+The penalty enters through a `RepeatedFactorMetric` holding the upper Cholesky factor of the shifted Gram: it penalizes the leading block of the flattened `theta` — dicts flatten by sorted key, so `"alpha"` leads — and leaves the trailing scalar $b$ as the unpenalized free block. `RidgeLevenbergMarquardt` adds a geodesic (second-order) correction to each Gauss–Newton step by default, taking it when it is small relative to the step itself. Convergence requires both the gradient (`gtol`) and residual (`atol`) tests.
 
 ```{python}
 gram = rbf_features(centers)
@@ -222,7 +244,11 @@ metric = RepeatedFactorMetric(
 theta_0 = {"alpha": jnp.zeros(TRAIN_POINTS), "b": jnp.zeros(())}
 
 solver = RidgeLevenbergMarquardt(
-    residual_fn, metric=metric, ridge=RIDGE, init_damping=INIT_DAMPING
+    residual_fn,
+    metric=metric,
+    ridge=RIDGE,
+    init_damping=INIT_DAMPING,
+    damping_decrease=DAMPING_DECREASE,
 )
 start = time.perf_counter()
 result = solver.solve(
@@ -240,31 +266,23 @@ theta = result.x
 
 ## Results
 
-The test rolls the learned policy closed-loop with [`tinydiffeq`](https://github.com/HighDimensionalEconLab/tinydiffeq)'s fixed-step RK4 `solve_ode` — no benchmark involved — and evaluates the Euler residual along the roll. The transversality certificate simulates to $T = 200$ and evaluates the log of $e^{-\hat\rho T} c(T)^{-\sigma} k(T)$, normalized by its initial-date value: far negative on the saddle path, positive on a capital bubble.
+The test rolls the learned policy closed-loop from $(z_0, k_0)$ over a fresh horizon and evaluates the Euler residual along the roll, then compares capital and consumption against the benchmark saddle path re-trended to levels, $k^\star(t) = z_0^{1/(1-a)} e^{g t} \kappa(t)$. The transversality certificate simulates to $T = 200$ and evaluates the log of $e^{-\hat\rho T} c(T)^{-\sigma} k(T)$, normalized by its initial-date value: far negative on the saddle path, positive on a capital bubble.
 
 ```{python}
-def simulate(theta, initial_log_state, T, n_steps, p):
-    def drift_field(log_state, _, args, p):
-        theta, structural = p
-        return log_state_drift(theta, log_state, structural)
-
-    return solve_ode(
-        drift_field,
-        RK4(),
-        0.0,
-        T,
-        initial_log_state,
-        dt_0=T / n_steps,
-        controller=ConstantStepSize(),
-        max_steps=n_steps,
-        save_at=SaveAt(steps=True),
-        p=(theta, p),
-    )
-
-
 initial_log_state = jnp.log(jnp.array([z_0, k_0]))
 test_solution = simulate(theta, initial_log_state, TEST_T, TEST_STEPS, p)
 euler_test = jax.vmap(lambda s: euler_residual(theta, s, p))(test_solution.xs)
+z_test, k_test = jnp.exp(test_solution.xs).T
+c_test = jax.vmap(lambda s: consumption(theta, s, p))(test_solution.xs)
+
+scale_test = z_0 ** (1.0 / (1.0 - a)) * jnp.exp(g * test_solution.ts)
+kappa_benchmark, c_tilde_benchmark = benchmark(test_solution.ts).T
+k_error = jnp.abs(k_test - scale_test * kappa_benchmark) / (
+    scale_test * kappa_benchmark
+)
+c_error = jnp.abs(c_test - scale_test * c_tilde_benchmark) / (
+    scale_test * c_tilde_benchmark
+)
 
 # Log transversality certificate at T, normalized by its initial-date value:
 # (-rho_hat T - sigma log c(T) + log k(T)) - (-sigma log c(0) + log k(0)).
@@ -280,18 +298,22 @@ log_tvc = (-rho_hat * TVC_T - sigma_crra * jnp.log(c_T) + jnp.log(k_T)) - (
 print(f"solve: {int(result.steps)} steps in {solve_time:.2f}s (incl. jit)")
 print(f"train loss: {float(result.info.resid_loss):.3e}")
 print(f"mean |Euler residual| test roll: {float(jnp.abs(euler_test).mean()):.3e}")
+print(
+    f"mean relative error vs benchmark: k {float(k_error.mean()):.3e}, "
+    f"c {float(c_error.mean()):.3e}"
+)
 print(f"log-TVC at t={TVC_T:.0f}: {float(log_tvc):.1f}   (should be << 0)")
 ```
 
-Detrended capital $\kappa = k\, z^{-1/(1-a)}$ converges to its balanced-growth steady state $\kappa_{ss}$ (dashed) along the test roll, and the Euler residual sits on zero.
+Detrended capital $\kappa = k\, z^{-1/(1-a)}$ tracks the benchmark (dashed) up toward the balanced-growth steady state $\kappa_{ss}$ along the test roll, and the Euler residual sits on zero.
 
 ```{python}
-z_test, k_test = jnp.exp(test_solution.xs).T
 kappa_test = k_test / z_test ** (1.0 / (1.0 - a))
 
 fig, (ax_k, ax_r) = plt.subplots(1, 2, figsize=(10, 4))
-ax_k.axhline(float(kappa_ss), color="k", linestyle="--", label=r"$\kappa_{ss}$")
+ax_k.axhline(float(kappa_ss), color="0.6", linestyle=":", label=r"$\kappa_{ss}$")
 ax_k.plot(test_solution.ts, kappa_test, "C0", label=r"$\kappa(t)$")
+ax_k.plot(test_solution.ts, kappa_benchmark, "k--", linewidth=0.8, label="benchmark")
 ax_k.set(xlabel="t", ylabel="detrended capital", title="detrended capital")
 ax_k.legend(fontsize=8)
 ax_r.plot(test_solution.ts, euler_test, "C0")

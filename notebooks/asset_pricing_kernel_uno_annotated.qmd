@@ -250,7 +250,7 @@ print(f"max |test residual|: {float(jnp.max(jnp.abs(test_residual))):.3e}")
 print(f"max rel error vs fundamental: {float(jnp.max(rel_error)):.3e}")
 ```
 
-The constrained solution tracks the closed-form fundamental with no bubble, degrading only as it extrapolates past the training horizon (dotted).
+The constrained solution tracks the closed-form fundamental with no bubble. As in the ridgeless notebook the residual vanishes at the training dates and oscillates between them, so the right panel is off-grid collocation error rather than extrapolation past the horizon (dotted).
 
 ```{python}
 fig, (ax_p, ax_r) = plt.subplots(1, 2, figsize=(10, 4))

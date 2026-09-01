@@ -5,7 +5,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from nlls_gram import LevenbergMarquardt
-from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_ode
+from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_bvp, solve_ode
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
@@ -28,6 +28,7 @@ p = {
 }
 
 WIDTH = 32
+HEAD_INIT_SCALE = 1e-3  # near-zero head: the policy starts at the anchor
 SEED = 0
 TRAIN_T = 100.0
 TRAIN_STEPS = 64  # RK4 steps; residuals sit on the 65 integrator states
@@ -38,6 +39,10 @@ TVC_STEPS = 256
 MAX_STEPS = 250
 LOSS_THRESHOLD = 1e-14  # sum of squared residuals; atol is its square root
 INIT_DAMPING = 1e-8
+BVP_T = 200.0
+BVP_POINTS = 201
+BVP_TOL = 1e-10
+BVP_MAX_NODES = 2048
 
 
 # U(0) = U'(0) = 1, so a near-zero head starts at its declared output scale.
@@ -47,7 +52,8 @@ def unit_softplus(raw):
 
 # Homothetic investment policy on the detrended state: a gelu MLP of
 # log kappa = log k - log z / (1 - a), anchored at delta k so the near-zero
-# head starts at replacement investment i = delta k.
+# head starts at replacement investment i = delta k. The structural constants
+# are baked in, so the policy is a function of the state alone.
 class InvestmentPolicy(nnx.Module):
     def __init__(self, *, rngs: nnx.Rngs):
         self.l1 = nnx.Linear(1, WIDTH, param_dtype=jnp.float64, rngs=rngs)
@@ -56,29 +62,29 @@ class InvestmentPolicy(nnx.Module):
         self.head = nnx.Linear(
             WIDTH,
             1,
-            kernel_init=nnx.initializers.normal(1e-3),
+            kernel_init=nnx.initializers.normal(HEAD_INIT_SCALE),
             param_dtype=jnp.float64,
             rngs=rngs,
         )
 
-    def __call__(self, log_state, p):
+    def __call__(self, log_state):
         log_z, log_k = log_state
-        h = jnp.atleast_1d(log_k - log_z / (1.0 - p["a"]))
+        h = jnp.atleast_1d(log_k - log_z / (1.0 - a))
         h = jax.nn.gelu(self.l1(h))
         h = jax.nn.gelu(self.l2(h))
         h = jax.nn.gelu(self.l3(h))
-        return p["delta"] * jnp.exp(log_k) * unit_softplus(self.head(h)[0])
+        return delta * jnp.exp(log_k) * unit_softplus(self.head(h))
 
 
 def consumption(policy, log_state, p):
     z, k = jnp.exp(log_state)
-    return z * k ** p["a"] - policy(log_state, p)
+    return z * k ** p["a"] - policy(log_state)[0]
 
 
 def log_state_drift(policy, log_state, p):
     log_k = log_state[1]
     return jnp.stack(
-        [(1.0 - p["a"]) * p["g"], policy(log_state, p) / jnp.exp(log_k) - p["delta"]]
+        [(1.0 - p["a"]) * p["g"], policy(log_state)[0] / jnp.exp(log_k) - p["delta"]]
     )
 
 
@@ -86,12 +92,14 @@ def log_state_drift(policy, log_state, p):
 # (f_k - delta - rho_hat) / sigma.
 def euler_residual(policy, log_state, p):
     drift = log_state_drift(policy, log_state, p)
-    _, dlog_c_dt = jax.jvp(
+    log_c, dlog_c_dt = jax.jvp(
         lambda state: jnp.log(consumption(policy, state, p)), (log_state,), (drift,)
     )
     z, k = jnp.exp(log_state)
+    # 0 * log_c is NaN where c <= 0; the tangent alone would stay finite there.
     return (
         dlog_c_dt
+        + 0.0 * log_c
         - (p["a"] * z * k ** (p["a"] - 1.0) - p["delta"] - p["rho_hat"])
         / p["sigma_crra"]
     )
@@ -99,12 +107,8 @@ def euler_residual(policy, log_state, p):
 
 # Fixed-step RK4 closed-loop simulation, saving the integrator's own states.
 def simulate(policy, initial_log_state, T, n_steps, p):
-    def drift_field(log_state, _, args, p):
-        policy, structural = p
-        return log_state_drift(policy, log_state, structural)
-
     return solve_ode(
-        drift_field,
+        lambda log_state: log_state_drift(policy, log_state, p),
         RK4(),
         0.0,
         T,
@@ -113,7 +117,6 @@ def simulate(policy, initial_log_state, T, n_steps, p):
         controller=ConstantStepSize(),
         max_steps=n_steps,
         save_at=SaveAt(steps=True),
-        p=(policy, p),
     )
 
 
@@ -128,7 +131,9 @@ def residual_fn(theta, args, p):
     initial_log_state = jnp.log(jnp.array([p["z_0"], p["k_0"]]))
     solution = simulate(policy, initial_log_state, TRAIN_T, TRAIN_STEPS, p)
     euler = jax.vmap(lambda s: euler_residual(policy, s, p))(solution.xs)
-    return euler / jnp.sqrt(euler.size)
+    # A trajectory that never reached TRAIN_T is a loud optimizer failure
+    # rather than a fit to its finite prefix.
+    return jnp.where(solution.ok, euler / jnp.sqrt(euler.size), jnp.inf)
 
 
 solver = LevenbergMarquardt(residual_fn, init_damping=INIT_DAMPING)
@@ -144,9 +149,59 @@ result = solver.solve(
 solve_time = time.perf_counter() - start
 policy = nnx.merge(graphdef, result.x)
 
+# Ex-post accuracy reference, never seen by training: the saddle path in the
+# detrended coordinates kappa = k / z^{1/(1-a)}, c_tilde = c / z^{1/(1-a)},
+# kappa' = kappa^a - c_tilde - (delta + g) kappa,
+# c_tilde' = (c_tilde / sigma)(a kappa^{a-1} - rho_hat - delta - sigma g),
+# with kappa(0) = kappa_0, the terminal pin kappa(T) = kappa_ss, and a
+# saddle-shaped guess at the linearized stable eigenvalue.
+kappa_0 = k_0 / z_0 ** (1.0 / (1.0 - a))
+kappa_ss = ((delta + rho_hat + sigma_crra * g) / a) ** (1.0 / (a - 1.0))
+
+
+def kappa_field(_, y):
+    kappa, c_tilde = y
+    return jnp.array(
+        [
+            kappa**a - c_tilde - (delta + g) * kappa,
+            (c_tilde / sigma_crra)
+            * (a * kappa ** (a - 1.0) - rho_hat - delta - sigma_crra * g),
+        ]
+    )
+
+
+def kappa_bc(ya, yb):
+    return jnp.array([ya[0] - kappa_0, yb[0] - kappa_ss])
+
+
+mesh = jnp.linspace(0.0, BVP_T, BVP_POINTS)
+c_tilde_ss = kappa_ss**a - (delta + g) * kappa_ss
+f_pp = a * (a - 1.0) * kappa_ss ** (a - 2.0)
+trace = rho_hat + (sigma_crra - 1.0) * g
+lambda_stable = 0.5 * (
+    trace - jnp.sqrt(trace**2 - 4.0 * c_tilde_ss * f_pp / sigma_crra)
+)
+kappa_guess = kappa_ss + (kappa_0 - kappa_ss) * jnp.exp(lambda_stable * mesh)
+y_guess = jnp.stack([kappa_guess, kappa_guess**a - (delta + g) * kappa_guess], axis=-1)
+benchmark = solve_bvp(
+    kappa_field, kappa_bc, mesh, y_guess, tol=BVP_TOL, max_nodes=BVP_MAX_NODES
+)
+
 initial_log_state = jnp.log(jnp.array([z_0, k_0]))
 test_solution = simulate(policy, initial_log_state, TEST_T, TEST_STEPS, p)
 euler_test = jax.vmap(lambda s: euler_residual(policy, s, p))(test_solution.xs)
+z_test, k_test = jnp.exp(test_solution.xs).T
+c_test = jax.vmap(lambda s: consumption(policy, s, p))(test_solution.xs)
+
+# Benchmark re-trended to levels: k*(t) = z_0^{1/(1-a)} e^{g t} kappa(t).
+scale_test = z_0 ** (1.0 / (1.0 - a)) * jnp.exp(g * test_solution.ts)
+kappa_benchmark, c_tilde_benchmark = benchmark(test_solution.ts).T
+k_error = jnp.abs(k_test - scale_test * kappa_benchmark) / (
+    scale_test * kappa_benchmark
+)
+c_error = jnp.abs(c_test - scale_test * c_tilde_benchmark) / (
+    scale_test * c_tilde_benchmark
+)
 
 # Log transversality certificate at T, normalized by its initial-date value:
 # (-rho_hat T - sigma log c(T) + log k(T)) - (-sigma log c(0) + log k(0)).
@@ -162,4 +217,8 @@ log_tvc = (-rho_hat * TVC_T - sigma_crra * jnp.log(c_T) + jnp.log(k_T)) - (
 print(f"solve: {int(result.steps)} steps in {solve_time:.2f}s (incl. jit)")
 print(f"final loss: {float(result.info.loss):.3e}")
 print(f"mean |Euler residual| test roll: {float(jnp.abs(euler_test).mean()):.3e}")
+print(
+    f"mean relative error vs benchmark: k {float(k_error.mean()):.3e}, "
+    f"c {float(c_error.mean()):.3e}"
+)
 print(f"log-TVC at t={TVC_T:.0f}: {float(log_tvc):.1f}   (should be << 0)")

@@ -40,7 +40,7 @@ TEST_T = 50.0
 N_TEST = 100
 RIDGE = 1e-10  # disappearing penalty weight
 ATOL = 1e-9  # unscaled residual norm
-GTOL = 1e-13
+GTOL = 1e-13  # must resolve the weakly penalized free p_0
 INIT_DAMPING = 1e-8
 MAX_STEPS = 100
 
@@ -129,7 +129,7 @@ def residual_fn(theta, args, p):
 
 ## Solve
 
-The penalty enters through a `RepeatedFactorMetric` holding the upper Cholesky factor of the Gram matrix: it penalizes the leading coordinates of the flattened `theta` — dicts flatten by sorted key, so `"alpha"` leads — and leaves the trailing scalar $p_0$ as the unpenalized free block. Because the residual is affine in `theta`, each ridge Levenberg–Marquardt step is an exact kernel ridge solve; convergence requires both the gradient (`gtol`) and residual (`atol`) tests.
+The penalty enters through a `RepeatedFactorMetric` holding the upper Cholesky factor of the Gram matrix: it penalizes the leading coordinates of the flattened `theta` — dicts flatten by sorted key, so `"alpha"` leads — and leaves the trailing scalar $p_0$ as the unpenalized free block. Because the residual is affine in `theta`, each ridge Levenberg–Marquardt step is an exact kernel ridge solve; convergence requires both the gradient (`gtol`) and residual (`atol`) tests, with `gtol` far below the ridge weight so the barely penalized $p_0$ is resolved rather than left wherever the $\alpha$ block stops moving.
 
 ```{python}
 K, K_tilde = kernel_matrices(t_train, t_train)
@@ -163,7 +163,7 @@ $$
 p_f(t) = \frac{x_0 + c/g}{r - g}\, e^{g t} - \frac{c}{g r},
 $$
 
-so we report the no-arbitrage residual on the test grid (which extends past the training horizon), the learned $p_0$ against $p_f(0) = 0.7$, and the relative pricing error.
+so we report the no-arbitrage residual on the test grid (which falls between the training dates and extends past the training horizon), the learned $p_0$ against $p_f(0) = 0.7$, and the relative pricing error.
 
 ```{python}
 K_test, K_tilde_test = kernel_matrices(t_test, t_train)
@@ -180,7 +180,7 @@ print(f"max |test residual|: {float(jnp.max(jnp.abs(test_residual))):.3e}")
 print(f"max rel error vs fundamental: {float(jnp.max(rel_error)):.3e}")
 ```
 
-The kernel price tracks the closed-form fundamental with no bubble, degrading only as it extrapolates past the training horizon (dotted).
+The kernel price tracks the closed-form fundamental with no bubble: the relative error stays near $10^{-3}$ across the whole grid rather than growing like $e^{r t}$, so what remains is the discretization error of a 41-point collocation grid. The residual vanishes at the training dates and oscillates between them — the right panel is off-grid collocation error, not extrapolation past the horizon (dotted).
 
 ```{python}
 fig, (ax_p, ax_r) = plt.subplots(1, 2, figsize=(10, 4))

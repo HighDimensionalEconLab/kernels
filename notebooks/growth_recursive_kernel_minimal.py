@@ -30,7 +30,8 @@ TVC_STEPS = 256
 RIDGE = 1e-12  # disappearing penalty weight
 ATOL = 1e-5
 GTOL = 1e-7
-INIT_DAMPING = 1e-8
+INIT_DAMPING = 1e-6
+DAMPING_DECREASE = 0.25
 MAX_STEPS = 100
 BVP_T = 200.0
 BVP_POINTS = 201
@@ -77,6 +78,7 @@ benchmark = solve_bvp(
 
 # Collocation states: the benchmark path sampled on the training dates,
 # re-trended to (log z, log k); their log kappa values double as RBF centers.
+# Nothing is integrated during training.
 t_train = jnp.linspace(0.0, TRAIN_T, TRAIN_POINTS)
 log_z_train = jnp.log(z_0) + (1.0 - a) * g * t_train
 log_k_train = jnp.log(benchmark(t_train)[:, 0]) + log_z_train / (1.0 - a)
@@ -127,14 +129,31 @@ def log_state_drift(theta, log_state, p):
 # (f_k - delta - rho_hat) / sigma.
 def euler_residual(theta, log_state, p):
     drift = log_state_drift(theta, log_state, p)
-    _, dlog_c_dt = jax.jvp(
+    log_c, dlog_c_dt = jax.jvp(
         lambda state: jnp.log(consumption(theta, state, p)), (log_state,), (drift,)
     )
     z, k = jnp.exp(log_state)
+    # 0 * log_c is NaN where c <= 0; the tangent alone would stay finite there.
     return (
         dlog_c_dt
+        + 0.0 * log_c
         - (p["a"] * z * k ** (p["a"] - 1.0) - p["delta"] - p["rho_hat"])
         / p["sigma_crra"]
+    )
+
+
+# Fixed-step RK4 closed-loop simulation, saving the integrator's own states.
+def simulate(theta, initial_log_state, T, n_steps, p):
+    return solve_ode(
+        lambda log_state: log_state_drift(theta, log_state, p),
+        RK4(),
+        0.0,
+        T,
+        initial_log_state,
+        dt_0=T / n_steps,
+        controller=ConstantStepSize(),
+        max_steps=n_steps,
+        save_at=SaveAt(steps=True),
     )
 
 
@@ -152,7 +171,11 @@ metric = RepeatedFactorMetric(
 theta_0 = {"alpha": jnp.zeros(TRAIN_POINTS), "b": jnp.zeros(())}
 
 solver = RidgeLevenbergMarquardt(
-    residual_fn, metric=metric, ridge=RIDGE, init_damping=INIT_DAMPING
+    residual_fn,
+    metric=metric,
+    ridge=RIDGE,
+    init_damping=INIT_DAMPING,
+    damping_decrease=DAMPING_DECREASE,
 )
 start = time.perf_counter()
 result = solver.solve(
@@ -167,30 +190,21 @@ result = solver.solve(
 solve_time = time.perf_counter() - start
 theta = result.x
 
-
-# Fixed-step RK4 closed-loop simulation, saving the integrator's own states.
-def simulate(theta, initial_log_state, T, n_steps, p):
-    def drift_field(log_state, _, args, p):
-        theta, structural = p
-        return log_state_drift(theta, log_state, structural)
-
-    return solve_ode(
-        drift_field,
-        RK4(),
-        0.0,
-        T,
-        initial_log_state,
-        dt_0=T / n_steps,
-        controller=ConstantStepSize(),
-        max_steps=n_steps,
-        save_at=SaveAt(steps=True),
-        p=(theta, p),
-    )
-
-
 initial_log_state = jnp.log(jnp.array([z_0, k_0]))
 test_solution = simulate(theta, initial_log_state, TEST_T, TEST_STEPS, p)
 euler_test = jax.vmap(lambda s: euler_residual(theta, s, p))(test_solution.xs)
+z_test, k_test = jnp.exp(test_solution.xs).T
+c_test = jax.vmap(lambda s: consumption(theta, s, p))(test_solution.xs)
+
+# Benchmark saddle path re-trended to levels: k*(t) = z_0^{1/(1-a)} e^{g t} kappa(t).
+scale_test = z_0 ** (1.0 / (1.0 - a)) * jnp.exp(g * test_solution.ts)
+kappa_benchmark, c_tilde_benchmark = benchmark(test_solution.ts).T
+k_error = jnp.abs(k_test - scale_test * kappa_benchmark) / (
+    scale_test * kappa_benchmark
+)
+c_error = jnp.abs(c_test - scale_test * c_tilde_benchmark) / (
+    scale_test * c_tilde_benchmark
+)
 
 # Log transversality certificate at T, normalized by its initial-date value:
 # (-rho_hat T - sigma log c(T) + log k(T)) - (-sigma log c(0) + log k(0)).
@@ -206,4 +220,8 @@ log_tvc = (-rho_hat * TVC_T - sigma_crra * jnp.log(c_T) + jnp.log(k_T)) - (
 print(f"solve: {int(result.steps)} steps in {solve_time:.2f}s (incl. jit)")
 print(f"train loss: {float(result.info.resid_loss):.3e}")
 print(f"mean |Euler residual| test roll: {float(jnp.abs(euler_test).mean()):.3e}")
+print(
+    f"mean relative error vs benchmark: k {float(k_error.mean()):.3e}, "
+    f"c {float(c_error.mean()):.3e}"
+)
 print(f"log-TVC at t={TVC_T:.0f}: {float(log_tvc):.1f}   (should be << 0)")

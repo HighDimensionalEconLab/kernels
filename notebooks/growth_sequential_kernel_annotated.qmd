@@ -179,7 +179,7 @@ theta = result.x
 
 ## Results
 
-Off-grid evaluation only needs fresh cross-kernel matrices against the training dates; the test grid extends past the training horizon to check extrapolation. The transversality certificate evaluates $-\hat\rho T - \sigma \log c(T) + \log k(T)$ — the logarithm of $e^{-\hat\rho T} \mu(T) k(T)$ under the first-order condition — at $T = 200$: on the saddle path it sits far below zero, on a capital bubble it turns positive.
+Off-grid evaluation only needs fresh cross-kernel matrices against the training dates; the test grid falls between them and extends past the training horizon. The transversality certificate evaluates $-\hat\rho T - \sigma \log c(T) + \log k(T)$ — the logarithm of $e^{-\hat\rho T} \mu(T) k(T)$ under the first-order condition — at $T = 200$: on the saddle path it sits far below zero, on a capital bubble it turns positive.
 
 ```{python}
 K_test, K_tilde_test = kernel_matrices(t_test, t_train)
@@ -201,7 +201,7 @@ print(f"mean |Euler residual| test: {float(jnp.abs(euler_test).mean()):.3e}")
 print(f"log-TVC at t={TVC_T:.0f}: {float(log_tvc):.1f}   (should be << 0)")
 ```
 
-Capital rises from $k_0$ toward its steady state while consumption climbs to its own; the costate (Euler) residual sits on zero inside the training horizon (dotted) and degrades gracefully past it.
+Capital rises from $k_0$ toward its steady state while consumption climbs to its own. The costate (Euler) residual vanishes at the training dates and is largest between the earliest of them, where the transition moves fastest; past the training horizon (dotted) the paths have already settled at the steady state, so extrapolation is nearly free.
 
 ```{python}
 c_test = theta["c_0"] + K_tilde_test @ theta["alpha_c"]

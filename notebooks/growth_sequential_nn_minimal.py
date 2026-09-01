@@ -25,7 +25,8 @@ N_TEST = 101
 TVC_T = 200.0
 MAX_STEPS = 500
 LOSS_THRESHOLD = 1e-15  # sum of squared residuals; atol is its square root
-INIT_DAMPING = 1e-8
+INIT_DAMPING = 1e-5
+DAMPING_INCREASE = 2.0
 
 t_train = jnp.linspace(0.0, TRAIN_T, N_TRAIN)
 t_test = jnp.linspace(0.0, TEST_T, N_TEST)
@@ -87,7 +88,9 @@ def residual_fn(theta, args, p):
     return residual / jnp.sqrt(residual.size)
 
 
-solver = LevenbergMarquardt(residual_fn, init_damping=INIT_DAMPING)
+solver = LevenbergMarquardt(
+    residual_fn, init_damping=INIT_DAMPING, damping_increase=DAMPING_INCREASE
+)
 start = time.perf_counter()
 result = solver.solve(
     theta_0,

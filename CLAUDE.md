@@ -78,6 +78,13 @@ per-directory READMEs.
 - `replication/` — ensemble + figure drivers; `collect_json.py` writes
   `.results/all_results.json`, the only place paper numbers are selected and
   rounded. Generated JSON is gitignored; track one with a targeted `!path` rule.
+  Every number embedded in the paper tex carries a no-op `\jsonpath{slash/path}`
+  tag immediately after it, pointing at its `all_results.json` leaf; a number
+  without a leaf gets one added in `collect_json.py` first.
+  `uv run python -m replication.verify_paper_tags` checks that every tag
+  resolves and literally equals the printed value;
+  `uv run python -m replication.export_paper_assets` copies the figures and
+  generated tables into the paper repo.
 - `notebooks/` — annotated `.qmd` (source of truth) + committed executed
   `.ipynb` + prose-free `*_minimal.py`; fully self-contained, no `models/`
   imports; rebuild with `uv run quarto render notebooks`.

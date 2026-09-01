@@ -136,14 +136,17 @@ def normalize_state(state, center, scale):
     return (state - center) / scale
 
 
+# Per-input multiplier on the LeCun variance of the first-layer kernel rows:
+# ones is plain LeCun, a smaller entry damps the draw's sensitivity to that
+# input, zero starts the row at exactly zero (not frozen).
 @dataclass(frozen=True)  # value-hashable: shares DrawNNXModule/jit compilations
-class MaskedLecunInit:
-    mask: tuple[float, ...]  # one flag per input coordinate
+class ScaledLecunInit:
+    variance_scale: tuple[float, ...]
 
     def __call__(self, key, shape, dtype):
         return (
             nnx.initializers.lecun_normal()(key, shape, dtype)
-            * jnp.asarray(self.mask, dtype=dtype)[:, None]
+            * jnp.sqrt(jnp.asarray(self.variance_scale, dtype=dtype))[:, None]
         )
 
 
@@ -168,7 +171,7 @@ class StateMLP(nnx.Module):
         center=None,
         scale=None,
         output_scale,
-        input_kernel_mask=None,
+        input_variance_scale=None,
         dtype,
         rngs,
     ):
@@ -194,8 +197,8 @@ class StateMLP(nnx.Module):
                 width,
                 **(
                     {}
-                    if input_kernel_mask is None
-                    else {"kernel_init": MaskedLecunInit(input_kernel_mask)}
+                    if input_variance_scale is None
+                    else {"kernel_init": ScaledLecunInit(input_variance_scale)}
                 ),
                 dtype=dtype,
                 param_dtype=dtype,

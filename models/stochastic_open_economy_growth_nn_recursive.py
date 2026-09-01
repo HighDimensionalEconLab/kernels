@@ -299,9 +299,7 @@ def stochastic_open_economy_growth_nn_recursive(
     train_scales = jnp.sqrt(jnp.asarray(train_variances, dtype=dtype))
     test_scales = jnp.sqrt(jnp.asarray(test_variances, dtype=dtype))
     investment_anchor = parameters.delta * k_0
-    # At the draw only log k feeds the first layer (investment ~ its start
-    # level, CA at zero) -- the z/asset/rate columns are zero at the draw,
-    # not frozen. The zeros CA kernel keeps its head exactly at zero; the
+    # The zeros CA kernel keeps its head exactly at zero at the draw; the
     # investment local_slope gives both heads the same O(output_scale)
     # Jacobian.
     policy_spec = dict(
@@ -327,7 +325,7 @@ def stochastic_open_economy_growth_nn_recursive(
             max(math.sqrt(rate_ergodic_variance), math.sqrt(train_variances[3])),
         ),
         output_scale=(investment_anchor, output_scale),
-        input_kernel_mask=(0.0, 1.0, 0.0, 0.0),
+        input_variance_scale=nn_set.input_variance_scale,
         dtype=dtype,
     )
     p = StructuralParameters.create(

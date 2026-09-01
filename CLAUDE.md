@@ -59,9 +59,10 @@ per-directory READMEs.
   output, `None` on the signed slots for a linear pass-through, `1.0` for a
   unit slope, and `flow_unit / start_level` = `1/delta` on the open-economy
   investment slot so every head carries an O(flow-unit) Jacobian at the
-  draw), then the `output_scale` Variable multiply, with optional
-  `MaskedLecunInit` first-layer column mask; normalization and output scales
-  are the non-Param Variables) and the hardcoded `HomotheticPolicyMLP`, with
+  draw), then the `output_scale` Variable multiply, with the optional
+  `ScaledLecunInit` per-input multiplier on the first layer's LeCun row
+  variances; normalization and output scales are the non-Param Variables)
+  and the hardcoded `HomotheticPolicyMLP`, with
   `normalize_state`/`UnitSoftplusWhere` also imported by the
   stochastic-open-economy kernel policy; plus `unit_softplus`/`ACTIVATIONS`,
   `NNXResidualArgs`, and the policy-artifact `save_model`/`load_model`

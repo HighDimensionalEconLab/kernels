@@ -141,23 +141,23 @@ def build_residual_args(train_states, kernel_set, reference_policy):
 class KernelSequentialPolicy:
     theta: tuple
     args: ResidualArgs
-    kernel_set: StateKernelSettings = struct.field(pytree_node=False)
 
     def __call__(self, state):
+        kernel_set = self.args.kernel_set
         x = normalize_state(state, self.args.center, self.args.scale)
         features = state_features(
-            self.kernel_set.state_kernel,
+            kernel_set.state_kernel,
             x,
             self.args.centers,
-            self.kernel_set.amplitude,
-            state_lengthscales(self.kernel_set),
+            kernel_set.amplitude,
+            state_lengthscales(kernel_set),
         )
         raw = jnp.stack([features @ self.theta[0], features @ self.theta[1]])
         index = 2
-        if self.kernel_set.free_constant:
+        if kernel_set.free_constant:
             raw = raw + self.theta[index]
             index += 1
-        if self.kernel_set.linear_mean:
+        if kernel_set.linear_mean:
             raw = raw + x @ self.theta[index]
         return scaled_outputs(
             raw,
@@ -168,7 +168,7 @@ class KernelSequentialPolicy:
 
 
 def residual_fn(theta, args, p):
-    policy = KernelSequentialPolicy(theta=theta, args=args, kernel_set=args.kernel_set)
+    policy = KernelSequentialPolicy(theta=theta, args=args)
     residuals = euler_residual_terms(policy, args.train_states, p)[0]
     count = jnp.asarray(residuals.size, dtype=residuals.dtype)
     return residuals.reshape(-1) / jnp.sqrt(count)
@@ -442,10 +442,9 @@ def stochastic_open_economy_growth_kernel_recursive(
         )
 
     theta = result.x
-    policy = KernelSequentialPolicy(theta=theta, args=args, kernel_set=kernel_set)
+    policy = KernelSequentialPolicy(theta=theta, args=args)
     train_values = trajectory_values(policy, train_states, p)
     train_df = trajectory_frame(train_values, train_solution.ts)
-    train_df["fixed_reference_center"] = True
 
     test_noise = sample_trajectory_noise(
         sde,

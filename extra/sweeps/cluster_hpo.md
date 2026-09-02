@@ -64,3 +64,60 @@ median certified tts | certification rate:
 - 12 of 50 array tasks died at startup (3 s) with a partially-visible `yaml`
   package import on the parallel FS — a launch race; the other 38 agents did
   all the work. If it recurs, stagger task start or resubmit the failed ids.
+
+## Solve-time sweeps, stochastic recursive NNs (Fir, 2026-09-01)
+
+Objective: median-seed `solve_time_gated` (solve time when the driver
+accepts the solution and the wrapper's ex-post gates hold), 3 seeds per
+trial, `min_successful_seeds` 2, per-seed cap 1.3x the default config's
+Fir total fit time (calibration job 57782142, 4 cores: closed 624 s, open
+72 s). Venv: wheelhouse jax/jaxlib 0.11.1, flax 0.12.9 from PyPI
+`--no-deps`, nlls-gram 2.10.0, tinydiffeq 2.6.1.
+
+| sweep | config | id | array | resources |
+|---|---|---|---|---|
+| closed economy | `stochastic_growth_nn_time_hpo.yaml` | `highdimensionaleconlab/kernels/qlbyvp59` | 57783361 (1-10) | 4 cores, 16 GB, 6 h |
+| open economy | `stochastic_open_economy_nn_time_hpo.yaml` | `highdimensionaleconlab/kernels/623si085` | 57783362 (1-10) | 4 cores, 16 GB, 3 h |
+
+    sbatch --account=def-jlperla_cpu --cpus-per-task=4 --mem=16G --time=06:00:00 --array=1-10 \
+      --export=ALL,PROJECT_DIR=/scratch/$USER/kernel_econ_alignment,SWEEP_ID=highdimensionaleconlab/kernels/qlbyvp59,VENV=.venv-cpu,WANDB_MODE=online \
+      extra/sweeps/wandb_sweep_agent.sbatch
+    # open economy: --time=03:00:00, SWEEP_ID=highdimensionaleconlab/kernels/623si085
+
+Unbounded agents (no `AGENT_COUNT`); the arrays end as `TIMEOUT`.
+
+Stopped after 35 minutes (`wandb sweep --stop`, `scancel`): closed 106
+trials / 33 accepted, open 188 / 174. Per-seed timeouts fired 14 times.
+
+### Results
+
+Times are Fir 4-core wall clock, median seed of 3; the defaults measured
+624 s (closed) and 72 s (open) on the same allocation.
+
+| sweep | best | held-out Euler (mean, max) | config vs default |
+|---|---|---|---|
+| closed | 11.6 s (54x) | 5.6e-8, 2.2e-5 (default 3.7e-8, 1.8e-5) | width 8, depth 2, silu, 4 x 250 steps, loss bar 5.6e-12, 16 trajectories, 65 points, euler_maruyama |
+| closed | 12.1 s (52x) | 5.4e-8, 3.9e-5 | width 8, depth 3, silu, 4 x 125, bar 1.2e-12, 33 points, euler_maruyama |
+| open | 8.4 s (9x) | 1.2e-5, 2.2e-4 / 8.9e-5 (default 3e-6) | width 8, depth 2, silu, 2 x 100 steps, one ladder epoch, 8 trajectories, 97 points, euler_maruyama |
+| open | 9.2 s (8x) | 4.0e-6, 3.9e-5 / 3.8e-5 | width 8, depth 2, silu, 2 x 250, one ladder epoch, 8 trajectories, 49 points, euler_maruyama |
+
+Marginal effects (accepted share, median accepted time; a Bayes sweep
+oversamples good regions, so directional only):
+
+- Closed: width 8 22/58 at 28 s, 16 11/33 at 102 s, 32 0/15; trajectories
+  16 32/70, 8 1/23, 4 0/13 (the dispersed-IC design needs the batch);
+  `max_steps` 25 and 50 never accepted, 125 6/25, 250 27/49;
+  `num_epochs` 2 never, 4 best (18/32); `train_points` 17 never, 33 and
+  65 alike; `euler_maruyama` 33/81, `sra1` 0/25 (confounded with the
+  early width-32 probes); gelu, silu, tanh all accept, silu fastest.
+  Accepted `train_loss_threshold` spans 1e-13 to 5e-11 (median 4e-12);
+  the LM damping quartet is flat.
+- Open: width 8 167/174 at 16 s vs 16 7/12 at 42 s; depth 2 slightly
+  faster than 3 (15 vs 18 s); one ladder epoch 14 s vs two 18 s;
+  `max_steps` 100 13 s vs 250 17 s; `train_points` 33 to 49 (14 s) vs
+  97 (19 s); 8 trajectories accept as often as 4, 2 do not (1/7);
+  `euler_maruyama` 130/136 vs `sra1` 44/52; activations and the LM
+  quartet flat.
+
+Adopting a sweep value: `ic_set.num_train_trajectories` enters the policy
+artifact's problem hash, so the kernel consumer's default must follow.

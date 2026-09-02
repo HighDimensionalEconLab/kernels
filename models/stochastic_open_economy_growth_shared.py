@@ -72,13 +72,13 @@ class StructuralParameters(ParameterPyTree):
 
 @dataclass(frozen=True)
 class DataSettings:
-    # Fixed-step SDE simulation on the integrator's own states; train_T covers
-    # ~8 half-lives of the capital transition. Test/tvc dt is 1.0.
-    train_points: int = 49
-    test_points: int = 71
+    # Fixed-step SDE simulation on the integrator's own states; the capital
+    # transition is over by ~40 years. Train dt is 1.25, test/tvc dt is 1.0.
+    train_points: int = 33
+    test_points: int = 51
     tvc_points: int = 161
-    train_T: float = 60.0
-    test_T: float = 70.0
+    train_T: float = 40.0
+    test_T: float = 50.0
     tvc_T: float = 160.0
 
 

@@ -171,3 +171,55 @@ bars 5/5 accept, epoch early stopping ends three seeds after one epoch
 (125 steps, 1.6 s) and the rest by 375 steps, held-out mean 3.8e-7
 median / 5.6e-7 worst, max 8.1e-5 / 1.5e-4; the gated arm runs 375 to
 500 steps (4.7 to 7.5 s) for 7.3e-8 / 2.1e-7.
+
+## Stochastic open-economy kernel (local, 2026-09-02)
+
+Diagnosis: the kernel's held-out error tracked the distance to the
+nearest design state, not the fit (tightening the stop and ridge cut the
+design error 13x and the held-out error 2x), because four shock paths
+from one initial condition leave the held-out paths ~0.8 normalized
+units outside the design box along log z and the rate gap, and half of
+a 60-year design sat past the capital transition. The decoupled
+`reference_ic_set` lets the kernel choose its own design density
+without a matching NN artifact, and the horizons drop to train 40 /
+test 50 (transition dynamics only).
+
+Sweep (`stochastic_open_economy_kernel_local_hpo.py`, three data seeds
+per config): 277 random configs over trajectory count {2, 4, 8, 16},
+train points {11, 17, 21, 33, 41} (designs above 400 centers skipped),
+ARD RBF / Matern-5/2, free constant, linear mean, log-uniform
+lengthscales (shared 0.7 to 5, log k as a 0.3x to 3x ratio, assets 0.1
+to 5), amplitude, metric epsilon, ridge, atol; then two rounds of 60
+log-normal jitters (sd log 1.5) around the top three to five. Marginal
+effects: 11 points never accept and 21 (dt 2) beats every other
+density; 16 paths beat fewer; ARD RBF beats Matern; the linear mean and
+lengthscales of 3 to 7 on the log z and rate axes do the extrapolation.
+
+Adopted (16 x 21, ARD RBF, linear mean, no free constant, lengthscales
+6.7 / 3.45 / 0.62 / 6.7, amplitude 1.2, epsilon 4.3e-6, ridge 2.8e-12,
+atol 2.2e-4, gtol 1e-9), five data seeds, all accepted:
+
+| | held-out mean (c, q) | held-out max | capital error mean / max | solve |
+| --- | --- | --- | --- | --- |
+| adopted | 7.4e-5 worst, 5.1e-5 median | 3.7e-3 | 0.055% / 0.56% | 0.8 to 2.5 s |
+| previous defaults (4 x 49, lengthscale 1.69) | 1.8e-3 | 1.2e-1 | 1.7% / 6.3% | 0.7 s |
+| adopted geometry, 32 paths | 6.2e-5 | 6.0e-3 | 0.037% / 0.29% | 8.9 s |
+
+Acceptance bars (2026-09-02, transition horizons): 3 x the worst
+accepted seed under the defaults above, rounded up to one significant
+figure. The neoclassical kernel moves to lengthscale 1.1 with the
+60-year path (0.6 stalls the LM with the free constant, and without it
+the multi-IC g = 0 design stalls instead); the closed kernel keeps its
+geometry (its replication seed accepts; two of five data seeds reject
+on the max bar, a coverage limit of the single-IC design that no
+density or lengthscale in {11..41 points, 8..32 paths, z lengthscale
+0.4..1.0} moves).
+
+| driver | metric | worst | bar |
+| --- | --- | --- | --- |
+| neoclassical NN | test mean / max | 9.1e-7 / 2.9e-5 | 3e-6 / 9e-5 |
+| closed NN | test mean / max | 9.2e-8 / 3.2e-5 | 3e-7 / 1e-4 |
+| open NN | test mean / max / diffusion max | 1.4e-5 / 3.1e-4 / 9.7e-4 | 5e-5 / 1e-3 / 3e-3 |
+| neoclassical kernel | test mean / max | 7.5e-6 / 8.4e-5 | 3e-5 / 3e-4 |
+| closed kernel | test mean / max | 7.7e-5 / 5.2e-3 | 3e-4 / 2e-2 |
+| open kernel | test mean / max | 7.4e-5 / 3.7e-3 | 3e-4 / 2e-2 |

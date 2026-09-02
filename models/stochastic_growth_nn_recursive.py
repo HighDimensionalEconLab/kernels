@@ -65,8 +65,8 @@ class ToleranceSettings:
     epoch_early_stopping: bool = True
     gate_train: bool = True
     gate_test: bool = True
-    test_euler_mean_abs: float = 7e-7
-    test_euler_max: float = 2e-4
+    test_euler_mean_abs: float = 3e-7
+    test_euler_max: float = 1e-4
 
 
 # Training ICs, the noise realization, and keys live in args (the epoch
@@ -243,10 +243,8 @@ def stochastic_growth_nn_recursive(
     use_float64: bool = True,
     sde_solver: str = "euler_maruyama",
     data_set: DataSettings = DataSettings(),
-    # The initial log z spread matches the ergodic variance (sigma_z^2/(2 eta)).
     ic_set: InitialConditionSettings = InitialConditionSettings(
         num_train_trajectories=16,
-        train_log_z_variance=CONSTANTS["z_ergodic_variance"],
         train_log_k_variance=0.01,
     ),
     nn_set: InvestmentPolicySettings = InvestmentPolicySettings(),

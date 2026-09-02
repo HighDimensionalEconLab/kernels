@@ -42,10 +42,10 @@ from models.utilities import (
 
 @dataclass(frozen=True)
 class DataSettings:
-    train_T: float = CONSTANTS["train_T"]
+    train_T: float = 60.0
     # Fixed RKHS centers on the exact path: a representation size, not a
     # simulation grid (nothing is integrated during training).
-    train_points: int = 65
+    train_points: int = 41
     # Held-out paths are fixed-step RK4 on the integrator's own states.
     test_points: int = 41
     tvc_steps: int = 256
@@ -56,7 +56,8 @@ class DataSettings:
 @dataclass(frozen=True)
 class StateKernelSettings:
     amplitude: float = 1.0
-    lengthscale: float = 0.6
+    # Below ~1 the unpenalized constant stalls the LM on the 60-year paths.
+    lengthscale: float = 1.1
     metric_epsilon: float = 3e-5
     # With the free constant, theta is (alpha, h_const) and only alpha is
     # penalized; without it the policy is the pure RKHS expansion.
@@ -85,8 +86,8 @@ class StateKernelSettings:
 class ToleranceSettings:
     gate_train: bool = True
     gate_test: bool = True
-    test_euler_mean_abs: float = 5e-5
-    test_euler_max: float = 4e-4
+    test_euler_mean_abs: float = 3e-5
+    test_euler_max: float = 3e-4
 
 
 @struct.dataclass

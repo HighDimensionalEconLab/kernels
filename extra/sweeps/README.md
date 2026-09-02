@@ -13,6 +13,9 @@ conditions on the results dict. Smoke-test one point locally with no wandb
 credentials by passing the chosen yaml's `--sweep_settings.script` and parameters
 to the wrapper with `--sweep_settings.wandb_mode=disabled` from the repo root.
 
+Local sweeps without wandb: `multicountry_growth_hpo.py` and
+`stochastic_open_economy_kernel_local_hpo.py` (jsonargparse CLIs; invocation in each header).
+
 ## Cluster venv
 `build_cluster_venv.sh [cpu|gpu]` builds a persistent venv from the Alliance wheelhouse
 (`--no-index`). `cpu` (default) builds `.venv-cpu` — the sweeps here are CPU-only (the

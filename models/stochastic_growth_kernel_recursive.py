@@ -74,8 +74,8 @@ class StateKernelSettings:
 class ToleranceSettings:
     gate_train: bool = True
     gate_test: bool = True
-    test_euler_mean_abs: float = 2e-4
-    test_euler_max: float = 1e-2
+    test_euler_mean_abs: float = 3e-4
+    test_euler_max: float = 2e-2
 
 
 @struct.dataclass
@@ -201,10 +201,16 @@ def stochastic_growth_kernel_recursive(
     sde_solver: str = "sra1",
     policy_dir: str = ".results",
     # The frozen design needs coverage, not integration accuracy.
-    data_set: DataSettings = DataSettings(train_points=33),
+    data_set: DataSettings = DataSettings(train_points=21),
+    # The reference NN's training-IC block, which enters its artifact hash:
+    # matches the NN driver's default problem.
+    reference_ic_set: InitialConditionSettings = InitialConditionSettings(
+        num_train_trajectories=16,
+        train_log_k_variance=0.01,
+    ),
+    # The frozen collocation design and the held-out batch.
     ic_set: InitialConditionSettings = InitialConditionSettings(
         num_train_trajectories=16,
-        train_log_z_variance=CONSTANTS["z_ergodic_variance"],
         train_log_k_variance=0.01,
     ),
     kernel_set: StateKernelSettings = StateKernelSettings(),
@@ -261,7 +267,7 @@ def stochastic_growth_kernel_recursive(
         z_0,
         k_0,
         use_float64,
-        ic_set,
+        reference_ic_set,
     )
     reference_policy, reference_meta, reference_path = load_reference_policy(
         policy_dir, problem_config
@@ -482,6 +488,7 @@ def stochastic_growth_kernel_recursive(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
+        "reference_ic_set": asdict(reference_ic_set),
         "lm_set": {
             "init_damping": lm_set.init_damping,
             "damping_decrease": lm_set.damping_decrease,

@@ -69,7 +69,7 @@ class ToleranceSettings:
     gate_train: bool = True
     gate_test: bool = True
     test_euler_mean_abs: float = 5e-5
-    test_euler_max: float = 2e-3
+    test_euler_max: float = 1e-3
     test_diffusion_max_abs: float = 3e-3
     # max_steps is the per-epoch LM budget; noise (and dispersed ICs) redraw
     # at epoch boundaries.

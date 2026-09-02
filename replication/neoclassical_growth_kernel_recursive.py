@@ -31,9 +31,6 @@ MULTI_IC = {
     "test_log_z_variance": 0.0025,
     "test_log_k_variance": 0.0025,
 }
-# Multi-IC homothetic runs fail fast on the base kernel geometry and retry a
-# data seed under the longer, more regularized geometry.
-RETRIES = ({"kernel_set": {"lengthscale": 1.1, "metric_epsilon": 3e-4}},)
 DIAGNOSTIC_COLUMNS = [
     "max_train_euler",
     "max_test_euler",
@@ -109,7 +106,6 @@ def run(
                 "ic_set": dict(ic_set),
                 "lm_set": {"max_steps": 60},
             },
-            retries=RETRIES,
         )
         save_experiment(
             name,

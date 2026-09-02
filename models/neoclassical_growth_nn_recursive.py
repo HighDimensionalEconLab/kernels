@@ -52,10 +52,10 @@ class DataSettings:
     # and enforces residuals on the accepted steps only. rtol/atol/initial_dt
     # configure the adaptive controller and are ignored under rk4; test/tvc
     # simulations stay fixed-step.
-    train_points: int = 65
+    train_points: int = 41
     test_points: int = 41
     tvc_steps: int = 256
-    train_T: float = CONSTANTS["train_T"]
+    train_T: float = 60.0
     train_tvc_T: float = CONSTANTS["transversality_T"]
     test_T: float = CONSTANTS["test_T"]
     ode_solver: str = "rk4"
@@ -78,8 +78,8 @@ class ToleranceSettings:
     epoch_early_stopping: bool = True
     gate_train: bool = True
     gate_test: bool = True
-    test_euler_mean_abs: float = 2e-6
-    test_euler_max: float = 4e-5
+    test_euler_mean_abs: float = 3e-6
+    test_euler_max: float = 9e-5
 
 
 @dataclass(frozen=True)

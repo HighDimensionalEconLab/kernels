@@ -57,8 +57,8 @@ from models.utilities import (
 class ToleranceSettings:
     gate_train: bool = True
     gate_test: bool = True
-    test_euler_mean_abs: float = 6e-3
-    test_euler_max: float = 4e-1
+    test_euler_mean_abs: float = 3e-4
+    test_euler_max: float = 2e-2
 
 
 # Kernel geometry lives in the NN's normalized coordinates, so one
@@ -66,13 +66,14 @@ class ToleranceSettings:
 # `lengthscale`.
 @dataclass(frozen=True)
 class StateKernelSettings:
-    # At this lengthscale the kernel carries levels and tilts, so the affine
-    # mean defaults off; retune the geometry jointly, not per field.
-    amplitude: float = 1.86
-    lengthscale: float = 1.69
-    metric_epsilon: float = 7.7e-5
+    # Held-out paths leave the design box along log z and the rate gap, so
+    # those axes carry long lengthscales and the affine mean does the
+    # extrapolation; retune the geometry jointly, not per field.
+    amplitude: float = 1.2
+    lengthscale: float = 6.7
+    metric_epsilon: float = 4.3e-6
     free_constant: bool = False
-    linear_mean: bool = False
+    linear_mean: bool = True
     state_kernel: Literal[
         "ard_rbf",
         "additive_rbf",
@@ -82,8 +83,8 @@ class StateKernelSettings:
         "additive_matern52",
     ] = "ard_rbf"
     log_z_lengthscale: float | None = None
-    log_k_lengthscale: float | None = None
-    asset_lengthscale: float | None = None
+    log_k_lengthscale: float | None = 3.45
+    asset_lengthscale: float | None = 0.62
     rate_lengthscale: float | None = None
 
 
@@ -209,30 +210,33 @@ def stochastic_open_economy_growth_kernel_recursive(
     use_float64: bool = True,
     sde_solver: str = "sra1",
     policy_dir: str = ".results",
-    # The NN's horizons at half its density: the frozen design needs
-    # coverage, not resolution, and the shared train/test protocol keeps the
-    # two solvers' held-out euler errors comparable.
-    data_set: DataSettings = DataSettings(train_points=49),
-    # Matches the NN driver's default problem, so a module-default NN run
+    # The NN's horizons at dt 2: the frozen design needs coverage, not
+    # resolution, and the shared train/test protocol keeps the two solvers'
+    # held-out euler errors comparable.
+    data_set: DataSettings = DataSettings(train_points=21),
+    # The reference NN's training-IC block, which enters its artifact hash:
+    # matches the NN driver's default problem, so a module-default NN run
     # with --policy_cache feeds a module-default kernel run.
-    ic_set: InitialConditionSettings = InitialConditionSettings(),
+    reference_ic_set: InitialConditionSettings = InitialConditionSettings(),
+    # The frozen collocation design and the held-out batch: the same IC
+    # process as the reference, with its own trajectory count.
+    ic_set: InitialConditionSettings = InitialConditionSettings(
+        num_train_trajectories=16
+    ),
     kernel_set: StateKernelSettings = StateKernelSettings(),
     # atol must clear the seed-dependent ridge-floor residual (conjunctive
-    # stopping; observed floors reach ~5e-5).
+    # stopping; observed floors reach ~1e-4).
     lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=4.9e-4,
         damping_decrease=0.16,
         damping_increase=8.5,
         geodesic_acceleration=True,
         geodesic_acceptance_ratio=0.75,
-        max_steps=300,
-        atol=1e-4,
-        gtol=7.4e-7,
+        max_steps=500,
+        atol=2.2e-4,
+        gtol=1e-9,
     ),
-    ridge_set: RidgeSettings = RidgeSettings(ridge=5.4e-11, ridge_decrease=0.1),
-    # The held-out max bar guards against simulation divergence, not NN
-    # accuracy: the frozen-design kernel is coarser than the NN it consumes
-    # and blow-ups land at 1e3+.
+    ridge_set: RidgeSettings = RidgeSettings(ridge=2.8e-12, ridge_decrease=0.1),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
 ):
@@ -319,8 +323,13 @@ def stochastic_open_economy_growth_kernel_recursive(
         z_0,
         rate_gap_0,
         use_float64,
-        ic_set.num_train_trajectories,
-        train_variances,
+        reference_ic_set.num_train_trajectories,
+        (
+            reference_ic_set.train_log_z_variance,
+            reference_ic_set.train_log_k_variance,
+            reference_ic_set.train_asset_variance,
+            reference_ic_set.train_rate_variance,
+        ),
     )
     reference_policy, reference_meta, reference_path = load_reference_policy(
         policy_dir, problem_config
@@ -557,6 +566,7 @@ def stochastic_open_economy_growth_kernel_recursive(
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
+        "reference_ic_set": asdict(reference_ic_set),
         "lm_set": {
             "init_damping": lm_set.init_damping,
             "damping_decrease": lm_set.damping_decrease,

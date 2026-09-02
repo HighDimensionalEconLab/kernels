@@ -29,9 +29,8 @@ STOCHASTIC_GROWTH_CONSTANTS = {
     "quarterly_tfp_sigma": 0.035,
     "rho_hat": -4.0 * math.log(0.9896),
     "eta": -4.0 * math.log(0.95),
-    "z_ergodic_variance": 0.035**2 / (1.0 - 0.95**2),
     "sigma_z": math.sqrt(2.0 * (-4.0 * math.log(0.95)) * (0.035**2 / (1.0 - 0.95**2))),
-    "train_T": 100.0,
+    "train_T": 60.0,
     "test_T": 40.0,
     "transversality_T": 200.0,
 }
@@ -53,7 +52,7 @@ class StructuralParameters(ParameterPyTree):
 class DataSettings:
     # Fixed-step SDE simulation on the integrator's own states: n points from
     # n - 1 steps including the initial condition, nothing interpolated.
-    train_points: int = 65
+    train_points: int = 41
     test_points: int = 41
     tvc_steps: int = 256
     train_T: float = STOCHASTIC_GROWTH_CONSTANTS["train_T"]

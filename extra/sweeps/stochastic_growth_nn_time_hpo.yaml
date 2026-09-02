@@ -31,7 +31,7 @@ parameters:
   sweep_settings.num_seeds:            {value: 3}
   sweep_settings.starting_seed:        {value: 0}
   sweep_settings.min_successful_seeds: {value: 2}
-  sweep_settings.seed_timeout:         {value: 150}
+  sweep_settings.seed_timeout:         {value: 820}
   sweep_settings.log_tables:           {value: "false"}
   # --- fixed solver settings ---
   verbose:                             {value: false}

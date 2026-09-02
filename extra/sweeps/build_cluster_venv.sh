@@ -7,8 +7,9 @@
 #
 # WHEELHOUSE RULE (Alliance): install EVERYTHING from the wheelhouse with --no-index --
 # never the public PyPI registry when a wheel exists. flax, nlls-gram and tinydiffeq
-# are installed LAST with --no-deps so pip cannot re-resolve jax/jaxlib from PyPI.
-# Their runtime dependencies are installed from the wheelhouse first.
+# are installed LAST with --no-deps so pip cannot re-resolve jax/jaxlib from PyPI
+# (the site pip constraints pin jax/jaxlib and the CUDA plugin to wheelhouse
+# versions anyway). Their runtime dependencies are installed from the wheelhouse first.
 #
 # pyarrow is the exception to "everything from the wheelhouse": the wheelhouse ships only
 # a DUMMY pyarrow wheel that errors on install. The real pyarrow lives in the `arrow`
@@ -24,12 +25,17 @@ set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MODE="${1:-cpu}"
 
-WHEELS="jax jaxlib flax jsonargparse numpy pandas scipy wandb"
+WHEELS="flax jsonargparse numpy pandas scipy wandb"
 
+# The wheelhouse CUDA plugin lags its jaxlib (plugin 0.10.2, jaxlib 0.11.1),
+# so the GPU venv takes the wheelhouse's complete 0.10.2 jax stack; each venv
+# then gets the flax release whose jax floor matches its jax.
 case "$MODE" in
-  cpu) module load gcc arrow/24.0.0 python/3.12;                           VENV=.venv-cpu ;;
+  cpu) module load gcc arrow/24.0.0 python/3.12;                           VENV=.venv-cpu
+       JAX="jax jaxlib"; FLAX="flax>=0.12.9" ;;
   gpu) module load gcc arrow/24.0.0 python/3.12 cuda/12.9 cudnn/9.13.1.26; VENV=.venv-gpu
-       WHEELS="$WHEELS jax_cuda12_plugin jax_cuda12_pjrt" ;;
+       JAX="jax==0.10.2 jaxlib==0.10.2 jax_cuda12_plugin==0.10.2 jax_cuda12_pjrt==0.10.2"
+       FLAX="flax==0.12.7" ;;
   *)   echo "usage: extra/sweeps/build_cluster_venv.sh [cpu|gpu]" >&2; exit 1 ;;
 esac
 
@@ -38,10 +44,9 @@ rm -rf "$VENV"
 python -m venv "$VENV"
 source "$VENV/bin/activate"
 pip install --no-index --upgrade pip >/dev/null
-pip install --no-index $WHEELS
-# The wheelhouse flax lags its own jax (0.12.6 imports jax.core.Effect, gone in
-# jax 0.11); the wheelhouse install above supplies flax's deps, PyPI the release
-# whose jax floor matches the wheelhouse jax (0.12.9 for jax 0.11.1).
-pip install --no-deps 'flax>=0.12.9' 'nlls-gram>=2.10.0' 'tinydiffeq>=2.6.1'
+pip install --no-index $JAX $WHEELS
+# The wheelhouse flax (0.12.6) cannot import against jax 0.11; the wheelhouse
+# install above supplies flax's deps, PyPI the matching flax release.
+pip install --no-deps "$FLAX" 'nlls-gram>=2.10.0' 'tinydiffeq>=2.6.1'
 python -c "import jax, flax, jsonargparse, pandas, pyarrow, scipy, nlls_gram, tinydiffeq, wandb; print('venv ok | jax', jax.__version__, '| devices', jax.devices())"
 echo "BUILD_DONE (${VENV})"

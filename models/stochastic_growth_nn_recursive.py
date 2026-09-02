@@ -187,6 +187,12 @@ def residual_fn(theta, args, p):
     ).reshape(-1)
 
 
+def accept_training(_, result):
+    residual = residual_fn(result.x, result.args, result.p)
+    loss = jnp.sum(residual * residual)
+    return jnp.isfinite(loss) & (loss < result.args.train_loss_threshold)
+
+
 # The deterministic model plus its OU log-TFP. No benchmark or steady-state
 # information enters the residual or initialization.
 def stochastic_growth_nn_recursive(
@@ -380,6 +386,7 @@ def stochastic_growth_nn_recursive(
         num_starts=lm_set.num_attempts,
         draw=DrawNNXModule(StateMLP, 2, 1, **policy_spec),
         reset_args=ResetEpochStream(),
+        accept=accept_training,
     )
     solve_options = dict(
         max_steps=tolerance_set.num_epochs * tolerance_set.max_steps,

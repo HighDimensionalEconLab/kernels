@@ -1,5 +1,9 @@
 import importlib.util
+import multiprocessing
+import queue as queue_module
+import re
 import sys
+import time
 from pathlib import Path
 
 import jsonargparse
@@ -15,6 +19,49 @@ import numpy as np
 # that returns either a metrics dict, or a tuple whose first element is the
 # metrics dict (optionally followed by an extras dict), and accepts a seed
 # argument (name set by --sweep_settings.seed_param).
+#
+# Ex-post gates: --sweep_settings.gates is a comma-separated list of
+# `key<=value` / `key>=value` / `key==value` conditions on the results dict and
+# --sweep_settings.gated_key names a results key; every seed gains
+# `<gated_key>_gated` (the value when all gates hold, NaN otherwise) and a
+# `gate_failures` string, so `sort_criteria=<gated_key>_gated` optimizes the
+# key conditional on the gates.
+#
+# --sweep_settings.seed_timeout runs each seed in a spawned process with a
+# wall-clock cap; a seed that exceeds it is terminated and counted as a crash.
+
+GATE = re.compile(r"^(\w+)(<=|>=|==|<|>)(.+)$")
+
+
+def load_function(script, function_name):
+    script_path = Path(script).resolve()
+    # The target imports its package siblings (`from models.x import ...`), so
+    # the repo root (the agent's cwd) and the script's directory are both
+    # importable regardless of where the agent launches from.
+    sys.path.insert(0, str(script_path.parent))
+    sys.path.insert(0, str(Path.cwd()))
+    module_name = script_path.stem
+    spec = importlib.util.spec_from_file_location(module_name, script_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return getattr(module, function_name or module_name)
+
+
+def split_output(out, extra_keys):
+    results = out[0] if isinstance(out, tuple) else out
+    extras = out[1] if isinstance(out, tuple) and len(out) > 1 else {}
+    return results, {k: extras[k] for k in extra_keys if k in extras}
+
+
+def run_seed(script, function_name, args, extra_keys, channel):
+    fn = load_function(script, function_name)
+    try:
+        out = jsonargparse.CLI(fn, args=args)
+    except Exception as e:
+        channel.put(("error", repr(e)))
+        return
+    channel.put(("ok", *split_output(out, extra_keys)))
 
 
 def main():
@@ -25,6 +72,9 @@ def main():
         "num_seeds": 5,
         "seed_param": "seed",
         "starting_seed": 42,
+        "seed_timeout": None,  # seconds per seed; None runs in-process, uncapped
+        "gates": "",
+        "gated_key": None,
         "wandb_mode": "online",  # "online" | "offline" | "disabled" (print only)
         # Log the per-seed seed_results / extra_log_keys wandb.Tables (default true).
         # Set false for large PRODUCTIVE grid sweeps where each run is one data point:
@@ -38,7 +88,7 @@ def main():
         # every other metric still logs for inspection.
         "min_successful_seeds": None,
     }
-    int_keys = {"num_seeds", "starting_seed", "min_successful_seeds"}
+    int_keys = {"num_seeds", "starting_seed", "min_successful_seeds", "seed_timeout"}
 
     # Manual argv walk: --sweep_settings.* args (both --key=value and --key value
     # forms) configure the wrapper; everything else passes through verbatim.
@@ -69,6 +119,22 @@ def main():
     if settings["sort_criteria"] is None:
         raise SystemExit("--sweep_settings.sort_criteria is required")
 
+    gates = []
+    for clause in (c.strip() for c in settings["gates"].split(",") if c.strip()):
+        match = GATE.match(clause)
+        if match is None:
+            raise SystemExit(f"Malformed gate: {clause!r}")
+        gates.append((match.group(1), match.group(2), float(match.group(3))))
+    if gates and settings["gated_key"] is None:
+        raise SystemExit("--sweep_settings.gated_key is required with gates")
+    compare = {
+        "<=": lambda a, b: a <= b,
+        ">=": lambda a, b: a >= b,
+        "==": lambda a, b: a == b,
+        "<": lambda a, b: a < b,
+        ">": lambda a, b: a > b,
+    }
+
     disabled = settings["wandb_mode"] == "disabled"
     if not disabled:
         import wandb
@@ -76,17 +142,10 @@ def main():
         # Under a sweep agent this picks up the sweep config automatically.
         wandb.init(mode=settings["wandb_mode"])
 
-    script_path = Path(settings["script"]).resolve()
-    # The target script imports its own siblings (e.g. utilities.py), so its
-    # directory must be importable regardless of where the agent launches from.
-    sys.path.insert(0, str(script_path.parent))
-    module_name = script_path.stem
-    function_name = settings["function_name"] or module_name
-    spec = importlib.util.spec_from_file_location(module_name, script_path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    fn = getattr(module, function_name)
+    extra_keys = [k.strip() for k in settings["extra_log_keys"].split(",") if k.strip()]
+    timeout = settings["seed_timeout"]
+    if timeout is None:
+        fn = load_function(settings["script"], settings["function_name"])
 
     # Replicable uint32 seeds derived from starting_seed.
     seeds = np.random.SeedSequence(settings["starting_seed"]).generate_state(
@@ -96,20 +155,70 @@ def main():
     sort_criteria = settings["sort_criteria"]
     runs = []
     num_crashes = 0
+    num_timeouts = 0
+    gate_failures = "none"
     for s in seeds:
         seed = int(s)
         args = passthrough + [f"--{settings['seed_param']}={seed}"]
         # A bad passthrough arg raises SystemExit (a BaseException), which
         # propagates and fails the whole trial loudly: a config error, not
         # seed noise. Only Exception counts as a per-seed crash.
-        try:
-            out = jsonargparse.CLI(fn, args=args)
-        except Exception as e:
-            print(f"seed {seed} crashed: {e!r}", file=sys.stderr)
+        if timeout is None:
+            try:
+                message = (
+                    "ok",
+                    *split_output(jsonargparse.CLI(fn, args=args), extra_keys),
+                )
+            except Exception as e:
+                message = ("error", repr(e))
+        else:
+            context = multiprocessing.get_context("spawn")
+            channel = context.Queue()
+            process = context.Process(
+                target=run_seed,
+                args=(
+                    settings["script"],
+                    settings["function_name"],
+                    args,
+                    extra_keys,
+                    channel,
+                ),
+            )
+            process.start()
+            message = None
+            deadline = time.monotonic() + timeout
+            while message is None and time.monotonic() < deadline:
+                try:
+                    message = channel.get(timeout=1.0)
+                except queue_module.Empty:
+                    if not process.is_alive():
+                        break
+            if message is None:
+                if process.is_alive():
+                    process.terminate()
+                    process.join()
+                    num_timeouts += 1
+                    message = ("error", f"timed out after {timeout}s")
+                else:
+                    process.join()
+                    raise SystemExit(f"seed {seed} exited with code {process.exitcode}")
+            process.join()
+        if message[0] == "error":
+            print(f"seed {seed} crashed: {message[1]}", file=sys.stderr)
             num_crashes += 1
             continue
-        results = out[0] if isinstance(out, tuple) else out
-        extras = out[1] if isinstance(out, tuple) and len(out) > 1 else {}
+        _, results, extras = message
+        if gates:
+            failed = [
+                f"{key}{op}{bound:g}"
+                for key, op, bound in gates
+                if key not in results or not compare[op](float(results[key]), bound)
+            ]
+            results[f"{settings['gated_key']}_gated"] = (
+                float(results[settings["gated_key"]]) if not failed else float("nan")
+            )
+            gate_failures = ",".join(failed) or "none"
+            results["gate_failures"] = gate_failures
         try:
             criteria = float(results[sort_criteria])
         except (KeyError, TypeError, ValueError):
@@ -126,12 +235,16 @@ def main():
         )
 
     if not runs:
-        # No seed produced a finite objective. Log only num_crashes (no metric, so
-        # the sweep optimizer skips this config) and exit 0: exiting non-zero counts
-        # as a crash toward wandb agent's flapping protection, which kills a worker
-        # after a few consecutive failures -- fatal for high-failure-rate sweeps
-        # (e.g. Adam, where most configs don't solve) that must run the full walltime.
-        log = {"num_crashes": num_crashes}
+        # No seed produced a finite objective. Log only the crash counts (no
+        # metric, so the sweep optimizer skips this config) and exit 0: exiting
+        # non-zero counts as a crash toward wandb agent's flapping protection,
+        # which kills a worker after a few consecutive failures -- fatal for
+        # high-failure-rate sweeps that must run the full walltime.
+        log = {
+            "num_crashes": num_crashes,
+            "num_timeouts": num_timeouts,
+            "gate_failures": gate_failures,
+        }
         if disabled:
             print(f"[wandb disabled] all seeds failed; would log: {log}")
             return
@@ -146,6 +259,7 @@ def main():
     log = dict(median["results"])
     log.update({f"best_{k}": v for k, v in best["results"].items()})
     log["num_crashes"] = num_crashes
+    log["num_timeouts"] = num_timeouts
     log["num_seeds_completed"] = len(runs)
     log["median_seed"] = median["seed"]
     log["best_seed"] = best["seed"]
@@ -168,7 +282,6 @@ def main():
         [r["seed"]] + [r["results"].get(k) for k in columns[1:]] for r in runs
     ]
 
-    extra_keys = [k.strip() for k in settings["extra_log_keys"].split(",") if k.strip()]
     extra_log = {}
     for key in extra_keys:
         if key not in median["extras"]:

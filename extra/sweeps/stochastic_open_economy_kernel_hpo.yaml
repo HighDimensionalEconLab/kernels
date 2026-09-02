@@ -4,7 +4,7 @@
 # so every swept count needs a pre-cached accepted float64 NN artifact in
 # <policy_dir> BEFORE launching (a missing one is a loud FileNotFoundError):
 #   for n in 2 4 8; do
-#     python stochastic_open_economy_growth_nn_recursive.py \
+#     python -m models.stochastic_open_economy_growth_nn_recursive \
 #       --ic_set.num_train_trajectories $n --policy_cache .results
 #   done
 # Gates are divergence guards, not accuracy bars: the T = 60 frozen design is
@@ -29,7 +29,7 @@ command:
   - ${args}
 parameters:
   # --- wrapper config ---
-  sweep_settings.script:               {value: stochastic_open_economy_growth_kernel_recursive.py}
+  sweep_settings.script:               {value: models/stochastic_open_economy_growth_kernel_recursive.py}
   sweep_settings.sort_criteria:        {value: test_euler_mean_abs_success}
   sweep_settings.seed_param:           {value: ic_set.data_seed}
   sweep_settings.num_seeds:            {value: 3}
@@ -50,10 +50,10 @@ parameters:
   kernel_set.free_constant:  {values: [true, false]}
   kernel_set.linear_mean:    {values: [true, false]}
   # --- ridge-LM axes ---
-  stop_set.max_steps:        {values: [25, 50, 150, 300]}
-  stop_set.residual_atol:    {distribution: log_uniform_values, min: 1e-6, max: 1e-4}
-  stop_set.gtol:             {distribution: log_uniform_values, min: 1e-8, max: 1e-4}
-  stop_set.ridge:            {distribution: log_uniform_values, min: 1e-12, max: 1e-3}
+  lm_set.max_steps:          {values: [25, 50, 150, 300]}
+  lm_set.atol:               {distribution: log_uniform_values, min: 1e-6, max: 1e-4}
+  lm_set.gtol:               {distribution: log_uniform_values, min: 1e-8, max: 1e-4}
+  ridge_set.ridge:           {distribution: log_uniform_values, min: 1e-12, max: 1e-3}
   lm_set.init_damping:      {distribution: log_uniform_values, min: 1e-8, max: 1e-3}
   lm_set.damping_decrease:  {distribution: uniform, min: 0.1, max: 0.9}
   lm_set.damping_increase:  {distribution: log_uniform_values, min: 1.5, max: 10.0}

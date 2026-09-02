@@ -41,6 +41,6 @@ source "$VENV/bin/activate"
 pip install --no-index --upgrade pip >/dev/null
 pip install --no-index $WHEELS
 pip install --no-index $GRAM_DEPS
-pip install --no-deps 'nlls-gram>=2.4.0' 'tinydiffeq>=2.2.0'
+pip install --no-deps 'nlls-gram>=2.10.0' 'tinydiffeq>=2.6.1'
 python -c "import jax, flax, jsonargparse, pandas, pyarrow, scipy, nlls_gram, tinydiffeq, wandb; print('venv ok | jax', jax.__version__, '| devices', jax.devices())"
 echo "BUILD_DONE (${VENV})"

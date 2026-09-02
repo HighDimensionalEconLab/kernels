@@ -1,0 +1,59 @@
+# Solve-time HPO for the float64 stochastic open-economy recursive NN: bayes
+# over MLP capacity, the epoch schedule and shock ladder, collocation size,
+# the SDE scheme, and the LM damping quartet.
+# Objective: the median seed's solve_time_gated -- solve_time when the driver
+# accepts the solution and the ex-post gates hold (held-out Euler mean and
+# per-head max within 10x of the default config's), NaN otherwise.
+# seed_timeout caps one seed's wall clock at ~1.3x the default config's total
+# fit time on the calibration node; over-budget seeds count as crashes.
+# ic_set.num_train_trajectories enters the policy artifact's problem hash: an
+# adopted value must be mirrored in the kernel consumer's default.
+# continuation_epochs > num_epochs raises and counts as a crash.
+# Launch: `wandb sweep extra/sweeps/stochastic_open_economy_nn_time_hpo.yaml`,
+# then wandb agents (extra/sweeps/wandb_sweep_agent.sbatch, VENV=.venv-cpu).
+program: extra/sweeps/wandb_sweep_wrapper.py
+project: kernels
+method: bayes
+metric:
+  name: solve_time_gated
+  goal: minimize
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args}
+parameters:
+  # --- wrapper config ---
+  sweep_settings.script:               {value: models/stochastic_open_economy_growth_nn_recursive.py}
+  sweep_settings.sort_criteria:        {value: solve_time_gated}
+  sweep_settings.gated_key:            {value: solve_time}
+  sweep_settings.gates:                {value: "solution_accepted==1,test_euler_mean_abs<=3e-5,test_c_euler_max_abs<=5e-3,test_q_euler_max_abs<=5e-3"}
+  sweep_settings.num_seeds:            {value: 3}
+  sweep_settings.starting_seed:        {value: 0}
+  sweep_settings.min_successful_seeds: {value: 2}
+  sweep_settings.seed_timeout:         {value: 45}
+  sweep_settings.log_tables:           {value: "false"}
+  # --- fixed solver settings ---
+  verbose:                             {value: false}
+  use_float64:                         {value: true}
+  lm_set.num_attempts:                 {value: 2}
+  lm_set.geodesic_acceleration:        {value: true}
+  # --- capacity ---
+  nn_set.width:                        {values: [8, 16, 32]}
+  nn_set.depth:                        {values: [2, 3]}
+  nn_set.hidden_activation:            {values: [gelu, silu, tanh]}
+  # --- epoch schedule + ladder ---
+  tolerance_set.max_steps:             {values: [50, 100, 250]}
+  tolerance_set.num_epochs:            {values: [2, 3, 5]}
+  tolerance_set.train_loss_threshold:  {distribution: log_uniform_values, min: 1e-11, max: 1e-9}
+  tolerance_set.initial_shock_scale:   {distribution: uniform, min: 0.1, max: 0.5}
+  tolerance_set.continuation_epochs:   {values: [1, 2]}
+  # --- collocation ---
+  ic_set.num_train_trajectories:       {values: [2, 4, 8]}
+  data_set.train_points:               {values: [33, 49, 97]}
+  sde_solver:                          {values: [sra1, euler_maruyama]}
+  # --- LM damping ---
+  lm_set.init_damping:                 {distribution: log_uniform_values, min: 1e-7, max: 1e-2}
+  lm_set.damping_decrease:             {distribution: uniform, min: 0.1, max: 0.9}
+  lm_set.damping_increase:             {distribution: log_uniform_values, min: 1.5, max: 10.0}
+  lm_set.geodesic_acceptance_ratio:    {distribution: uniform, min: 0.5, max: 0.99}

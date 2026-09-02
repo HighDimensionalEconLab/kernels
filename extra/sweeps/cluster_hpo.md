@@ -121,3 +121,20 @@ oversamples good regions, so directional only):
 
 Adopting a sweep value: `ic_set.num_train_trajectories` enters the policy
 artifact's problem hash, so the kernel consumer's default must follow.
+
+### float32 GPU smoke (Fir, job 57785088, one `1g.10gb` H100 MIG slice)
+
+`.venv-gpu` is the wheelhouse jax 0.10.2 stack with flax 0.12.7. Both
+drivers at their defaults, `use_float64 false`, thresholds from the local
+float32 ladder (closed `train_loss_threshold` 1e-11, open 1e-9; the
+float32 fresh-batch floors sit near 1e-12 and 1e-11):
+
+| driver | steps | solve time | s / step | held-out Euler mean | float64 default |
+|---|---|---|---|---|---|
+| closed | 750 (accept hook, final loss 6.4e-13) | 136 s | 0.18 | 1.9e-6 | 3.7e-8 |
+| open | 750 | 80 s | 0.11 | 1.6e-5 | 3e-6 |
+
+Local CPU float32 at the same thresholds: closed 0.24 s/step (converged at
+the first boundary), open 0.04 s/step. The networks are too small to fill
+a GPU; the slice only helps the closed economy's Jacobian, and the open
+economy is launch-bound and slower than a laptop core.

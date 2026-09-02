@@ -61,13 +61,13 @@ class StateKernelSettings:
     # ray_amplitude = 0 recovers the pure 2-D representation. ray_slope is a
     # tuned hyperparameter like the lengthscales -- the structural detrending
     # 1/(1-a) must never enter the approximation class.
-    ray_slope: float = 1.58
-    ray_amplitude: float = 0.705
-    ray_lengthscale: float = 0.541
-    amplitude: float = 0.657
-    log_z_lengthscale: float = 3.17
-    log_k_lengthscale: float = 0.283
-    metric_epsilon: float = 1.02e-3
+    ray_slope: float = 1.51
+    ray_amplitude: float = 0.412
+    ray_lengthscale: float = 0.634
+    amplitude: float = 5.71
+    log_z_lengthscale: float = 1.0
+    log_k_lengthscale: float = 4.27
+    metric_epsilon: float = 2.0e-7
 
 
 # Ex-post acceptance: gate_train requires the ridge LM to have converged,
@@ -204,10 +204,10 @@ def neoclassical_growth_kernel_recursive_nonhomothetic(
         geodesic_acceleration=True,
         geodesic_acceptance_ratio=0.75,
         max_steps=150,
-        atol=7e-7,
+        atol=6.75e-6,
         gtol=1e-7,
     ),
-    ridge_set: RidgeSettings = RidgeSettings(ridge=1.2e-11),
+    ridge_set: RidgeSettings = RidgeSettings(ridge=3.9e-12),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
 ):

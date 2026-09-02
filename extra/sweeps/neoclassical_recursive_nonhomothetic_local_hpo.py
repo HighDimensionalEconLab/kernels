@@ -1,8 +1,9 @@
 # Local random-search HPO for the non-homothetic recursive neoclassical
-# drivers on the single-IC g = 0 experiment: the NN (capacity, epoch schedule,
-# collocation size, multi-start budget, LM damping) over NN seeds 0-4, or the
-# kernel (collocation size, ray + ARD geometry, metric shift, ridge, stop)
-# on data seed 0. Both drivers run at their production acceptance bars -- the
+# drivers on one of the replication experiments: the NN (capacity, epoch
+# schedule, collocation size, multi-start budget, LM damping) over NN seeds
+# 0-4, or the kernel (collocation size, ray + ARD geometry, metric shift,
+# ridge, stop) over data seeds. Both drivers run at their production
+# acceptance bars -- the
 # NN's predicate drives multi-start acceptance and early stopping inside the
 # optimizer, so loosening it would change the algorithm being tuned -- and
 # `report` re-applies the same bars to the recorded metrics. One row per
@@ -11,8 +12,8 @@
 # max_new and loop it from the shell. Parallel workers take distinct
 # `--output`, `--sweep_seed`, and `--config_offset`; `report` globs them.
 #
-#   JAX_PLATFORMS=cpu uv run python -m extra.sweeps.neoclassical_recursive_nonhomothetic_local_hpo run --driver nn --max_new 10
-#   uv run python -m extra.sweeps.neoclassical_recursive_nonhomothetic_local_hpo report --driver nn
+#   JAX_PLATFORMS=cpu uv run python -m extra.sweeps.neoclassical_recursive_nonhomothetic_local_hpo run --driver kernel --experiment multi_ic_g0 --seeds [0,1,2] --max_new 10
+#   uv run python -m extra.sweeps.neoclassical_recursive_nonhomothetic_local_hpo report --driver kernel --experiment multi_ic_g0
 from __future__ import annotations
 
 import glob
@@ -31,17 +32,27 @@ from models.neoclassical_growth_nn_recursive_nonhomothetic import (
 )
 from replication.utilities import configure_process, run_solver, with_option
 
-# The replication's single-IC g = 0 experiment.
-EXPERIMENT = {
-    "verbose": False,
-    "g": 0.0,
-    "ic_set.data_seed": 0,
+# The replication drivers' experiments.
+SINGLE_IC = {
     "ic_set.num_train_trajectories": 1,
     "ic_set.num_test_trajectories": 1,
     "ic_set.train_log_z_variance": 0.0,
     "ic_set.train_log_k_variance": 0.0,
     "ic_set.test_log_z_variance": 0.0,
     "ic_set.test_log_k_variance": 0.0,
+}
+MULTI_IC = {
+    "ic_set.num_train_trajectories": 5,
+    "ic_set.num_test_trajectories": 10,
+    "ic_set.train_log_z_variance": 0.01,
+    "ic_set.train_log_k_variance": 0.01,
+    "ic_set.test_log_z_variance": 0.0025,
+    "ic_set.test_log_k_variance": 0.0025,
+}
+EXPERIMENTS = {
+    "single_ic_g0": {"g": 0.0, **SINGLE_IC},
+    "multi_ic_g0": {"g": 0.0, **MULTI_IC},
+    "multi_ic_g02": {"g": 0.02, **MULTI_IC},
 }
 COMMON_METRICS = (
     "solution_accepted",
@@ -190,14 +201,19 @@ def aggregate(frame, space):
     return pd.DataFrame(rows)
 
 
-def output_path(driver):
+def output_path(driver, experiment):
     return (
-        f".results/hpo/neoclassical_recursive_nonhomothetic_{driver}_local_hpo.parquet"
+        ".results/hpo/neoclassical_recursive_nonhomothetic_"
+        f"{driver}_{experiment}_local_hpo.parquet"
     )
 
 
+# seeds: NN seeds for the NN driver, data seeds for the kernel (whose
+# single-IC solve is deterministic, the zero variances pinning the draw).
 def run(
     driver: str = "nn",
+    experiment: str = "single_ic_g0",
+    seeds: tuple[int, ...] | None = None,
     output: str | None = None,
     n_configs: int = 150,
     sweep_seed: int = 0,
@@ -211,7 +227,9 @@ def run(
 ):
     configure_process()
     space = SPACES[driver]
-    path = pathlib.Path(output or output_path(driver))
+    seeds = space["seeds"] if seeds is None else seeds
+    fixed = {"verbose": False, "ic_set.data_seed": 0, **EXPERIMENTS[experiment]}
+    path = pathlib.Path(output or output_path(driver, experiment))
     path.parent.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(sweep_seed)
     if around is None:
@@ -242,18 +260,17 @@ def run(
         if max_new is not None and new == max_new:
             break
         if (
-            EXPERIMENT["ic_set.num_train_trajectories"]
-            * config["data_set.train_points"]
+            fixed["ic_set.num_train_trajectories"] * config["data_set.train_points"]
             > MAX_CENTERS
         ):
             continue
         new += 1
         options = {}
-        for key, value in {**EXPERIMENT, **space["fixed"], **config}.items():
+        for key, value in {**fixed, **space["fixed"], **config}.items():
             if key != "config":
                 options = with_option(options, key, value)
         rows = []
-        for seed in space["seeds"]:
+        for seed in seeds:
             row = {**config, "seed": seed}
             try:
                 results, _ = run_solver(
@@ -291,9 +308,14 @@ def read_frames(pattern):
     return pd.concat([pd.read_parquet(p) for p in paths], ignore_index=True)
 
 
-def report(driver: str = "nn", output: str | None = None, top: int = 15):
+def report(
+    driver: str = "nn",
+    experiment: str = "single_ic_g0",
+    output: str | None = None,
+    top: int = 15,
+):
     space = SPACES[driver]
-    summary = aggregate(read_frames(output or output_path(driver)), space)
+    summary = aggregate(read_frames(output or output_path(driver, experiment)), space)
     full = summary[summary["n_accepted"] == summary["n_seeds"]]
     columns = [
         "config",

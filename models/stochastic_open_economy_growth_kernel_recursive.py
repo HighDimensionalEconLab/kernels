@@ -350,7 +350,7 @@ def stochastic_open_economy_growth_kernel_recursive(
         )
 
     fit_timer = Stopwatch()
-    # Frozen design at full shock scale on the NN driver's training noise
+    # Frozen design on the NN driver's training noise
     # key (fold_in index 1); the discretization is deliberately coarser.
     train_noise = sample_trajectory_noise(
         sde,

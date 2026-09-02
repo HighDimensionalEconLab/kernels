@@ -98,8 +98,8 @@ Times are Fir 4-core wall clock, median seed of 3; the defaults measured
 |---|---|---|---|
 | closed | 11.6 s (54x) | 5.6e-8, 2.2e-5 (default 3.7e-8, 1.8e-5) | width 8, depth 2, silu, 4 x 250 steps, loss bar 5.6e-12, 16 trajectories, 65 points, euler_maruyama |
 | closed | 12.1 s (52x) | 5.4e-8, 3.9e-5 | width 8, depth 3, silu, 4 x 125, bar 1.2e-12, 33 points, euler_maruyama |
-| open | 8.4 s (9x) | 1.2e-5, 2.2e-4 / 8.9e-5 (default 3e-6) | width 8, depth 2, silu, 2 x 100 steps, one ladder epoch, 8 trajectories, 97 points, euler_maruyama |
-| open | 9.2 s (8x) | 4.0e-6, 3.9e-5 / 3.8e-5 | width 8, depth 2, silu, 2 x 250, one ladder epoch, 8 trajectories, 49 points, euler_maruyama |
+| open | 8.4 s (9x) | 1.2e-5, 2.2e-4 / 8.9e-5 (default 3e-6) | width 8, depth 2, silu, 2 x 100 steps, no shock homotopy, 8 trajectories, 97 points, euler_maruyama |
+| open | 9.2 s (8x) | 4.0e-6, 3.9e-5 / 3.8e-5 | width 8, depth 2, silu, 2 x 250, no shock homotopy, 8 trajectories, 49 points, euler_maruyama |
 
 Marginal effects (accepted share, median accepted time; a Bayes sweep
 oversamples good regions, so directional only):
@@ -113,8 +113,10 @@ oversamples good regions, so directional only):
   Accepted `train_loss_threshold` spans 1e-13 to 5e-11 (median 4e-12);
   the LM damping quartet is flat.
 - Open: width 8 167/174 at 16 s vs 16 7/12 at 42 s; depth 2 slightly
-  faster than 3 (15 vs 18 s); one ladder epoch 14 s vs two 18 s;
-  `max_steps` 100 13 s vs 250 17 s; `train_points` 33 to 49 (14 s) vs
+  faster than 3 (15 vs 18 s); training the true model from the first
+  epoch 14 s vs a reduced-volatility first epoch 18 s (that shock homotopy
+  has since been removed from the driver); `max_steps` 100 13 s vs 250
+  17 s; `train_points` 33 to 49 (14 s) vs
   97 (19 s); 8 trajectories accept as often as 4, 2 do not (1/7);
   `euler_maruyama` 130/136 vs `sra1` 44/52; activations and the LM
   quartet flat.
@@ -140,8 +142,8 @@ a GPU; the slice only helps the closed economy's Jacobian, and the open
 economy is launch-bound and slower than a laptop core.
 
 Adopted defaults (2026-09-02): closed width 8, depth 3, silu, 4 x 125
-steps, `euler_maruyama`; open width 8, depth 2, silu, 5 x 100 steps, one
-ladder epoch, 49 train points, `euler_maruyama`. Trajectory counts and
+steps, `euler_maruyama`; open width 8, depth 2, silu, 5 x 100 steps, 49
+train points, `euler_maruyama`. Trajectory counts and
 loss bars unchanged. Locally, five seeds: closed held-out Euler mean
 7.3e-8 median / 2.1e-7 worst at 6.8 s (was 3.7e-8 / 4.6e-8 at 82 to
 165 s); open 5.9e-6 / 1.0e-5 at 1.2 s (was 4.2e-6 / 5.0e-6 at 23 to

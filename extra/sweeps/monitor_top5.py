@@ -25,8 +25,6 @@ CFG_KEYS = [
     "tolerance_set.max_steps",
     "tolerance_set.num_epochs",
     "tolerance_set.train_loss_threshold",
-    "tolerance_set.initial_shock_scale",
-    "tolerance_set.continuation_epochs",
     "ic_set.num_train_trajectories",
     "data_set.train_points",
     "sde_solver",

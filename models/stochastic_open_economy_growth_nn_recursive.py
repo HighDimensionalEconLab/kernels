@@ -63,7 +63,7 @@ from models.utilities import (
 # (on the redrawn training batch and the test batch), by the multi-start
 # accept hook, and ex post: gate_train requires the training loss under
 # train_loss_threshold, gate_test the held-out per-equation Euler errors
-# and Ito diffusion terms under the bars; both need the ladder at scale 1.
+# and Ito diffusion terms under the bars.
 @dataclass(frozen=True)
 class ToleranceSettings:
     gate_train: bool = True
@@ -72,15 +72,11 @@ class ToleranceSettings:
     test_euler_max: float = 5e-3
     test_diffusion_max_abs: float = 1e-2
     # max_steps is the per-epoch LM budget; noise (and dispersed ICs) redraw
-    # at epoch boundaries. The shock ladder rises geometrically to 1.0 over
-    # continuation_epochs.
+    # at epoch boundaries.
     max_steps: int = 100
     train_loss_threshold: float = 1e-10
     num_epochs: int = 5
     epoch_early_stopping: bool = True
-    shock_continuation: bool = True
-    initial_shock_scale: float = 0.238
-    continuation_epochs: int = 1
 
 
 # Per-knot Euler residuals over the simulated batch, flattened and scaled by
@@ -97,7 +93,7 @@ def collocation_residuals(sde, policy, initial_states, noise, p, data_set):
     return residuals / jnp.sqrt(count)
 
 
-# ICs, noise, keys, and ladder position live in args, so the implicit
+# ICs, noise, keys, and the epoch counter live in args, so the implicit
 # derivative is conditional on the carried batch.
 @struct.dataclass
 class ResidualArgs:
@@ -112,8 +108,6 @@ class ResidualArgs:
     epoch_key: jax.Array
     restart_key: jax.Array
     epoch: jax.Array
-    shock_scales: jax.Array
-    shock_scale: jax.Array
     train_loss_threshold: jax.Array
     test_euler_mean_abs: jax.Array
     test_euler_max: jax.Array
@@ -126,8 +120,8 @@ class ResidualArgs:
     gate_test: bool = struct.field(pytree_node=False)
 
 
-# Interior epoch boundaries redraw the batch, step the ladder, and stop on a
-# nonfinite fresh-batch loss or an accepted policy.
+# Interior epoch boundaries redraw the batch and stop on a nonfinite
+# fresh-batch loss or an accepted policy.
 @dataclass(frozen=True)
 class EpochCallback:
     num_train_trajectories: int
@@ -140,16 +134,11 @@ class EpochCallback:
         epoch_key, draw_key, noise_key = jax.random.split(ctx.args.epoch_key, 3)
         dtype = ctx.args.initial_states.dtype
         epoch = ctx.args.epoch + 1
-        shock_scale = ctx.args.shock_scales[epoch]
         if self.resample_initial_states:
-            # The stochastic axes' IC spread rides the shock ladder: partial-
-            # scale epochs draw z / rate starts with proportionally shrunk
-            # dispersion (inert at the zero-variance default).
-            scale_mask = jnp.asarray([shock_scale, 1.0, 1.0, shock_scale], dtype=dtype)
             initial_states = standardized_initial_states(
                 draw_key,
                 ctx.args.initial_center,
-                ctx.args.initial_scales * scale_mask,
+                ctx.args.initial_scales,
                 self.num_train_trajectories,
             )
         else:
@@ -167,7 +156,6 @@ class EpochCallback:
             ),
             epoch_key=epoch_key,
             epoch=epoch,
-            shock_scale=shock_scale,
         )
         ok, loss, _, _ = accepted(ctx.x, fresh, ctx.p)
         nonfinite = ~jnp.isfinite(loss)
@@ -208,24 +196,18 @@ class EpochCallback:
 
 def residual_fn(theta, args, p):
     policy = nnx.merge(args.graphdef, theta, args.nondiff)
-    # The ladder scales both sigmas through p (simulation and residual agree);
-    # corr_zr is scale-free.
-    stage_parameters = p.replace(
-        sigma_z=p.sigma_z * args.shock_scale,
-        sigma_r=p.sigma_r * args.shock_scale,
-    )
     return collocation_residuals(
         args.sde,
         policy,
         args.initial_states,
         args.noise,
-        stage_parameters,
+        p,
         args.data_set,
     ).reshape(-1)
 
 
 # Held-out per-equation Euler errors and Ito terms of the policy on the test
-# batch carried in args, at the full shock scale.
+# batch carried in args.
 def test_metrics(policy, args, p):
     solution = simulate(
         args.sde,
@@ -249,8 +231,7 @@ def test_metrics(policy, args, p):
 
 
 # The acceptance predicate: (ok, training loss, train_ok, test_ok). NaN
-# metrics fail their comparison, so a diverged path is never accepted, and
-# nothing is accepted below full shock scale.
+# metrics fail their comparison, so a diverged path is never accepted.
 def accepted(theta, args, p):
     residual = residual_fn(theta, args, p)
     loss = jnp.sum(residual * residual)
@@ -263,11 +244,7 @@ def accepted(theta, args, p):
         & jnp.all(max_abs <= args.test_euler_max)
         & jnp.all(diffusion_max <= args.test_diffusion_max_abs)
     )
-    ok = (
-        (args.shock_scale == 1.0)
-        & (train_ok | (not args.gate_train))
-        & (test_ok | (not args.gate_test))
-    )
+    ok = (train_ok | (not args.gate_train)) & (test_ok | (not args.gate_test))
     return ok, loss, train_ok, test_ok
 
 
@@ -391,39 +368,12 @@ def stochastic_open_economy_growth_nn_recursive(
     test_dt = data_set.test_T / n_test_steps
     tvc_dt = data_set.tvc_T / n_tvc_steps
 
-    if tolerance_set.shock_continuation:
-        continuation_scales = (
-            np.ones(1)
-            if tolerance_set.continuation_epochs == 1
-            else np.geomspace(
-                tolerance_set.initial_shock_scale,
-                1.0,
-                tolerance_set.continuation_epochs,
-            )
-        )
-        shock_scales = jnp.asarray(
-            np.concatenate(
-                [
-                    continuation_scales,
-                    np.ones(
-                        tolerance_set.num_epochs - tolerance_set.continuation_epochs
-                    ),
-                ]
-            ),
-            dtype=dtype,
-        )
-    else:
-        shock_scales = jnp.ones(tolerance_set.num_epochs, dtype=dtype)
-    initial_scale_mask = jnp.asarray(
-        [shock_scales[0], 1.0, 1.0, shock_scales[0]], dtype=dtype
-    )
-
     data_key = jax.random.key(ic_set.data_seed)
     train_ic_key, test_ic_key = jax.random.split(data_key)
     train_initial_states = standardized_initial_states(
         train_ic_key,
         initial_center,
-        train_scales * initial_scale_mask,
+        train_scales,
         ic_set.num_train_trajectories,
     )
     test_initial_states = standardized_initial_states(
@@ -471,8 +421,6 @@ def stochastic_open_economy_growth_nn_recursive(
         epoch_key=jax.random.fold_in(train_ic_key, 2),
         restart_key=jax.random.fold_in(train_ic_key, 4),
         epoch=jnp.asarray(0, dtype=jnp.int32),
-        shock_scales=shock_scales,
-        shock_scale=shock_scales[0],
         train_loss_threshold=jnp.asarray(
             tolerance_set.train_loss_threshold, dtype=dtype
         ),
@@ -588,26 +536,21 @@ def stochastic_open_economy_growth_nn_recursive(
     if verbose:
         print(
             f"attempt {attempt}: {stopping_reason} after {steps} steps "
-            f"(epoch {epochs_run}/{tolerance_set.num_epochs}, shock scale "
-            f"{float(solve_args.shock_scale):.3f}), "
+            f"(epoch {epochs_run}/{tolerance_set.num_epochs}), "
             f"train_loss={train_loss:.3e} ({solve_time:.2f}s)"
         )
     policy = nnx.merge(graphdef, theta_final, nondiff)
 
     # Training diagnostics use the batch the solution was returned on.
-    train_stage_parameters = p.replace(
-        sigma_z=p.sigma_z * solve_args.shock_scale,
-        sigma_r=p.sigma_r * solve_args.shock_scale,
-    )
     train_solution = simulate_train(
         sde,
         policy,
         solve_args.initial_states,
         solve_args.noise,
-        train_stage_parameters,
+        p,
         data_set,
     )
-    train_values = trajectory_values(policy, train_solution.xs, train_stage_parameters)
+    train_values = trajectory_values(policy, train_solution.xs, p)
     test_solution = simulate(
         sde,
         policy,
@@ -815,10 +758,6 @@ def stochastic_open_economy_growth_nn_recursive(
         "steps": steps,
         "attempts_run": int(result.multi_start.attempts_run),
         "epochs_run": epochs_run,
-        "shock_continuation_scales": tuple(
-            float(value) for value in np.asarray(shock_scales)
-        ),
-        "final_training_shock_scale": float(solve_args.shock_scale),
         "attempt": attempt,
         "final_damping": final_damping,
         "solve_time": solve_time,

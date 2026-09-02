@@ -114,8 +114,8 @@ per-directory READMEs.
   optimizer names them), `ridge_set: RidgeSettings` the RidgeLM extras
   (ridge, continuation, linear_solver), `cg_set: CGSettings` the CG knobs,
   `solver_set: UnoOptimizerSettings` the Uno/IPOPT options; `tolerance_set`
-  holds ex-post acceptance gates only (the epoch-recursive NN drivers also
-  keep their training-schedule fields there).
+  holds the two acceptance toggles and their thresholds (the epoch-recursive
+  NN drivers also keep their training-schedule fields there).
 - Every sequence-space driver represents paths in LEVELS (anchored
   representer: value = init + K_tilde @ alpha, the form the RKHS theory
   covers). The sequence-space drivers pin a fixed small ridge, except
@@ -140,9 +140,17 @@ per-directory READMEs.
   output scales like `delta * k_0` live in its Variables) and the kernel-recursive
   policy structs carrying `p` as a pytree field instead. The neoclassical
   `homothetic_representation` flag picks `HomotheticPolicyMLP`
-  (`i = delta * k * unit_softplus(h(log kappa))`) vs a general `StateMLP`;
-  acceptance is solver convergence only — Euler residuals, transversality,
-  and benchmark errors are reported, never gated.
+  (`i = delta * k * unit_softplus(h(log kappa))`) vs a general `StateMLP`.
+  Every recursive driver accepts on one predicate,
+  `(not gate_train or train_ok) and (not gate_test or test_ok)`, at every
+  decision point it has (epoch boundary, multi-start accept hook, ex post):
+  `train_ok` is the driver's training criterion (fresh-batch loss under
+  `train_loss_threshold`, the deterministic open economy's train-path
+  residual, LM status for the kernels), `test_ok` the held-out Euler errors
+  on the test batch under `test_euler_mean_abs` / `test_euler_max` (plus the
+  Ito-term bar in the stochastic open economy); the test batch rides in
+  `ResidualArgs` so the callbacks can simulate it. Transversality and
+  benchmark errors are reported, never gated.
 - The stochastic recursive NN drivers always train and write
   content-addressed policy `.npz` artifacts via `--policy_cache <dir>` (a
   pure save target); the kernel-recursive consumers read them via

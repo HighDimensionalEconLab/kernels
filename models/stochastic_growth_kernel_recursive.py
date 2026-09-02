@@ -68,9 +68,14 @@ class StateKernelSettings:
     metric_epsilon: float = 3e-5
 
 
+# Ex-post acceptance: gate_train requires the ridge LM to have converged,
+# gate_test the held-out Euler errors under the bars.
 @dataclass(frozen=True)
 class ToleranceSettings:
-    log_tvc_threshold: float = 0.0
+    gate_train: bool = True
+    gate_test: bool = True
+    test_euler_mean_abs: float = 5e-4
+    test_euler_max: float = 3e-2
 
 
 @struct.dataclass
@@ -390,12 +395,6 @@ def stochastic_growth_kernel_recursive(
         test_solution.ok[:, None, None], test_solution.xs, jnp.nan
     )
     test_values = trajectory_values(policy, test_log_states, p)
-    test_path_ok = bool(
-        jnp.all(test_solution.ok)
-        and jnp.all(jnp.isfinite(test_log_states))
-        and jnp.all(jnp.isfinite(test_values["c"]))
-        and jnp.min(test_values["c"]) > 0.0
-    )
     test_initial = np.asarray(test_initial_conditions)
     test_df = long_df(
         {"t": test_solution.ts, **test_values},
@@ -440,7 +439,6 @@ def stochastic_growth_kernel_recursive(
         p,
     )
     max_log_tvc = float(jnp.max(train_tvc))
-    transversality_ok = bool(max_log_tvc < tolerance_set.log_tvc_threshold)
 
     max_train_euler = float(jnp.max(jnp.abs(train_values["euler_residual"])))
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
@@ -469,11 +467,15 @@ def stochastic_growth_kernel_recursive(
         (grid_values["c"] - reference_grid_values["c"]) / reference_grid_values["c"]
     )
 
+    test_euler_mean_abs = float(jnp.mean(jnp.abs(test_values["euler_residual"])))
     rejection_reasons = []
-    if not solver_converged:
-        rejection_reasons.append("solver")
-    if not test_path_ok:
-        rejection_reasons.append("test_path")
+    if tolerance_set.gate_train and not solver_converged:
+        rejection_reasons.append("train")
+    if tolerance_set.gate_test and not (
+        test_euler_mean_abs <= tolerance_set.test_euler_mean_abs
+        and max_test_euler <= tolerance_set.test_euler_max
+    ):
+        rejection_reasons.append("test")
     results = {
         "parameters": p.to_dict(),
         "initial_conditions": {"z_0": z_0, "k_0": k_0},
@@ -508,7 +510,6 @@ def stochastic_growth_kernel_recursive(
             jnp.max(jnp.abs(test_values["diffusion_term"]))
         ),
         "max_log_tvc_residual": max_log_tvc,
-        "transversality_ok": transversality_ok,
         "min_test_c": float(jnp.min(test_values["c"])),
         "steps": steps,
         **acceptance_fields(rejection_reasons),

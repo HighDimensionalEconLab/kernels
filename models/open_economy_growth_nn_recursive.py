@@ -42,12 +42,16 @@ from models.utilities import (
 # residual or initialization.
 
 
-# Acceptance gates, CLI-reachable so a lower-precision caller can pass its
-# own bars.
+# Acceptance is one predicate, evaluated by the multi-start accept hook and
+# ex post: gate_train requires the max Euler residual on the training path
+# under train_residual, gate_test the max Euler residual on the diagnostic
+# path (T = diagnostic_T) under test_euler_max.
 @dataclass(frozen=True)
 class ToleranceSettings:
+    gate_train: bool = True
+    gate_test: bool = True
     train_residual: float = 1e-5
-    validation_residual: float = 5e-3
+    test_euler_max: float = 2e-5
 
 
 @dataclass(frozen=True)
@@ -77,7 +81,11 @@ class SequentialPolicySettings:
 class ResidualArgs:
     graphdef: nnx.GraphDef
     nondiff: nnx.State
+    train_residual: jax.Array
+    test_euler_max: jax.Array
     data_set: DataSettings = struct.field(pytree_node=False)
+    gate_train: bool = struct.field(pytree_node=False)
+    gate_test: bool = struct.field(pytree_node=False)
 
 
 def policy_values(policy, k, a, p):
@@ -210,6 +218,34 @@ def evaluate_path(policy, T, n_points, p):
     return evaluate_path_jit(policy, T, n_points - 1, p)
 
 
+def max_euler_residual(values):
+    return jnp.maximum(
+        jnp.max(jnp.abs(values["q_euler"])), jnp.max(jnp.abs(values["c_euler"]))
+    )
+
+
+# The acceptance predicate: (ok, train residual, test residual, train_ok,
+# test_ok). NaN residuals fail their comparison, so a diverged path is never
+# accepted.
+def accepted(theta, args, p):
+    policy = nnx.merge(args.graphdef, theta, args.nondiff)
+    data_set = args.data_set
+    train = max_euler_residual(
+        evaluate_path(policy, data_set.train_T, data_set.train_points, p)
+    )
+    test = max_euler_residual(
+        evaluate_path(policy, data_set.diagnostic_T, data_set.diagnostic_points, p)
+    )
+    train_ok = train <= args.train_residual
+    test_ok = test <= args.test_euler_max
+    ok = (train_ok | (not args.gate_train)) & (test_ok | (not args.gate_test))
+    return ok, train, test, train_ok, test_ok
+
+
+def accept_training(_, result):
+    return accepted(result.x, result.args, result.p)[0]
+
+
 def open_economy_growth_nn_recursive(
     alpha: float = CONSTANTS["alpha"],
     gamma: float = CONSTANTS["gamma"],
@@ -271,7 +307,11 @@ def open_economy_growth_nn_recursive(
     residual_args = ResidualArgs(
         graphdef=graphdef,
         nondiff=nondiff,
+        train_residual=jnp.asarray(tolerance_set.train_residual, dtype=dtype),
+        test_euler_max=jnp.asarray(tolerance_set.test_euler_max, dtype=dtype),
         data_set=data_set,
+        gate_train=tolerance_set.gate_train,
+        gate_test=tolerance_set.gate_test,
     )
 
     solver = LevenbergMarquardt(
@@ -286,10 +326,11 @@ def open_economy_growth_nn_recursive(
         key=multi_start_key,
         num_starts=lm_set.num_attempts,
         draw=DrawNNXModule(StateMLP, 1, 2, **policy_spec),
+        accept=accept_training,
     )
     solve_options = dict(
         max_steps=lm_set.max_steps,
-        atol=lm_set.atol,
+        atol=lm_set.atol if tolerance_set.gate_train else 0.0,
         max_steps_is_success=False,
     )
     timer = Stopwatch()
@@ -302,6 +343,19 @@ def open_economy_growth_nn_recursive(
     )
     solve_time = timer.elapsed(result)
     attempt = int(result.multi_start.attempt) + 1
+    solver_accepted = bool(result.multi_start.accepted)
+    _, train_residual, test_residual, train_ok, test_ok = accepted(
+        result.x, residual_args, p
+    )
+    max_train_residual = float(train_residual)
+    max_validation_residual = float(test_residual)
+    rejection_reasons = []
+    if tolerance_set.gate_train and not bool(train_ok):
+        rejection_reasons.append("train")
+    if tolerance_set.gate_test and not bool(test_ok):
+        rejection_reasons.append("test")
+    acceptance = acceptance_fields(rejection_reasons)
+    solution_accepted = acceptance["solution_accepted"]
     policy = nnx.merge(graphdef, result.x, nondiff)
 
     train_eval = evaluate_path(policy, data_set.train_T, data_set.train_points, p)
@@ -312,36 +366,6 @@ def open_economy_growth_nn_recursive(
     train_t = train_eval["t"]
     test_t = test_eval["t"]
     jax.block_until_ready((train_eval, test_eval, diagnostic_eval))
-
-    max_train_residual = max(
-        float(jnp.max(jnp.abs(train_eval["q_euler"]))),
-        float(jnp.max(jnp.abs(train_eval["c_euler"]))),
-    )
-    max_validation_residual = max(
-        float(jnp.max(jnp.abs(diagnostic_eval["q_euler"]))),
-        float(jnp.max(jnp.abs(diagnostic_eval["c_euler"]))),
-    )
-    finite_positive = bool(
-        all(
-            jnp.all(jnp.isfinite(values[name])) and jnp.min(values[name]) > 0.0
-            for values in (train_eval, test_eval, diagnostic_eval)
-            for name in ("k", "q", "c", "x")
-        )
-        and all(
-            jnp.all(jnp.isfinite(values[name]))
-            for values in (train_eval, test_eval, diagnostic_eval)
-            for name in ("a", "current_account", "q_euler", "c_euler")
-        )
-    )
-    rejection_reasons = []
-    if not finite_positive:
-        rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > tolerance_set.train_residual:
-        rejection_reasons.append("train_residual")
-    if max_validation_residual > tolerance_set.validation_residual:
-        rejection_reasons.append("validation_residual")
-    acceptance = acceptance_fields(rejection_reasons)
-    solution_accepted = acceptance["solution_accepted"]
 
     benchmark, benchmark_diagnostics = open_economy_growth_benchmark(p)
     benchmark_values = benchmark(np.asarray(test_t))
@@ -465,6 +489,7 @@ def open_economy_growth_nn_recursive(
         "attempts_run": int(result.multi_start.attempts_run),
         "solve_time": solve_time,
         "solve_time_success": solve_time if solution_accepted else np.nan,
+        "solver_accepted": solver_accepted,
         "total_params": int(theta_final.size),
         "unknown_count": int(theta_final.size),
         "num_training_trajectories": 1,

@@ -79,9 +79,14 @@ class StateKernelSettings:
     linear_mean: bool = False
 
 
+# Ex-post acceptance: gate_train requires the ridge LM to have converged,
+# gate_test the held-out Euler errors under the bars.
 @dataclass(frozen=True)
 class ToleranceSettings:
-    log_tvc_threshold: float = 0.0
+    gate_train: bool = True
+    gate_test: bool = True
+    test_euler_mean_abs: float = 2e-4
+    test_euler_max: float = 1e-3
 
 
 @struct.dataclass
@@ -398,15 +403,20 @@ def neoclassical_growth_kernel_recursive(
         p,
     )
     max_log_tvc_residual = float(jnp.max(train_tvc))
-    transversality_ok = bool(max_log_tvc_residual < tolerance_set.log_tvc_threshold)
 
     max_train_euler = float(jnp.max(jnp.abs(train_values["euler_residual"])))
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
     test_trajectory_euler = jnp.mean(jnp.abs(test_values["euler_residual"]), axis=1)
 
+    test_euler_mean_abs = float(jnp.mean(jnp.abs(test_values["euler_residual"])))
     rejection_reasons = []
-    if not solver_converged:
-        rejection_reasons.append("solver")
+    if tolerance_set.gate_train and not solver_converged:
+        rejection_reasons.append("train")
+    if tolerance_set.gate_test and not (
+        test_euler_mean_abs <= tolerance_set.test_euler_mean_abs
+        and max_test_euler <= tolerance_set.test_euler_max
+    ):
+        rejection_reasons.append("test")
     results = {
         "parameters": p.to_dict(),
         "initial_conditions": {"z_0": z_0, "k_0": k_0},
@@ -434,7 +444,7 @@ def neoclassical_growth_kernel_recursive(
         "train_loss": train_loss,
         "max_train_euler": max_train_euler,
         "max_test_euler": max_test_euler,
-        "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_values["euler_residual"]))),
+        "test_euler_mean_abs": test_euler_mean_abs,
         "test_trajectory_euler_mean_abs_p50": float(
             jnp.quantile(test_trajectory_euler, 0.5)
         ),
@@ -443,7 +453,6 @@ def neoclassical_growth_kernel_recursive(
         ),
         "test_trajectory_euler_mean_abs_max": float(jnp.max(test_trajectory_euler)),
         "max_log_tvc_residual": max_log_tvc_residual,
-        "transversality_ok": transversality_ok,
         "min_test_c": float(jnp.min(test_values["c"])),
         **error_fields,
         "steps": steps,

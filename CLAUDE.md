@@ -153,8 +153,8 @@ per-directory READMEs.
 - x64 + `jax_default_matmul_precision="highest"` set by every entrypoint
   before any array is created.
 - Scales multiply: `input_scale` and `output_scale` on `TimeMLP` and
-  `StateMLP` are multipliers (sequence-space `input_scale = 1 / max(train_T,
-  1)`), as are every `*_scale` setting.
+  `StateMLP` are multipliers (sequence-space `input_scale = 0.01`, a
+  literal — never derived from a horizon), as are every `*_scale` setting.
 - Numeric settings are used verbatim — never clamped, floored, or defensively
   adjusted in code; guidance (e.g. keep `train_residual` above ~8x machine
   epsilon for the run dtype) rides as comments on the field defaults.

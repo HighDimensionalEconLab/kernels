@@ -299,15 +299,10 @@ def stochastic_open_economy_growth_nn_recursive(
     train_scales = jnp.sqrt(jnp.asarray(train_variances, dtype=dtype))
     test_scales = jnp.sqrt(jnp.asarray(test_variances, dtype=dtype))
     investment_anchor = parameters.delta * k_0
-    # Input scales are reciprocal standard deviations; the asset unit is an
-    # O(output) flow accumulated over the training horizon at a
-    # current-account-to-output ratio of 0.3 (a finer unit costs LM steps).
+    # Input scales are reciprocal standard deviations; the asset unit is
+    # 20 x output (a finer unit costs LM steps).
     z_sd = max(math.sqrt(z_ergodic_variance), math.sqrt(train_variances[0]))
-    asset_sd = max(
-        math.sqrt(train_variances[2]),
-        0.3 * data_set.train_T * output_scale,
-        output_scale,
-    )
+    asset_sd = max(math.sqrt(train_variances[2]), 20.0 * output_scale)
     rate_sd = max(math.sqrt(rate_ergodic_variance), math.sqrt(train_variances[3]))
     # The investment local_slope gives both outputs an O(output_scale) Jacobian.
     policy_spec = dict(

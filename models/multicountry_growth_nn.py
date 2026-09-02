@@ -216,7 +216,6 @@ def multicountry_growth_nn(
     mu_scale = tuple(float(c_scale ** (-gamma)) for gamma in gammas)
     q_scale = 1.0 / eta
     rate_scale = r
-    input_scale = 1.0 / max(float(train_t[-1]), 1.0)
 
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     # Assets are signed, so their head block scales linearly; the other
@@ -240,7 +239,7 @@ def multicountry_growth_nn(
         depth=nn_set.depth,
         activation=ACTIVATIONS[nn_set.hidden_activation],
         final_activation=final_activation,
-        input_scale=input_scale,
+        input_scale=0.01,
         output_scale=output_scale,
         dtype=dtype,
         rngs=nnx.Rngs(init_key),
@@ -274,7 +273,7 @@ def multicountry_growth_nn(
             depth=nn_set.depth,
             activation=ACTIVATIONS[nn_set.hidden_activation],
             final_activation=final_activation,
-            input_scale=input_scale,
+            input_scale=0.01,
             output_scale=output_scale,
             dtype=dtype,
         ),

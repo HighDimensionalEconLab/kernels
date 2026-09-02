@@ -78,8 +78,8 @@ class ToleranceSettings:
     epoch_early_stopping: bool = True
     gate_train: bool = True
     gate_test: bool = True
-    test_euler_mean_abs: float = 5e-6
-    test_euler_max: float = 1e-4
+    test_euler_mean_abs: float = 2e-6
+    test_euler_max: float = 4e-5
 
 
 @dataclass(frozen=True)

@@ -51,7 +51,7 @@ class ToleranceSettings:
     gate_train: bool = True
     gate_test: bool = True
     train_residual: float = 1e-5
-    test_euler_max: float = 2e-5
+    test_euler_max: float = 5e-6
 
 
 @dataclass(frozen=True)

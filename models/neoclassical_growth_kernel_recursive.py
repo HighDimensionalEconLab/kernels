@@ -85,8 +85,8 @@ class StateKernelSettings:
 class ToleranceSettings:
     gate_train: bool = True
     gate_test: bool = True
-    test_euler_mean_abs: float = 2e-4
-    test_euler_max: float = 1e-3
+    test_euler_mean_abs: float = 5e-5
+    test_euler_max: float = 4e-4
 
 
 @struct.dataclass

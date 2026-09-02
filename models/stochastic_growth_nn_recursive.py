@@ -65,8 +65,8 @@ class ToleranceSettings:
     epoch_early_stopping: bool = True
     gate_train: bool = True
     gate_test: bool = True
-    test_euler_mean_abs: float = 2e-6
-    test_euler_max: float = 5e-4
+    test_euler_mean_abs: float = 7e-7
+    test_euler_max: float = 2e-4
 
 
 # Training ICs, the noise realization, and keys live in args (the epoch

@@ -57,8 +57,8 @@ from models.utilities import (
 class ToleranceSettings:
     gate_train: bool = True
     gate_test: bool = True
-    test_euler_mean_abs: float = 1e-2
-    test_euler_max: float = 3e-1
+    test_euler_mean_abs: float = 6e-3
+    test_euler_max: float = 4e-1
 
 
 # Kernel geometry lives in the NN's normalized coordinates, so one

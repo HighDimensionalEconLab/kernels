@@ -149,3 +149,25 @@ loss bars unchanged. Locally, five seeds: closed held-out Euler mean
 165 s); open 5.9e-6 / 1.0e-5 at 1.2 s (was 4.2e-6 / 5.0e-6 at 23 to
 34 s). The kernel consumers distilled from the new artifacts reproduce
 their previous held-out errors to three digits.
+
+Acceptance bars (2026-09-02): each recursive driver's held-out bar is 3
+x the worst accepted seed over its experiments under the defaults above,
+rounded up to one significant figure (10 x wherever the 3 x arm
+rejected; none did). The mean bars in the stochastic open economy apply
+per output, so the worst is the larger of the c and q means.
+
+| driver | metric | worst | bar |
+| --- | --- | --- | --- |
+| neoclassical NN | test mean / max | 4.2e-7 / 1.1e-5 | 2e-6 / 4e-5 |
+| closed NN | test mean / max | 2.1e-7 / 6.0e-5 | 7e-7 / 2e-4 |
+| open NN | test mean / max / diffusion max | 1.4e-5 / 5.8e-4 / 9.6e-4 | 5e-5 / 2e-3 / 3e-3 |
+| deterministic open NN | test max | 1.6e-6 | 5e-6 |
+| neoclassical kernel | test mean / max | 1.6e-5 / 1.3e-4 | 5e-5 / 4e-4 |
+| closed kernel | test mean / max | 5.1e-5 / 3.2e-3 | 2e-4 / 1e-2 |
+| open kernel | test mean / max | 1.8e-3 / 1.2e-1 | 6e-3 / 4e-1 |
+
+Closed NN `test_only` arm (`gate_train=False`, five seeds): at these
+bars 5/5 accept, epoch early stopping ends three seeds after one epoch
+(125 steps, 1.6 s) and the rest by 375 steps, held-out mean 3.8e-7
+median / 5.6e-7 worst, max 8.1e-5 / 1.5e-4; the gated arm runs 375 to
+500 steps (4.7 to 7.5 s) for 7.3e-8 / 2.1e-7.

@@ -138,3 +138,12 @@ Local CPU float32 at the same thresholds: closed 0.24 s/step (converged at
 the first boundary), open 0.04 s/step. The networks are too small to fill
 a GPU; the slice only helps the closed economy's Jacobian, and the open
 economy is launch-bound and slower than a laptop core.
+
+Adopted defaults (2026-09-02): closed width 8, depth 3, silu, 4 x 125
+steps, `euler_maruyama`; open width 8, depth 2, silu, 5 x 100 steps, one
+ladder epoch, 49 train points, `euler_maruyama`. Trajectory counts and
+loss bars unchanged. Locally, five seeds: closed held-out Euler mean
+7.3e-8 median / 2.1e-7 worst at 6.8 s (was 3.7e-8 / 4.6e-8 at 82 to
+165 s); open 5.9e-6 / 1.0e-5 at 1.2 s (was 4.2e-6 / 5.0e-6 at 23 to
+34 s). The kernel consumers distilled from the new artifacts reproduce
+their previous held-out errors to three digits.

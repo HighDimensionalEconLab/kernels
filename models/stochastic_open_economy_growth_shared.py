@@ -74,7 +74,7 @@ class StructuralParameters(ParameterPyTree):
 class DataSettings:
     # Fixed-step SDE simulation on the integrator's own states; train_T covers
     # ~8 half-lives of the capital transition. Test/tvc dt is 1.0.
-    train_points: int = 97
+    train_points: int = 49
     test_points: int = 71
     tvc_points: int = 161
     train_T: float = 60.0
@@ -104,9 +104,9 @@ class InitialConditionSettings:
 
 @dataclass(frozen=True)
 class SequentialPolicySettings:
-    width: int = 16
-    depth: int = 3
-    hidden_activation: str = "gelu"
+    width: int = 8
+    depth: int = 2
+    hidden_activation: str = "silu"
     head_init_scale: float = 1e-3
 
 

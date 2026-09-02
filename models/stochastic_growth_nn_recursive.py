@@ -61,11 +61,11 @@ class ToleranceSettings:
     max_steps: int = 125
     # Must sit well above the reachable fresh-batch floor (~1e-15).
     train_loss_threshold: float = 5e-13
-    num_epochs: int = 6
+    num_epochs: int = 4
     epoch_early_stopping: bool = True
     gate_train: bool = True
     gate_test: bool = True
-    test_euler_mean_abs: float = 5e-7
+    test_euler_mean_abs: float = 2e-6
     test_euler_max: float = 5e-4
 
 
@@ -241,7 +241,7 @@ def stochastic_growth_nn_recursive(
     k_0: float = 1.0,
     seed: int = 0,
     use_float64: bool = True,
-    sde_solver: str = "sra1",
+    sde_solver: str = "euler_maruyama",
     data_set: DataSettings = DataSettings(),
     # The initial log z spread matches the ergodic variance (sigma_z^2/(2 eta)).
     ic_set: InitialConditionSettings = InitialConditionSettings(

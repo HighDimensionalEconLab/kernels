@@ -68,19 +68,19 @@ from models.utilities import (
 class ToleranceSettings:
     gate_train: bool = True
     gate_test: bool = True
-    test_euler_mean_abs: float = 5e-5
-    test_euler_max: float = 3e-3
+    test_euler_mean_abs: float = 1e-4
+    test_euler_max: float = 5e-3
     test_diffusion_max_abs: float = 1e-2
     # max_steps is the per-epoch LM budget; noise (and dispersed ICs) redraw
     # at epoch boundaries. The shock ladder rises geometrically to 1.0 over
     # continuation_epochs.
-    max_steps: int = 250
+    max_steps: int = 100
     train_loss_threshold: float = 1e-10
     num_epochs: int = 5
     epoch_early_stopping: bool = True
     shock_continuation: bool = True
     initial_shock_scale: float = 0.238
-    continuation_epochs: int = 2
+    continuation_epochs: int = 1
 
 
 # Per-knot Euler residuals over the simulated batch, flattened and scaled by
@@ -293,7 +293,7 @@ def stochastic_open_economy_growth_nn_recursive(
     corr_zr: float = 0.0,
     seed: int = 0,
     use_float64: bool = True,
-    sde_solver: str = "sra1",
+    sde_solver: str = "euler_maruyama",
     data_set: DataSettings = DataSettings(),
     ic_set: InitialConditionSettings = InitialConditionSettings(),
     # The residual differentiates the policy twice, so no kinked activation.

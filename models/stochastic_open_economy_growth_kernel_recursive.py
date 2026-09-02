@@ -91,7 +91,7 @@ class ResidualArgs:
     train_states: jax.Array
     gram: jax.Array
     center: jax.Array
-    scale: jax.Array
+    input_scale: jax.Array
     output_scale: jax.Array
     kernel_set: StateKernelSettings = struct.field(pytree_node=False)
     final_activation: UnitSoftplusWhere = struct.field(pytree_node=False)
@@ -110,8 +110,10 @@ def state_lengthscales(kernel_set):
 def build_residual_args(train_states, kernel_set, reference_policy):
     flat_states = train_states.reshape(-1, 4)
     center = reference_policy.center[...]
-    scale = reference_policy.scale[...]
-    centers = jax.vmap(lambda state: normalize_state(state, center, scale))(flat_states)
+    input_scale = reference_policy.input_scale[...]
+    centers = jax.vmap(lambda state: normalize_state(state, center, input_scale))(
+        flat_states
+    )
     gram = state_features(
         kernel_set.state_kernel,
         centers,
@@ -124,7 +126,7 @@ def build_residual_args(train_states, kernel_set, reference_policy):
         train_states=flat_states,
         gram=gram,
         center=center,
-        scale=scale,
+        input_scale=input_scale,
         output_scale=reference_policy.output_scale[...],
         kernel_set=kernel_set,
         final_activation=reference_policy.final_activation,
@@ -142,7 +144,7 @@ class KernelSequentialPolicy:
 
     def __call__(self, state):
         kernel_set = self.args.kernel_set
-        x = normalize_state(state, self.args.center, self.args.scale)
+        x = normalize_state(state, self.args.center, self.args.input_scale)
         features = state_features(
             kernel_set.state_kernel,
             x,

@@ -119,7 +119,7 @@ class TimeMLP(nnx.Module):
 
     def __call__(self, t):
         t = jnp.asarray(t)
-        h = (t / self.input_scale)[..., None]
+        h = (t * self.input_scale)[..., None]
         for layer in self.layers:
             h = self.activation(layer(h))
         out = self.head(h)
@@ -132,46 +132,33 @@ class TimeMLP(nnx.Module):
         return out
 
 
-def normalize_state(state, center, scale):
-    return (state - center) / scale
-
-
-# Per-input multiplier on the LeCun variance of the first-layer kernel rows:
-# ones is plain LeCun, a smaller entry damps the draw's sensitivity to that
-# input, zero starts the row at exactly zero (not frozen).
-@dataclass(frozen=True)  # value-hashable: shares DrawNNXModule/jit compilations
-class ScaledLecunInit:
-    variance_scale: tuple[float, ...]
-
-    def __call__(self, key, shape, dtype):
-        return (
-            nnx.initializers.lecun_normal()(key, shape, dtype)
-            * jnp.sqrt(jnp.asarray(self.variance_scale, dtype=dtype))[:, None]
-        )
+def normalize_state(state, center, input_scale):
+    return (state - center) * input_scale
 
 
 # p-free MLP policy map state (..., in_features) -> (..., out_features):
-# affine normalization, trunk, one Linear head per (out_width, kernel_std)
-# entry (None kernel_std draws a zeros kernel) concatenated, the optional
-# final_activation (unit_softplus, or UnitSoftplusWhere for mixed
-# signed/positive heads), then the output_scale multiply. Positive states
-# enter in logs, taken by the caller. A scalar state broadcasts against the
-# (in_features,) normalization for in_features = 1. Every constructor kwarg
-# is hashable so DrawNNXModule specs stay value-hashable.
+# affine normalization input_scale * (state - center), trunk, one near-zero
+# Linear head, the optional final_activation (unit_softplus, or
+# UnitSoftplusWhere for mixed signed/positive outputs), then the
+# output_scale multiply. Positive states enter in logs, taken by the
+# caller; input_scale is the reciprocal standard deviation of each
+# coordinate. A scalar state broadcasts against the (in_features,)
+# normalization for in_features = 1. Every constructor kwarg is hashable so
+# DrawNNXModule specs stay value-hashable.
 class StateMLP(nnx.Module):
     def __init__(
         self,
         in_features,
+        out_features,
         *,
         width,
         depth,
         activation,
-        heads,
+        head_kernel_std,
         final_activation=None,
         center=None,
-        scale=None,
+        input_scale=None,
         output_scale,
-        input_variance_scale=None,
         dtype,
         rngs,
     ):
@@ -185,55 +172,34 @@ class StateMLP(nnx.Module):
             if center is None
             else jnp.asarray(center, dtype=dtype)
         )
-        self.scale = nnx.Variable(
+        self.input_scale = nnx.Variable(
             jnp.ones(in_features, dtype=dtype)
-            if scale is None
-            else jnp.asarray(scale, dtype=dtype)
+            if input_scale is None
+            else jnp.asarray(input_scale, dtype=dtype)
         )
         self.output_scale = nnx.Variable(jnp.asarray(output_scale, dtype=dtype))
         layers = [
-            nnx.Linear(
-                in_features,
-                width,
-                **(
-                    {}
-                    if input_variance_scale is None
-                    else {"kernel_init": ScaledLecunInit(input_variance_scale)}
-                ),
-                dtype=dtype,
-                param_dtype=dtype,
-                rngs=rngs,
-            )
+            nnx.Linear(in_features, width, dtype=dtype, param_dtype=dtype, rngs=rngs)
         ]
         for _ in range(depth - 1):
             layers.append(
                 nnx.Linear(width, width, dtype=dtype, param_dtype=dtype, rngs=rngs)
             )
         self.layers = nnx.List(layers)
-        self.heads = nnx.List(
-            [
-                nnx.Linear(
-                    width,
-                    out_width,
-                    kernel_init=(
-                        nnx.initializers.zeros_init()
-                        if kernel_std is None
-                        else nnx.initializers.normal(kernel_std)
-                    ),
-                    bias_init=nnx.initializers.zeros_init(),
-                    dtype=dtype,
-                    param_dtype=dtype,
-                    rngs=rngs,
-                )
-                for out_width, kernel_std in heads
-            ]
+        self.head = nnx.Linear(
+            width,
+            out_features,
+            kernel_init=nnx.initializers.normal(head_kernel_std),
+            dtype=dtype,
+            param_dtype=dtype,
+            rngs=rngs,
         )
 
     def __call__(self, state):
-        h = normalize_state(state, self.center[...], self.scale[...])
+        h = normalize_state(state, self.center[...], self.input_scale[...])
         for layer in self.layers:
             h = self.activation(layer(h))
-        out = jnp.concatenate([head(h) for head in self.heads], axis=-1)
+        out = self.head(h)
         if self.final_activation is not None:
             out = self.final_activation(out)
         return self.output_scale[...] * out

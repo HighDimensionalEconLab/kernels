@@ -216,7 +216,7 @@ def multicountry_growth_nn(
     mu_scale = tuple(float(c_scale ** (-gamma)) for gamma in gammas)
     q_scale = 1.0 / eta
     rate_scale = r
-    input_scale = max(float(train_t[-1]), 1.0)
+    input_scale = 1.0 / max(float(train_t[-1]), 1.0)
 
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     # Assets are signed, so their head block scales linearly; the other

@@ -255,19 +255,20 @@ def stochastic_growth_nn_recursive(
 
     fit_timer = Stopwatch()
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
-    # Unit scales: mean reversion in z fixes the coordinate's own scale.
+    # Unit input scales: log z spans O(0.1) at its ergodic spread, and a
+    # network that is that insensitive to z at the draw trains best.
     policy_spec = dict(
         width=nn_set.mlp_width,
         depth=nn_set.mlp_depth,
         activation=ACTIVATIONS[nn_set.hidden_activation],
-        heads=((1, nn_set.head_init_scale),),
+        head_kernel_std=nn_set.head_init_scale,
         final_activation=unit_softplus,
         center=(math.log(z_bar), math.log(k_0)),
         output_scale=(delta * k_0,),
         dtype=dtype,
     )
     graphdef, _, nondiff = nnx.split(
-        StateMLP(2, rngs=nnx.Rngs(0), **policy_spec),
+        StateMLP(2, 1, rngs=nnx.Rngs(0), **policy_spec),
         nnx.Param,
         ...,
     )
@@ -349,7 +350,7 @@ def stochastic_growth_nn_recursive(
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
     _, theta_0, _ = nnx.split(
-        StateMLP(2, rngs=nnx.Rngs(init_key), **policy_spec),
+        StateMLP(2, 1, rngs=nnx.Rngs(init_key), **policy_spec),
         nnx.Param,
         ...,
     )
@@ -377,7 +378,7 @@ def stochastic_growth_nn_recursive(
     multi_start = MultiStart(
         key=multi_start_key,
         num_starts=lm_set.num_attempts,
-        draw=DrawNNXModule(StateMLP, 2, **policy_spec),
+        draw=DrawNNXModule(StateMLP, 2, 1, **policy_spec),
         reset_args=ResetEpochStream(),
     )
     solve_options = dict(

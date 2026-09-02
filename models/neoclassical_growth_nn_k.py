@@ -151,7 +151,7 @@ def neoclassical_growth_nn_k(
     )
 
     t_train = make_train_t_grid(data_set, dtype)
-    input_scale = max(float(data_set.train_T), 1.0)
+    input_scale = 1.0 / max(float(data_set.train_T), 1.0)
     k_scale = float(k_0)
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     # The module's trend Param: the init guess when learned, the true rate

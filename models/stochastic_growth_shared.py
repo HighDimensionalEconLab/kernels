@@ -350,10 +350,11 @@ def make_investment_policy(meta, dtype):
     settings = InvestmentPolicySettings(**meta["settings"])
     return StateMLP(
         2,
+        1,
         width=settings.mlp_width,
         depth=settings.mlp_depth,
         activation=ACTIVATIONS[settings.hidden_activation],
-        heads=((1, settings.head_init_scale),),
+        head_kernel_std=settings.head_init_scale,
         final_activation=unit_softplus,
         output_scale=(1.0,),
         dtype=dtype,

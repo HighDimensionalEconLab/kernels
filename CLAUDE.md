@@ -52,16 +52,18 @@ per-directory READMEs.
   `g`); the recursive policy pieces — the generic `StateMLP` map
   state -> (..., out_features) (states arrive in the model's natural
   coordinates, logs of positive states taken by the caller;
-  `normalize_state` affine normalization, trunk, one near-zero Linear head
-  per `(out_width, kernel_std)` entry — `None` draws a zeros kernel —
-  optional static `final_activation` (bare `unit_softplus`, or
+  `normalize_state` affine normalization `input_scale * (state - center)`
+  — unit `input_scale` on the closed-economy log states, the reciprocal
+  standard deviation per axis in the stochastic open economy, whose kernel
+  consumer inherits these coordinates — trunk, one near-zero Linear head
+  at `head_kernel_std`, optional static
+  `final_activation` (bare `unit_softplus`, or
   `UnitSoftplusWhere(local_slope=...)` for mixed heads — one entry per
   output, `None` on the signed slots for a linear pass-through, `1.0` for a
   unit slope, and `flow_unit / start_level` = `1/delta` on the open-economy
   investment slot so every head carries an O(flow-unit) Jacobian at the
-  draw), then the `output_scale` Variable multiply, with the optional
-  `ScaledLecunInit` per-input multiplier on the first layer's LeCun row
-  variances; normalization and output scales are the non-Param Variables)
+  draw), then the `output_scale` Variable multiply; normalization and
+  output scales are the non-Param Variables)
   and the hardcoded `HomotheticPolicyMLP`, with
   `normalize_state`/`UnitSoftplusWhere` also imported by the
   stochastic-open-economy kernel policy; plus `unit_softplus`/`ACTIVATIONS`,
@@ -150,6 +152,9 @@ per-directory READMEs.
 
 - x64 + `jax_default_matmul_precision="highest"` set by every entrypoint
   before any array is created.
+- Scales multiply: `input_scale` and `output_scale` on `TimeMLP` and
+  `StateMLP` are multipliers (sequence-space `input_scale = 1 / max(train_T,
+  1)`), as are every `*_scale` setting.
 - Numeric settings are used verbatim — never clamped, floored, or defensively
   adjusted in code; guidance (e.g. keep `train_residual` above ~8x machine
   epsilon for the run dtype) rides as comments on the field defaults.

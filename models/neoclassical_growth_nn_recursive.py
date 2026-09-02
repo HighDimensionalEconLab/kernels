@@ -288,12 +288,12 @@ def neoclassical_growth_nn_recursive(
             dtype=dtype,
         )
     else:
-        policy_cls, policy_args = StateMLP, (2,)
+        policy_cls, policy_args = StateMLP, (2, 1)
         policy_spec = dict(
             width=nn_set.mlp_width,
             depth=nn_set.mlp_depth,
             activation=ACTIVATIONS[nn_set.hidden_activation],
-            heads=((1, nn_set.head_init_scale),),
+            head_kernel_std=nn_set.head_init_scale,
             final_activation=unit_softplus,
             center=(math.log(z_0), math.log(k_0)),
             output_scale=(delta * k_0,),

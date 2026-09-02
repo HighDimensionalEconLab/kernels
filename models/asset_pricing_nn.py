@@ -104,7 +104,7 @@ def asset_pricing_nn(
     dtype = jnp.float64 if use_float64 else jnp.float32
     train_t = make_train_t_grid(data_set, dtype)
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
-    input_scale = max(float(data_set.train_T), 1.0)
+    input_scale = 1.0 / max(float(data_set.train_T), 1.0)
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     model = TimeMLP(
         1,

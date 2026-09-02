@@ -70,6 +70,7 @@ class SequentialPolicySettings:
     width: int = 32
     depth: int = 3
     hidden_activation: str = "gelu"
+    head_init_scale: float = 1e-3
 
 
 @struct.dataclass
@@ -254,9 +255,9 @@ def open_economy_growth_nn_recursive(
         width=nn_set.width,
         depth=nn_set.depth,
         activation=ACTIVATIONS[nn_set.hidden_activation],
-        heads=((2, 1e-3),),
+        head_kernel_std=nn_set.head_init_scale,
         # Investment starts at replacement investment delta * k_0; the
-        # local_slope gives both heads the same O(initial_output) Jacobian.
+        # local_slope gives both outputs the same O(initial_output) Jacobian.
         final_activation=UnitSoftplusWhere(
             local_slope=(initial_output / (delta * k_0), None)
         ),
@@ -265,7 +266,7 @@ def open_economy_growth_nn_recursive(
         dtype=dtype,
     )
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
-    model = StateMLP(1, rngs=nnx.Rngs(init_key), **policy_spec)
+    model = StateMLP(1, 2, rngs=nnx.Rngs(init_key), **policy_spec)
     graphdef, theta_0, nondiff = nnx.split(model, nnx.Param, ...)
     residual_args = ResidualArgs(
         graphdef=graphdef,
@@ -284,7 +285,7 @@ def open_economy_growth_nn_recursive(
     multi_start = MultiStart(
         key=multi_start_key,
         num_starts=lm_set.num_attempts,
-        draw=DrawNNXModule(StateMLP, 1, **policy_spec),
+        draw=DrawNNXModule(StateMLP, 1, 2, **policy_spec),
     )
     solve_options = dict(
         max_steps=lm_set.max_steps,

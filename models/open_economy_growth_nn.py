@@ -153,7 +153,7 @@ def open_economy_growth_nn(
     q_scale = 1.0 / float(eta)
     c_scale = float(k_0**alpha - delta * k_0)
     mu_scale = float(c_scale ** (-gamma))
-    input_scale = max(float(train_t[-1]), 1.0)
+    input_scale = 1.0 / max(float(train_t[-1]), 1.0)
 
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     # Assets are signed, so the a head output scales linearly; the other

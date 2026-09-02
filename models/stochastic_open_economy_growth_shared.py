@@ -107,12 +107,7 @@ class SequentialPolicySettings:
     width: int = 16
     depth: int = 3
     hidden_activation: str = "gelu"
-    investment_head_init_scale: float = 1e-3
-    # Per-input (log z, log k, a, rate_gap) multiplier on the LeCun variance
-    # of the first-layer kernel rows; ones is plain LeCun. The asset row
-    # starts damped: assets are the one axis with no initial-condition
-    # dispersion, and a full-variance draw there costs LM steps.
-    input_variance_scale: tuple[float, ...] = (1.0, 1.0, 0.1, 1.0)
+    head_init_scale: float = 1e-3
 
 
 def state_levels(state, p):
@@ -440,10 +435,11 @@ def make_sequential_policy(meta, dtype):
     structural = meta["structural"]
     return StateMLP(
         4,
+        2,
         width=settings.width,
         depth=settings.depth,
         activation=ACTIVATIONS[settings.hidden_activation],
-        heads=((1, settings.investment_head_init_scale), (1, None)),
+        head_kernel_std=settings.head_init_scale,
         final_activation=UnitSoftplusWhere(
             local_slope=(
                 structural["output_scale"]

@@ -299,33 +299,28 @@ def stochastic_open_economy_growth_nn_recursive(
     train_scales = jnp.sqrt(jnp.asarray(train_variances, dtype=dtype))
     test_scales = jnp.sqrt(jnp.asarray(test_variances, dtype=dtype))
     investment_anchor = parameters.delta * k_0
-    # The zeros CA kernel keeps its head exactly at zero at the draw; the
-    # investment local_slope gives both heads the same O(output_scale)
-    # Jacobian.
+    # Input scales are reciprocal standard deviations; the asset unit is an
+    # O(output) flow accumulated over the training horizon at a
+    # current-account-to-output ratio of 0.3 (a finer unit costs LM steps).
+    z_sd = max(math.sqrt(z_ergodic_variance), math.sqrt(train_variances[0]))
+    asset_sd = max(
+        math.sqrt(train_variances[2]),
+        0.3 * data_set.train_T * output_scale,
+        output_scale,
+    )
+    rate_sd = max(math.sqrt(rate_ergodic_variance), math.sqrt(train_variances[3]))
+    # The investment local_slope gives both outputs an O(output_scale) Jacobian.
     policy_spec = dict(
         width=nn_set.width,
         depth=nn_set.depth,
         activation=ACTIVATIONS[nn_set.hidden_activation],
-        heads=((1, nn_set.investment_head_init_scale), (1, None)),
+        head_kernel_std=nn_set.head_init_scale,
         final_activation=UnitSoftplusWhere(
             local_slope=(output_scale / investment_anchor, None)
         ),
         center=(math.log(z_bar), math.log(k_0), a_0, 0.0),
-        # Asset scale: assets integrate an O(output_scale) flow over the
-        # training horizon at an assumed current-account-to-output ratio of
-        # order 0.1, floored at output_scale.
-        scale=(
-            max(math.sqrt(z_ergodic_variance), math.sqrt(train_variances[0])),
-            1.0,
-            max(
-                math.sqrt(train_variances[2]),
-                0.1 * data_set.train_T * output_scale,
-                output_scale,
-            ),
-            max(math.sqrt(rate_ergodic_variance), math.sqrt(train_variances[3])),
-        ),
+        input_scale=(1.0 / z_sd, 1.0, 1.0 / asset_sd, 1.0 / rate_sd),
         output_scale=(investment_anchor, output_scale),
-        input_variance_scale=nn_set.input_variance_scale,
         dtype=dtype,
     )
     p = StructuralParameters.create(
@@ -397,7 +392,7 @@ def stochastic_open_economy_growth_nn_recursive(
 
     fit_timer = Stopwatch()
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
-    initial_model = StateMLP(4, rngs=nnx.Rngs(init_key), **policy_spec)
+    initial_model = StateMLP(4, 2, rngs=nnx.Rngs(init_key), **policy_spec)
     graphdef, theta_0, nondiff = nnx.split(initial_model, nnx.Param, ...)
     # fold_in(train_ic_key, 1) is the training noise stream; the kernel
     # consumer regenerates this exact stream to rebuild the frozen design.
@@ -503,7 +498,7 @@ def stochastic_open_economy_growth_nn_recursive(
         multi_start=MultiStart(
             key=multi_start_key,
             num_starts=lm_set.num_attempts,
-            draw=DrawNNXModule(StateMLP, 4, **policy_spec),
+            draw=DrawNNXModule(StateMLP, 4, 2, **policy_spec),
             reset_args=ResetEpochStream(),
             accept=accept_training,
         ),

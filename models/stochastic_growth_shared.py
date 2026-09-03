@@ -10,7 +10,7 @@ import numpy as np
 from flax import nnx
 from tinydiffeq import SaveAt, solve_sde
 
-from models.neural_networks import ACTIVATIONS, StateMLP, unit_softplus
+from models.neural_networks import ACTIVATIONS, PolicySettings, StateMLP, unit_softplus
 from models.utilities import ParameterPyTree
 
 # Stochastic neoclassical growth on the state (log z, log k): OU log-TFP
@@ -334,24 +334,16 @@ def growth_initial_conditions(z_0, k_0, ic_set, dtype):
     )
 
 
-@dataclass(frozen=True)
-class InvestmentPolicySettings:
-    mlp_width: int = 16
-    mlp_depth: int = 2
-    hidden_activation: str = "silu"
-    head_init_scale: float = 1e-3
-
-
 # The load template spells out the architecture and the output map from
 # meta; only the normalization and output-scale Variables ride in the
 # artifact's nondiff block and overwrite the placeholder defaults.
 def make_investment_policy(meta, dtype):
-    settings = InvestmentPolicySettings(**meta["settings"])
+    settings = PolicySettings(**meta["settings"])
     return StateMLP(
         2,
         1,
-        width=settings.mlp_width,
-        depth=settings.mlp_depth,
+        width=settings.width,
+        depth=settings.depth,
         activation=ACTIVATIONS[settings.hidden_activation],
         head_kernel_std=settings.head_init_scale,
         final_activation=unit_softplus,

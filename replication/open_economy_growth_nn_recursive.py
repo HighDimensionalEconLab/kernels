@@ -13,6 +13,24 @@ from replication.utilities import (
 PREFIX = "open_economy_growth_nn_recursive"
 SOLVER = open_economy_growth_nn_recursive.open_economy_growth_nn_recursive
 
+DIAGNOSTIC_COLUMNS = [
+    "max_train_residual",
+    "max_validation_residual",
+    "max_benchmark_error",
+    "k_relative_error_max",
+    "q_relative_error_max",
+    "c_relative_error_max",
+    "ex_post_present_value_gap",
+    "steps",
+    "solve_time",
+]
+
+
+def report(results_df):
+    accepted = int(results_df["solution_accepted"].sum())
+    print(f"  accepted {accepted}/{len(results_df)}")
+    print(results_df[DIAGNOSTIC_COLUMNS].agg(["median", "max"]).to_string())
+
 
 def run(
     output_dir: str = ".results",
@@ -43,6 +61,7 @@ def run(
             prefix=PREFIX,
             hyperparameters=hyperparameters,
         )
+        report(results_df)
         return results_df
 
     baseline = go("baseline", n_seeds)

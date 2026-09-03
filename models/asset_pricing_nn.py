@@ -28,6 +28,7 @@ from models.utilities import (
     OptimizerSettings,
     Stopwatch,
     acceptance_fields,
+    gate_rejections,
     make_train_t_grid,
     value_and_grad_fwd,
 )
@@ -96,7 +97,9 @@ def asset_pricing_nn(
         atol=3.162277660168379e-08,
         num_attempts=5,
     ),
-    tolerance_set: ToleranceSettings = ToleranceSettings(train_residual=1e-6),
+    tolerance_set: ToleranceSettings = ToleranceSettings(
+        train_residual=1e-6, validation_residual=1e-5
+    ),
     verbose: bool = True,
 ):
     jax.config.update("jax_enable_x64", True)
@@ -104,6 +107,9 @@ def asset_pricing_nn(
     dtype = jnp.float64 if use_float64 else jnp.float32
     train_t = make_train_t_grid(data_set, dtype)
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
+    validation_t = jnp.linspace(
+        0.0, float(train_t[-1]), data_set.validation_points, dtype=dtype
+    )
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
     model = TimeMLP(
         1,
@@ -169,17 +175,20 @@ def asset_pricing_nn(
         NNXResidualArgs(batch={"t": test_t}, graphdef=graphdef, nondiff=nondiff),
         p,
     )
+    validation_df = snapshot(
+        result.x,
+        NNXResidualArgs(batch={"t": validation_t}, graphdef=graphdef, nondiff=nondiff),
+        p,
+    )
     max_train_residual = float(train_df["residual"].abs().max())
+    max_validation_residual = float(validation_df["residual"].abs().max())
     p_0 = float(test_df["p"].iloc[0])
     rejection_reasons = []
-    if not result.multi_start.accepted:
-        rejection_reasons.append(
-            STATUS_TO_REASON.get(int(result.status), "training_failure")
-        )
-    if max_train_residual > tolerance_set.train_residual:
-        rejection_reasons.append("train_residual")
     if p_0 < 0.0:
         rejection_reasons.append("negative_p_0")
+    rejection_reasons += gate_rejections(
+        tolerance_set, max_train_residual, max_validation_residual
+    )
     solution_accepted = not rejection_reasons
 
     results = {
@@ -201,7 +210,9 @@ def asset_pricing_nn(
         "p_0": p_0,
         "train_loss": float(result.info.loss),
         "final_damping": float(result.lm_state.damping),
+        "solver_status": STATUS_TO_REASON.get(int(result.status), "unknown"),
         "max_train_residual": max_train_residual,
+        "max_validation_residual": max_validation_residual,
         "max_test_residual": float(test_df["residual"].abs().max()),
         "p_rel_error_mean": float(test_df["p_rel_error"].mean()),
         "p_rel_error_max": float(test_df["p_rel_error"].max()),

@@ -136,6 +136,15 @@ def normalize_state(state, center, input_scale):
     return (state - center) * input_scale
 
 
+# StateMLP architecture settings shared by every recursive NN driver.
+@dataclass(frozen=True)
+class PolicySettings:
+    width: int = 16
+    depth: int = 2
+    hidden_activation: str = "silu"
+    head_init_scale: float = 1e-3
+
+
 # p-free MLP policy map state (..., in_features) -> (..., out_features):
 # affine normalization input_scale * (state - center), trunk, one near-zero
 # Linear head, the optional final_activation (unit_softplus, or

@@ -66,6 +66,18 @@ class DataSettings:
     long_run_window: float = 10.0
 
 
+# Numerical acceptance and ex-post quality thresholds, CLI-reachable so a
+# lower-precision caller can pass its own bars.
+@dataclass(frozen=True)
+class ToleranceSettings:
+    gate_train: bool = True
+    train_residual: float = 1e-5
+    # The validation threshold is an HPO/quality diagnostic; it does not
+    # redefine convergence of a finite, feasible numerical solution.
+    gate_validation: bool = False
+    validation_residual: float = 1e-2
+
+
 # Identical initial conditions across countries make the multicountry
 # dynamics degenerate (no cross-country variation to solve for), so the
 # drivers DRAW heterogeneous defaults from these seeded distributions

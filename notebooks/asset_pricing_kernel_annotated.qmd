@@ -38,14 +38,19 @@ TRAIN_T = 40.0
 N_TRAIN = 41
 TEST_T = 50.0
 N_TEST = 100
+N_VALIDATION = 401
 RIDGE = 1e-10  # disappearing penalty weight
 ATOL = 1e-9  # unscaled residual norm
 GTOL = 1e-13  # must resolve the weakly penalized free p_0
 INIT_DAMPING = 1e-8
+GEODESIC_ACCEPTANCE_RATIO = 0.8
 MAX_STEPS = 100
+TRAIN_RESIDUAL = 1e-8
+VALIDATION_RESIDUAL = 1e-2
 
 t_train = jnp.linspace(0.0, TRAIN_T, N_TRAIN)
 t_test = jnp.linspace(0.0, TEST_T, N_TEST)
+t_validation = jnp.linspace(0.0, TRAIN_T, N_VALIDATION)
 ```
 
 ## The model
@@ -139,7 +144,11 @@ args = {"K": K, "K_tilde": K_tilde, "t": t_train}
 theta_0 = {"alpha": jnp.zeros(N_TRAIN), "p_0": jnp.zeros(())}
 
 solver = RidgeLevenbergMarquardt(
-    residual_fn, metric=metric, ridge=RIDGE, init_damping=INIT_DAMPING
+    residual_fn,
+    metric=metric,
+    ridge=RIDGE,
+    init_damping=INIT_DAMPING,
+    geodesic_acceptance_ratio=GEODESIC_ACCEPTANCE_RATIO,
 )
 start = time.perf_counter()
 result = solver.solve(
@@ -152,7 +161,8 @@ result = solver.solve(
     max_steps_is_success=False,
 )
 solve_time = time.perf_counter() - start
-alpha, p_0 = result.x["alpha"], result.x["p_0"]
+theta = result.x
+alpha, p_0 = theta["alpha"], theta["p_0"]
 ```
 
 ## Results
@@ -178,6 +188,27 @@ print(f"solve: {int(result.steps)} steps in {solve_time:.2f}s (incl. jit)")
 print(f"p_0 = {float(p_0):.6f}")
 print(f"max |test residual|: {float(jnp.max(jnp.abs(test_residual))):.3e}")
 print(f"max rel error vs fundamental: {float(jnp.max(rel_error)):.3e}")
+```
+
+`residual_fn` evaluates on whatever `K`/`K_tilde`/`t` it is handed, so the same function reused against a validation grid over the training horizon gives the ex-post gate.
+
+```{python}
+max_train_residual = float(jnp.max(jnp.abs(residual_fn(theta, args, p))))
+K_validation, K_tilde_validation = kernel_matrices(t_validation, t_train)
+args_validation = {"K": K_validation, "K_tilde": K_tilde_validation, "t": t_validation}
+max_validation_residual = float(
+    jnp.max(jnp.abs(residual_fn(theta, args_validation, p)))
+)
+train_ok = max_train_residual <= TRAIN_RESIDUAL
+validation_ok = max_validation_residual <= VALIDATION_RESIDUAL
+print(
+    f"max train residual {max_train_residual:.3e} <= {TRAIN_RESIDUAL:.0e}: {train_ok}"
+)
+print(
+    f"max validation residual {max_validation_residual:.3e} <= "
+    f"{VALIDATION_RESIDUAL:.0e}: {validation_ok}"
+)
+print(f"accepted: {train_ok and validation_ok}")
 ```
 
 The kernel price tracks the closed-form fundamental with no bubble: the relative error stays near $10^{-3}$ across the whole grid rather than growing like $e^{r t}$, so what remains is the discretization error of a 41-point collocation grid. The residual vanishes at the training dates and oscillates between them — the right panel is off-grid collocation error, not extrapolation past the horizon (dotted).

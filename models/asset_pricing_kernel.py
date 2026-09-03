@@ -35,6 +35,7 @@ from models.utilities import (
     RidgeSettings,
     Stopwatch,
     acceptance_fields,
+    gate_rejections,
     make_train_t_grid,
 )
 
@@ -84,6 +85,9 @@ def asset_pricing_kernel(
     ell, sigma = kernel_set.ell, kernel_set.sigma
     train_data = make_train_t_grid(data_set, dtype)
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
+    validation_data = jnp.linspace(
+        0.0, float(train_data[-1]), data_set.validation_points, dtype=dtype
+    )
     p = StructuralParameters.create(dtype=dtype, r=r, c=c, g=g, x_0=x_0)
 
     K, K_tilde, metric = integrated_metric_factorization(
@@ -143,17 +147,26 @@ def asset_pricing_kernel(
     p_benchmark = mu_f_array(test_data, p)
     p_rel_error = jnp.abs(p_benchmark - p_test) / p_benchmark
 
+    validation_values = evaluate_grid(validation_data)
+    p_validation = validation_values["p"]
+    max_validation_residual = float(jnp.max(jnp.abs(validation_values["residual"])))
+
     # Analytic finite-horizon bias in the matern12 case.
     horizon_bias_p0 = kernel_horizon_bias_p0(p, kernel_set, T=float(train_data[-1]))
 
-    finite = bool(jnp.all(jnp.isfinite(p_test)) and jnp.all(jnp.isfinite(p_benchmark)))
+    finite = bool(
+        jnp.all(jnp.isfinite(p_test))
+        and jnp.all(jnp.isfinite(p_benchmark))
+        and jnp.all(jnp.isfinite(p_validation))
+    )
     rejection_reasons = []
     if not finite:
         rejection_reasons.append("nonfinite")
-    if max_train_residual > tolerance_set.train_residual:
-        rejection_reasons.append("train_residual")
     if float(p_0) < 0.0:
         rejection_reasons.append("negative_p_0")
+    rejection_reasons += gate_rejections(
+        tolerance_set, max_train_residual, max_validation_residual
+    )
 
     results = {
         "parameters": p.to_dict(),
@@ -173,6 +186,7 @@ def asset_pricing_kernel(
         "horizon_bias_p0": horizon_bias_p0,
         "rkhs_norm_p": float(rkhs_norm_squared(alpha, K)),
         "max_train_residual": max_train_residual,
+        "max_validation_residual": max_validation_residual,
         "max_test_residual": float(jnp.max(jnp.abs(test_residual))),
         # min/max error statistics exclude the pinned t = 0 point ([1:]).
         "p_rel_error_mean": float(p_rel_error.mean()),

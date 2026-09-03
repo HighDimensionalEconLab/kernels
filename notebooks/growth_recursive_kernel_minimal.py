@@ -3,7 +3,7 @@ import time
 
 import jax
 import jax.numpy as jnp
-from nlls_gram import RepeatedFactorMetric, RidgeLevenbergMarquardt
+from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
 from tinydiffeq import RK4, ConstantStepSize, SaveAt, solve_bvp, solve_ode
 
 jax.config.update("jax_enable_x64", True)
@@ -36,11 +36,14 @@ ATOL = 6.75e-6
 GTOL = 1e-7
 INIT_DAMPING = 1e-6
 DAMPING_DECREASE = 0.25
-MAX_STEPS = 100
+MAX_STEPS = 150
 BVP_T = 200.0
 BVP_POINTS = 201
 BVP_TOL = 1e-10
 BVP_MAX_NODES = 2048
+TRAIN_EULER_MAX = 1e-4
+TEST_EULER_MEAN_ABS = 3e-5
+TEST_EULER_MAX = 3e-4
 
 # Reference saddle path in the detrended coordinates kappa = k / z^{1/(1-a)},
 # c_tilde = c / z^{1/(1-a)}: kappa' = kappa^a - c_tilde - (delta + g) kappa,
@@ -238,3 +241,22 @@ print(
     f"c {float(c_error.mean()):.3e}"
 )
 print(f"log-TVC at t={TVC_T:.0f}: {float(log_tvc):.1f}   (should be << 0)")
+
+# The production driver reports the ridge LM status but does not gate on it;
+# acceptance is an ex-post check of the max training Euler residual and the
+# held-out bars.
+euler_train = jax.vmap(lambda s: euler_residual(theta, s, p))(train_log_states)
+train_euler_max = float(jnp.max(jnp.abs(euler_train)))
+train_ok = train_euler_max <= TRAIN_EULER_MAX
+test_euler_mean_abs = float(jnp.abs(euler_test).mean())
+test_euler_max = float(jnp.abs(euler_test).max())
+test_ok = (
+    test_euler_mean_abs <= TEST_EULER_MEAN_ABS and test_euler_max <= TEST_EULER_MAX
+)
+print(f"status: {LMStatus(result.status).name}")
+print(f"max train |Euler| {train_euler_max:.3e} <= {TRAIN_EULER_MAX:.0e}: {train_ok}")
+print(
+    f"test mean|Euler| {test_euler_mean_abs:.3e} <= {TEST_EULER_MEAN_ABS:.0e} and "
+    f"max|Euler| {test_euler_max:.3e} <= {TEST_EULER_MAX:.0e}: {test_ok}"
+)
+print(f"accepted: {train_ok and test_ok}")

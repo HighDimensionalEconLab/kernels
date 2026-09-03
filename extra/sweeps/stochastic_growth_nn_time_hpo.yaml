@@ -38,8 +38,8 @@ parameters:
   lm_set.num_attempts:                 {value: 2}
   lm_set.geodesic_acceleration:        {value: true}
   # --- capacity ---
-  nn_set.mlp_width:                    {values: [8, 16, 32]}
-  nn_set.mlp_depth:                    {values: [2, 3]}
+  nn_set.width:                        {values: [8, 16, 32]}
+  nn_set.depth:                        {values: [2, 3]}
   nn_set.hidden_activation:            {values: [gelu, silu, tanh]}
   # --- epoch schedule ---
   tolerance_set.max_steps:             {values: [25, 50, 125, 250]}

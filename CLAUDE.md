@@ -65,8 +65,10 @@ per-directory READMEs.
   draw), then the `output_scale` Variable multiply; normalization and
   output scales are the non-Param Variables), with
   `normalize_state`/`UnitSoftplusWhere` also imported by the
-  stochastic-open-economy kernel policy; plus `unit_softplus`/`ACTIVATIONS`,
-  `NNXResidualArgs`, and the policy-artifact `save_model`/`load_model`
+  stochastic-open-economy kernel policy; plus `PolicySettings` (the
+  width/depth/activation/head-init dataclass every recursive NN driver takes
+  as `nn_set`), `unit_softplus`/`ACTIVATIONS`, `NNXResidualArgs`, and the
+  policy-artifact `save_model`/`load_model`
   (load factories rebuild the `StateMLP` architecture and `final_activation`
   from meta — the open-economy slope from the artifact's
   `structural`/`initial_state` blocks — with placeholder Variables the
@@ -113,8 +115,29 @@ per-directory READMEs.
   optimizer names them), `ridge_set: RidgeSettings` the RidgeLM extras
   (ridge, continuation, linear_solver), `cg_set: CGSettings` the CG knobs,
   `solver_set: UnoOptimizerSettings` the Uno/IPOPT options; `tolerance_set`
-  holds the two acceptance toggles and their thresholds (the epoch-recursive
-  NN drivers also keep their training-schedule fields there).
+  holds the acceptance toggles and bars — `gate_train`/`gate_validation`
+  with `train_residual`/`validation_residual` in sequence space,
+  `gate_train`/`gate_test` with the driver's training criterion and the
+  `test_euler_*` bars in the recursive drivers (the epoch-recursive NN
+  drivers also keep their training-schedule fields there).
+- Acceptance is ex post and one predicate in every driver:
+  `(not gate_train or train_ok) and (not gate_validation or validation_ok)`
+  in sequence space, `(not gate_train or train_ok) and (not gate_test or
+  test_ok)` in the recursive drivers. Sequence-space `train_ok` /
+  `validation_ok` are the max abs residual on the training grid and on the
+  held-out validation grid — a finer `linspace(0, train grid end,
+  validation_points)` on the same path (same initial conditions), evaluated
+  through the post-solve `evaluate_grid`/`snapshot` closure — under
+  `tolerance_set.train_residual` / `validation_residual`; `test_*` stays the
+  long-horizon diagnostic. Every bar compares with `<=` so a NaN fails;
+  feasibility (nonfinite or nonpositive paths, `negative_p_0`, the mpk
+  `p_bound`) is a hard, untoggled rejection reason. The optimizer's own
+  status is reported as `solver_status` (plus `solution_status` under
+  Uno/IPOPT) and never gates; multi-start keys on the optimizer's status
+  through the library default accept, and no driver passes an `accept=`
+  hook; `max_steps_is_success=False` everywhere except the epoch-recursive
+  NN drivers under a multi-epoch schedule, where exhausting the schedule
+  is the optimizer's normal stop.
 - Every sequence-space driver represents paths in LEVELS (anchored
   representer: value = init + K_tilde @ alpha, the form the RKHS theory
   covers). The sequence-space drivers pin a fixed small ridge, except
@@ -144,16 +167,17 @@ per-directory READMEs.
   `q = log k - ray_slope * log z` plus an anisotropic RBF in
   `(log z, log k)`) with `ray_slope` a tuned hyperparameter like the
   lengthscales and theta = `(alpha, h_const, linear_coeffs)`, alpha alone
-  penalized. Every recursive driver accepts on one predicate,
-  `(not gate_train or train_ok) and (not gate_test or test_ok)`, at every
-  decision point it has (epoch boundary, multi-start accept hook, ex post):
-  `train_ok` is the driver's training criterion (fresh-batch loss under
-  `train_loss_threshold`, the deterministic open economy's train-path
-  residual, LM status for the kernels), `test_ok` the held-out Euler errors
+  penalized. In the recursive drivers `train_ok` is the driver's training
+  criterion (the fresh-batch loss under `train_loss_threshold` for the
+  epoch NN drivers, the deterministic open economy's train-path residual
+  under `train_residual`, the max training Euler residual under
+  `train_euler_max` for the kernels) and `test_ok` the held-out Euler errors
   on the test batch under `test_euler_mean_abs` / `test_euler_max` (plus the
-  Ito-term bar in the stochastic open economy); the test batch rides in
-  `ResidualArgs` so the callbacks can simulate it. Transversality and
-  benchmark errors are reported, never gated.
+  Ito-term bar in the stochastic open economy). The epoch callback stops the
+  solve only on the training criterion (a fresh-batch loss under
+  `train_loss_threshold` sets `CONVERGED`; `epoch_early_stopping` toggles
+  it), so the held-out batch lives in driver scope and is simulated once ex
+  post. Transversality and benchmark errors are reported, never gated.
 - The stochastic recursive NN drivers always train and write
   content-addressed policy `.npz` artifacts via `--policy_cache <dir>` (a
   pure save target); the kernel-recursive consumers read them via
@@ -165,7 +189,8 @@ per-directory READMEs.
   before any array is created.
 - Scales multiply: `input_scale` and `output_scale` on `TimeMLP` and
   `StateMLP` are multipliers (sequence-space `input_scale = 0.01`, a
-  literal — never derived from a horizon), as are every `*_scale` setting.
+  literal — never derived from a horizon — with asset pricing alone at
+  `0.025`), as are every `*_scale` setting.
 - Numeric settings are used verbatim — never clamped, floored, or defensively
   adjusted in code; guidance (e.g. keep `train_residual` above ~8x machine
   epsilon for the run dtype) rides as comments on the field defaults.

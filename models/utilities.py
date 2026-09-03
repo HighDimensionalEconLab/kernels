@@ -55,6 +55,23 @@ def acceptance_fields(rejection_reasons):
     }
 
 
+# Residual-bar gate failures; a bar is skipped when its toggle is off, and
+# `<=` so a NaN fails.
+def gate_rejections(tolerance_set, max_train_residual, max_validation_residual):
+    reasons = []
+    if (
+        tolerance_set.gate_train
+        and not max_train_residual <= tolerance_set.train_residual
+    ):
+        reasons.append("train_residual")
+    if (
+        tolerance_set.gate_validation
+        and not max_validation_residual <= tolerance_set.validation_residual
+    ):
+        reasons.append("validation_residual")
+    return reasons
+
+
 # Long-format DataFrame from a dict of same-shaped arrays: one row per
 # element, index columns from np.indices (one per index name), one data
 # column per key. `scalars` maps column name -> python scalar, or array
@@ -160,11 +177,6 @@ class UnoOptimizerSettings:
     time_limit: float | None = None
     primal_tolerance: float | None = None
     dual_tolerance: float | None = None
-
-
-ACCEPTED_UNO_SOLUTION_STATUSES = frozenset(
-    {"FEASIBLE_KKT_POINT", "FEASIBLE_SMALL_STEP"}
-)
 
 
 # Sequence-space solver args; the recursive drivers keep bespoke ones.

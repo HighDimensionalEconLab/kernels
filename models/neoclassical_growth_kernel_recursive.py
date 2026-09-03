@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import jsonargparse
 import numpy as np
 from flax import struct
-from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
+from nlls_gram import RepeatedFactorMetric, RidgeLevenbergMarquardt
 
 from models.kernels import (
     ard_rbf_state_features,
@@ -70,12 +70,14 @@ class StateKernelSettings:
     metric_epsilon: float = 2.0e-7
 
 
-# Ex-post acceptance: gate_train requires the ridge LM to have converged,
-# gate_test the held-out Euler errors under the bars.
+# Ex-post acceptance: gate_train requires the max training Euler residual
+# under train_euler_max, gate_test the held-out Euler errors under the bars.
+# The ridge LM status is reported, never gated.
 @dataclass(frozen=True)
 class ToleranceSettings:
     gate_train: bool = True
     gate_test: bool = True
+    train_euler_max: float = 1e-4
     test_euler_mean_abs: float = 3e-5
     test_euler_max: float = 3e-4
 
@@ -295,7 +297,6 @@ def neoclassical_growth_kernel_recursive(
     train_loss = float(result.info.resid_loss)
     status = int(result.status)
     stopping_reason = STATUS_TO_REASON.get(status, "unknown")
-    solver_converged = status == LMStatus.CONVERGED
     if verbose:
         print(
             f"solve: {stopping_reason} after {steps} steps, "
@@ -384,7 +385,10 @@ def neoclassical_growth_kernel_recursive(
 
     test_euler_mean_abs = float(jnp.mean(jnp.abs(test_values["euler_residual"])))
     rejection_reasons = []
-    if tolerance_set.gate_train and not solver_converged:
+    if (
+        tolerance_set.gate_train
+        and not max_train_euler <= tolerance_set.train_euler_max
+    ):
         rejection_reasons.append("train")
     if tolerance_set.gate_test and not (
         test_euler_mean_abs <= tolerance_set.test_euler_mean_abs
@@ -430,6 +434,7 @@ def neoclassical_growth_kernel_recursive(
         "min_test_c": float(jnp.min(test_values["c"])),
         **error_fields,
         "steps": steps,
+        "solver_status": stopping_reason,
         "solve_time": solve_time,
         "setup_time": setup_time,
         "total_fit_time": total_fit_time,

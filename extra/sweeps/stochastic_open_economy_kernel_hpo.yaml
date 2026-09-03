@@ -40,6 +40,7 @@ parameters:
   verbose:                             {value: false}
   use_float64:                         {value: true}
   policy_dir:                          {value: .results}
+  tolerance_set.train_euler_max:       {value: 1e0}
   tolerance_set.test_euler_mean_abs:   {value: 5e-2}
   tolerance_set.test_euler_max:        {value: 1e0}
   # --- kernel geometry ---

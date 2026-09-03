@@ -11,7 +11,12 @@ import pandas as pd
 from flax import nnx
 from tinydiffeq import SaveAt, solve_sde
 
-from models.neural_networks import ACTIVATIONS, StateMLP, UnitSoftplusWhere
+from models.neural_networks import (
+    ACTIVATIONS,
+    PolicySettings,
+    StateMLP,
+    UnitSoftplusWhere,
+)
 from models.utilities import ParameterPyTree
 
 # Recursive stochastic small open economy on (log z, log k, a, rate_gap).
@@ -100,14 +105,6 @@ class InitialConditionSettings:
     test_log_k_variance: float | None = None
     test_asset_variance: float | None = None
     test_rate_variance: float | None = None
-
-
-@dataclass(frozen=True)
-class SequentialPolicySettings:
-    width: int = 16
-    depth: int = 2
-    hidden_activation: str = "silu"
-    head_init_scale: float = 1e-3
 
 
 def state_levels(state, p):
@@ -431,7 +428,7 @@ def problem_cache_config(
 # only the normalization and output-scale Variables ride in the artifact's
 # nondiff block and overwrite the placeholder defaults.
 def make_sequential_policy(meta, dtype):
-    settings = SequentialPolicySettings(**meta["settings"])
+    settings = PolicySettings(**meta["settings"])
     structural = meta["structural"]
     return StateMLP(
         4,

@@ -29,4 +29,9 @@ class DataSettings:
 # own bars; keep train_residual above ~8x machine epsilon for the run dtype.
 @dataclass(frozen=True)
 class ToleranceSettings:
+    gate_train: bool = True
     train_residual: float = 1e-8
+    # Preserves current acceptance: the validation residual (measured 4e-3,
+    # a 2.5x margin) is reported but does not yet gate.
+    gate_validation: bool = False
+    validation_residual: float = 1e-2

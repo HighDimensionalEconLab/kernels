@@ -137,10 +137,12 @@ class DataSettings:
     validation_points: int = 401
 
 
-# Ex-post acceptance bars shared by the NLLS and uno kernel drivers.
+# Ex-post acceptance bars shared by the NLLS, NN, and uno kernel drivers.
 @dataclass(frozen=True)
 class ToleranceSettings:
+    gate_train: bool = True
     train_residual: float = 1e-5
+    gate_validation: bool = True
     validation_residual: float = 1e-2
 
 

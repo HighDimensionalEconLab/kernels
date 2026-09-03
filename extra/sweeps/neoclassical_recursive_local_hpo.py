@@ -69,8 +69,8 @@ SPACES = {
         seed_option="seed",
         seeds=(0, 1, 2, 3, 4),
         discrete={
-            "nn_set.mlp_width": (8, 16, 32),
-            "nn_set.mlp_depth": (2, 3),
+            "nn_set.width": (8, 16, 32),
+            "nn_set.depth": (2, 3),
             "nn_set.hidden_activation": ("silu", "gelu", "tanh"),
             "tolerance_set.max_steps": (125, 250, 500),
             "tolerance_set.num_epochs": (1, 2, 4),

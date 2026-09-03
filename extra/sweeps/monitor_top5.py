@@ -17,8 +17,6 @@ IDS_FILE = HERE / "sweep_ids.json"
 LOG_FILE = HERE / "logs" / "monitor.log"
 # Union over the sweeps; keys absent from a run's config are skipped.
 CFG_KEYS = [
-    "nn_set.mlp_width",
-    "nn_set.mlp_depth",
     "nn_set.width",
     "nn_set.depth",
     "nn_set.hidden_activation",

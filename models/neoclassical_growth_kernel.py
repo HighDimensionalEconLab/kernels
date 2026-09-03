@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from typing import NamedTuple
 
 import jax
@@ -24,6 +24,7 @@ from models.neoclassical_growth_shared import (
 from models.neoclassical_growth_shared import (
     DataSettings,
     StructuralParameters,
+    ToleranceSettings,
     mpk,
     production,
 )
@@ -34,6 +35,7 @@ from models.utilities import (
     RidgeSettings,
     Stopwatch,
     acceptance_fields,
+    gate_rejections,
     make_train_t_grid,
 )
 
@@ -83,13 +85,6 @@ def residual_fn(theta, args, p):
         [values["resource"], values["euler"], values["shadow_price"]]
     )
     return residual / jnp.sqrt(residual.size), values
-
-
-# CLI-reachable bars; only train_residual gates acceptance.
-@dataclass(frozen=True)
-class ToleranceSettings:
-    train_residual: float = 1e-5
-    log_tvc_threshold: float = 0.0
 
 
 def neoclassical_growth_kernel(
@@ -222,15 +217,22 @@ def neoclassical_growth_kernel(
         return {"t": points, **values}
 
     test_data = jnp.linspace(0, data_set.test_T, data_set.test_points, dtype=dtype)
+    validation_data = jnp.linspace(
+        0.0, float(train_data[-1]), data_set.validation_points, dtype=dtype
+    )
     test_benchmark = neoclassical_growth_benchmark(p)
     train_eval = evaluate_grid(train_data)
     test_eval = evaluate_grid(test_data)
+    validation_eval = evaluate_grid(validation_data)
     frame_columns = ("t", "k", "c", "mu", "resource", "euler", "shadow_price")
     train_df = pd.DataFrame(
         {name: np.asarray(train_eval[name]) for name in frame_columns}
     )
     test_df = pd.DataFrame(
         {name: np.asarray(test_eval[name]) for name in frame_columns}
+    )
+    validation_df = pd.DataFrame(
+        {name: np.asarray(validation_eval[name]) for name in frame_columns}
     )
     k_b, c_b = test_benchmark(test_data)
     test_df["k_benchmark"] = np.asarray(k_b)
@@ -253,7 +255,7 @@ def neoclassical_growth_kernel(
     finite_positive = bool(
         all(
             np.isfinite(df[name]).all() and (df[name] > 0.0).all()
-            for df in (train_df, test_df)
+            for df in (train_df, test_df, validation_df)
             for name in ("k", "c", "mu")
         )
     )
@@ -264,11 +266,19 @@ def neoclassical_growth_kernel(
             train_df["shadow_price"].abs().max(),
         )
     )
+    max_validation_residual = float(
+        max(
+            validation_df["resource"].abs().max(),
+            validation_df["euler"].abs().max(),
+            validation_df["shadow_price"].abs().max(),
+        )
+    )
     rejection_reasons = []
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > tolerance_set.train_residual:
-        rejection_reasons.append("train_residual")
+    rejection_reasons += gate_rejections(
+        tolerance_set, max_train_residual, max_validation_residual
+    )
 
     g_hat_value = float(theta.g_hat) if learn_g_hat else float(g)
 
@@ -291,6 +301,7 @@ def neoclassical_growth_kernel(
         "c_0": float(c_0),
         "mu_0": float(mu_0),
         "max_train_residual": max_train_residual,
+        "max_validation_residual": max_validation_residual,
         "test_euler_mean_abs": float(test_df["euler"].abs().mean()),
         "test_k_rel_error_abs": float(test_df["k_rel_error"].mean()),
         "test_c_rel_error_abs": float(test_df["c_rel_error"].mean()),

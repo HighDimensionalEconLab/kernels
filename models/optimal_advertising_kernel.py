@@ -32,6 +32,7 @@ from models.utilities import (
     RidgeSettings,
     Stopwatch,
     acceptance_fields,
+    gate_rejections,
     make_train_t_grid,
 )
 
@@ -194,8 +195,9 @@ def optimal_advertising_kernel(
     rejection_reasons = []
     if not finite_valid:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > tolerance_set.train_residual:
-        rejection_reasons.append("train_residual")
+    rejection_reasons += gate_rejections(
+        tolerance_set, max_train_residual, max_validation_residual
+    )
 
     kernel_solution = jax.jit(evaluate_grid)
 

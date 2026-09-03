@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from typing import NamedTuple
 
 import jax
@@ -37,6 +37,7 @@ from models.multicountry_growth_shared import (
     DataSettings,
     InitialConditionSettings,
     StructuralParameters,
+    ToleranceSettings,
     capital_drift,
     current_account,
     draw_initial_conditions,
@@ -59,6 +60,7 @@ from models.utilities import (
     RidgeSettings,
     Stopwatch,
     acceptance_fields,
+    gate_rejections,
     make_sampled_train_grid,
 )
 
@@ -166,16 +168,6 @@ def residual_fn(theta, args, p):
         ]
     )
     return residual / jnp.sqrt(residual.size), values
-
-
-# Numerical acceptance and ex-post quality thresholds, CLI-reachable so a
-# lower-precision caller can pass its own bars.
-@dataclass(frozen=True)
-class ToleranceSettings:
-    train_residual: float = 1e-5
-    # The validation threshold is an HPO/quality diagnostic; it does not
-    # redefine convergence of a finite, feasible numerical solution.
-    validation_residual: float = 1e-2
 
 
 def multicountry_growth_kernel(
@@ -455,14 +447,13 @@ def multicountry_growth_kernel(
         )
     )
     residual_count = (5 * num_countries + 1) * n_train
+    validation_pass = max_validation_residual <= tolerance_set.validation_residual
     rejection_reasons = []
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > tolerance_set.train_residual:
-        rejection_reasons.append("train_residual")
-    validation_pass = max_validation_residual <= tolerance_set.validation_residual
-    if not validation_pass:
-        rejection_reasons.append("validation_residual")
+    rejection_reasons += gate_rejections(
+        tolerance_set, max_train_residual, max_validation_residual
+    )
 
     resolved_steady = resolved_steady_state(validation_eval["mu"][-1], p)
     tail = tail_diagnostics(validation_eval, p)

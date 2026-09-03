@@ -25,11 +25,11 @@ from models.optimal_advertising_shared import (
     ToleranceSettings,
 )
 from models.utilities import (
-    ACCEPTED_UNO_SOLUTION_STATUSES,
     KernelResidualArgs,
     Stopwatch,
     UnoOptimizerSettings,
     acceptance_fields,
+    gate_rejections,
     make_train_t_grid,
 )
 
@@ -123,6 +123,12 @@ def optimal_advertising_kernel_uno(
     train_data = make_train_t_grid(data_set, jnp.float64)
     test_data = jnp.linspace(
         0.0, data_set.test_T, data_set.test_points, dtype=jnp.float64
+    )
+    validation_data = jnp.linspace(
+        0.0,
+        data_set.train_T,
+        data_set.validation_points,
+        dtype=jnp.float64,
     )
 
     n_train = len(train_data)
@@ -263,6 +269,19 @@ def optimal_advertising_kernel_uno(
     test_values = kernel_solution(test_data)
     x_test, mu_test, u_test = test_values["x"], test_values["mu"], test_values["u"]
 
+    validation_values = kernel_solution(validation_data)
+    x_validation = validation_values["x"]
+    mu_validation = validation_values["mu"]
+    u_validation = validation_values["u"]
+    max_validation_residual = max(
+        float(jnp.max(jnp.abs(residual)))
+        for residual in (
+            validation_values["state"],
+            validation_values["costate"],
+            validation_values["shadow_price"],
+        )
+    )
+
     solve_time = elapsed
     solver_status = str(result.optimization_status).split(".")[-1]
     solution_status = str(result.solution_status).split(".")[-1]
@@ -271,16 +290,17 @@ def optimal_advertising_kernel_uno(
         and jnp.all(jnp.isfinite(mu_test))
         and jnp.all(jnp.isfinite(u_test))
         and jnp.min(u_test) > 0.0
+        and jnp.all(jnp.isfinite(x_validation))
+        and jnp.all(jnp.isfinite(mu_validation))
+        and jnp.all(jnp.isfinite(u_validation))
+        and jnp.min(u_validation) > 0.0
     )
     rejection_reasons = []
-    if solver_status != "SUCCESS":
-        rejection_reasons.append("solver_status")
-    if solution_status not in ACCEPTED_UNO_SOLUTION_STATUSES:
-        rejection_reasons.append("solution_status")
     if not finite_valid:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > tolerance_set.train_residual:
-        rejection_reasons.append("train_residual")
+    rejection_reasons += gate_rejections(
+        tolerance_set, max_train_residual, max_validation_residual
+    )
 
     results = {
         "parameters": {**p.to_dict(), "gamma": gamma},
@@ -294,7 +314,10 @@ def optimal_advertising_kernel_uno(
         "rkhs_norm_mu": float(rkhs_norm_squared(theta.alpha_mu, K)),
         "rkhs_norm_u": float(rkhs_norm_squared(theta.alpha_u, K)),
         "max_train_residual": max_train_residual,
+        "max_validation_residual": max_validation_residual,
         "solve_time": solve_time,
+        "solver_status": solver_status,
+        "solution_status": solution_status,
         "stationarity": result.solution_stationarity,
         "primal_feasibility": result.solution_primal_feasibility,
         **acceptance_fields(rejection_reasons),

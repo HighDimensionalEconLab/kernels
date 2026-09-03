@@ -53,10 +53,16 @@ class DataSettings:
     train_points_list: list[float] | None = None
     test_T: float = 50.0
     test_points: int = 100
+    validation_points: int = 401
 
 
 # Acceptance gates, CLI-reachable so a lower-precision caller can pass its
 # own bars; keep train_residual above ~8x machine epsilon for the run dtype.
 @dataclass(frozen=True)
 class ToleranceSettings:
+    gate_train: bool = True
     train_residual: float = 1e-8
+    gate_validation: bool = True
+    # The kernel interpolant's between-node residual is 2e-4; the NN driver
+    # passes a tighter bar at its signature.
+    validation_residual: float = 1e-2

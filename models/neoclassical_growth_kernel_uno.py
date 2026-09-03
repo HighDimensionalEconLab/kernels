@@ -30,11 +30,11 @@ from models.neoclassical_growth_shared import (
     production,
 )
 from models.utilities import (
-    ACCEPTED_UNO_SOLUTION_STATUSES,
     KernelResidualArgs,
     Stopwatch,
     UnoOptimizerSettings,
     acceptance_fields,
+    gate_rejections,
     make_train_t_grid,
 )
 
@@ -119,7 +119,12 @@ lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
 # bound applies only under butterfly production.
 @dataclass(frozen=True)
 class ToleranceSettings:
+    gate_train: bool = True
     train_residual: float = 1e-5
+    # Preserves current (smooth-model) acceptance; the butterfly sweep in
+    # replication/neoclassical_growth_concave_convex_kernel_uno.py passes
+    # gate_validation=True.
+    gate_validation: bool = False
     validation_residual: float = 5e-3
     mpk_bound: float = 1e-3
     log_tvc_threshold: float = 0.0
@@ -414,19 +419,11 @@ def neoclassical_growth_kernel_uno(
     solver_status = str(result.optimization_status).split(".")[-1]
     solution_status = str(result.solution_status).split(".")[-1]
     rejection_reasons = []
-    if solver_status != "SUCCESS":
-        rejection_reasons.append("solver_status")
-    if solution_status not in ACCEPTED_UNO_SOLUTION_STATUSES:
-        rejection_reasons.append("solution_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > tolerance_set.train_residual:
-        rejection_reasons.append("train_residual")
-    if (
-        use_butterfly_production
-        and max_validation_residual > tolerance_set.validation_residual
-    ):
-        rejection_reasons.append("validation_residual")
+    rejection_reasons += gate_rejections(
+        tolerance_set, max_train_residual, max_validation_residual
+    )
     if use_butterfly_production and (
         p_lower_violation > tolerance_set.mpk_bound
         or p_upper_violation > tolerance_set.mpk_bound
@@ -451,6 +448,8 @@ def neoclassical_growth_kernel_uno(
         "log_tvc_residual": log_tvc,
         "transversality_ok": transversality_ok,
         "solve_time": solve_time,
+        "solver_status": solver_status,
+        "solution_status": solution_status,
         **acceptance_fields(rejection_reasons),
     }
     if verbose:

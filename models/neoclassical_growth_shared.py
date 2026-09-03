@@ -83,10 +83,18 @@ class DataSettings:
     test_tvc_T: float = NEOCLASSICAL_GROWTH_CONSTANTS["transversality_T"]
 
 
-# Threshold for the reported transversality_ok diagnostic; acceptance gates
-# on the training loss only.
+# Numerical acceptance and ex-post quality thresholds, CLI-reachable so a
+# lower-precision caller can pass its own bars; log_tvc_threshold is the
+# reported transversality_ok diagnostic, never gated.
 @dataclass(frozen=True)
 class ToleranceSettings:
+    gate_train: bool = True
+    train_residual: float = 1e-5
+    gate_validation: bool = True
+    # The kernel interpolant's between-node residual is O(1e-2) on the
+    # baseline design and 5e-2 on the sparse one; the NN drivers pass a
+    # tighter bar at their signatures.
+    validation_residual: float = 1e-1
     log_tvc_threshold: float = 0.0
 
 

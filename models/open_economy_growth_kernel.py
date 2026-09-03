@@ -43,6 +43,7 @@ from models.utilities import (
     RidgeSettings,
     Stopwatch,
     acceptance_fields,
+    gate_rejections,
     make_sampled_train_grid,
 )
 
@@ -292,14 +293,13 @@ def open_economy_growth_kernel(
         p,
     )
 
+    validation_pass = max_validation_residual <= tolerance_set.validation_residual
     rejection_reasons = []
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > tolerance_set.train_residual:
-        rejection_reasons.append("train_residual")
-    validation_pass = max_validation_residual <= tolerance_set.validation_residual
-    if not validation_pass:
-        rejection_reasons.append("validation_residual")
+    rejection_reasons += gate_rejections(
+        tolerance_set, max_train_residual, max_validation_residual
+    )
 
     alpha_mu, alpha_c, alpha_k, alpha_a, alpha_q, c_0, mu_0, q_0 = theta
     rkhs_norm_mu = rkhs_norm_squared(alpha_mu, K)

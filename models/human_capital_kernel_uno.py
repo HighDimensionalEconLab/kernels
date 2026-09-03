@@ -27,11 +27,11 @@ from models.kernels import (
     rkhs_norm_squared,
 )
 from models.utilities import (
-    ACCEPTED_UNO_SOLUTION_STATUSES,
     KernelResidualArgs,
     Stopwatch,
     UnoOptimizerSettings,
     acceptance_fields,
+    gate_rejections,
     make_train_t_grid,
 )
 
@@ -358,14 +358,11 @@ def human_capital_kernel_uno(
     solver_status = str(result.optimization_status).split(".")[-1]
     solution_status = str(result.solution_status).split(".")[-1]
     rejection_reasons = []
-    if solver_status != "SUCCESS":
-        rejection_reasons.append("solver_status")
-    if solution_status not in ACCEPTED_UNO_SOLUTION_STATUSES:
-        rejection_reasons.append("solution_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > tolerance_set.train_residual:
-        rejection_reasons.append("train_residual")
+    rejection_reasons += gate_rejections(
+        tolerance_set, max_train_residual, max_validation_residual
+    )
 
     results = {
         "parameters": p.to_dict(),
@@ -389,6 +386,8 @@ def human_capital_kernel_uno(
             jnp.max(jnp.abs(test_eval["hidden_dae_residual"]))
         ),
         "solve_time": solve_time,
+        "solver_status": solver_status,
+        "solution_status": solution_status,
         "stationarity": result.solution_stationarity,
         "primal_feasibility": result.solution_primal_feasibility,
         **acceptance_fields(rejection_reasons),

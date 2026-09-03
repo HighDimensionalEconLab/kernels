@@ -13,7 +13,6 @@ import numpy as np
 from flax import struct
 from nlls_gram import (
     AnnealRidge,
-    LMStatus,
     RepeatedFactorMetric,
     RidgeLevenbergMarquardt,
 )
@@ -51,12 +50,14 @@ from models.utilities import (
 )
 
 
-# Ex-post acceptance: gate_train requires the ridge LM to have converged,
-# gate_test the held-out per-equation Euler errors under the bars.
+# Ex-post acceptance: gate_train requires the max training Euler residual
+# under train_euler_max, gate_test the held-out per-equation Euler errors
+# under the bars. The ridge LM status is reported, never gated.
 @dataclass(frozen=True)
 class ToleranceSettings:
     gate_train: bool = True
     gate_test: bool = True
+    train_euler_max: float = 3e-4
     test_euler_mean_abs: float = 3e-4
     test_euler_max: float = 2e-2
 
@@ -440,7 +441,6 @@ def stochastic_open_economy_growth_kernel_recursive(
     train_loss = float(result.info.resid_loss)
     status = int(result.status)
     stopping_reason = STATUS_TO_REASON.get(status, "unknown")
-    solver_converged = status == LMStatus.CONVERGED
     if verbose:
         print(
             f"solve: {stopping_reason} after {steps} steps, "
@@ -537,12 +537,16 @@ def stochastic_open_economy_growth_kernel_recursive(
     test_df["a_scaled_error"] = np.asarray(asset_error).reshape(-1)
 
     train_euler = jnp.stack([train_values["c_euler"], train_values["q_euler"]], axis=-1)
+    train_euler_max_abs = float(jnp.max(jnp.abs(train_euler)))
     test_mean_abs = jnp.mean(jnp.abs(test_euler), axis=(0, 1))
     test_max_abs = jnp.max(jnp.abs(test_euler), axis=(0, 1))
     test_euler_max_abs = float(jnp.max(test_max_abs))
 
     rejection_reasons = []
-    if tolerance_set.gate_train and not solver_converged:
+    if (
+        tolerance_set.gate_train
+        and not train_euler_max_abs <= tolerance_set.train_euler_max
+    ):
         rejection_reasons.append("train")
     if tolerance_set.gate_test and not bool(
         jnp.all(test_mean_abs <= tolerance_set.test_euler_mean_abs)
@@ -592,7 +596,7 @@ def stochastic_open_economy_growth_kernel_recursive(
         "rate_lengthscale": lengthscales[3],
         "train_loss": train_loss,
         "train_euler_mean_abs": float(jnp.mean(jnp.abs(train_euler))),
-        "train_euler_max_abs": float(jnp.max(jnp.abs(train_euler))),
+        "train_euler_max_abs": train_euler_max_abs,
         "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_euler))),
         # NaN when rejected: the HPO sweeps sort on this.
         "test_euler_mean_abs_success": (
@@ -611,6 +615,7 @@ def stochastic_open_economy_growth_kernel_recursive(
         "test_mean_abs_asset_scaled_error": float(jnp.mean(jnp.abs(asset_error))),
         "test_max_abs_asset_scaled_error": float(jnp.max(jnp.abs(asset_error))),
         "steps": steps,
+        "solver_status": stopping_reason,
         "setup_time": setup_time,
         "solve_time": solve_time,
         "total_fit_time": total_fit_time,

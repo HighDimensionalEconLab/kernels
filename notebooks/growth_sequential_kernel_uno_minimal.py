@@ -20,10 +20,11 @@ p = {"a": a, "delta": delta, "rho_hat": rho_hat, "sigma_crra": sigma_crra, "k_0"
 ELL = 10.0  # Matern-1/2 length scale
 SIGMA = 1.0  # kernel amplitude
 TRAIN_T = 100.0
-N_TRAIN = 101
+N_TRAIN = 401
 TEST_T = 110.0
 N_TEST = 100
 TVC_T = 200.0
+TRAIN_RESIDUAL = 1e-5
 
 t_train = jnp.linspace(0.0, TRAIN_T, N_TRAIN)
 t_test = jnp.linspace(0.0, TEST_T, N_TEST)
@@ -205,3 +206,16 @@ print(f"solve: {result.solution_status.name} in {solve_time:.2f}s (incl. jit)")
 print(f"c_0 = {float(theta['c_0']):.6f}, mu_0 = {float(theta['mu_0']):.6f}")
 print(f"mean |Euler residual| test: {float(jnp.abs(euler_test).mean()):.3e}")
 print(f"log-TVC at t={TVC_T:.0f}: {float(log_tvc):.1f}   (should be << 0)")
+
+# The solve status above is reported for diagnostics; acceptance is judged
+# only against the max train residual bound. residual_fn scales its rows by
+# 1/sqrt(count); the gate compares the unscaled rows.
+train_residual = residual_fn(theta, args, p)
+max_train_residual = float(
+    jnp.max(jnp.abs(train_residual)) * jnp.sqrt(train_residual.size)
+)
+train_ok = max_train_residual <= TRAIN_RESIDUAL
+print(
+    f"max train residual {max_train_residual:.3e} <= {TRAIN_RESIDUAL:.0e}: {train_ok}"
+)
+print(f"accepted: {train_ok}")

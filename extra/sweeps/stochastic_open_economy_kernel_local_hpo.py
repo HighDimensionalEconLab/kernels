@@ -47,6 +47,7 @@ MAX_CENTERS = 400
 FIXED = {
     "lm_set.gtol": 1e-9,
     "lm_set.max_steps": 500,
+    "tolerance_set.train_euler_max": 1.0,
     "tolerance_set.test_euler_mean_abs": 5e-2,
     "tolerance_set.test_euler_max": 1.0,
 }

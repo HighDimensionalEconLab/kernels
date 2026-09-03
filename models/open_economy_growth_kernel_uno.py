@@ -38,11 +38,11 @@ from models.open_economy_growth_shared import (
     tvc_diagnostics,
 )
 from models.utilities import (
-    ACCEPTED_UNO_SOLUTION_STATUSES,
     KernelResidualArgs,
     Stopwatch,
     UnoOptimizerSettings,
     acceptance_fields,
+    gate_rejections,
     make_sampled_train_grid,
 )
 
@@ -387,18 +387,13 @@ def open_economy_growth_kernel_uno(
     solve_time = elapsed
     solver_status = str(result.optimization_status).split(".")[-1]
     solution_status = str(result.solution_status).split(".")[-1]
+    validation_pass = max_validation_residual <= tolerance_set.validation_residual
     rejection_reasons = []
-    if solver_status != "SUCCESS":
-        rejection_reasons.append("solver_status")
-    if solution_status not in ACCEPTED_UNO_SOLUTION_STATUSES:
-        rejection_reasons.append("solution_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > tolerance_set.train_residual:
-        rejection_reasons.append("train_residual")
-    validation_pass = max_validation_residual <= tolerance_set.validation_residual
-    if not validation_pass:
-        rejection_reasons.append("validation_residual")
+    rejection_reasons += gate_rejections(
+        tolerance_set, max_train_residual, max_validation_residual
+    )
 
     rkhs_norm_mu = rkhs_norm_squared(theta.alpha_mu, K)
     rkhs_norm_c = rkhs_norm_squared(theta.alpha_c, K)
@@ -469,6 +464,8 @@ def open_economy_growth_kernel_uno(
         "rkhs_norm_q": float(rkhs_norm_q),
         "rkhs_norm_total": float(rkhs_norm_total),
         "solve_time": solve_time,
+        "solver_status": solver_status,
+        "solution_status": solution_status,
         "stationarity": result.solution_stationarity,
         "primal_feasibility": result.solution_primal_feasibility,
         **acceptance_fields(rejection_reasons),

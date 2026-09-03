@@ -28,6 +28,7 @@ from models.open_economy_growth_shared import (
 from models.open_economy_growth_shared import (
     DataSettings,
     StructuralParameters,
+    ToleranceSettings,
     current_account,
     investment_expenditure,
     investment_rate_from_q,
@@ -39,20 +40,14 @@ from models.open_economy_growth_shared import (
     tvc_diagnostics,
 )
 from models.utilities import (
+    STATUS_TO_REASON,
     OptimizerSettings,
     Stopwatch,
     acceptance_fields,
+    gate_rejections,
     make_sampled_train_grid,
     value_and_grad_fwd,
 )
-
-
-# Acceptance gates, CLI-reachable so a lower-precision caller can pass its
-# own bars.
-@dataclass(frozen=True)
-class ToleranceSettings:
-    train_residual: float = 1e-5
-    validation_residual: float = 1e-2
 
 
 @dataclass(frozen=True)
@@ -306,14 +301,11 @@ def open_economy_growth_nn(
     )
 
     rejection_reasons = []
-    if not bool(result.multi_start.accepted):
-        rejection_reasons.append("solver_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > tolerance_set.train_residual:
-        rejection_reasons.append("train_residual")
-    if max_validation_residual > tolerance_set.validation_residual:
-        rejection_reasons.append("validation_residual")
+    rejection_reasons += gate_rejections(
+        tolerance_set, max_train_residual, max_validation_residual
+    )
     acceptance = acceptance_fields(rejection_reasons)
     solution_accepted = acceptance["solution_accepted"]
 
@@ -369,6 +361,7 @@ def open_economy_growth_nn(
         ),
         "train_loss": float(result.info.loss),
         "final_damping": float(result.lm_state.damping),
+        "solver_status": STATUS_TO_REASON.get(int(result.status), "unknown"),
         "steps": int(result.steps),
         "attempt": attempt,
         "solve_time": solve_time,

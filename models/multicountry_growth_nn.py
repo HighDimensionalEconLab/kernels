@@ -22,6 +22,7 @@ from models.multicountry_growth_shared import (
     DataSettings,
     InitialConditionSettings,
     StructuralParameters,
+    ToleranceSettings,
     current_account,
     draw_initial_conditions,
     investment_expenditure,
@@ -43,22 +44,14 @@ from models.neural_networks import (
     UnitSoftplusWhere,
 )
 from models.utilities import (
+    STATUS_TO_REASON,
     OptimizerSettings,
     Stopwatch,
     acceptance_fields,
+    gate_rejections,
     make_sampled_train_grid,
     value_and_grad_fwd,
 )
-
-
-# Acceptance gates, CLI-reachable so a lower-precision caller can pass its
-# own bars.
-@dataclass(frozen=True)
-class ToleranceSettings:
-    train_residual: float = 1e-5
-    # The validation threshold is an HPO/quality diagnostic; it does not
-    # redefine convergence of a finite, feasible numerical solution.
-    validation_residual: float = 1e-2
 
 
 @dataclass(frozen=True)
@@ -368,12 +361,11 @@ def multicountry_growth_nn(
         )
     )
     rejection_reasons = []
-    if not bool(result.multi_start.accepted):
-        rejection_reasons.append("solver_status")
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
-    if max_train_residual > tolerance_set.train_residual:
-        rejection_reasons.append("train_residual")
+    rejection_reasons += gate_rejections(
+        tolerance_set, max_train_residual, max_validation_residual
+    )
     acceptance = acceptance_fields(rejection_reasons)
     solution_accepted = acceptance["solution_accepted"]
 
@@ -437,6 +429,7 @@ def multicountry_growth_nn(
         "ex_post_capital_tvc": float(jnp.max(tvc["capital_tvc"])),
         "train_loss": float(result.info.loss),
         "final_damping": float(result.lm_state.damping),
+        "solver_status": STATUS_TO_REASON.get(int(result.status), "unknown"),
         "steps": int(result.steps),
         "attempt": attempt,
         "solve_time": solve_time,

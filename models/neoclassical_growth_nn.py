@@ -34,9 +34,11 @@ from models.neural_networks import (
     unit_softplus,
 )
 from models.utilities import (
+    STATUS_TO_REASON,
     OptimizerSettings,
     Stopwatch,
     acceptance_fields,
+    gate_rejections,
     make_train_t_grid,
     value_and_grad_fwd,
 )
@@ -113,7 +115,7 @@ def neoclassical_growth_nn(
         atol=3.162277660168379e-08,
         num_attempts=5,
     ),
-    tolerance_set: ToleranceSettings = ToleranceSettings(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(validation_residual=1e-4),
     verbose: bool = True,
 ):
     jax.config.update("jax_enable_x64", True)
@@ -217,16 +219,29 @@ def neoclassical_growth_nn(
     steps = int(result.steps)
     attempt = int(result.multi_start.attempt) + 1
     train_loss = float(result.info.loss)
-    accepted = bool(result.multi_start.accepted)
 
     test_t = jnp.linspace(0.0, data_set.test_T, data_set.test_points, dtype=dtype)
     z_trend_test = jnp.exp((1.0 - a) * g * test_t)
+    validation_t = jnp.linspace(
+        0.0, float(t_train[-1]), data_set.validation_points, dtype=dtype
+    )
+    z_trend_validation = jnp.exp((1.0 - a) * g * validation_t)
     benchmark = neoclassical_growth_benchmark(p)
     train_df = snapshot(result.x, residual_args, p, benchmark)
     test_df = snapshot(
         result.x,
         NNXResidualArgs(
             batch={"t": test_t, "z_trend": z_trend_test},
+            graphdef=graphdef,
+            nondiff=nondiff,
+        ),
+        p,
+        benchmark,
+    )
+    validation_df = snapshot(
+        result.x,
+        NNXResidualArgs(
+            batch={"t": validation_t, "z_trend": z_trend_validation},
             graphdef=graphdef,
             nondiff=nondiff,
         ),
@@ -241,9 +256,15 @@ def neoclassical_growth_nn(
 
     g_hat_value = float(model.g[...]) if model.g is not None else float(g)
 
-    rejection_reasons = []
-    if not accepted:
-        rejection_reasons.append("train_loss")
+    max_train_residual = float(
+        max(train_df["resource"].abs().max(), train_df["euler"].abs().max())
+    )
+    max_validation_residual = float(
+        max(validation_df["resource"].abs().max(), validation_df["euler"].abs().max())
+    )
+    rejection_reasons = gate_rejections(
+        tolerance_set, max_train_residual, max_validation_residual
+    )
     results = {
         "parameters": {**p.to_dict(), "learn_g_hat": learn_g_hat},
         "nn_set": asdict(nn_set),
@@ -264,13 +285,13 @@ def neoclassical_growth_nn(
         "seed": seed,
         "train_loss": train_loss,
         "final_damping": float(result.lm_state.damping),
+        "solver_status": STATUS_TO_REASON.get(int(result.status), "unknown"),
         "test_resource_mean_abs": float(test_df["resource"].abs().mean()),
         "test_euler_mean_abs": float(test_df["euler"].abs().mean()),
         "test_k_rel_error_abs": float(test_df["k_rel_error"].mean()),
         "test_c_rel_error_abs": float(test_df["c_rel_error"].mean()),
-        "max_train_residual": float(
-            max(train_df["resource"].abs().max(), train_df["euler"].abs().max())
-        ),
+        "max_train_residual": max_train_residual,
+        "max_validation_residual": max_validation_residual,
         "log_tvc_residual": log_tvc,
         "transversality_ok": transversality_ok,
         "steps": steps,

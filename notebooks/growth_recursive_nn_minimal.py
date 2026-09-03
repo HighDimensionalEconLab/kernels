@@ -27,9 +27,9 @@ p = {
     "k_0": k_0,
 }
 
-WIDTH = 8
-DEPTH = 2  # hidden tanh layers
-HEAD_INIT_SCALE = 4.7e-3  # near-zero head: the policy starts at the anchor
+WIDTH = 16
+DEPTH = 2  # hidden silu layers
+HEAD_INIT_SCALE = 1e-3  # near-zero head: the policy starts at the anchor
 SEED = 0
 TRAIN_T = 100.0
 TRAIN_STEPS = 64  # RK4 steps; residuals sit on the 65 integrator states
@@ -39,6 +39,8 @@ TVC_T = 200.0
 TVC_STEPS = 256
 MAX_STEPS = 125
 LOSS_THRESHOLD = 2.15e-14  # sum of squared residuals; atol is its square root
+TEST_EULER_MEAN_ABS = 3e-6
+TEST_EULER_MAX = 9e-5
 INIT_DAMPING = 4.74e-4
 DAMPING_DECREASE = 0.511
 DAMPING_INCREASE = 2.82
@@ -54,7 +56,7 @@ def unit_softplus(raw):
     return jax.nn.softplus(2.0 * jnp.log(2.0) * raw) / jnp.log(2.0)
 
 
-# Investment policy on the full log state: a tanh MLP of x - x_0 with
+# Investment policy on the full log state: a silu MLP of x - x_0 with
 # x_0 = (log z_0, log k_0), anchored at delta k_0 so the near-zero head starts
 # at replacement investment at the initial capital. No structural constant
 # enters the map beyond that anchor; nothing detrends the state.
@@ -78,7 +80,7 @@ class InvestmentPolicy(nnx.Module):
     def __call__(self, log_state):
         h = log_state - log_state_0
         for layer in self.layers:
-            h = jnp.tanh(layer(h))
+            h = jax.nn.silu(layer(h))
         return delta * k_0 * unit_softplus(self.head(h))
 
 
@@ -234,3 +236,19 @@ print(
     f"c {float(c_error.mean()):.3e}"
 )
 print(f"log-TVC at t={TVC_T:.0f}: {float(log_tvc):.1f}   (should be << 0)")
+
+# The production driver's ex-post acceptance: the optimizer stops on its own
+# train-loss criterion, and acceptance is judged afterward against the
+# training loss and the held-out Euler bars.
+train_ok = float(result.info.loss) < LOSS_THRESHOLD
+test_euler_mean_abs = float(jnp.abs(euler_test).mean())
+test_euler_max = float(jnp.abs(euler_test).max())
+test_ok = (
+    test_euler_mean_abs <= TEST_EULER_MEAN_ABS and test_euler_max <= TEST_EULER_MAX
+)
+print(f"train loss {float(result.info.loss):.3e} < {LOSS_THRESHOLD:.3e}: {train_ok}")
+print(
+    f"test mean|Euler| {test_euler_mean_abs:.3e} <= {TEST_EULER_MEAN_ABS:.0e} and "
+    f"max|Euler| {test_euler_max:.3e} <= {TEST_EULER_MAX:.0e}: {test_ok}"
+)
+print(f"accepted: {train_ok and test_ok}")

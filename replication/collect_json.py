@@ -1408,8 +1408,8 @@ def neoclassical_growth_nn_recursive(out):
         ),
         "data": hp["data_set"],
         "architecture": {
-            "width": hp["nn_set"]["mlp_width"],
-            "depth": hp["nn_set"]["mlp_depth"],
+            "width": hp["nn_set"]["width"],
+            "depth": hp["nn_set"]["depth"],
             "hidden_activation": hp["nn_set"]["hidden_activation"],
             "total_params": int(med(single_json["total_params"])),
         },
@@ -1452,8 +1452,8 @@ def stochastic_growth_nn_recursive(out):
         "z_ergodic_sd": sig(med(j["z_ergodic_sd"]), 4),
         "data": hp["data_set"],
         "architecture": {
-            "width": hp["nn_set"]["mlp_width"],
-            "depth": hp["nn_set"]["mlp_depth"],
+            "width": hp["nn_set"]["width"],
+            "depth": hp["nn_set"]["depth"],
             "hidden_activation": hp["nn_set"]["hidden_activation"],
             "total_params": int(med(j["total_params"])),
         },

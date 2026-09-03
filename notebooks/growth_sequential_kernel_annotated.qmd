@@ -37,18 +37,24 @@ Parameters of the algorithm: the kernel hyperparameters, the collocation and tes
 ELL = 10.0  # Matern-1/2 length scale
 SIGMA = 1.0  # kernel amplitude
 TRAIN_T = 100.0
-N_TRAIN = 101
+N_TRAIN = 401
 TEST_T = 110.0
 N_TEST = 100
+N_VALIDATION = 801
 TVC_T = 200.0
 RIDGE = 1e-10  # disappearing penalty weight
 ATOL = 2e-8  # on the 1/sqrt(3n)-scaled residual norm
 GTOL = 1e-9
 INIT_DAMPING = 1e-8
+DAMPING_DECREASE = 0.1
+GEODESIC_ACCEPTANCE_RATIO = 0.8
 MAX_STEPS = 50
+TRAIN_RESIDUAL = 1e-5
+VALIDATION_RESIDUAL = 1e-2
 
 t_train = jnp.linspace(0.0, TRAIN_T, N_TRAIN)
 t_test = jnp.linspace(0.0, TEST_T, N_TEST)
+t_validation = jnp.linspace(0.0, TRAIN_T, N_VALIDATION)
 ```
 
 ## The model
@@ -161,7 +167,12 @@ theta_0 = {
 }
 
 solver = RidgeLevenbergMarquardt(
-    residual_fn, metric=metric, ridge=RIDGE, init_damping=INIT_DAMPING
+    residual_fn,
+    metric=metric,
+    ridge=RIDGE,
+    init_damping=INIT_DAMPING,
+    damping_decrease=DAMPING_DECREASE,
+    geodesic_acceptance_ratio=GEODESIC_ACCEPTANCE_RATIO,
 )
 start = time.perf_counter()
 result = solver.solve(
@@ -199,6 +210,32 @@ print(f"solve: {int(result.steps)} steps in {solve_time:.2f}s (incl. jit)")
 print(f"c_0 = {float(theta['c_0']):.6f}, mu_0 = {float(theta['mu_0']):.6f}")
 print(f"mean |Euler residual| test: {float(jnp.abs(euler_test).mean()):.3e}")
 print(f"log-TVC at t={TVC_T:.0f}: {float(log_tvc):.1f}   (should be << 0)")
+```
+
+`residual_fn` evaluates on whatever `K`/`K_tilde` matrices it is handed, so the same function reused against a validation grid over the training horizon gives the ex-post gate. It scales its rows by $1/\sqrt{\text{count}}$; the gate compares the unscaled rows.
+
+```{python}
+train_residual = residual_fn(theta, args, p)
+max_train_residual = float(
+    jnp.max(jnp.abs(train_residual)) * jnp.sqrt(train_residual.size)
+)
+K_validation, K_tilde_validation = kernel_matrices(t_validation, t_train)
+validation_residual = residual_fn(
+    theta, {"K": K_validation, "K_tilde": K_tilde_validation}, p
+)
+max_validation_residual = float(
+    jnp.max(jnp.abs(validation_residual)) * jnp.sqrt(validation_residual.size)
+)
+train_ok = max_train_residual <= TRAIN_RESIDUAL
+validation_ok = max_validation_residual <= VALIDATION_RESIDUAL
+print(
+    f"max train residual {max_train_residual:.3e} <= {TRAIN_RESIDUAL:.0e}: {train_ok}"
+)
+print(
+    f"max validation residual {max_validation_residual:.3e} <= "
+    f"{VALIDATION_RESIDUAL:.0e}: {validation_ok}"
+)
+print(f"accepted: {train_ok and validation_ok}")
 ```
 
 Capital rises from $k_0$ toward its steady state while consumption climbs to its own. The costate (Euler) residual vanishes at the training dates and is largest between the earliest of them, where the transition moves fastest; past the training horizon (dotted) the paths have already settled at the steady state, so extrapolation is nearly free.

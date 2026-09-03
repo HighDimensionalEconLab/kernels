@@ -92,4 +92,7 @@ class DataSettings:
 # own bars.
 @dataclass(frozen=True)
 class ToleranceSettings:
+    gate_train: bool = True
     train_residual: float = 1e-5
+    gate_validation: bool = True
+    validation_residual: float = 1e-2

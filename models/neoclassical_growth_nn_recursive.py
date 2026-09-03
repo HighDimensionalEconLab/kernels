@@ -29,6 +29,7 @@ from models.neoclassical_growth_shared import (
 )
 from models.neural_networks import (
     ACTIVATIONS,
+    PolicySettings,
     StateMLP,
     unit_softplus,
 )
@@ -63,10 +64,10 @@ class DataSettings:
     initial_dt: float | None = None
 
 
-# Acceptance is one predicate, evaluated at every interior epoch boundary
-# (on the redrawn training batch and the test batch), by the multi-start
-# accept hook, and ex post: gate_train requires the training loss under
-# train_loss_threshold, gate_test the held-out Euler errors under the bars.
+# Ex-post acceptance: gate_train requires the training loss on the returned
+# batch under train_loss_threshold, gate_test the held-out Euler errors under
+# the bars. The optimizer stops on its own criteria (atol, or the epoch
+# callback's fresh-batch loss test) and its status is reported, never gated.
 @dataclass(frozen=True)
 class ToleranceSettings:
     # max_steps is the LM-update budget per epoch; training ICs are redrawn at
@@ -81,14 +82,6 @@ class ToleranceSettings:
     test_euler_max: float = 9e-5
 
 
-@dataclass(frozen=True)
-class InvestmentPolicySettings:
-    mlp_width: int = 16
-    mlp_depth: int = 2
-    hidden_activation: str = "silu"
-    head_init_scale: float = 4.7e-3
-
-
 # Training ICs and keys live in args (the epoch callback may rewrite args
 # only), so the implicit derivative is conditional on the carried batch.
 @struct.dataclass
@@ -96,23 +89,18 @@ class ResidualArgs:
     graphdef: nnx.GraphDef
     nondiff: nnx.State
     initial_log_states: jax.Array
-    test_initial_log_states: jax.Array
     epoch_key: jax.Array
     restart_key: jax.Array
     epoch: jax.Array
     train_loss_threshold: jax.Array
-    test_euler_mean_abs: jax.Array
-    test_euler_max: jax.Array
     epoch_steps: jax.Array
     total_steps: jax.Array
     data_set: DataSettings = struct.field(pytree_node=False)
-    gate_train: bool = struct.field(pytree_node=False)
-    gate_test: bool = struct.field(pytree_node=False)
 
 
 # At each interior epoch boundary: redraw the training ICs, stop on a
-# nonfinite fresh-batch loss or an accepted policy, else continue with
-# damping reset.
+# nonfinite fresh-batch loss or (with epoch_early_stopping) a fresh-batch
+# loss under train_loss_threshold, else continue with damping reset.
 @dataclass(frozen=True)
 class EpochCallback:
     num_train_trajectories: int
@@ -135,9 +123,9 @@ class EpochCallback:
             epoch_key=epoch_key,
             epoch=ctx.args.epoch + 1,
         )
-        ok, loss, _, _ = accepted(ctx.x, fresh, ctx.p)
+        loss, train_ok = train_accepted(ctx.x, fresh, ctx.p)
         nonfinite = ~jnp.isfinite(loss)
-        converged = ok if self.epoch_early_stopping else jnp.asarray(False)
+        converged = train_ok if self.epoch_early_stopping else jnp.asarray(False)
         status = jnp.where(
             nonfinite,
             jnp.asarray(LMStatus.NONFINITE, dtype=jnp.int32),
@@ -172,36 +160,13 @@ class EpochCallback:
         )
 
 
-# Held-out Euler errors of the policy on the test initial conditions.
-def test_metrics(policy, args, p):
-    solution = simulate(
-        policy,
-        args.test_initial_log_states,
-        args.data_set.test_T,
-        args.data_set.test_points - 1,
-        p,
-    )
-    log_states = jnp.where(solution.ok[:, None, None], solution.xs, jnp.nan)
-    euler = jnp.abs(euler_residuals(policy, log_states.reshape(-1, 2), p))
-    return jnp.mean(euler), jnp.max(euler)
-
-
-# The acceptance predicate: (ok, training loss, train_ok, test_ok). NaN
-# metrics fail their comparison, so a diverged path is never accepted.
-def accepted(theta, args, p):
+# The training criterion on the batch carried in args: (loss, train_ok) with
+# train_ok a finite loss under train_loss_threshold. A NaN loss fails the
+# comparison, so a diverged batch never passes.
+def train_accepted(theta, args, p):
     residual = residual_fn(theta, args, p)
     loss = jnp.sum(residual * residual)
-    train_ok = jnp.isfinite(loss) & (loss < args.train_loss_threshold)
-    mean_abs, max_abs = test_metrics(
-        nnx.merge(args.graphdef, theta, args.nondiff), args, p
-    )
-    test_ok = (mean_abs <= args.test_euler_mean_abs) & (max_abs <= args.test_euler_max)
-    ok = (train_ok | (not args.gate_train)) & (test_ok | (not args.gate_test))
-    return ok, loss, train_ok, test_ok
-
-
-def accept_training(_, result):
-    return accepted(result.x, result.args, result.p)[0]
+    return loss, jnp.isfinite(loss) & (loss < args.train_loss_threshold)
 
 
 # Training simulation on the integrator's own states.
@@ -282,7 +247,7 @@ def neoclassical_growth_nn_recursive(
     use_float64: bool = True,
     data_set: DataSettings = DataSettings(),
     ic_set: InitialConditionSettings = InitialConditionSettings(),
-    nn_set: InvestmentPolicySettings = InvestmentPolicySettings(),
+    nn_set: PolicySettings = PolicySettings(),
     lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=4.74e-4,
         damping_decrease=0.511,
@@ -321,8 +286,8 @@ def neoclassical_growth_nn_recursive(
     # Unit input scales: log z is pinned at g = 0 and drifts O(0.1) per decade
     # otherwise, and a network that insensitive to z at the draw trains best.
     policy_spec = dict(
-        width=nn_set.mlp_width,
-        depth=nn_set.mlp_depth,
+        width=nn_set.width,
+        depth=nn_set.depth,
         activation=ACTIVATIONS[nn_set.hidden_activation],
         head_kernel_std=nn_set.head_init_scale,
         final_activation=unit_softplus,
@@ -341,22 +306,17 @@ def neoclassical_growth_nn_recursive(
         graphdef=graphdef,
         nondiff=nondiff,
         initial_log_states=jnp.log(train_initial_conditions),
-        test_initial_log_states=jnp.log(test_initial_conditions),
         epoch_key=jax.random.fold_in(train_ic_key, 1),
         restart_key=jax.random.fold_in(train_ic_key, 2),
         epoch=jnp.asarray(0, dtype=jnp.int32),
         train_loss_threshold=jnp.asarray(
             tolerance_set.train_loss_threshold, dtype=dtype
         ),
-        test_euler_mean_abs=jnp.asarray(tolerance_set.test_euler_mean_abs, dtype=dtype),
-        test_euler_max=jnp.asarray(tolerance_set.test_euler_max, dtype=dtype),
         epoch_steps=jnp.asarray(tolerance_set.max_steps, dtype=jnp.int32),
         total_steps=jnp.asarray(
             tolerance_set.num_epochs * tolerance_set.max_steps, dtype=jnp.int32
         ),
         data_set=data_set,
-        gate_train=tolerance_set.gate_train,
-        gate_test=tolerance_set.gate_test,
     )
 
     # Multi-start Levenberg-Marquardt training.
@@ -382,10 +342,11 @@ def neoclassical_growth_nn_recursive(
         epoch_early_stopping=tolerance_set.epoch_early_stopping,
     )
     # The per-step tolerance is sound only while the training batch never
-    # changes; across epochs, acceptance is judged at the boundaries instead.
+    # changes; across epochs the callback judges the fresh batch at the
+    # boundaries instead.
     atol = (
         math.sqrt(tolerance_set.train_loss_threshold)
-        if tolerance_set.num_epochs == 1 and tolerance_set.gate_train
+        if tolerance_set.num_epochs == 1 and tolerance_set.epoch_early_stopping
         else 0.0
     )
     multi_start = MultiStart(
@@ -393,13 +354,14 @@ def neoclassical_growth_nn_recursive(
         num_starts=lm_set.num_attempts,
         draw=DrawNNXModule(StateMLP, 2, 1, **policy_spec),
         reset_args=ResetEpochStream(),
-        accept=accept_training,
     )
     solve_options = dict(
         max_steps=tolerance_set.num_epochs * tolerance_set.max_steps,
         atol=atol,
         callback=callback,
-        max_steps_is_success=False,
+        # A completed multi-epoch schedule is a normal stop; a single-epoch
+        # solve must reach atol.
+        max_steps_is_success=tolerance_set.num_epochs > 1,
     )
 
     setup_time = fit_timer.elapsed()
@@ -418,17 +380,10 @@ def neoclassical_growth_nn_recursive(
     # stopped the solve, so the loss is recomputed at the returned
     # (x, args).
     theta_final, solve_args = result.x, result.args
-    _, loss, train_ok, test_ok = accepted(theta_final, solve_args, p)
+    loss, train_ok = train_accepted(theta_final, solve_args, p)
     train_loss = float(loss)
-    rejection_reasons = []
-    if tolerance_set.gate_train and not bool(train_ok):
-        rejection_reasons.append("train")
-    if tolerance_set.gate_test and not bool(test_ok):
-        rejection_reasons.append("test")
-    acceptance = acceptance_fields(rejection_reasons)
-    solution_accepted = acceptance["solution_accepted"]
     epochs_run = int(solve_args.epoch) + 1
-    stopping_reason = STATUS_TO_REASON.get(int(result.status), "max_steps")
+    stopping_reason = STATUS_TO_REASON.get(int(result.status), "unknown")
     attempt = int(result.multi_start.attempt) + 1
     final_damping = float(result.lm_state.damping)
     solver_accepted = bool(result.multi_start.accepted)
@@ -453,18 +408,18 @@ def neoclassical_growth_nn_recursive(
     )
     # Adaptive simulations pad the step buffer past the accepted prefix; those
     # rows are not training states and leave the frame here.
-    train_accepted = (
+    train_step_mask = (
         None if data_set.ode_solver == "rk4" else np.asarray(train_solution.accepted)
     )
-    if train_accepted is not None:
-        train_df = train_df[train_accepted.reshape(-1)].reset_index(drop=True)
+    if train_step_mask is not None:
+        train_df = train_df[train_step_mask.reshape(-1)].reset_index(drop=True)
     num_simulation_states = int(
-        train_solution.ts.size if train_accepted is None else train_accepted.sum()
+        train_solution.ts.size if train_step_mask is None else train_step_mask.sum()
     )
 
     # Held-out simulations and benchmark errors.
     test_solution = simulate(
-        policy, solve_args.test_initial_log_states, test_T, n_test_steps, p
+        policy, jnp.log(test_initial_conditions), test_T, n_test_steps, p
     )
     jax.block_until_ready(test_solution)
     test_log_states = jnp.where(
@@ -528,7 +483,19 @@ def neoclassical_growth_nn_recursive(
 
     max_train_euler = float(train_df["euler_residual"].abs().max())
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
+    test_euler_mean_abs = float(jnp.mean(jnp.abs(test_values["euler_residual"])))
     test_trajectory_euler = jnp.mean(jnp.abs(test_values["euler_residual"]), axis=1)
+
+    rejection_reasons = []
+    if tolerance_set.gate_train and not bool(train_ok):
+        rejection_reasons.append("train")
+    if tolerance_set.gate_test and not (
+        test_euler_mean_abs <= tolerance_set.test_euler_mean_abs
+        and max_test_euler <= tolerance_set.test_euler_max
+    ):
+        rejection_reasons.append("test")
+    acceptance = acceptance_fields(rejection_reasons)
+    solution_accepted = acceptance["solution_accepted"]
 
     results = {
         "parameters": p.to_dict(),
@@ -550,11 +517,9 @@ def neoclassical_growth_nn_recursive(
         "max_train_euler": max_train_euler,
         "max_test_euler": max_test_euler,
         "final_damping": final_damping,
-        "test_euler_mean_abs": float(jnp.mean(jnp.abs(test_values["euler_residual"]))),
+        "test_euler_mean_abs": test_euler_mean_abs,
         "test_euler_mean_abs_success": (
-            float(jnp.mean(jnp.abs(test_values["euler_residual"])))
-            if solution_accepted
-            else np.nan
+            test_euler_mean_abs if solution_accepted else np.nan
         ),
         "test_trajectory_euler_mean_abs_p50": float(
             jnp.quantile(test_trajectory_euler, 0.5)
@@ -566,6 +531,7 @@ def neoclassical_growth_nn_recursive(
         "max_log_tvc_residual": max_log_tvc_residual,
         "min_test_c": float(jnp.min(test_values["c"])),
         "steps": steps,
+        "solver_status": stopping_reason,
         "epochs_run": epochs_run,
         "attempt": attempt,
         "attempts_run": int(result.multi_start.attempts_run),

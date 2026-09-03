@@ -53,7 +53,8 @@ class DataSettings:
     train_points_list: list[float] | None = None
     test_T: float = 50.0
     test_points: int = 100
-    validation_points: int = 201
+    # 249 intervals share no interior point with the training nodes.
+    validation_points: int = 250
 
 
 # Acceptance gates, CLI-reachable so a lower-precision caller can pass its

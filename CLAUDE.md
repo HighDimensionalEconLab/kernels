@@ -127,7 +127,9 @@ per-directory READMEs.
   the max abs residual on the training grid under
   `tolerance_set.train_residual`; `validation_ok` is the MEAN abs residual
   on the held-out validation grid — a finer `linspace(0, train grid end,
-  validation_points)` on the same path (same initial conditions), evaluated
+  validation_points)` on the same path (same initial conditions), with
+  `validation_points - 1` coprime to the training-interval count so no
+  interior validation point sits on a node, evaluated
   through the post-solve `evaluate_grid`/`snapshot` closure — under
   `validation_residual`, with `max_validation_residual` reported beside it;
   `test_*` stays the long-horizon diagnostic. Every bar compares with `<=` so a NaN fails;

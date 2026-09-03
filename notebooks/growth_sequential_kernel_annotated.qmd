@@ -37,10 +37,10 @@ Parameters of the algorithm: the kernel hyperparameters, the collocation and tes
 ELL = 10.0  # Matern-1/2 length scale
 SIGMA = 1.0  # kernel amplitude
 TRAIN_T = 100.0
-N_TRAIN = 401
+N_TRAIN = 101
 TEST_T = 110.0
 N_TEST = 100
-N_VALIDATION = 801  # twice the node density, so it samples between nodes
+N_VALIDATION = 250  # shares no interior point with the training nodes
 TVC_T = 200.0
 RIDGE = 1e-10  # disappearing penalty weight
 ATOL = 2e-8  # on the 1/sqrt(3n)-scaled residual norm

@@ -84,7 +84,7 @@ def asset_pricing_nn(
     x_0: float = 0.01,
     seed: int = 0,
     use_float64: bool = True,
-    data_set: DataSettings = DataSettings(test_points=101),
+    data_set: DataSettings = DataSettings(),
     nn_set: PricePolicySettings = PricePolicySettings(),
     # Library-default LM damping schedule; pinned here so the CLI reaches it.
     # atol is on the residual norm (the loss stops at atol^2).

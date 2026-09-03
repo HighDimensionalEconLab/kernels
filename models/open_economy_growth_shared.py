@@ -134,7 +134,8 @@ class DataSettings:
     tail_points: int = 15
     test_T: float = 50.0
     test_points: int = 201
-    validation_points: int = 401
+    # 449 intervals share no interior point with the front-loaded nodes.
+    validation_points: int = 450
 
 
 # Ex-post acceptance bars shared by the NLLS, NN, and uno kernel drivers.

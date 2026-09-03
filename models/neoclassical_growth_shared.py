@@ -79,7 +79,8 @@ class DataSettings:
     train_points_list: list[float] | None = None
     test_T: float = NEOCLASSICAL_GROWTH_CONSTANTS["sequence_test_T"]
     test_points: int = 100
-    validation_points: int = 201
+    # 249 intervals share no interior point with the training nodes.
+    validation_points: int = 250
     test_tvc_T: float = NEOCLASSICAL_GROWTH_CONSTANTS["transversality_T"]
 
 

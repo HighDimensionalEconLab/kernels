@@ -118,7 +118,7 @@ def neoclassical_growth_nn_k(
     sigma_crra: float = CONSTANTS["sigma_crra"],
     seed: int = 0,
     use_float64: bool = True,
-    data_set: DataSettings = DataSettings(test_points=101),
+    data_set: DataSettings = DataSettings(),
     nn_set: GrowthPolicySettings = GrowthPolicySettings(),
     # atol is on the residual norm (the loss stops at atol^2).
     lm_set: OptimizerSettings = OptimizerSettings(

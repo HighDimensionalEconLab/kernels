@@ -57,7 +57,8 @@ class DataSettings:
     tail_points: int = 15
     test_T: float = 50.0
     test_points: int = 201
-    validation_points: int = 401
+    # 449 intervals share no interior point with the front-loaded nodes.
+    validation_points: int = 450
     # Long-run validity checks are evaluated at t ~ long_run_check_T (flat
     # consumption/capital/debt, capital at the theory steady state, interest
     # rate ~ r), with flatness measured against

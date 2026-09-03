@@ -83,9 +83,9 @@ class ToleranceSettings:
 
 @dataclass(frozen=True)
 class InvestmentPolicySettings:
-    mlp_width: int = 8
+    mlp_width: int = 16
     mlp_depth: int = 2
-    hidden_activation: str = "tanh"
+    hidden_activation: str = "silu"
     head_init_scale: float = 4.7e-3
 
 

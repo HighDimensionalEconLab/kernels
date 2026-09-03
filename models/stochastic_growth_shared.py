@@ -336,8 +336,8 @@ def growth_initial_conditions(z_0, k_0, ic_set, dtype):
 
 @dataclass(frozen=True)
 class InvestmentPolicySettings:
-    mlp_width: int = 8
-    mlp_depth: int = 3
+    mlp_width: int = 16
+    mlp_depth: int = 2
     hidden_activation: str = "silu"
     head_init_scale: float = 1e-3
 

@@ -71,9 +71,9 @@ class DataSettings:
 
 @dataclass(frozen=True)
 class SequentialPolicySettings:
-    width: int = 32
-    depth: int = 3
-    hidden_activation: str = "gelu"
+    width: int = 16
+    depth: int = 2
+    hidden_activation: str = "silu"
     head_init_scale: float = 1e-3
 
 

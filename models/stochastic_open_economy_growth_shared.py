@@ -104,7 +104,7 @@ class InitialConditionSettings:
 
 @dataclass(frozen=True)
 class SequentialPolicySettings:
-    width: int = 8
+    width: int = 16
     depth: int = 2
     hidden_activation: str = "silu"
     head_init_scale: float = 1e-3

@@ -1,10 +1,9 @@
-# Local random-search HPO for the non-homothetic recursive neoclassical
-# drivers on one of the replication experiments: the NN (capacity, epoch
-# schedule, collocation size, multi-start budget, LM damping) over NN seeds
-# 0-4, or the kernel (collocation size, ray + ARD geometry, metric shift,
-# ridge, stop) over data seeds. Both drivers run at their production
-# acceptance bars -- the
-# NN's predicate drives multi-start acceptance and early stopping inside the
+# Local random-search HPO for the recursive neoclassical drivers on one of
+# the replication experiments: the NN (capacity, epoch schedule, collocation
+# size, multi-start budget, LM damping) over NN seeds 0-4, or the kernel
+# (collocation size, ray + ARD geometry, metric shift, ridge, stop) over data
+# seeds. Both drivers run at their production acceptance bars -- the NN's
+# predicate drives multi-start acceptance and early stopping inside the
 # optimizer, so loosening it would change the algorithm being tuned -- and
 # `report` re-applies the same bars to the recorded metrics. One row per
 # (config, seed) appends to the parquet after every config, so a rerun with the
@@ -12,8 +11,8 @@
 # max_new and loop it from the shell. Parallel workers take distinct
 # `--output`, `--sweep_seed`, and `--config_offset`; `report` globs them.
 #
-#   JAX_PLATFORMS=cpu uv run python -m extra.sweeps.neoclassical_recursive_nonhomothetic_local_hpo run --driver kernel --experiment multi_ic_g0 --seeds [0,1,2] --max_new 10
-#   uv run python -m extra.sweeps.neoclassical_recursive_nonhomothetic_local_hpo report --driver kernel --experiment multi_ic_g0
+#   JAX_PLATFORMS=cpu uv run python -m extra.sweeps.neoclassical_recursive_local_hpo run --driver kernel --experiment multi_ic_g0 --seeds [0,1,2] --max_new 10
+#   uv run python -m extra.sweeps.neoclassical_recursive_local_hpo report --driver kernel --experiment multi_ic_g0
 from __future__ import annotations
 
 import glob
@@ -24,12 +23,10 @@ import jsonargparse
 import numpy as np
 import pandas as pd
 
-from models.neoclassical_growth_kernel_recursive_nonhomothetic import (
-    neoclassical_growth_kernel_recursive_nonhomothetic,
+from models.neoclassical_growth_kernel_recursive import (
+    neoclassical_growth_kernel_recursive,
 )
-from models.neoclassical_growth_nn_recursive_nonhomothetic import (
-    neoclassical_growth_nn_recursive_nonhomothetic,
-)
+from models.neoclassical_growth_nn_recursive import neoclassical_growth_nn_recursive
 from replication.utilities import configure_process, run_solver, with_option
 
 # The replication drivers' experiments.
@@ -68,7 +65,7 @@ COMMON_METRICS = (
 )
 SPACES = {
     "nn": dict(
-        solver=neoclassical_growth_nn_recursive_nonhomothetic,
+        solver=neoclassical_growth_nn_recursive,
         seed_option="seed",
         seeds=(0, 1, 2, 3, 4),
         discrete={
@@ -97,7 +94,7 @@ SPACES = {
         size_metric="total_params",
     ),
     "kernel": dict(
-        solver=neoclassical_growth_kernel_recursive_nonhomothetic,
+        solver=neoclassical_growth_kernel_recursive,
         seed_option="ic_set.data_seed",
         # Deterministic given the data draw, which the single-IC zero variances
         # pin at the base point.
@@ -203,8 +200,7 @@ def aggregate(frame, space):
 
 def output_path(driver, experiment):
     return (
-        ".results/hpo/neoclassical_recursive_nonhomothetic_"
-        f"{driver}_{experiment}_local_hpo.parquet"
+        f".results/hpo/neoclassical_recursive_{driver}_{experiment}_local_hpo.parquet"
     )
 
 

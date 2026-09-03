@@ -1638,6 +1638,8 @@ def neoclassical_growth_kernel_recursive(out):
             "num_centers": int(med(j["num_centers"])),
             "penalized_parameter_count": int(med(j["penalized_parameter_count"])),
             "rkhs_norm": sig(med(j["rkhs_norm"])),
+            "rkhs_norm_ray": sig(med(j["rkhs_norm_ray"])),
+            "rkhs_norm_2d": sig(med(j["rkhs_norm_2d"])),
             "num_train_trajectories": experiment_hp["ic_set"]["num_train_trajectories"],
             "num_test_trajectories": experiment_hp["ic_set"]["num_test_trajectories"],
         }
@@ -1648,6 +1650,8 @@ def neoclassical_growth_kernel_recursive(out):
         ),
         "data": hp["data_set"],
         "kernel": hp["kernel_set"],
+        # The balanced-growth slope the tuned kernel/ray_slope is compared to.
+        "structural_ray_slope": sig(1.0 / (1.0 - hp["parameters"]["a"])),
         "solver": {"ridge": hp["ridge_set"]["ridge"]},
         "experiments": {name: experiment(name) for name in RECURSIVE_EXPERIMENTS},
     }

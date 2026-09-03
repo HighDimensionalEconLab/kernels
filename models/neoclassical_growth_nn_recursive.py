@@ -29,7 +29,6 @@ from models.neoclassical_growth_shared import (
 )
 from models.neural_networks import (
     ACTIVATIONS,
-    HomotheticPolicyMLP,
     StateMLP,
     unit_softplus,
 )
@@ -52,7 +51,7 @@ class DataSettings:
     # and enforces residuals on the accepted steps only. rtol/atol/initial_dt
     # configure the adaptive controller and are ignored under rk4; test/tvc
     # simulations stay fixed-step.
-    train_points: int = 41
+    train_points: int = 61
     test_points: int = 41
     tvc_steps: int = 256
     train_T: float = 60.0
@@ -72,8 +71,8 @@ class DataSettings:
 class ToleranceSettings:
     # max_steps is the LM-update budget per epoch; training ICs are redrawn at
     # each interior epoch boundary, so num_epochs = 1 never resamples.
-    max_steps: int = 250
-    train_loss_threshold: float = 1e-14
+    max_steps: int = 125
+    train_loss_threshold: float = 2.15e-14
     num_epochs: int = 1
     epoch_early_stopping: bool = True
     gate_train: bool = True
@@ -84,11 +83,10 @@ class ToleranceSettings:
 
 @dataclass(frozen=True)
 class InvestmentPolicySettings:
-    mlp_width: int = 32
-    mlp_depth: int = 3
-    hidden_activation: str = "gelu"
-    head_init_scale: float = 1e-3
-    homothetic_representation: bool = True
+    mlp_width: int = 8
+    mlp_depth: int = 2
+    hidden_activation: str = "tanh"
+    head_init_scale: float = 4.7e-3
 
 
 # Training ICs and keys live in args (the epoch callback may rewrite args
@@ -266,9 +264,12 @@ def residual_fn(theta, args, p):
     ).reshape(-1)
 
 
-# The stochastic variant (stochastic_growth_nn_recursive) solves this same
-# model with stochastic TFP. No benchmark or steady-state information enters
-# the residual or initialization; the closed form is ex-post diagnostics only.
+# Deterministic recursive neoclassical growth: a general StateMLP on
+# (log z, log k), the policy form of the stochastic driver
+# (stochastic_growth_nn_recursive), with the structural constants only in
+# the output anchor delta * k_0. No benchmark or steady-state information
+# enters the residual or initialization; the closed form is ex-post
+# diagnostics only.
 def neoclassical_growth_nn_recursive(
     a: float = CONSTANTS["a"],
     delta: float = CONSTANTS["delta"],
@@ -283,12 +284,12 @@ def neoclassical_growth_nn_recursive(
     ic_set: InitialConditionSettings = InitialConditionSettings(),
     nn_set: InvestmentPolicySettings = InvestmentPolicySettings(),
     lm_set: OptimizerSettings = OptimizerSettings(
-        init_damping=3.26e-5,
-        damping_decrease=0.482,
-        damping_increase=2.71,
+        init_damping=4.74e-4,
+        damping_decrease=0.511,
+        damping_increase=2.82,
         geodesic_acceleration=True,
-        geodesic_acceptance_ratio=0.541,
-        num_attempts=5,
+        geodesic_acceptance_ratio=0.892,
+        num_attempts=2,
     ),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
@@ -317,31 +318,20 @@ def neoclassical_growth_nn_recursive(
 
     fit_timer = Stopwatch()
     init_key, multi_start_key = jax.random.split(jax.random.key(seed))
-    if nn_set.homothetic_representation:
-        policy_cls, policy_args = HomotheticPolicyMLP, ()
-        policy_spec = dict(
-            width=nn_set.mlp_width,
-            depth=nn_set.mlp_depth,
-            activation=ACTIVATIONS[nn_set.hidden_activation],
-            head_kernel_std=nn_set.head_init_scale,
-            a=a,
-            delta=delta,
-            dtype=dtype,
-        )
-    else:
-        policy_cls, policy_args = StateMLP, (2, 1)
-        policy_spec = dict(
-            width=nn_set.mlp_width,
-            depth=nn_set.mlp_depth,
-            activation=ACTIVATIONS[nn_set.hidden_activation],
-            head_kernel_std=nn_set.head_init_scale,
-            final_activation=unit_softplus,
-            center=(math.log(z_0), math.log(k_0)),
-            output_scale=(delta * k_0,),
-            dtype=dtype,
-        )
+    # Unit input scales: log z is pinned at g = 0 and drifts O(0.1) per decade
+    # otherwise, and a network that insensitive to z at the draw trains best.
+    policy_spec = dict(
+        width=nn_set.mlp_width,
+        depth=nn_set.mlp_depth,
+        activation=ACTIVATIONS[nn_set.hidden_activation],
+        head_kernel_std=nn_set.head_init_scale,
+        final_activation=unit_softplus,
+        center=(math.log(z_0), math.log(k_0)),
+        output_scale=(delta * k_0,),
+        dtype=dtype,
+    )
     graphdef, _, nondiff = nnx.split(
-        policy_cls(*policy_args, rngs=nnx.Rngs(0), **policy_spec),
+        StateMLP(2, 1, rngs=nnx.Rngs(0), **policy_spec),
         nnx.Param,
         ...,
     )
@@ -379,7 +369,7 @@ def neoclassical_growth_nn_recursive(
         geodesic_acceptance_ratio=lm_set.geodesic_acceptance_ratio,
     )
     _, theta_0, _ = nnx.split(
-        policy_cls(*policy_args, rngs=nnx.Rngs(init_key), **policy_spec),
+        StateMLP(2, 1, rngs=nnx.Rngs(init_key), **policy_spec),
         nnx.Param,
         ...,
     )
@@ -401,7 +391,7 @@ def neoclassical_growth_nn_recursive(
     multi_start = MultiStart(
         key=multi_start_key,
         num_starts=lm_set.num_attempts,
-        draw=DrawNNXModule(policy_cls, *policy_args, **policy_spec),
+        draw=DrawNNXModule(StateMLP, 2, 1, **policy_spec),
         reset_args=ResetEpochStream(),
         accept=accept_training,
     )

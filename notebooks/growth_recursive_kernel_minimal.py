@@ -18,17 +18,21 @@ z_0 = 1.0  # initial TFP
 k_0 = 1.0  # initial capital
 p = {"a": a, "delta": delta, "rho_hat": rho_hat, "sigma_crra": sigma_crra, "g": g}
 
-AMPLITUDE = 1.0  # RBF amplitude
-LENGTHSCALE = 0.6  # RBF length scale in log kappa
-METRIC_EPSILON = 3e-5  # diagonal shift before the Cholesky metric factor
+RAY_SLOPE = 1.51  # slope s of the ray coordinate q = log k - s log z
+RAY_AMPLITUDE = 0.412  # RBF amplitude in q
+RAY_LENGTHSCALE = 0.634  # RBF length scale in q
+AMPLITUDE = 5.71  # anisotropic RBF amplitude in (log z, log k)
+LOG_Z_LENGTHSCALE = 1.0
+LOG_K_LENGTHSCALE = 4.27
+METRIC_EPSILON = 2e-7  # diagonal shift before the Cholesky metric factor
 TRAIN_T = 100.0
 TRAIN_POINTS = 65  # collocation states (and RBF centers) on the benchmark path
 TEST_T = 40.0
 TEST_STEPS = 40
 TVC_T = 200.0
 TVC_STEPS = 256
-RIDGE = 1e-12  # disappearing penalty weight
-ATOL = 1e-5
+RIDGE = 3.9e-12  # disappearing penalty weight
+ATOL = 6.75e-6
 GTOL = 1e-7
 INIT_DAMPING = 1e-6
 DAMPING_DECREASE = 0.25
@@ -77,19 +81,29 @@ benchmark = solve_bvp(
 )
 
 # Collocation states: the benchmark path sampled on the training dates,
-# re-trended to (log z, log k); their log kappa values double as RBF centers.
+# re-trended to (log z, log k); the states are the kernel centers, with their
+# ray coordinates q = log k - RAY_SLOPE log z the centers of the ray component.
 # Nothing is integrated during training.
 t_train = jnp.linspace(0.0, TRAIN_T, TRAIN_POINTS)
 log_z_train = jnp.log(z_0) + (1.0 - a) * g * t_train
 log_k_train = jnp.log(benchmark(t_train)[:, 0]) + log_z_train / (1.0 - a)
 train_log_states = jnp.stack([log_z_train, log_k_train], axis=-1)
-centers = log_k_train - log_z_train / (1.0 - a)
+q_centers = log_k_train - RAY_SLOPE * log_z_train
 
 
-def rbf_features(q):
-    return AMPLITUDE**2 * jnp.exp(
-        -((q[..., None] - centers) ** 2) / (2.0 * LENGTHSCALE**2)
+# Additive state kernel: an anisotropic RBF in (log z, log k) plus an RBF in
+# the ray coordinate q; the slope is a tuned hyperparameter like the
+# lengthscales.
+def rbf_features(log_state):
+    scaled = (log_state[..., None, :] - train_log_states) / jnp.array(
+        [LOG_Z_LENGTHSCALE, LOG_K_LENGTHSCALE]
     )
+    ard = AMPLITUDE**2 * jnp.exp(-0.5 * jnp.sum(scaled**2, axis=-1))
+    q = log_state[..., 1] - RAY_SLOPE * log_state[..., 0]
+    ray = RAY_AMPLITUDE**2 * jnp.exp(
+        -((q[..., None] - q_centers) ** 2) / (2.0 * RAY_LENGTHSCALE**2)
+    )
+    return ard + ray
 
 
 # U(0) = U'(0) = 1, so a near-zero head starts at its declared output scale.
@@ -97,17 +111,11 @@ def unit_softplus(raw):
     return jax.nn.softplus(2.0 * jnp.log(2.0) * raw) / jnp.log(2.0)
 
 
-# Homothetic investment policy on the detrended state: an RBF expansion in
-# log kappa = log k - log z / (1 - a) plus the unpenalized free constant b,
-# anchored at replacement investment delta k.
+# Kernel expansion in the full log state plus an unpenalized linear term and
+# constant, anchored at replacement investment at the initial capital.
 def investment(theta, log_state, p):
-    alpha, b = theta["alpha"], theta["b"]
-    log_kappa = log_state[1] - log_state[0] / (1.0 - p["a"])
-    return (
-        p["delta"]
-        * jnp.exp(log_state[1])
-        * unit_softplus(rbf_features(log_kappa) @ alpha + b)
-    )
+    raw = rbf_features(log_state) @ theta["alpha"] + log_state @ theta["linear"]
+    return p["delta"] * k_0 * unit_softplus(raw + theta["b"])
 
 
 def consumption(theta, log_state, p):
@@ -162,13 +170,18 @@ def residual_fn(theta, args, p):
     return euler / jnp.sqrt(euler.size)
 
 
-gram = rbf_features(centers)
+gram = rbf_features(train_log_states)
 metric = RepeatedFactorMetric(
     jnp.linalg.cholesky(gram + METRIC_EPSILON * jnp.eye(TRAIN_POINTS), upper=True),
     repeats=1,
 )
-# Flattened by sorted key: "alpha" (penalized by the metric) precedes the free "b".
-theta_0 = {"alpha": jnp.zeros(TRAIN_POINTS), "b": jnp.zeros(())}
+# Flattened by sorted key: "alpha" (penalized by the metric) precedes the free
+# "b" and "linear".
+theta_0 = {
+    "alpha": jnp.zeros(TRAIN_POINTS),
+    "b": jnp.zeros(()),
+    "linear": jnp.zeros(2),
+}
 
 solver = RidgeLevenbergMarquardt(
     residual_fn,

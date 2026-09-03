@@ -37,17 +37,21 @@ p = {"a": a, "delta": delta, "rho_hat": rho_hat, "sigma_crra": sigma_crra, "g": 
 Parameters of the algorithm: the state-kernel hyperparameters, the collocation design and simulation horizons, the ridge Levenberg–Marquardt settings, and the benchmark boundary-value solve.
 
 ```{python}
-AMPLITUDE = 1.0  # RBF amplitude
-LENGTHSCALE = 0.6  # RBF length scale in log kappa
-METRIC_EPSILON = 3e-5  # diagonal shift before the Cholesky metric factor
+RAY_SLOPE = 1.51  # slope s of the ray coordinate q = log k - s log z
+RAY_AMPLITUDE = 0.412  # RBF amplitude in q
+RAY_LENGTHSCALE = 0.634  # RBF length scale in q
+AMPLITUDE = 5.71  # anisotropic RBF amplitude in (log z, log k)
+LOG_Z_LENGTHSCALE = 1.0
+LOG_K_LENGTHSCALE = 4.27
+METRIC_EPSILON = 2e-7  # diagonal shift before the Cholesky metric factor
 TRAIN_T = 100.0
 TRAIN_POINTS = 65  # collocation states (and RBF centers) on the benchmark path
 TEST_T = 40.0
 TEST_STEPS = 40
 TVC_T = 200.0
 TVC_STEPS = 256
-RIDGE = 1e-12  # disappearing penalty weight
-ATOL = 1e-5
+RIDGE = 3.9e-12  # disappearing penalty weight
+ATOL = 6.75e-6
 GTOL = 1e-7
 INIT_DAMPING = 1e-6
 DAMPING_DECREASE = 0.25
@@ -120,31 +124,44 @@ benchmark = solve_bvp(
 )
 ```
 
-The benchmark places the training states: its path, sampled on the training dates and re-trended to $(\log z, \log k)$, is the collocation design, and the sampled $\log \kappa$ values double as the kernel centers. Nothing is integrated during training — this is a representation size, not a simulation grid. Unlike the recursive NN notebook, which trains on the closed-loop rollout its own policy generates, this collocation design is fixed data. The same benchmark returns at the end as the accuracy reference on the held-out rollout.
+The benchmark places the training states: its path, sampled on the training dates and re-trended to $(\log z, \log k)$, is the collocation design, and those states are the kernel centers — with their ray coordinates $q_j = \log k_j - s \log z_j$ the centers of the ray component. Nothing is integrated during training — this is a representation size, not a simulation grid. Unlike the recursive NN notebook, which trains on the closed-loop rollout its own policy generates, this collocation design is fixed data. The same benchmark returns at the end as the accuracy reference on the held-out rollout.
 
 ```{python}
 t_train = jnp.linspace(0.0, TRAIN_T, TRAIN_POINTS)
 log_z_train = jnp.log(z_0) + (1.0 - a) * g * t_train
 log_k_train = jnp.log(benchmark(t_train)[:, 0]) + log_z_train / (1.0 - a)
 train_log_states = jnp.stack([log_z_train, log_k_train], axis=-1)
-centers = log_k_train - log_z_train / (1.0 - a)
+q_centers = log_k_train - RAY_SLOPE * log_z_train
 ```
 
 ## The hypothesis class
 
-The policy is *homothetic*: a Gaussian RBF expansion in the single detrended state $\log \kappa = \log k - \log z / (1 - a)$,
+The policy is a kernel expansion in the full log state $x = (\log z, \log k)$ under the additive state kernel
 
 $$
-i(x) = \delta\, k\; U\!\Big( \textstyle\sum_j \alpha_j\, \sigma^2 e^{-(\log\kappa - q_j)^2 / 2\ell^2} + b \Big),
+K(x, x') = \sigma_r^2\, e^{-(q - q')^2 / 2\ell_r^2} + \sigma^2 \exp\!\Big(-\tfrac{1}{2}\textstyle\sum_d (x_d - x'_d)^2 / \ell_d^2\Big),
+\qquad q = \log k - s \log z,
 $$
 
-with centers $q_j$ at the collocation states, an unpenalized free constant $b$, and the normalized softplus $U$ (with $U(0) = U'(0) = 1$) anchoring a near-zero expansion at exact replacement investment $i = \delta k$.
+a squared exponential in the ray coordinate $q$ plus an anisotropic squared exponential in $(\log z, \log k)$; the penalized solve splits the policy between the two components by minimum norm. The slope $s$ is a hyperparameter tuned alongside the lengthscales, on the same footing as them, and it lands at the balanced-growth slope $1/(1-a) = 1.5$ without that value being imposed. With centers $x_j$ at the collocation states, an unpenalized linear term $\beta^\top x$ and constant $b$, and the normalized softplus $U$ (with $U(0) = U'(0) = 1$),
+
+$$
+i(x) = \delta\, k_0\; U\!\Big( \textstyle\sum_j \alpha_j\, K(x, x_j) + \beta^\top x + b \Big),
+$$
+
+so a zero expansion sits at replacement investment at the initial capital. This is the same approximation class the stochastic growth kernel uses.
 
 ```{python}
-def rbf_features(q):
-    return AMPLITUDE**2 * jnp.exp(
-        -((q[..., None] - centers) ** 2) / (2.0 * LENGTHSCALE**2)
+def rbf_features(log_state):
+    scaled = (log_state[..., None, :] - train_log_states) / jnp.array(
+        [LOG_Z_LENGTHSCALE, LOG_K_LENGTHSCALE]
     )
+    ard = AMPLITUDE**2 * jnp.exp(-0.5 * jnp.sum(scaled**2, axis=-1))
+    q = log_state[..., 1] - RAY_SLOPE * log_state[..., 0]
+    ray = RAY_AMPLITUDE**2 * jnp.exp(
+        -((q[..., None] - q_centers) ** 2) / (2.0 * RAY_LENGTHSCALE**2)
+    )
+    return ard + ray
 
 
 def unit_softplus(raw):
@@ -152,13 +169,8 @@ def unit_softplus(raw):
 
 
 def investment(theta, log_state, p):
-    alpha, b = theta["alpha"], theta["b"]
-    log_kappa = log_state[1] - log_state[0] / (1.0 - p["a"])
-    return (
-        p["delta"]
-        * jnp.exp(log_state[1])
-        * unit_softplus(rbf_features(log_kappa) @ alpha + b)
-    )
+    raw = rbf_features(log_state) @ theta["alpha"] + log_state @ theta["linear"]
+    return p["delta"] * k_0 * unit_softplus(raw + theta["b"])
 ```
 
 ## Model functions
@@ -215,14 +227,14 @@ def simulate(theta, initial_log_state, T, n_steps, p):
 The residual is Euler-only — the resource constraint is built into $c(x) = z k^a - i(x)$ — enforced at the fixed collocation states:
 
 $$
-\min_{\alpha, b}\ \| r(\alpha, b) \|^2 + \lambda\, \alpha^\top (K + \varepsilon I)\, \alpha,
+\min_{\alpha, \beta, b}\ \| r(\alpha, \beta, b) \|^2 + \lambda\, \alpha^\top (K + \varepsilon I)\, \alpha,
 \qquad
 r_j = \frac{1}{\sqrt n}\Big(
 \frac{d \log c}{dt}\Big|_{x_j} - \frac{1}{\sigma}\big(a z_j k_j^{a-1} - \delta - \hat\rho\big)
 \Big).
 $$
 
-As $\lambda \to 0$ this selects the interpolant of minimal RKHS norm with the free constant $b$ unpenalized; $\varepsilon$ shifts the Gram's near-zero eigenvalues so its Cholesky factor exists.
+As $\lambda \to 0$ this selects the interpolant of minimal RKHS norm with the linear term $\beta$ and constant $b$ unpenalized; $\varepsilon$ shifts the Gram's near-zero eigenvalues so its Cholesky factor exists.
 
 ```{python}
 def residual_fn(theta, args, p):
@@ -232,16 +244,21 @@ def residual_fn(theta, args, p):
 
 ## Solve
 
-The penalty enters through a `RepeatedFactorMetric` holding the upper Cholesky factor of the shifted Gram: it penalizes the leading block of the flattened `theta` — dicts flatten by sorted key, so `"alpha"` leads — and leaves the trailing scalar $b$ as the unpenalized free block. `RidgeLevenbergMarquardt` adds a geodesic (second-order) correction to each Gauss–Newton step by default, taking it when it is small relative to the step itself. Convergence requires both the gradient (`gtol`) and residual (`atol`) tests.
+The penalty enters through a `RepeatedFactorMetric` holding the upper Cholesky factor of the shifted Gram: it penalizes the leading block of the flattened `theta` — dicts flatten by sorted key, so `"alpha"` leads — and leaves the trailing `"b"` and `"linear"` as the unpenalized free block. `RidgeLevenbergMarquardt` adds a geodesic (second-order) correction to each Gauss–Newton step by default, taking it when it is small relative to the step itself. Convergence requires both the gradient (`gtol`) and residual (`atol`) tests.
 
 ```{python}
-gram = rbf_features(centers)
+gram = rbf_features(train_log_states)
 metric = RepeatedFactorMetric(
     jnp.linalg.cholesky(gram + METRIC_EPSILON * jnp.eye(TRAIN_POINTS), upper=True),
     repeats=1,
 )
-# Flattened by sorted key: "alpha" (penalized by the metric) precedes the free "b".
-theta_0 = {"alpha": jnp.zeros(TRAIN_POINTS), "b": jnp.zeros(())}
+# Flattened by sorted key: "alpha" (penalized by the metric) precedes the free
+# "b" and "linear".
+theta_0 = {
+    "alpha": jnp.zeros(TRAIN_POINTS),
+    "b": jnp.zeros(()),
+    "linear": jnp.zeros(2),
+}
 
 solver = RidgeLevenbergMarquardt(
     residual_fn,
@@ -305,7 +322,7 @@ print(
 print(f"log-TVC at t={TVC_T:.0f}: {float(log_tvc):.1f}   (should be << 0)")
 ```
 
-Detrended capital $\kappa = k\, z^{-1/(1-a)}$ tracks the benchmark (dashed) up toward the balanced-growth steady state $\kappa_{ss}$ along the test roll, and the Euler residual sits on zero.
+Detrended capital $\kappa = k\, z^{-1/(1-a)}$ tracks the benchmark (dashed) up toward the balanced-growth steady state $\kappa_{ss}$ along the test roll, and the Euler residual sits on zero. The kernel was handed the ray coordinate only through a tuned slope, and the fitted policy exhibits the balanced-growth ray rather than having it imposed.
 
 ```{python}
 kappa_test = k_test / z_test ** (1.0 / (1.0 - a))

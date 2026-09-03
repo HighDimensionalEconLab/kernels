@@ -63,8 +63,7 @@ per-directory READMEs.
   unit slope, and `flow_unit / start_level` = `1/delta` on the open-economy
   investment slot so every head carries an O(flow-unit) Jacobian at the
   draw), then the `output_scale` Variable multiply; normalization and
-  output scales are the non-Param Variables)
-  and the hardcoded `HomotheticPolicyMLP`, with
+  output scales are the non-Param Variables), with
   `normalize_state`/`UnitSoftplusWhere` also imported by the
   stochastic-open-economy kernel policy; plus `unit_softplus`/`ACTIVATIONS`,
   `NNXResidualArgs`, and the policy-artifact `save_model`/`load_model`
@@ -136,12 +135,16 @@ per-directory READMEs.
   RK4 states (nothing interpolated inside the residual); every recursive
   policy call is p-free — `policy(state) -> (out_features,)`, single-output
   consumers index `[0]` — with structural constants baked at construction
-  (`HomotheticPolicyMLP` holds a/delta as non-Param Variables, `StateMLP`
-  output scales like `delta * k_0` live in its Variables) and the kernel-recursive
-  policy structs carrying `p` as a pytree field instead. The neoclassical
-  `homothetic_representation` flag picks `HomotheticPolicyMLP`
-  (`i = delta * k * unit_softplus(h(log kappa))`) vs a general `StateMLP`.
-  Every recursive driver accepts on one predicate,
+  (`StateMLP` output scales like `delta * k_0` live in its Variables) and
+  the kernel-recursive policy structs carrying `p` as a pytree field
+  instead. Every recursive policy is a function of the full state in the
+  model's natural coordinates; no driver detrends or reduces the state
+  inside the approximation class. The neoclassical and stochastic growth
+  kernels share the ray + 2-D ARD state kernel (an RBF in
+  `q = log k - ray_slope * log z` plus an anisotropic RBF in
+  `(log z, log k)`) with `ray_slope` a tuned hyperparameter like the
+  lengthscales and theta = `(alpha, h_const, linear_coeffs)`, alpha alone
+  penalized. Every recursive driver accepts on one predicate,
   `(not gate_train or train_ok) and (not gate_test or test_ok)`, at every
   decision point it has (epoch boundary, multi-start accept hook, ex post):
   `train_ok` is the driver's training criterion (fresh-batch loss under

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Literal
 
 import jax
 import jax.numpy as jnp
@@ -11,10 +10,10 @@ from flax import struct
 from nlls_gram import LMStatus, RepeatedFactorMetric, RidgeLevenbergMarquardt
 
 from models.kernels import (
+    ard_rbf_state_features,
     rbf_state_features,
     rbf_state_gram,
     rkhs_norm_squared,
-    state_features,
 )
 from models.neoclassical_growth_benchmark import neoclassical_growth_benchmark
 from models.neoclassical_growth_shared import (
@@ -45,7 +44,7 @@ class DataSettings:
     train_T: float = 60.0
     # Fixed RKHS centers on the exact path: a representation size, not a
     # simulation grid (nothing is integrated during training).
-    train_points: int = 41
+    train_points: int = 61
     # Held-out paths are fixed-step RK4 on the integrator's own states.
     test_points: int = 41
     tvc_steps: int = 256
@@ -55,29 +54,20 @@ class DataSettings:
 
 @dataclass(frozen=True)
 class StateKernelSettings:
-    amplitude: float = 1.0
-    # Below ~1 the unpenalized constant stalls the LM on the 60-year paths.
-    lengthscale: float = 1.1
-    metric_epsilon: float = 3e-5
-    # With the free constant, theta is (alpha, h_const) and only alpha is
-    # penalized; without it the policy is the pure RKHS expansion.
-    free_constant: bool = True
-    # Homothetic: 1-D RBF on log(k/z). Non-homothetic: a 2-D expansion on the
-    # centered (log z, log k) with product (ard) or sum (additive) composition
-    # of RBF or Matern 1-D kernels; lengthscales default per axis to
-    # `lengthscale`, and linear_mean appends two unpenalized coefficients.
-    homothetic_representation: bool = True
-    state_kernel: Literal[
-        "ard_rbf",
-        "additive_rbf",
-        "ard_matern32",
-        "ard_matern52",
-        "additive_matern32",
-        "additive_matern52",
-    ] = "ard_rbf"
-    log_z_lengthscale: float | None = None
-    log_k_lengthscale: float | None = None
-    linear_mean: bool = False
+    # Additive kernel: a 1-D RBF on the ray coordinate
+    # q = log k - ray_slope * log z plus a 2-D ARD RBF on (log z, log k). The
+    # penalized solve finds the minimum-norm split between the two components,
+    # so the amplitude ratio sets how much of the policy the ray explains;
+    # ray_amplitude = 0 recovers the pure 2-D representation. ray_slope is a
+    # tuned hyperparameter like the lengthscales; the balanced-growth slope
+    # 1/(1-a) never enters the approximation class.
+    ray_slope: float = 1.51
+    ray_amplitude: float = 0.412
+    ray_lengthscale: float = 0.634
+    amplitude: float = 5.71
+    log_z_lengthscale: float = 1.0
+    log_k_lengthscale: float = 4.27
+    metric_epsilon: float = 2.0e-7
 
 
 # Ex-post acceptance: gate_train requires the ridge LM to have converged,
@@ -92,94 +82,66 @@ class ToleranceSettings:
 
 @struct.dataclass
 class ResidualArgs:
-    centers: jax.Array
+    # train_log_states doubles as the 2-D kernel centers: the representer
+    # nodes are the collocation states.
     train_log_states: jax.Array
+    q_centers: jax.Array
     gram: jax.Array
-    state_offset: jax.Array
     k_scale: jax.Array
-    # 1/(1-a): log kappa = log k - z_detrend * log z for Hicks-neutral z.
-    z_detrend: jax.Array
     kernel_set: StateKernelSettings = struct.field(pytree_node=False)
 
 
-def state_lengthscales(kernel_set):
-    ell_z = kernel_set.log_z_lengthscale
-    ell_k = kernel_set.log_k_lengthscale
-    return (
-        kernel_set.lengthscale if ell_z is None else ell_z,
-        kernel_set.lengthscale if ell_k is None else ell_k,
-    )
-
-
-def build_residual_args(train_log_states, kernel_set, p, z_0=1.0, k_0=1.0):
+def build_residual_args(train_log_states, kernel_set, k_0=1.0):
     flat_states = train_log_states.reshape(-1, 2)
     dtype = flat_states.dtype
-    state_offset = jnp.log(jnp.asarray([z_0, k_0], dtype))
-    z_detrend = jnp.asarray(1.0 / (1.0 - p.a), dtype)
-    if kernel_set.homothetic_representation:
-        centers = flat_states[:, 1] - z_detrend * flat_states[:, 0]
-        gram = rbf_state_gram(
-            centers,
-            jnp.asarray(kernel_set.amplitude, dtype),
-            jnp.asarray(kernel_set.lengthscale, dtype),
-        )
-    else:
-        centers = flat_states - state_offset
-        gram = state_features(
-            kernel_set.state_kernel,
-            centers,
-            centers,
-            kernel_set.amplitude,
-            state_lengthscales(kernel_set),
-        )
+    q_centers = flat_states[:, 1] - kernel_set.ray_slope * flat_states[:, 0]
+    gram = ard_rbf_state_features(
+        flat_states,
+        flat_states,
+        jnp.asarray(kernel_set.amplitude, dtype),
+        jnp.asarray(
+            (kernel_set.log_z_lengthscale, kernel_set.log_k_lengthscale), dtype
+        ),
+    ) + rbf_state_gram(
+        q_centers,
+        jnp.asarray(kernel_set.ray_amplitude, dtype),
+        jnp.asarray(kernel_set.ray_lengthscale, dtype),
+    )
     return ResidualArgs(
-        centers=centers,
         train_log_states=flat_states,
+        q_centers=q_centers,
         gram=gram,
-        state_offset=state_offset,
         k_scale=jnp.asarray(k_0, dtype),
-        z_detrend=z_detrend,
         kernel_set=kernel_set,
     )
 
 
-def raw_policy(theta, args, log_state, kernel_set):
-    alpha = theta[0]
-    if kernel_set.homothetic_representation:
-        q = log_state[1] - args.z_detrend * log_state[0]
-        features = rbf_state_features(
-            q,
-            args.centers,
-            jnp.asarray(kernel_set.amplitude, q.dtype),
-            jnp.asarray(kernel_set.lengthscale, q.dtype),
-        )
-        h = features @ alpha
-    else:
-        x = log_state - args.state_offset
-        features = state_features(
-            kernel_set.state_kernel,
-            x,
-            args.centers,
-            kernel_set.amplitude,
-            state_lengthscales(kernel_set),
-        )
-        h = features @ alpha
-        # The linear-mean coefficients are the last theta leaf, after the free
-        # constant when both are present; like h_const they are unpenalized.
-        if kernel_set.linear_mean:
-            h = h + x @ theta[-1]
-    if kernel_set.free_constant and len(theta) > 1:
-        h = h + theta[1]
-    return h
+# theta = (alpha, h_const, linear_coeffs); only alpha is penalized.
+def raw_policy(theta, args, log_state):
+    kernel_set = args.kernel_set
+    alpha, h_const, linear_coeffs = theta
+    q = log_state[1] - kernel_set.ray_slope * log_state[0]
+    features = ard_rbf_state_features(
+        log_state,
+        args.train_log_states,
+        jnp.asarray(kernel_set.amplitude, log_state.dtype),
+        jnp.asarray(
+            (kernel_set.log_z_lengthscale, kernel_set.log_k_lengthscale),
+            log_state.dtype,
+        ),
+    ) + rbf_state_features(
+        q,
+        args.q_centers,
+        jnp.asarray(kernel_set.ray_amplitude, q.dtype),
+        jnp.asarray(kernel_set.ray_lengthscale, q.dtype),
+    )
+    return features @ alpha + log_state @ linear_coeffs + h_const
 
 
-# Same output maps as the recursive NN: unit softplus of the raw policy
-# anchored at delta * k (homothetic) or the constant delta * k_0.
-def investment(theta, args, log_state, p, kernel_set):
-    raw = raw_policy(theta, args, log_state, kernel_set)
-    if kernel_set.homothetic_representation:
-        k = jnp.exp(log_state[1])
-        return p.delta * k * unit_softplus(raw)
+# Same output map as the recursive NN: unit softplus of the raw policy
+# anchored at the constant delta * k_0.
+def investment(theta, args, log_state, p):
+    raw = raw_policy(theta, args, log_state)
     return p.delta * args.k_scale * unit_softplus(raw)
 
 
@@ -188,12 +150,9 @@ class KernelInvestmentPolicy:
     theta: tuple
     args: ResidualArgs
     p: StructuralParameters
-    kernel_set: StateKernelSettings = struct.field(pytree_node=False)
 
     def __call__(self, log_state):
-        return jnp.atleast_1d(
-            investment(self.theta, self.args, log_state, self.p, self.kernel_set)
-        )
+        return jnp.atleast_1d(investment(self.theta, self.args, log_state, self.p))
 
 
 # Frozen collocation design: the exact benchmark paths of the training
@@ -217,11 +176,15 @@ def fixed_collocation_data(p, initial_conditions, data_set, *, dtype):
 
 
 def residual_fn(theta, args, p):
-    policy = KernelInvestmentPolicy(theta, args, p, args.kernel_set)
+    policy = KernelInvestmentPolicy(theta, args, p)
     residual = euler_residuals(policy, args.train_log_states, p)
     return residual / jnp.sqrt(residual.size)
 
 
+# Deterministic recursive neoclassical growth: the additive ray + 2-D ARD
+# kernel of the stochastic driver (stochastic_growth_kernel_recursive) on the
+# raw (log z, log k), with the structural constants only in the output anchor
+# delta * k_0.
 def neoclassical_growth_kernel_recursive(
     a: float = CONSTANTS["a"],
     delta: float = CONSTANTS["delta"],
@@ -240,11 +203,11 @@ def neoclassical_growth_kernel_recursive(
         damping_increase=4.0,
         geodesic_acceleration=True,
         geodesic_acceptance_ratio=0.75,
-        max_steps=100,
-        atol=1e-5,
+        max_steps=150,
+        atol=6.75e-6,
         gtol=1e-7,
     ),
-    ridge_set: RidgeSettings = RidgeSettings(ridge=1e-12),
+    ridge_set: RidgeSettings = RidgeSettings(ridge=3.9e-12),
     tolerance_set: ToleranceSettings = ToleranceSettings(),
     verbose: bool = True,
 ):
@@ -288,8 +251,8 @@ def neoclassical_growth_kernel_recursive(
     train_times, train_log_states = fixed_collocation_data(
         p_bench, train_initial_conditions, data_set, dtype=dtype
     )
-    args = build_residual_args(train_log_states, kernel_set, p, z_0, k_0)
-    n_centers = args.centers.shape[0]
+    args = build_residual_args(train_log_states, kernel_set, k_0)
+    n_centers = args.train_log_states.shape[0]
     shifted_gram = args.gram + kernel_set.metric_epsilon * jnp.eye(
         n_centers, dtype=dtype
     )
@@ -297,11 +260,11 @@ def neoclassical_growth_kernel_recursive(
         jnp.linalg.cholesky(shifted_gram, upper=True),
         repeats=1,
     )
-    theta_0 = (jnp.zeros(n_centers, dtype=dtype),)
-    if kernel_set.free_constant:
-        theta_0 = theta_0 + (jnp.zeros((), dtype=dtype),)
-    if kernel_set.linear_mean:
-        theta_0 = theta_0 + (jnp.zeros(2, dtype=dtype),)
+    theta_0 = (
+        jnp.zeros(n_centers, dtype=dtype),
+        jnp.zeros((), dtype=dtype),
+        jnp.zeros(2, dtype=dtype),
+    )
 
     # Ridge Levenberg-Marquardt solve.
     solver = RidgeLevenbergMarquardt(
@@ -340,9 +303,19 @@ def neoclassical_growth_kernel_recursive(
         )
 
     theta = result.x
+    # Component attribution: the representer solution splits as
+    # h_ray = sum_i alpha_i K_ray(., q_i) plus the 2-D remainder, with squared
+    # RKHS norms alpha' G_ray alpha and alpha' G_2d alpha.
+    ray_gram = rbf_state_gram(
+        args.q_centers,
+        jnp.asarray(kernel_set.ray_amplitude, dtype),
+        jnp.asarray(kernel_set.ray_lengthscale, dtype),
+    )
     alpha = theta[0]
-    h_const = float(theta[1]) if kernel_set.free_constant else 0.0
-    policy = KernelInvestmentPolicy(theta, args, p, kernel_set)
+    h_const = float(theta[1])
+    rkhs_norm_ray = float(alpha @ ray_gram @ alpha)
+    rkhs_norm_2d = float(alpha @ (args.gram - ray_gram) @ alpha)
+    policy = KernelInvestmentPolicy(theta, args, p)
 
     train_values = trajectory_values(policy, train_log_states, p)
     train_initial = np.asarray(train_initial_conditions)
@@ -438,10 +411,10 @@ def neoclassical_growth_kernel_recursive(
         "tolerance_set": asdict(tolerance_set),
         "h_const": h_const,
         "rkhs_norm": float(rkhs_norm_squared(alpha, args.gram)),
+        "rkhs_norm_ray": rkhs_norm_ray,
+        "rkhs_norm_2d": rkhs_norm_2d,
         "shifted_metric_norm": float(rkhs_norm_squared(alpha, shifted_gram)),
         "penalized_parameter_count": n_centers,
-        "unpenalized_parameter_count": (1 if kernel_set.free_constant else 0)
-        + (2 if kernel_set.linear_mean else 0),
         "train_loss": train_loss,
         "max_train_euler": max_train_euler,
         "max_test_euler": max_test_euler,

@@ -27,8 +27,9 @@ p = {
     "k_0": k_0,
 }
 
-WIDTH = 32
-HEAD_INIT_SCALE = 1e-3  # near-zero head: the policy starts at the anchor
+WIDTH = 8
+DEPTH = 2  # hidden tanh layers
+HEAD_INIT_SCALE = 4.7e-3  # near-zero head: the policy starts at the anchor
 SEED = 0
 TRAIN_T = 100.0
 TRAIN_STEPS = 64  # RK4 steps; residuals sit on the 65 integrator states
@@ -36,9 +37,12 @@ TEST_T = 40.0
 TEST_STEPS = 40
 TVC_T = 200.0
 TVC_STEPS = 256
-MAX_STEPS = 250
-LOSS_THRESHOLD = 1e-14  # sum of squared residuals; atol is its square root
-INIT_DAMPING = 1e-8
+MAX_STEPS = 125
+LOSS_THRESHOLD = 2.15e-14  # sum of squared residuals; atol is its square root
+INIT_DAMPING = 4.74e-4
+DAMPING_DECREASE = 0.511
+DAMPING_INCREASE = 2.82
+GEODESIC_ACCEPTANCE_RATIO = 0.892
 BVP_T = 200.0
 BVP_POINTS = 201
 BVP_TOL = 1e-10
@@ -50,15 +54,19 @@ def unit_softplus(raw):
     return jax.nn.softplus(2.0 * jnp.log(2.0) * raw) / jnp.log(2.0)
 
 
-# Homothetic investment policy on the detrended state: a gelu MLP of
-# log kappa = log k - log z / (1 - a), anchored at delta k so the near-zero
-# head starts at replacement investment i = delta k. The structural constants
-# are baked in, so the policy is a function of the state alone.
+# Investment policy on the full log state: a tanh MLP of x - x_0 with
+# x_0 = (log z_0, log k_0), anchored at delta k_0 so the near-zero head starts
+# at replacement investment at the initial capital. No structural constant
+# enters the map beyond that anchor; nothing detrends the state.
+log_state_0 = jnp.log(jnp.array([z_0, k_0]))
+
+
 class InvestmentPolicy(nnx.Module):
     def __init__(self, *, rngs: nnx.Rngs):
-        self.l1 = nnx.Linear(1, WIDTH, param_dtype=jnp.float64, rngs=rngs)
-        self.l2 = nnx.Linear(WIDTH, WIDTH, param_dtype=jnp.float64, rngs=rngs)
-        self.l3 = nnx.Linear(WIDTH, WIDTH, param_dtype=jnp.float64, rngs=rngs)
+        layers = [nnx.Linear(2, WIDTH, param_dtype=jnp.float64, rngs=rngs)]
+        for _ in range(DEPTH - 1):
+            layers.append(nnx.Linear(WIDTH, WIDTH, param_dtype=jnp.float64, rngs=rngs))
+        self.layers = nnx.List(layers)
         self.head = nnx.Linear(
             WIDTH,
             1,
@@ -68,12 +76,10 @@ class InvestmentPolicy(nnx.Module):
         )
 
     def __call__(self, log_state):
-        log_z, log_k = log_state
-        h = jnp.atleast_1d(log_k - log_z / (1.0 - a))
-        h = jax.nn.gelu(self.l1(h))
-        h = jax.nn.gelu(self.l2(h))
-        h = jax.nn.gelu(self.l3(h))
-        return delta * jnp.exp(log_k) * unit_softplus(self.head(h))
+        h = log_state - log_state_0
+        for layer in self.layers:
+            h = jnp.tanh(layer(h))
+        return delta * k_0 * unit_softplus(self.head(h))
 
 
 def consumption(policy, log_state, p):
@@ -136,7 +142,13 @@ def residual_fn(theta, args, p):
     return jnp.where(solution.ok, euler / jnp.sqrt(euler.size), jnp.inf)
 
 
-solver = LevenbergMarquardt(residual_fn, init_damping=INIT_DAMPING)
+solver = LevenbergMarquardt(
+    residual_fn,
+    init_damping=INIT_DAMPING,
+    damping_decrease=DAMPING_DECREASE,
+    damping_increase=DAMPING_INCREASE,
+    geodesic_acceptance_ratio=GEODESIC_ACCEPTANCE_RATIO,
+)
 start = time.perf_counter()
 result = solver.solve(
     theta_0,

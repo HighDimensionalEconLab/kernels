@@ -205,40 +205,6 @@ class StateMLP(nnx.Module):
         return self.output_scale[...] * out
 
 
-# Homothetic neoclassical investment policy i = delta * k * U(h(log kappa)),
-# kappa = k / z^{1/(1-a)} the detrended capital; a and delta are baked as
-# non-Param Variables so the call is p-free like StateMLP's. Returns (1,).
-class HomotheticPolicyMLP(nnx.Module):
-    def __init__(
-        self, *, width, depth, activation, head_kernel_std, a, delta, dtype, rngs
-    ):
-        self.activation = nnx.static(activation)
-        self.a = nnx.Variable(jnp.asarray(a, dtype=dtype))
-        self.delta = nnx.Variable(jnp.asarray(delta, dtype=dtype))
-        layers = [nnx.Linear(1, width, dtype=dtype, param_dtype=dtype, rngs=rngs)]
-        for _ in range(depth - 1):
-            layers.append(
-                nnx.Linear(width, width, dtype=dtype, param_dtype=dtype, rngs=rngs)
-            )
-        self.layers = nnx.List(layers)
-        self.head = nnx.Linear(
-            width,
-            1,
-            kernel_init=nnx.initializers.normal(head_kernel_std),
-            bias_init=nnx.initializers.zeros_init(),
-            dtype=dtype,
-            param_dtype=dtype,
-            rngs=rngs,
-        )
-
-    def __call__(self, log_state):
-        log_z, log_k = log_state
-        h = jnp.atleast_1d(log_k - log_z / (1.0 - self.a[...]))
-        for layer in self.layers:
-            h = self.activation(layer(h))
-        return self.delta[...] * jnp.exp(log_k) * unit_softplus(self.head(h))
-
-
 # One .npz per trained module: the nnx.Param block and the non-differentiated
 # Variable block as "params/..." and "nondiff/..." flat keys (nnx's supported
 # State.to_pure_dict / replace_by_pure_dict conversion, list indices numeric),

@@ -273,11 +273,17 @@ def neoclassical_growth_kernel(
             validation_df["shadow_price"].abs().max(),
         )
     )
+    mean_validation_residual = float(
+        validation_df[list(("resource", "euler", "shadow_price"))]
+        .abs()
+        .to_numpy()
+        .mean()
+    )
     rejection_reasons = []
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
     rejection_reasons += gate_rejections(
-        tolerance_set, max_train_residual, max_validation_residual
+        tolerance_set, max_train_residual, mean_validation_residual
     )
 
     g_hat_value = float(theta.g_hat) if learn_g_hat else float(g)
@@ -302,6 +308,7 @@ def neoclassical_growth_kernel(
         "mu_0": float(mu_0),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
+        "mean_validation_residual": mean_validation_residual,
         "test_euler_mean_abs": float(test_df["euler"].abs().mean()),
         "test_k_rel_error_abs": float(test_df["k_rel_error"].mean()),
         "test_c_rel_error_abs": float(test_df["c_rel_error"].mean()),

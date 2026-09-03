@@ -129,7 +129,7 @@ def neoclassical_growth_nn_k(
         atol=3.162277660168379e-08,
         num_attempts=5,
     ),
-    tolerance_set: ToleranceSettings = ToleranceSettings(validation_residual=1e-4),
+    tolerance_set: ToleranceSettings = ToleranceSettings(validation_residual=1e-6),
     verbose: bool = True,
 ):
     jax.config.update("jax_enable_x64", True)
@@ -259,8 +259,9 @@ def neoclassical_growth_nn_k(
 
     max_train_residual = float(train_df["euler"].abs().max())
     max_validation_residual = float(validation_df["euler"].abs().max())
+    mean_validation_residual = float(validation_df["euler"].abs().mean())
     rejection_reasons = gate_rejections(
-        tolerance_set, max_train_residual, max_validation_residual
+        tolerance_set, max_train_residual, mean_validation_residual
     )
     results = {
         "parameters": {**p.to_dict(), "learn_g_hat": learn_g_hat},
@@ -288,6 +289,7 @@ def neoclassical_growth_nn_k(
         "test_c_rel_error_abs": float(test_df["c_rel_error"].mean()),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
+        "mean_validation_residual": mean_validation_residual,
         "log_tvc_residual": log_tvc,
         "transversality_ok": transversality_ok,
         "steps": steps,

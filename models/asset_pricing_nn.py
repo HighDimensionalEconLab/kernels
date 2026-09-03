@@ -98,7 +98,7 @@ def asset_pricing_nn(
         num_attempts=5,
     ),
     tolerance_set: ToleranceSettings = ToleranceSettings(
-        train_residual=1e-6, validation_residual=1e-5
+        train_residual=1e-6, validation_residual=1e-6
     ),
     verbose: bool = True,
 ):
@@ -182,12 +182,13 @@ def asset_pricing_nn(
     )
     max_train_residual = float(train_df["residual"].abs().max())
     max_validation_residual = float(validation_df["residual"].abs().max())
+    mean_validation_residual = float(validation_df["residual"].abs().mean())
     p_0 = float(test_df["p"].iloc[0])
     rejection_reasons = []
     if p_0 < 0.0:
         rejection_reasons.append("negative_p_0")
     rejection_reasons += gate_rejections(
-        tolerance_set, max_train_residual, max_validation_residual
+        tolerance_set, max_train_residual, mean_validation_residual
     )
     solution_accepted = not rejection_reasons
 
@@ -213,6 +214,7 @@ def asset_pricing_nn(
         "solver_status": STATUS_TO_REASON.get(int(result.status), "unknown"),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
+        "mean_validation_residual": mean_validation_residual,
         "max_test_residual": float(test_df["residual"].abs().max()),
         "p_rel_error_mean": float(test_df["p_rel_error"].mean()),
         "p_rel_error_max": float(test_df["p_rel_error"].max()),

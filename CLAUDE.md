@@ -123,13 +123,14 @@ per-directory READMEs.
 - Acceptance is ex post and one predicate in every driver:
   `(not gate_train or train_ok) and (not gate_validation or validation_ok)`
   in sequence space, `(not gate_train or train_ok) and (not gate_test or
-  test_ok)` in the recursive drivers. Sequence-space `train_ok` /
-  `validation_ok` are the max abs residual on the training grid and on the
-  held-out validation grid — a finer `linspace(0, train grid end,
+  test_ok)` in the recursive drivers. Sequence-space `train_ok` is
+  the max abs residual on the training grid under
+  `tolerance_set.train_residual`; `validation_ok` is the MEAN abs residual
+  on the held-out validation grid — a finer `linspace(0, train grid end,
   validation_points)` on the same path (same initial conditions), evaluated
   through the post-solve `evaluate_grid`/`snapshot` closure — under
-  `tolerance_set.train_residual` / `validation_residual`; `test_*` stays the
-  long-horizon diagnostic. Every bar compares with `<=` so a NaN fails;
+  `validation_residual`, with `max_validation_residual` reported beside it;
+  `test_*` stays the long-horizon diagnostic. Every bar compares with `<=` so a NaN fails;
   feasibility (nonfinite or nonpositive paths, `negative_p_0`, the mpk
   `p_bound`) is a hard, untoggled rejection reason. The optimizer's own
   status is reported as `solver_status` (plus `solution_status` under

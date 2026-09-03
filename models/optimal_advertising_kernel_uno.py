@@ -281,6 +281,18 @@ def optimal_advertising_kernel_uno(
             validation_values["shadow_price"],
         )
     )
+    mean_validation_residual = float(
+        jnp.mean(
+            jnp.abs(
+                jnp.concatenate(
+                    [
+                        jnp.ravel(validation_values[name])
+                        for name in ("state", "costate", "shadow_price")
+                    ]
+                )
+            )
+        )
+    )
 
     solve_time = elapsed
     solver_status = str(result.optimization_status).split(".")[-1]
@@ -299,7 +311,7 @@ def optimal_advertising_kernel_uno(
     if not finite_valid:
         rejection_reasons.append("nonfinite_or_nonpositive")
     rejection_reasons += gate_rejections(
-        tolerance_set, max_train_residual, max_validation_residual
+        tolerance_set, max_train_residual, mean_validation_residual
     )
 
     results = {
@@ -315,6 +327,7 @@ def optimal_advertising_kernel_uno(
         "rkhs_norm_u": float(rkhs_norm_squared(theta.alpha_u, K)),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
+        "mean_validation_residual": mean_validation_residual,
         "solve_time": solve_time,
         "solver_status": solver_status,
         "solution_status": solution_status,

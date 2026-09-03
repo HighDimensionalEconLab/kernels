@@ -330,6 +330,25 @@ def multicountry_growth_nn(
         float(jnp.max(jnp.abs(validation_eval["consumption_foc"]))),
         float(jnp.max(jnp.abs(validation_eval["asset_clearing"]))),
     )
+    mean_validation_residual = float(
+        jnp.mean(
+            jnp.abs(
+                jnp.concatenate(
+                    [
+                        jnp.ravel(validation_eval[name])
+                        for name in (
+                            "capital",
+                            "assets",
+                            "tobin_q",
+                            "marginal_wealth",
+                            "consumption_foc",
+                            "asset_clearing",
+                        )
+                    ]
+                )
+            )
+        )
+    )
     # The capital/tobin_q/marginal_wealth rows here are rate-form; scaling
     # them by the matching path level pointwise restates the held-out
     # residual in the kernel driver's level units, so kernel-vs-NN residual
@@ -364,7 +383,7 @@ def multicountry_growth_nn(
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
     rejection_reasons += gate_rejections(
-        tolerance_set, max_train_residual, max_validation_residual
+        tolerance_set, max_train_residual, mean_validation_residual
     )
     acceptance = acceptance_fields(rejection_reasons)
     solution_accepted = acceptance["solution_accepted"]
@@ -406,6 +425,7 @@ def multicountry_growth_nn(
         "consumption_scale": float(steady["consumption_scale"]),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
+        "mean_validation_residual": mean_validation_residual,
         "max_validation_residual_level": max_validation_residual_level,
         "validation_pass": validation_pass,
         "max_resource_gap": max_resource_gap,

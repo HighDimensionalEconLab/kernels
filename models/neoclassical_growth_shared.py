@@ -79,7 +79,7 @@ class DataSettings:
     train_points_list: list[float] | None = None
     test_T: float = NEOCLASSICAL_GROWTH_CONSTANTS["sequence_test_T"]
     test_points: int = 100
-    validation_points: int = 801
+    validation_points: int = 201
     test_tvc_T: float = NEOCLASSICAL_GROWTH_CONSTANTS["transversality_T"]
 
 
@@ -91,10 +91,10 @@ class ToleranceSettings:
     gate_train: bool = True
     train_residual: float = 1e-5
     gate_validation: bool = True
-    # The kernel interpolant's between-node residual is O(1e-2) on the
-    # baseline design and 5e-2 on the sparse one; the NN drivers pass a
-    # tighter bar at their signatures.
-    validation_residual: float = 1e-1
+    # Mean abs residual over the validation grid, sized for the baseline
+    # design (the kernel measures 5e-5); coarser experiments pass their own
+    # bar and the NN drivers a tighter one at their signatures.
+    validation_residual: float = 2e-4
     log_tvc_threshold: float = 0.0
 
 

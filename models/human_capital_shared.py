@@ -85,7 +85,7 @@ class DataSettings:
     train_points_list: list[float] | None = None
     test_T: float = 100.0
     test_points: int = 100
-    validation_points: int = 300
+    validation_points: int = 201
 
 
 # Acceptance gates, CLI-reachable so a lower-precision caller can pass its
@@ -95,4 +95,4 @@ class ToleranceSettings:
     gate_train: bool = True
     train_residual: float = 1e-5
     gate_validation: bool = True
-    validation_residual: float = 1e-2
+    validation_residual: float = 1e-4

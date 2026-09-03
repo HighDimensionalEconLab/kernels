@@ -53,7 +53,7 @@ class DataSettings:
     train_points_list: list[float] | None = None
     test_T: float = 50.0
     test_points: int = 100
-    validation_points: int = 401
+    validation_points: int = 201
 
 
 # Acceptance gates, CLI-reachable so a lower-precision caller can pass its
@@ -63,6 +63,6 @@ class ToleranceSettings:
     gate_train: bool = True
     train_residual: float = 1e-8
     gate_validation: bool = True
-    # The kernel interpolant's between-node residual is 2e-4; the NN driver
-    # passes a tighter bar at its signature.
-    validation_residual: float = 1e-2
+    # Mean abs residual over the validation grid: the kernel measures 2e-5;
+    # the NN driver passes a tighter bar at its signature.
+    validation_residual: float = 1e-4

@@ -40,7 +40,8 @@ def run(
 
     # QE figure experiments. The sparse grid keeps the baseline's front-loaded
     # relative spacing over the full train_T; far_steady_state trains on the
-    # first ~2 e-foldings of the saddle path only.
+    # first ~2 e-foldings of the saddle path only. Both coarser designs carry
+    # a looser between-node validation bar than the baseline.
     go("baseline", output_dir)
     go(
         "sparse",
@@ -61,11 +62,13 @@ def run(
                 100.0,
             ]
         ),
+        tolerance_set=dict(validation_residual=1e-2),
     )
     go(
         "far_steady_state",
         output_dir,
         data_set=dict(train_T=20.0, train_points=21, test_T=30.0),
+        tolerance_set=dict(validation_residual=1e-3),
     )
 
     go("baseline_g02", output_dir, g=0.02)

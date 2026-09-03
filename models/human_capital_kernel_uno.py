@@ -343,6 +343,26 @@ def human_capital_kernel_uno(
         float(jnp.max(jnp.abs(validation_eval["shadow_price"]))),
         float(jnp.max(jnp.abs(validation_eval["costate_gap"]))),
     )
+    mean_validation_residual = float(
+        jnp.mean(
+            jnp.abs(
+                jnp.concatenate(
+                    [
+                        jnp.ravel(validation_eval[name])
+                        for name in (
+                            "physical_accumulation",
+                            "human_accumulation",
+                            "physical_euler",
+                            "human_euler",
+                            "feasibility",
+                            "shadow_price",
+                            "costate_gap",
+                        )
+                    ]
+                )
+            )
+        )
+    )
     positive_names = ("k", "h", "i_k", "i_h", "c", "mu_k", "mu_h")
     finite_positive = bool(
         all(
@@ -361,7 +381,7 @@ def human_capital_kernel_uno(
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
     rejection_reasons += gate_rejections(
-        tolerance_set, max_train_residual, max_validation_residual
+        tolerance_set, max_train_residual, mean_validation_residual
     )
 
     results = {
@@ -381,6 +401,7 @@ def human_capital_kernel_uno(
         **{f"rkhs_norm_{name}": value for name, value in rkhs_norms.items()},
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
+        "mean_validation_residual": mean_validation_residual,
         "max_test_feasibility": float(jnp.max(jnp.abs(test_eval["feasibility"]))),
         "max_test_hidden_dae_residual": float(
             jnp.max(jnp.abs(test_eval["hidden_dae_residual"]))

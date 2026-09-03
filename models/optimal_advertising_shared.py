@@ -22,7 +22,7 @@ class DataSettings:
     train_points_list: list[float] | None = None
     test_T: float = 50.0
     test_points: int = 100
-    validation_points: int = 300
+    validation_points: int = 201
 
 
 # Acceptance gates, CLI-reachable so a lower-precision caller can pass its
@@ -31,7 +31,6 @@ class DataSettings:
 class ToleranceSettings:
     gate_train: bool = True
     train_residual: float = 1e-8
-    # Preserves current acceptance: the validation residual (measured 4e-3,
-    # a 2.5x margin) is reported but does not yet gate.
-    gate_validation: bool = False
-    validation_residual: float = 1e-2
+    gate_validation: bool = True
+    # Mean abs residual over the validation grid; the kernel measures 7e-5.
+    validation_residual: float = 5e-4

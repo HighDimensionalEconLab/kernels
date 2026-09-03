@@ -40,7 +40,8 @@ def run(output_dir: str = ".results", verbose: bool = False):
     # Debt/asset experiments sized by the baseline run's own
     # steady-state output.
     output_ss = float(baseline["output_ss"].iloc[0])
-    go("r_star_005", r_star=0.05)
+    # The higher world rate steepens the paths; its between-node bar is looser.
+    go("r_star_005", r_star=0.05, tolerance_set=dict(validation_residual=1e-3))
     go("initial_debt", a_0=-0.5 * output_ss)
     go("initial_assets", a_0=0.5 * output_ss)
     write_summary(output_dir, PREFIX)

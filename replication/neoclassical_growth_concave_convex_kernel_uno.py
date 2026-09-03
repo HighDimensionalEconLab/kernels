@@ -44,7 +44,6 @@ def run(
             "data_set": dict(
                 train_T=40.0, train_points=41, test_T=50.0, test_points=41
             ),
-            "tolerance_set": dict(gate_validation=True),
         },
     )
 

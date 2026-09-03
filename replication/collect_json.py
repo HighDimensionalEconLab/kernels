@@ -1235,6 +1235,7 @@ def human_capital_kernel(out):
         "c_0": sig(med(j["c_0"]), 4),
         "max_train_residual": sci(med(j["max_train_residual"]), 2),
         "max_validation_residual": sci(med(j["max_validation_residual"]), 2),
+        "mean_validation_residual": sci(med(j["mean_validation_residual"]), 2),
         "max_test_feasibility": sci(med(j["max_test_feasibility"]), 2),
         # The implied no-arbitrage (hidden DAE) residual the prose bounds.
         "max_test_hidden_dae_residual": sci(med(j["max_test_hidden_dae_residual"]), 2),
@@ -1705,6 +1706,7 @@ def open_economy_growth_kernel(
             "train_T": sig(experiment_hp["data_set"]["train_T"], 5),
             "max_train_residual": sci(med(j["max_train_residual"])),
             "max_validation_residual": sci(med(j["max_validation_residual"])),
+            "mean_validation_residual": sci(med(j["mean_validation_residual"])),
             "max_benchmark_error": sci(med(j["max_benchmark_error"])),
             "k_relative_error_max": sci(med(j["k_relative_error_max"])),
             "q_relative_error_max": sci(med(j["q_relative_error_max"])),
@@ -1863,6 +1865,7 @@ def multicountry_growth_kernel(out):
             "train_T": sig(hp["data_set"]["train_T"], 5),
             "max_train_residual": sci(med(j["max_train_residual"])),
             "max_validation_residual": sci(med(j["max_validation_residual"])),
+            "mean_validation_residual": sci(med(j["mean_validation_residual"])),
             "max_resource_gap": sci(med(j["max_resource_gap"])),
             "max_asset_clearing": sci(med(j["max_asset_clearing"])),
             "ex_post_asset_tvc": sci(med(j["ex_post_asset_tvc"])),
@@ -2058,6 +2061,12 @@ def multicountry_growth_scaling(out):
                 for experiment in summary.values()
             )
         ),
+        "mean_validation_residual": sci(
+            max(
+                med(experiment["mean_validation_residual"])
+                for experiment in summary.values()
+            )
+        ),
         "residual_atol_by_country_count": residual_atols,
         "ridge_by_country_count": ridges,
         # The representative-agent CRRA comparative static, one implicit-AD
@@ -2114,6 +2123,9 @@ def multicountry_growth_matern32(out):
             "max_validation_residual": sci(
                 med(summary[name]["max_validation_residual"])
             ),
+            "mean_validation_residual": sci(
+                med(summary[name]["mean_validation_residual"])
+            ),
             "solve_time_median": sig(med(summary[name]["solve_time"])),
         }
         for name in ("baseline", "initial_debt", "initial_assets")
@@ -2157,6 +2169,10 @@ def write_multicountry_kernel_comparison_table(out):
                 med(matrix_summary[name]["max_validation_residual"])
                 for name in configurations
             ),
+            "mean_validation_residual": max(
+                med(matrix_summary[name]["mean_validation_residual"])
+                for name in configurations
+            ),
             "solve_time": med(matrix_summary["baseline"]["solve_time"]),
         }
 
@@ -2173,6 +2189,7 @@ def write_multicountry_kernel_comparison_table(out):
         (r"Bond-invariance gap: $q_i$ (test window)", "q_gap", "error"),
         ("Bond-invariance gap (train horizon)", "train_horizon_gap", "error"),
         ("Max train residual", "max_train_residual", "error"),
+        ("Mean validation residual", "mean_validation_residual", "error"),
         ("Max validation residual", "max_validation_residual", "error"),
         ("Baseline solve time (s)", "solve_time", "time"),
     ]
@@ -2237,6 +2254,9 @@ def multicountry_growth_nn(out):
             ),
             "max_validation_residual_median": sci(
                 float(accepted["max_validation_residual"].median())
+            ),
+            "mean_validation_residual_median": sci(
+                float(accepted["mean_validation_residual"].median())
             ),
             "max_resource_gap_median": sci(
                 float(accepted["max_resource_gap"].median())

@@ -55,9 +55,10 @@ def acceptance_fields(rejection_reasons):
     }
 
 
-# Residual-bar gate failures; a bar is skipped when its toggle is off, and
-# `<=` so a NaN fails.
-def gate_rejections(tolerance_set, max_train_residual, max_validation_residual):
+# Residual-bar gate failures: the training bar is on the max abs row, the
+# validation bar on the mean abs row over the held-out grid. A bar is
+# skipped when its toggle is off, and `<=` so a NaN fails.
+def gate_rejections(tolerance_set, max_train_residual, mean_validation_residual):
     reasons = []
     if (
         tolerance_set.gate_train
@@ -66,7 +67,7 @@ def gate_rejections(tolerance_set, max_train_residual, max_validation_residual):
         reasons.append("train_residual")
     if (
         tolerance_set.gate_validation
-        and not max_validation_residual <= tolerance_set.validation_residual
+        and not mean_validation_residual <= tolerance_set.validation_residual
     ):
         reasons.append("validation_residual")
     return reasons

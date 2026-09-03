@@ -23,11 +23,14 @@ TRAIN_T = 100.0
 N_TRAIN = 401
 TEST_T = 110.0
 N_TEST = 100
+N_VALIDATION = 801  # twice the node density, so it samples between nodes
 TVC_T = 200.0
 TRAIN_RESIDUAL = 1e-5
+VALIDATION_RESIDUAL = 2e-4
 
 t_train = jnp.linspace(0.0, TRAIN_T, N_TRAIN)
 t_test = jnp.linspace(0.0, TEST_T, N_TEST)
+t_validation = jnp.linspace(0.0, TRAIN_T, N_VALIDATION)
 
 
 # Matern-1/2 kernel k(t, t') = sigma^2 e^{-|t - t'|/ell} with antiderivative
@@ -208,14 +211,32 @@ print(f"mean |Euler residual| test: {float(jnp.abs(euler_test).mean()):.3e}")
 print(f"log-TVC at t={TVC_T:.0f}: {float(log_tvc):.1f}   (should be << 0)")
 
 # The solve status above is reported for diagnostics; acceptance is judged
-# only against the max train residual bound. residual_fn scales its rows by
-# 1/sqrt(count); the gate compares the unscaled rows.
+# against the max train residual bound and, with residual_fn reused on a
+# finer validation grid over the training horizon, the mean between-node
+# residual. residual_fn scales its rows by 1/sqrt(count); the gate compares
+# the unscaled rows.
 train_residual = residual_fn(theta, args, p)
 max_train_residual = float(
     jnp.max(jnp.abs(train_residual)) * jnp.sqrt(train_residual.size)
 )
+K_validation, K_tilde_validation = kernel_matrices(t_validation, t_train)
+validation_residual = residual_fn(
+    theta, {"K": K_validation, "K_tilde": K_tilde_validation}, p
+)
+max_validation_residual = float(
+    jnp.max(jnp.abs(validation_residual)) * jnp.sqrt(validation_residual.size)
+)
+mean_validation_residual = float(
+    jnp.mean(jnp.abs(validation_residual)) * jnp.sqrt(validation_residual.size)
+)
 train_ok = max_train_residual <= TRAIN_RESIDUAL
+validation_ok = mean_validation_residual <= VALIDATION_RESIDUAL
 print(
     f"max train residual {max_train_residual:.3e} <= {TRAIN_RESIDUAL:.0e}: {train_ok}"
 )
-print(f"accepted: {train_ok}")
+print(
+    f"mean validation residual {mean_validation_residual:.3e} <= "
+    f"{VALIDATION_RESIDUAL:.0e}: {validation_ok}"
+)
+print(f"max validation residual {max_validation_residual:.3e}")
+print(f"accepted: {train_ok and validation_ok}")

@@ -143,7 +143,10 @@ class ToleranceSettings:
     gate_train: bool = True
     train_residual: float = 1e-5
     gate_validation: bool = True
-    validation_residual: float = 1e-2
+    # Mean abs residual over the validation grid, sized for the baseline
+    # design (the kernel measures 1e-5); the r_star = 0.05 experiment passes
+    # its own bar and the NN driver a tighter one at its signature.
+    validation_residual: float = 1e-4
 
 
 def tail_diagnostics(k, a, q, c, p):

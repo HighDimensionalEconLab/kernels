@@ -121,11 +121,8 @@ lagrangian_hessian = jax.jit(jax.hessian(lagrangian, argnums=0))
 class ToleranceSettings:
     gate_train: bool = True
     train_residual: float = 1e-5
-    # Preserves current (smooth-model) acceptance; the butterfly sweep in
-    # replication/neoclassical_growth_concave_convex_kernel_uno.py passes
-    # gate_validation=True.
-    gate_validation: bool = False
-    validation_residual: float = 5e-3
+    gate_validation: bool = True
+    validation_residual: float = 2e-4
     mpk_bound: float = 1e-3
     log_tvc_threshold: float = 0.0
 
@@ -366,6 +363,12 @@ def neoclassical_growth_kernel_uno(
         float(validation_df["euler"].abs().max()),
         float(validation_df["shadow_price"].abs().max()),
     )
+    mean_validation_residual = float(
+        validation_df[list(("resource", "euler", "shadow_price"))]
+        .abs()
+        .to_numpy()
+        .mean()
+    )
 
     # The costate-implied MPK must sit between the two branch slopes up to
     # branch slack; violations gate acceptance under butterfly production.
@@ -422,7 +425,7 @@ def neoclassical_growth_kernel_uno(
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
     rejection_reasons += gate_rejections(
-        tolerance_set, max_train_residual, max_validation_residual
+        tolerance_set, max_train_residual, mean_validation_residual
     )
     if use_butterfly_production and (
         p_lower_violation > tolerance_set.mpk_bound
@@ -440,6 +443,7 @@ def neoclassical_growth_kernel_uno(
         "mu_0": float(mu_0),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
+        "mean_validation_residual": mean_validation_residual,
         "p_lower_violation": p_lower_violation,
         "p_upper_violation": p_upper_violation,
         "test_euler_mean_abs": float(test_df["euler"].abs().mean()),

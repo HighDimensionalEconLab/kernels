@@ -75,7 +75,7 @@ class ToleranceSettings:
     # The validation threshold is an HPO/quality diagnostic; it does not
     # redefine convergence of a finite, feasible numerical solution.
     gate_validation: bool = False
-    validation_residual: float = 1e-2
+    validation_residual: float = 1e-4
 
 
 # Identical initial conditions across countries make the multicountry

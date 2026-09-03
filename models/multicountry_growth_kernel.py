@@ -431,6 +431,25 @@ def multicountry_growth_kernel(
         float(jnp.max(jnp.abs(validation_eval["consumption_foc"]))),
         float(jnp.max(jnp.abs(validation_eval["asset_clearing"]))),
     )
+    mean_validation_residual = float(
+        jnp.mean(
+            jnp.abs(
+                jnp.concatenate(
+                    [
+                        jnp.ravel(validation_eval[name])
+                        for name in (
+                            "capital",
+                            "assets",
+                            "tobin_q",
+                            "marginal_wealth",
+                            "consumption_foc",
+                            "asset_clearing",
+                        )
+                    ]
+                )
+            )
+        )
+    )
     max_resource_gap = float(jnp.max(jnp.abs(validation_eval["resource_gap"])))
     max_asset_clearing = float(jnp.max(jnp.abs(validation_eval["asset_clearing"])))
 
@@ -452,7 +471,7 @@ def multicountry_growth_kernel(
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
     rejection_reasons += gate_rejections(
-        tolerance_set, max_train_residual, max_validation_residual
+        tolerance_set, max_train_residual, mean_validation_residual
     )
 
     resolved_steady = resolved_steady_state(validation_eval["mu"][-1], p)
@@ -503,6 +522,7 @@ def multicountry_growth_kernel(
         "consumption_scale": float(steady["consumption_scale"]),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
+        "mean_validation_residual": mean_validation_residual,
         "validation_pass": validation_pass,
         "max_resource_gap": max_resource_gap,
         "max_asset_clearing": max_asset_clearing,

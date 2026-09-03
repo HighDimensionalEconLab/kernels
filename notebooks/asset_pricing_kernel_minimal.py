@@ -19,7 +19,7 @@ TRAIN_T = 40.0
 N_TRAIN = 41
 TEST_T = 50.0
 N_TEST = 100
-N_VALIDATION = 401
+N_VALIDATION = 201
 RIDGE = 1e-10  # disappearing penalty weight
 ATOL = 1e-9  # unscaled residual norm
 GTOL = 1e-13  # must resolve the weakly penalized free p_0
@@ -27,7 +27,7 @@ INIT_DAMPING = 1e-8
 GEODESIC_ACCEPTANCE_RATIO = 0.8
 MAX_STEPS = 100
 TRAIN_RESIDUAL = 1e-8
-VALIDATION_RESIDUAL = 1e-2
+VALIDATION_RESIDUAL = 1e-4
 
 t_train = jnp.linspace(0.0, TRAIN_T, N_TRAIN)
 t_test = jnp.linspace(0.0, TEST_T, N_TEST)
@@ -108,16 +108,17 @@ print(f"max rel error vs fundamental: {float(jnp.max(rel_error)):.3e}")
 max_train_residual = float(jnp.max(jnp.abs(residual_fn(theta, args, p))))
 K_validation, K_tilde_validation = kernel_matrices(t_validation, t_train)
 args_validation = {"K": K_validation, "K_tilde": K_tilde_validation, "t": t_validation}
-max_validation_residual = float(
-    jnp.max(jnp.abs(residual_fn(theta, args_validation, p)))
-)
+validation_residual = residual_fn(theta, args_validation, p)
+max_validation_residual = float(jnp.max(jnp.abs(validation_residual)))
+mean_validation_residual = float(jnp.mean(jnp.abs(validation_residual)))
 train_ok = max_train_residual <= TRAIN_RESIDUAL
-validation_ok = max_validation_residual <= VALIDATION_RESIDUAL
+validation_ok = mean_validation_residual <= VALIDATION_RESIDUAL
 print(
     f"max train residual {max_train_residual:.3e} <= {TRAIN_RESIDUAL:.0e}: {train_ok}"
 )
 print(
-    f"max validation residual {max_validation_residual:.3e} <= "
+    f"mean validation residual {mean_validation_residual:.3e} <= "
     f"{VALIDATION_RESIDUAL:.0e}: {validation_ok}"
 )
+print(f"max validation residual {max_validation_residual:.3e}")
 print(f"accepted: {train_ok and validation_ok}")

@@ -335,6 +335,24 @@ def open_economy_growth_kernel_uno(
         float(jnp.max(jnp.abs(validation_eval["marginal_wealth"]))),
         float(jnp.max(jnp.abs(validation_eval["consumption_foc"]))),
     )
+    mean_validation_residual = float(
+        jnp.mean(
+            jnp.abs(
+                jnp.concatenate(
+                    [
+                        jnp.ravel(validation_eval[name])
+                        for name in (
+                            "capital",
+                            "assets",
+                            "tobin_q",
+                            "marginal_wealth",
+                            "consumption_foc",
+                        )
+                    ]
+                )
+            )
+        )
+    )
 
     benchmark, benchmark_diagnostics = open_economy_growth_benchmark(p)
     benchmark_values = benchmark(np.asarray(test_data))
@@ -392,7 +410,7 @@ def open_economy_growth_kernel_uno(
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
     rejection_reasons += gate_rejections(
-        tolerance_set, max_train_residual, max_validation_residual
+        tolerance_set, max_train_residual, mean_validation_residual
     )
 
     rkhs_norm_mu = rkhs_norm_squared(theta.alpha_mu, K)
@@ -424,6 +442,7 @@ def open_economy_growth_kernel_uno(
         "q_0": float(theta.q_0),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
+        "mean_validation_residual": mean_validation_residual,
         "validation_pass": validation_pass,
         "max_benchmark_error": max_benchmark_error,
         "differential_residual_count": 4 * n_train,

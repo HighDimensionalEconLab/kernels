@@ -118,7 +118,7 @@ def open_economy_growth_nn(
         atol=1e-07,
         num_attempts=5,
     ),
-    tolerance_set: ToleranceSettings = ToleranceSettings(),
+    tolerance_set: ToleranceSettings = ToleranceSettings(validation_residual=1e-6),
     verbose: bool = True,
 ):
     jax.config.update("jax_enable_x64", True)
@@ -242,6 +242,24 @@ def open_economy_growth_nn(
         float(jnp.max(jnp.abs(validation_eval["marginal_wealth"]))),
         float(jnp.max(jnp.abs(validation_eval["consumption_foc"]))),
     )
+    mean_validation_residual = float(
+        jnp.mean(
+            jnp.abs(
+                jnp.concatenate(
+                    [
+                        jnp.ravel(validation_eval[name])
+                        for name in (
+                            "capital",
+                            "assets",
+                            "tobin_q",
+                            "marginal_wealth",
+                            "consumption_foc",
+                        )
+                    ]
+                )
+            )
+        )
+    )
 
     steady = steady_state(p)
     output_scale = float(steady["output"])
@@ -304,7 +322,7 @@ def open_economy_growth_nn(
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")
     rejection_reasons += gate_rejections(
-        tolerance_set, max_train_residual, max_validation_residual
+        tolerance_set, max_train_residual, mean_validation_residual
     )
     acceptance = acceptance_fields(rejection_reasons)
     solution_accepted = acceptance["solution_accepted"]
@@ -334,6 +352,7 @@ def open_economy_growth_nn(
         "q_0": float(test_eval["q"][0]),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
+        "mean_validation_residual": mean_validation_residual,
         "max_benchmark_error": max_benchmark_error,
         "differential_residual_count": 4 * n_train,
         "algebraic_residual_count": n_train,

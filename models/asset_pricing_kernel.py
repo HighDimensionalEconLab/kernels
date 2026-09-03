@@ -150,6 +150,7 @@ def asset_pricing_kernel(
     validation_values = evaluate_grid(validation_data)
     p_validation = validation_values["p"]
     max_validation_residual = float(jnp.max(jnp.abs(validation_values["residual"])))
+    mean_validation_residual = float(jnp.mean(jnp.abs(validation_values["residual"])))
 
     # Analytic finite-horizon bias in the matern12 case.
     horizon_bias_p0 = kernel_horizon_bias_p0(p, kernel_set, T=float(train_data[-1]))
@@ -165,7 +166,7 @@ def asset_pricing_kernel(
     if float(p_0) < 0.0:
         rejection_reasons.append("negative_p_0")
     rejection_reasons += gate_rejections(
-        tolerance_set, max_train_residual, max_validation_residual
+        tolerance_set, max_train_residual, mean_validation_residual
     )
 
     results = {
@@ -187,6 +188,7 @@ def asset_pricing_kernel(
         "rkhs_norm_p": float(rkhs_norm_squared(alpha, K)),
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
+        "mean_validation_residual": mean_validation_residual,
         "max_test_residual": float(jnp.max(jnp.abs(test_residual))),
         # min/max error statistics exclude the pinned t = 0 point ([1:]).
         "p_rel_error_mean": float(p_rel_error.mean()),

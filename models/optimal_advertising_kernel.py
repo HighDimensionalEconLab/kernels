@@ -181,6 +181,18 @@ def optimal_advertising_kernel(
         float(jnp.max(jnp.abs(validation_eval["costate"]))),
         float(jnp.max(jnp.abs(validation_eval["shadow_price"]))),
     )
+    mean_validation_residual = float(
+        jnp.mean(
+            jnp.abs(
+                jnp.concatenate(
+                    [
+                        jnp.ravel(validation_eval[name])
+                        for name in ("state", "costate", "shadow_price")
+                    ]
+                )
+            )
+        )
+    )
     finite_valid = bool(
         all(
             jnp.all(jnp.isfinite(grid[name]))
@@ -196,7 +208,7 @@ def optimal_advertising_kernel(
     if not finite_valid:
         rejection_reasons.append("nonfinite_or_nonpositive")
     rejection_reasons += gate_rejections(
-        tolerance_set, max_train_residual, max_validation_residual
+        tolerance_set, max_train_residual, mean_validation_residual
     )
 
     kernel_solution = jax.jit(evaluate_grid)
@@ -225,6 +237,7 @@ def optimal_advertising_kernel(
         **{f"rkhs_norm_{name}": float(value) for name, value in rkhs_norms.items()},
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
+        "mean_validation_residual": mean_validation_residual,
         "solve_time": elapsed,
         "train_loss": float(result.info.resid_loss),
         "final_damping": float(result.lm_state.damping),

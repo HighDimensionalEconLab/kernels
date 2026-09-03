@@ -60,23 +60,56 @@ def run(
                 100.0,
             ]
         ),
+        tolerance_set=dict(validation_residual=1e-2),
     )
     go(
         "far_steady_state",
         data_set=dict(train_T=20.0, train_points=21, test_T=30.0),
+        tolerance_set=dict(validation_residual=1e-3),
     )
 
     # nu / ell robustness table rows. The (nu=1/2, ell=10) row aliases the
     # baseline experiment in collect_json, so it is not re-run here.
-    go("nu15_ell10", kernel_set=dict(kernel="matern32", ell=10.0))
-    go("nu25_ell10", kernel_set=dict(kernel="matern52", ell=10.0))
-    go("nu05_ell2", kernel_set=dict(kernel="matern12", ell=2.0))
-    go("nu05_ell20", kernel_set=dict(kernel="matern12", ell=20.0))
+    # The rows report their validation residual without gating on it: the
+    # loss of between-node precision is what the table measures.
+    validation_off = dict(gate_validation=False)
+    go(
+        "nu15_ell10",
+        kernel_set=dict(kernel="matern32", ell=10.0),
+        tolerance_set=validation_off,
+    )
+    go(
+        "nu25_ell10",
+        kernel_set=dict(kernel="matern52", ell=10.0),
+        tolerance_set=validation_off,
+    )
+    go(
+        "nu05_ell2",
+        kernel_set=dict(kernel="matern12", ell=2.0),
+        tolerance_set=validation_off,
+    )
+    go(
+        "nu05_ell20",
+        kernel_set=dict(kernel="matern12", ell=20.0),
+        tolerance_set=validation_off,
+    )
     # Gaussian/RBF (nu -> inf) referee rows: ill-conditioned Gram matrices at
     # large ell may reject -- a first-class outcome rendered as "--" in the table.
-    go("rbf_ell10", kernel_set=dict(kernel="rbf", ell=10.0))
-    go("rbf_ell2", kernel_set=dict(kernel="rbf", ell=2.0))
-    go("rbf_ell20", kernel_set=dict(kernel="rbf", ell=20.0))
+    go(
+        "rbf_ell10",
+        kernel_set=dict(kernel="rbf", ell=10.0),
+        tolerance_set=validation_off,
+    )
+    go(
+        "rbf_ell2",
+        kernel_set=dict(kernel="rbf", ell=2.0),
+        tolerance_set=validation_off,
+    )
+    go(
+        "rbf_ell20",
+        kernel_set=dict(kernel="rbf", ell=20.0),
+        tolerance_set=validation_off,
+    )
 
     write_summary(output_dir, PREFIX)
 

@@ -1997,6 +1997,7 @@ def multicountry_growth_scaling(out):
     kernel_settings = set()
     residual_atols = {}
     ridges = {}
+    system_size = {}
     for count in MULTICOUNTRY_SCALING_COUNTS:
         hp = load(out, f"multicountry_growth_scaling_cg_N{count}_hyperparameters")
         train_gates.add(hp["tolerance_set"]["train_residual"])
@@ -2004,6 +2005,12 @@ def multicountry_growth_scaling(out):
         kernel_settings.add((hp["kernel_set"]["kernel"], hp["kernel_set"]["ell"]))
         residual_atols[str(count)] = hp["lm_set"]["atol"]
         ridges[str(count)] = hp["ridge_set"]["ridge"]
+        rung = summary[f"cg_N{count}"]
+        system_size[str(count)] = {
+            "train_points": hp["data_set"]["train_points"],
+            "dae_residual_count": int(med(rung["dae_residual_count"])),
+            "unknown_count": int(med(rung["unknown_count"])),
+        }
         if count <= MULTICOUNTRY_SCALING_DENSE_MAX:
             dense_hp = load(
                 out, f"multicountry_growth_scaling_dense_N{count}_hyperparameters"
@@ -2069,6 +2076,7 @@ def multicountry_growth_scaling(out):
         ),
         "residual_atol_by_country_count": residual_atols,
         "ridge_by_country_count": ridges,
+        "system_size": system_size,
         # The representative-agent CRRA comparative static, one implicit-AD
         # forward tangent through the cg solve; comparable against the
         # N=2/N=10 sensitivity tables' _common entries, with both runtimes

@@ -30,7 +30,6 @@ from models.multicountry_growth_shared import (
     long_run_diagnostics,
     production,
     q_drift,
-    relative_welfare_weights,
     resolved_steady_state,
     steady_state,
     tail_diagnostics,
@@ -306,7 +305,6 @@ def multicountry_growth_nn(
             "x": x,
             "output": output,
             "resources": resources,
-            "relative_welfare_weights": relative_welfare_weights(values["mu"]),
             "resource_gap": resource_gap,
         }
 
@@ -396,13 +394,10 @@ def multicountry_growth_nn(
     long_run = long_run_diagnostics(
         validation_t,
         validation_eval,
-        a_0_array,
         p,
         check_T=data_set.long_run_check_T,
         window=data_set.long_run_window,
     )
-    relative_weights = test_eval["relative_welfare_weights"][0]
-    log_relative_weights = jnp.log(relative_weights)
 
     results = {
         "parameters": p.to_dict(),
@@ -457,20 +452,6 @@ def multicountry_growth_nn(
         "total_params": int(ravel_pytree(nnx.state(model, nnx.Param))[0].size),
         **acceptance,
     }
-    if long_run["common_gamma"]:
-        results.update(
-            {
-                "long_run_consumption_ratio_drift": float(
-                    long_run["consumption_ratio_drift"]
-                ),
-                "long_run_wealth_proportionality_gap": float(
-                    long_run["wealth_proportionality_gap"]
-                ),
-                "long_run_wealth_rank_violation": float(
-                    long_run["wealth_rank_violation"]
-                ),
-            }
-        )
     for country in range(num_countries):
         suffix = country + 1
         results.update(
@@ -479,17 +460,11 @@ def multicountry_growth_nn(
                 f"q_0_{suffix}": float(test_eval["q"][0, country]),
                 f"c_0_{suffix}": float(test_eval["c"][0, country]),
                 f"mu_0_{suffix}": float(test_eval["mu"][0, country]),
-                f"relative_weight_{suffix}": float(relative_weights[country]),
-                f"log_relative_weight_{suffix}": float(log_relative_weights[country]),
                 f"terminal_a_{suffix}": float(validation_eval["a"][-1, country]),
                 f"long_run_a_{suffix}": float(resolved_steady["a"][country]),
                 f"long_run_c_{suffix}": float(resolved_steady["c"][country]),
             }
         )
-        if long_run["common_gamma"]:
-            results[f"initial_wealth_{suffix}"] = float(
-                long_run["initial_wealth"][country]
-            )
 
     if verbose:
         print("\nFinal results:")
@@ -520,7 +495,6 @@ def multicountry_growth_nn(
                 "tobin_q",
                 "marginal_wealth",
                 "consumption_foc",
-                "relative_welfare_weights",
             ):
                 data[f"{name}_{suffix}"] = np.asarray(values[name][:, country])
         return pd.DataFrame(data)

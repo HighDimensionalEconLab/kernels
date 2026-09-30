@@ -180,10 +180,6 @@ def q_drift(k, q, z, rate, p):
     ) * q - marginal_product(k, z, p)
 
 
-def relative_welfare_weights(mu):
-    return mu[..., :1] / mu
-
-
 def weighted_gini(values, populations):
     # Population-weighted Gini across countries (each country a mass of
     # identical members at its per-capita value):
@@ -249,7 +245,6 @@ def resolved_steady_state(mu, p):
         "output": steady["output"],
         "resources": steady["g"],
         "mu": mu,
-        "relative_welfare_weights": relative_welfare_weights(mu),
         "resource_gap": jnp.sum(populations * (steady["g"] - consumption)),
         "asset_clearing_gap": jnp.sum(populations * assets),
     }
@@ -403,23 +398,15 @@ def tail_diagnostics(values, p):
 def long_run_diagnostics(
     t,
     values,
-    a_0,
     p,
     check_T=100.0,
     window=10.0,
 ):
-    # Host-side diagnostics (argsort, python bools): call on concrete
-    # arrays only -- not jittable or traceable, unlike tvc/tail above.
-    # Long-run validity at t ~ check_T (well before the training horizon).
-    # The gamma-robust block holds for any curvature profile: flatness of
-    # consumption, capital, and debt; capital at the theory steady state
-    # (k_ss_i ~ z_i^(1/(1-alpha)) -- equal across countries only under equal
-    # productivities, the general invariant is MPK equalization); and the
-    # interest rate at r. The invariance identities -- constant consumption
-    # ratios, consumption proportional to initial wealth a_0_i +
-    # PV(resources_i), and wealth-rank preservation -- are exact only under
-    # a common gamma, so they are computed only when every gamma_i is equal.
-    a_0 = jnp.asarray(a_0, dtype=values["k"].dtype)
+    # Long-run validity at t ~ check_T (well before the training horizon),
+    # for any curvature profile: flatness of consumption, capital, and debt;
+    # capital at the theory steady state (k_ss_i ~ z_i^(1/(1-alpha)) -- equal
+    # across countries only under equal productivities, the general invariant
+    # is MPK equalization); and the interest rate at r.
     i_check = int(jnp.argmin(jnp.abs(t - check_T)))
     i_before = int(jnp.argmin(jnp.abs(t - (check_T - window))))
     steady = resolved_steady_state(values["mu"][-1], p)
@@ -428,7 +415,7 @@ def long_run_diagnostics(
     mpk_steady = p.delta + p.r / p.eta
     mpk_check = marginal_product(values["k"][i_check], productivities, p)
     rate = values["interest_rate"]
-    diagnostics = {
+    return {
         "c_flatness": jnp.max(
             jnp.abs(values["c"][i_check] / values["c"][i_before] - 1.0)
         ),
@@ -441,67 +428,4 @@ def long_run_diagnostics(
         "k_theory_gap": jnp.max(jnp.abs(jnp.log(values["k"][i_check] / steady["k"]))),
         "mpk_equalization_gap": jnp.max(jnp.abs(mpk_check - mpk_steady)) / mpk_steady,
         "interest_rate_gap": jnp.abs(rate[i_check] - p.r) / p.r,
-        "common_gamma": bool(np.all(np.asarray(p.gammas) == np.asarray(p.gammas)[0])),
     }
-    if not diagnostics["common_gamma"]:
-        return diagnostics
-
-    consumption_ratios = values["c"] / values["c"][:, :1]
-    cumulative_rate = jnp.concatenate(
-        [
-            jnp.zeros(1, dtype=rate.dtype),
-            jnp.cumsum(0.5 * (rate[1:] + rate[:-1]) * jnp.diff(t)),
-        ]
-    )
-    discount = jnp.exp(-cumulative_rate)
-    resource_pv = (
-        jnp.trapezoid(discount[:, None] * values["resources"], t, axis=0)
-        + discount[-1] * steady["resources"] / p.r
-    )
-    initial_wealth = a_0 + resource_pv
-    consumption_wealth_shares = values["c"][0] / initial_wealth
-    a_0_order = np.argsort(np.asarray(a_0))
-    # Exact rank equality is tie-fragile at large N: the proportionality
-    # spread bounds how close two wealth levels can be before their
-    # consumption ordering is numerically undetermined. The gated quantity
-    # is therefore the largest relative wealth separation among misordered
-    # pairs -- zero when the ranking is exact, and at tie scale when an
-    # exact-rank mismatch is a numerical tie rather than a violation.
-    wealth_scaled = initial_wealth / jnp.mean(initial_wealth)
-    wealth_differences = wealth_scaled[:, None] - wealth_scaled[None, :]
-    consumption_differences = steady["c"][:, None] - steady["c"][None, :]
-    wealth_rank_violation = jnp.max(
-        jnp.where(
-            wealth_differences * consumption_differences < 0.0,
-            jnp.abs(wealth_differences),
-            0.0,
-        )
-    )
-    diagnostics.update(
-        {
-            "consumption_ratio_drift": jnp.max(
-                jnp.abs(consumption_ratios / consumption_ratios[0] - 1.0)
-            ),
-            "wealth_proportionality_gap": jnp.max(
-                jnp.abs(
-                    consumption_wealth_shares / jnp.mean(consumption_wealth_shares)
-                    - 1.0
-                )
-            ),
-            "initial_wealth": initial_wealth,
-            "wealth_rank_violation": wealth_rank_violation,
-            "c_rank_matches_wealth": bool(
-                np.array_equal(
-                    np.argsort(np.asarray(steady["c"])),
-                    np.argsort(np.asarray(initial_wealth)),
-                )
-            ),
-            "c_rank_matches_a_0": bool(
-                np.array_equal(np.argsort(np.asarray(steady["c"])), a_0_order)
-            ),
-            "terminal_a_rank_matches_a_0": bool(
-                np.array_equal(np.argsort(np.asarray(values["a"][-1])), a_0_order)
-            ),
-        }
-    )
-    return diagnostics

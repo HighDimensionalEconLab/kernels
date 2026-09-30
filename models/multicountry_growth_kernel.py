@@ -45,7 +45,6 @@ from models.multicountry_growth_shared import (
     long_run_diagnostics,
     production,
     q_drift,
-    relative_welfare_weights,
     resolved_steady_state,
     steady_state,
     tail_diagnostics,
@@ -405,7 +404,6 @@ def multicountry_growth_kernel(
             "x": x,
             "output": output,
             "resources": resources,
-            "relative_welfare_weights": relative_welfare_weights(values["mu"]),
             "resource_gap": resource_gap,
         }
 
@@ -480,13 +478,10 @@ def multicountry_growth_kernel(
     long_run = long_run_diagnostics(
         validation_data,
         validation_eval,
-        a_0_array,
         p,
         check_T=data_set.long_run_check_T,
         window=data_set.long_run_window,
     )
-    relative_weights = test_eval["relative_welfare_weights"][0]
-    log_relative_weights = jnp.log(relative_weights)
     coefficient_groups = {
         "k": theta.alpha_k,
         "a": theta.alpha_a,
@@ -560,20 +555,6 @@ def multicountry_growth_kernel(
         "solver_status": STATUS_TO_REASON.get(int(result.status), "unknown"),
         **acceptance_fields(rejection_reasons),
     }
-    if long_run["common_gamma"]:
-        results.update(
-            {
-                "long_run_consumption_ratio_drift": float(
-                    long_run["consumption_ratio_drift"]
-                ),
-                "long_run_wealth_proportionality_gap": float(
-                    long_run["wealth_proportionality_gap"]
-                ),
-                "long_run_wealth_rank_violation": float(
-                    long_run["wealth_rank_violation"]
-                ),
-            }
-        )
     for country in range(num_countries):
         suffix = country + 1
         results.update(
@@ -581,8 +562,6 @@ def multicountry_growth_kernel(
                 f"q_0_{suffix}": float(theta.q_0s[country]),
                 f"c_0_{suffix}": float(theta.c_0s[country]),
                 f"mu_0_{suffix}": float(theta.mu_0s[country]),
-                f"relative_weight_{suffix}": float(relative_weights[country]),
-                f"log_relative_weight_{suffix}": float(log_relative_weights[country]),
                 f"terminal_a_{suffix}": float(validation_eval["a"][-1, country]),
                 f"long_run_a_{suffix}": float(resolved_steady["a"][country]),
                 f"long_run_c_{suffix}": float(resolved_steady["c"][country]),
@@ -592,10 +571,6 @@ def multicountry_growth_kernel(
                 },
             }
         )
-        if long_run["common_gamma"]:
-            results[f"initial_wealth_{suffix}"] = float(
-                long_run["initial_wealth"][country]
-            )
     results["rate_0"] = float(theta.rate_0)
 
     def frame(values, points):
@@ -622,7 +597,6 @@ def multicountry_growth_kernel(
                 "tobin_q",
                 "marginal_wealth",
                 "consumption_foc",
-                "relative_welfare_weights",
             ):
                 data[f"{name}_{suffix}"] = np.asarray(values[name][:, country])
         return pd.DataFrame(data)

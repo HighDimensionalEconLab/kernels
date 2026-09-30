@@ -1138,7 +1138,6 @@ def asset_pricing_nn(out):
         },
         "n_seeds": int(j["n_seeds"]),
         "frac_accepted": sig(j["frac_accepted"]),
-        "selection": "minimum_identity_metric_parameter_step",
         "training_information": {
             "terminal_residual_count": 0,
             "tvc_residual_count": 0,
@@ -1651,8 +1650,6 @@ def neoclassical_growth_kernel_recursive(out):
         ),
         "data": hp["data_set"],
         "kernel": hp["kernel_set"],
-        # The balanced-growth slope the tuned kernel/ray_slope is compared to.
-        "structural_ray_slope": sig(1.0 / (1.0 - hp["parameters"]["a"])),
         "solver": {"ridge": hp["ridge_set"]["ridge"]},
         "experiments": {name: experiment(name) for name in RECURSIVE_EXPERIMENTS},
     }
@@ -1832,7 +1829,6 @@ def open_economy_growth_nn_recursive(out, prefix="open_economy_growth_nn_recursi
             "hidden_activation": hp["nn_set"]["hidden_activation"],
             "total_params": int(med(load(out, f"{prefix}_baseline")["total_params"])),
         },
-        "selection": "minimum_identity_metric_parameter_step",
         "training_information": {"terminal_residual_count": 0},
         "n_seeds": int(load(out, f"{prefix}_baseline")["n_seeds"]),
         "experiments": {
@@ -2286,7 +2282,6 @@ def multicountry_growth_nn(out):
             "productivities",
         ),
         "architecture": experiments["baseline"]["architecture"],
-        "selection": "minimum_identity_metric_parameter_step",
         "training_information": {
             "terminal_residual_count": 0,
             "tvc_training_residual_count": 0,

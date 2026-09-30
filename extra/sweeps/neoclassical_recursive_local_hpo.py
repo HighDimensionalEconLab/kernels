@@ -110,7 +110,7 @@ SPACES = {
             "ridge_set.ridge": (1e-13, 1e-9),
             "lm_set.atol": (1e-6, 1e-4),
         },
-        uniform={"kernel_set.ray_slope": (0.5, 3.0)},
+        uniform={},
         fixed={"lm_set.gtol": 1e-7, "lm_set.max_steps": 300},
         metrics=(*COMMON_METRICS, "rkhs_norm", "num_centers"),
         bars=(3e-5, 3e-4),

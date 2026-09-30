@@ -428,7 +428,6 @@ def multicountry_growth_nn(
         "differential_residual_count": 4 * num_countries * n_train,
         "algebraic_residual_count": (num_countries + 1) * n_train,
         "dae_residual_count": (5 * num_countries + 1) * n_train,
-        "free_initial_value_count": 3 * num_countries + 1,
         "long_run_c_flatness": float(long_run["c_flatness"]),
         "long_run_k_flatness": float(long_run["k_flatness"]),
         "long_run_a_flatness": float(long_run["a_flatness"]),

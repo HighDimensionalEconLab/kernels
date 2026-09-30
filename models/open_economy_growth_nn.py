@@ -357,7 +357,6 @@ def open_economy_growth_nn(
         "differential_residual_count": 4 * n_train,
         "algebraic_residual_count": n_train,
         "dae_residual_count": 5 * n_train,
-        "free_initial_value_count": 3,
         "k_relative_error_max": float(jnp.max(k_relative_error)),
         "q_relative_error_max": float(jnp.max(q_relative_error)),
         "c_relative_error_max": float(jnp.max(c_relative_error)),

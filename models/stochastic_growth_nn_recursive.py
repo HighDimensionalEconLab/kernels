@@ -34,7 +34,7 @@ from models.stochastic_growth_shared import (
     StructuralParameters,
     euler_residuals,
     growth_initial_conditions,
-    log_tvc_residual,
+    log_tvc,
     problem_cache_config,
     simulate,
     simulate_train,
@@ -492,7 +492,7 @@ def stochastic_growth_nn_recursive(
         dtype,
         2,
     )
-    train_tvc = log_tvc_residual(
+    train_tvc = log_tvc(
         sde,
         policy,
         train_batch_log_states,
@@ -573,7 +573,7 @@ def stochastic_growth_nn_recursive(
         "mean_abs_diffusion_term": float(
             jnp.mean(jnp.abs(test_values["diffusion_term"]))
         ),
-        "max_log_tvc_residual": max_log_tvc,
+        "max_log_tvc": max_log_tvc,
         "min_test_c": float(jnp.min(test_values["c"])),
         "steps": steps,
         "solver_status": stopping_reason,

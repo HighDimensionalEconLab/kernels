@@ -1388,9 +1388,7 @@ def neoclassical_growth_nn_recursive(out):
             ),
             "max_train_euler_median": sci(float(sample["max_train_euler"].median())),
             "max_test_euler_median": sci(float(sample["max_test_euler"].median())),
-            "max_log_tvc_residual_median": sig(
-                float(sample["max_log_tvc_residual"].median()), 4
-            ),
+            "max_log_tvc_median": sig(float(sample["max_log_tvc"].median()), 4),
             "solve_time_median": sig(float(sample["solve_time"].median())),
             "steps_median": sig(float(sample["steps"].median())),
             **final_damping_summary(sample),
@@ -1469,9 +1467,7 @@ def stochastic_growth_nn_recursive(out):
                 "max_test_euler_median": sci(
                     float(accepted["max_test_euler"].median())
                 ),
-                "max_log_tvc_residual_median": sig(
-                    float(accepted["max_log_tvc_residual"].median()), 4
-                ),
+                "max_log_tvc_median": sig(float(accepted["max_log_tvc"].median()), 4),
                 "solve_time_median": sig(float(accepted["solve_time"].median())),
                 "steps_median": sig(float(accepted["steps"].median())),
                 **final_damping_summary(accepted),
@@ -1506,7 +1502,7 @@ def stochastic_growth_kernel_recursive(out):
                 "num_centers": int(med(j["num_centers"])),
                 "rkhs_norm_2d": sig(med(j["rkhs_norm_2d"])),
                 "rkhs_norm_ray": sig(med(j["rkhs_norm_ray"])),
-                "max_log_tvc_residual": sig(med(j["max_log_tvc_residual"]), 4),
+                "max_log_tvc": sig(med(j["max_log_tvc"]), 4),
                 "solve_time": sig(med(j["solve_time"]), 2),
                 "timing_repetitions": int(med(j["timing_repetitions"])),
             }
@@ -1562,11 +1558,13 @@ def stochastic_open_economy_growth_nn_recursive(out):
                 "test_euler_mean_abs_median": sci(
                     float(accepted["test_euler_mean_abs"].median())
                 ),
-                "ex_post_expected_absolute_asset_tvc_median": sci(
-                    float(accepted["ex_post_expected_absolute_asset_tvc"].median())
+                "log_expected_absolute_asset_tvc_median": sig(
+                    math.log(
+                        float(accepted["ex_post_expected_absolute_asset_tvc"].median())
+                    )
                 ),
-                "ex_post_expected_capital_tvc_median": sci(
-                    float(accepted["ex_post_expected_capital_tvc"].median())
+                "log_expected_capital_tvc_median": sig(
+                    math.log(float(accepted["ex_post_expected_capital_tvc"].median()))
                 ),
                 "solve_time_median": sig(float(accepted["solve_time"].median())),
                 **final_damping_summary(accepted),
@@ -1602,11 +1600,11 @@ def stochastic_open_economy_growth_kernel_recursive(out):
                 ),
                 "rkhs_coefficients": int(med(j["rkhs_coefficients"])),
                 "free_parameter_count": int(med(j["free_parameter_count"])),
-                "ex_post_expected_absolute_asset_tvc": sci(
-                    med(j["ex_post_expected_absolute_asset_tvc"])
+                "log_expected_absolute_asset_tvc": sig(
+                    math.log(med(j["ex_post_expected_absolute_asset_tvc"]))
                 ),
-                "ex_post_expected_capital_tvc": sci(
-                    med(j["ex_post_expected_capital_tvc"])
+                "log_expected_capital_tvc": sig(
+                    math.log(med(j["ex_post_expected_capital_tvc"]))
                 ),
                 "solve_time": sig(med(j["solve_time"]), 2),
                 "timing_repetitions": int(med(j["timing_repetitions"])),
@@ -1630,7 +1628,7 @@ def neoclassical_growth_kernel_recursive(out):
             "test_euler_mean_abs": sci(med(j["test_euler_mean_abs"])),
             "max_train_euler": sci(med(j["max_train_euler"])),
             "max_test_euler": sci(med(j["max_test_euler"])),
-            "max_log_tvc_residual": sig(med(j["max_log_tvc_residual"]), 4),
+            "max_log_tvc": sig(med(j["max_log_tvc"]), 4),
             "solve_time": sig(med(j["solve_time"])),
             "steps": int(med(j["steps"])),
             "num_centers": int(med(j["num_centers"])),
@@ -1807,11 +1805,11 @@ def open_economy_growth_nn_recursive(out, prefix="open_economy_growth_nn_recursi
             "ex_post_present_value_gap_median": sci(
                 float(accepted["ex_post_present_value_gap"].median())
             ),
-            "ex_post_asset_tvc_median": sci(
-                float(accepted["ex_post_asset_tvc"].median())
+            "log_asset_tvc_median": sig(
+                math.log(float(accepted["ex_post_asset_tvc"].median()))
             ),
-            "ex_post_capital_tvc_median": sci(
-                float(accepted["ex_post_capital_tvc"].median())
+            "log_capital_tvc_median": sig(
+                math.log(float(accepted["ex_post_capital_tvc"].median()))
             ),
             "solve_time_median": sig(float(accepted["solve_time"].median())),
             **final_damping_summary(accepted),

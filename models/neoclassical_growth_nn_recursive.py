@@ -23,7 +23,7 @@ from models.neoclassical_growth_shared import (
     euler_residuals,
     growth_initial_conditions,
     log_state_drift,
-    log_tvc_residual,
+    log_tvc,
     simulate,
     trajectory_values,
 )
@@ -476,10 +476,10 @@ def neoclassical_growth_nn_recursive(
     }
 
     # Terminal transversality certificate on the training batch.
-    train_tvc = log_tvc_residual(
+    train_tvc = log_tvc(
         policy, train_batch_log_states, data_set.train_tvc_T, data_set.tvc_steps, p
     )
-    max_log_tvc_residual = float(jnp.max(train_tvc))
+    max_log_tvc = float(jnp.max(train_tvc))
 
     max_train_euler = float(train_df["euler_residual"].abs().max())
     max_test_euler = float(jnp.max(jnp.abs(test_values["euler_residual"])))
@@ -528,7 +528,7 @@ def neoclassical_growth_nn_recursive(
             jnp.quantile(test_trajectory_euler, 0.9)
         ),
         "test_trajectory_euler_mean_abs_max": float(jnp.max(test_trajectory_euler)),
-        "max_log_tvc_residual": max_log_tvc_residual,
+        "max_log_tvc": max_log_tvc,
         "min_test_c": float(jnp.min(test_values["c"])),
         "steps": steps,
         "solver_status": stopping_reason,

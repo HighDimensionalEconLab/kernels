@@ -18,7 +18,7 @@ DIAGNOSTIC_COLUMNS = [
     "train_loss",
     "test_euler_mean_abs",
     "max_test_euler",
-    "max_log_tvc_residual",
+    "max_log_tvc",
     "steps",
     "solve_time",
 ]

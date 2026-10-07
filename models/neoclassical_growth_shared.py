@@ -300,16 +300,13 @@ def simulate(policy, initial_log_states, T, n_steps, p):
 # by the initial-date certificate, per initial state: the saddle path sits
 # far negative, a capital bubble drives it positive. A failed simulation is a
 # loud +inf.
-def log_tvc_residual(policy, initial_log_states, T, n_steps, p):
+def log_tvc(policy, initial_log_states, T, n_steps, p):
     solution = simulate(policy, initial_log_states, T, n_steps, p)
     terminal_log_states = solution.xs[:, -1, :]
     c_T = jax.vmap(lambda state: consumption(policy, state, p))(terminal_log_states)
     k_T = jnp.exp(terminal_log_states[:, 1])
-    c_0 = jax.vmap(lambda state: consumption(policy, state, p))(initial_log_states)
-    k_0 = jnp.exp(initial_log_states[:, 1])
-    log_tvc = -p.rho_hat * T - p.sigma_crra * jnp.log(c_T) + jnp.log(k_T)
-    initial_log_tvc = -p.sigma_crra * jnp.log(c_0) + jnp.log(k_0)
-    return jnp.where(solution.ok, log_tvc - initial_log_tvc, jnp.inf)
+    value = -p.rho_hat * T - p.sigma_crra * jnp.log(c_T) + jnp.log(k_T)
+    return jnp.where(solution.ok, value, jnp.inf)
 
 
 # nnx.jit so one compiled evaluation serves both the nnx policy and the

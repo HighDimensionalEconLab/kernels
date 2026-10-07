@@ -188,29 +188,36 @@ def accepted_cell(j):
     return f"{int(j['n_accepted'])}/{int(total)}"
 
 
-# Sequential kernel-vs-NN comparison across models. Error columns use each
-# model's headline benchmark metric (p for asset pricing; k for growth; the
-# max over k/q/c/a-scaled for the open economy); the concave-convex rows
-# report the correct-basin fraction over the 70 initial conditions,
-# scored against the benchmark destination (the k_thr-side saddle).
+# Sequential kernel-vs-NN comparison across models. Error columns are the
+# mean and largest relative errors against each model's benchmark: the price
+# for asset pricing and capital otherwise. NN entries are medians over
+# accepted seeds; the concave-convex sweep aggregates over its 70 initial
+# conditions (mean of the per-run means, largest entry overall).
 def write_sequential_comparison_table(out):
-    def basin_fraction(name):
-        frame = pd.read_parquet(out / f"{name}_threshold_results.parquet")
-        return f"{int(frame['basin_correct'].sum())}/{len(frame)}"
-
     # The concave-convex experiment is a sweep over initial conditions, so the
     # acceptance denominator is the sweep size rather than the n_seeds meta.
     def sweep_accepted(name):
         frame = pd.read_parquet(out / f"{name}_threshold_results.parquet")
         return f"{int(frame['solution_accepted'].sum())}/{len(frame)}"
 
-    def oe_max_error(j):
-        return max(
-            med(j["k_relative_error_max"]),
-            med(j["q_relative_error_max"]),
-            med(j["c_relative_error_max"]),
-            med(j["a_scaled_error_max"]),
-        )
+    # Capital relative errors from a saved test_df frame (t > 0), restricted
+    # to accepted runs: per-run mean and max, combined by median over seeds
+    # or by mean/max over a sweep.
+    def k_error_cells(name, run_key, aggregate):
+        df = pd.read_parquet(out / f"{name}_test_df.parquet")
+        df = df[df["t"] > 0.0]
+        column = "k_rel_error" if "k_rel_error" in df.columns else "k_relative_error"
+        if run_key is None:
+            errors = df[column].abs()
+            return float(errors.mean()), float(errors.max())
+        results = pd.read_parquet(out / f"{name}_results.parquet")
+        accepted = results.loc[results["solution_accepted"], run_key]
+        grouped = df[df[run_key].isin(accepted)].groupby(run_key)[column]
+        means = grouped.apply(lambda s: s.abs().mean())
+        maxes = grouped.apply(lambda s: s.abs().max())
+        if aggregate == "seeds":
+            return float(means.median()), float(maxes.median())
+        return float(means.mean()), float(maxes.max())
 
     ap_kernel = load(out, "asset_pricing_kernel_baseline")
     ap_nn = load(out, "asset_pricing_nn_baseline")
@@ -227,7 +234,6 @@ def write_sequential_comparison_table(out):
             "Kernel",
             med(ap_kernel["p_rel_error_mean"]),
             med(ap_kernel["p_rel_error_max"]),
-            None,
             med(ap_kernel["solve_time"]),
             accepted_cell(ap_kernel),
         ),
@@ -236,7 +242,6 @@ def write_sequential_comparison_table(out):
             "NN",
             med(ap_nn["p_rel_error_mean"]),
             med(ap_nn["p_rel_error_max"]),
-            None,
             med(ap_nn["solve_time"]),
             accepted_cell(ap_nn),
         ),
@@ -247,7 +252,6 @@ def write_sequential_comparison_table(out):
             rel_error_extrema(out, "neoclassical_growth_kernel_baseline")[
                 "test_k_rel_error_max"
             ],
-            None,
             med(ngm_kernel["solve_time"]),
             accepted_cell(ngm_kernel),
         ),
@@ -258,59 +262,53 @@ def write_sequential_comparison_table(out):
             rel_error_extrema(out, "neoclassical_growth_nn_baseline")[
                 "test_k_rel_error_max"
             ],
-            None,
             med(ngm_nn["solve_time_success"]),
             accepted_cell(ngm_nn),
         ),
         (
             "Concave-convex",
             "Kernel",
-            None,
-            None,
-            basin_fraction("neoclassical_growth_concave_convex_kernel"),
+            *k_error_cells(
+                "neoclassical_growth_concave_convex_kernel_threshold", "k_0", "sweep"
+            ),
             med(cc_kernel["solve_time"]),
             sweep_accepted("neoclassical_growth_concave_convex_kernel"),
         ),
         (
             "",
             "NN",
-            None,
-            None,
-            basin_fraction("neoclassical_growth_concave_convex_nn"),
+            *k_error_cells(
+                "neoclassical_growth_concave_convex_nn_threshold", "k_0", "sweep"
+            ),
             med(cc_nn["solve_time"]),
             sweep_accepted("neoclassical_growth_concave_convex_nn"),
         ),
         (
             "Open economy",
             "Kernel",
-            None,
-            oe_max_error(oe_kernel),
-            None,
+            *k_error_cells("open_economy_growth_kernel_baseline", None, None),
             med(oe_kernel["solve_time"]),
             accepted_cell(oe_kernel),
         ),
         (
             "",
             "NN",
-            None,
-            oe_max_error(oe_nn),
-            None,
+            *k_error_cells("open_economy_growth_nn_baseline", "seed", "seeds"),
             med(oe_nn["solve_time_success"]),
             accepted_cell(oe_nn),
         ),
     ]
     lines = [
-        r"\begin{tabular}{llrrrrr}",
+        r"\begin{tabular}{llrrrr}",
         r"\toprule",
-        r"Model & Solver & Mean rel.\ error & Max rel.\ error & "
-        r"Correct basin & Time (s) & Accepted \\",
+        r"Model & Solver & Mean rel.\ error & Max rel.\ error & Time (s) & Accepted \\",
         r"\midrule",
     ]
-    for model, solver, mean_err, max_err, basin, seconds, accepted in rows:
+    for model, solver, mean_err, max_err, seconds, accepted in rows:
         lines.append(
             f"{model} & {solver} & {comparison_cell(mean_err)} & "
-            f"{comparison_cell(max_err)} & {basin if basin is not None else '--'} & "
-            f"{comparison_cell(seconds, 'time')} & {accepted} \\\\"
+            f"{comparison_cell(max_err)} & {comparison_cell(seconds, 'time')} & "
+            f"{accepted} \\\\"
         )
     lines += [r"\bottomrule", r"\end{tabular}", ""]
     path = out / "sequential_solver_comparison.tex"

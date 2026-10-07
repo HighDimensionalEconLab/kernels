@@ -200,7 +200,8 @@ def multicountry_growth_kernel(
         gtol=5e-8,
     ),
     # "cg" is matrix-free preconditioned CG (arrow+Woodbury, rebuilt every LM
-    # step); implicit-AD re-solves stay dense-only (CG degrades the tangents).
+    # step); with no ad_solver set, the implicit-AD solve inherits the carried
+    # preconditioner at zero damping.
     ridge_set: RidgeSettings = RidgeSettings(
         ridge=3e-13,
         ridge_init=1e-7,

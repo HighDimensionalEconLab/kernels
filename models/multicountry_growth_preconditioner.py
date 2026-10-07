@@ -12,8 +12,9 @@
 # (rank one across countries -- the population-weighted a-direction -- times
 # the time modes). Block elimination of the arrowhead (batched per-country
 # Cholesky + border Schur complement) followed by the Woodbury identity over
-# U is therefore the EXACT shifted inverse at the build point, at O(N) build
-# and apply cost in the country count.
+# U is therefore the EXACT shifted inverse at the build point. The
+# factorizations and each apply cost O(N) in the country count; the per-node
+# weight assembly below is dense over the 5N+1 rows of a node and costs O(N^3).
 #
 # Assembly never materializes the (5N+1)n x ((5N+1)n + 3N + 1) Jacobian:
 # every residual row is time-local given the per-time levels

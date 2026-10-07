@@ -97,10 +97,9 @@ def run(output_dir: str = ".results"):
         ),
         # The undamped AD system runs once, so it gets a deeper budget than
         # the damped inner solves. The preconditioned AD residual stalls near
-        # 1e-8 (the arrow-Woodbury build is structurally approximate away
-        # from the seed), so the dtype-default 1e-10 tolerance is unreachable
-        # and CG burns the whole budget with no accuracy gain; the explicit
-        # tolerance stops at the stall.
+        # 1e-8, so the dtype-default 1e-10 tolerance is unreachable and CG
+        # burns the whole budget with no accuracy gain; the explicit tolerance
+        # stops at the stall.
         ad_solver=CG(None, tol=1e-8, maxiter=10 * cg_settings.maxiter),
         init_damping=primal_solver.init_damping,
         damping_decrease=primal_solver.damping_decrease,

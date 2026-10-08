@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import pathlib
 
-import jax
 import jax.numpy as jnp
 import jsonargparse
 import matplotlib.pyplot as plt
@@ -11,7 +10,7 @@ import numpy as np
 from jax.scipy.special import erf
 
 from models.kernels import integrated_kernel_matrices
-from replication.utilities import style
+from replication.utilities import configure_process, style
 
 PREFIX = "kernel_interpolation_example"
 
@@ -232,5 +231,5 @@ def run(
 
 
 if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
+    configure_process()
     jsonargparse.CLI(run)

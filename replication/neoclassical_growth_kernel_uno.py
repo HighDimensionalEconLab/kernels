@@ -70,8 +70,8 @@ def run(
 
     # nu / ell robustness table rows. The (nu=1/2, ell=10) row aliases the
     # baseline experiment in collect_json, so it is not re-run here.
-    # The rows report their validation residual without gating on it: the
-    # loss of between-node precision is what the table measures.
+    # Validation does not gate these rows; the table reports path-error
+    # extrema against the benchmark.
     validation_off = dict(gate_validation=False)
     go(
         "nu15_ell10",

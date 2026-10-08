@@ -12,8 +12,8 @@ def run(
     output_dir: str = ".results",
 ):
     configure_process()
-    # The table reports each row's validation residual without gating on it:
-    # the loss of between-node precision is what the rows measure.
+    # Validation does not gate these rows; the table reports path-error
+    # extrema against the benchmark.
     validation_off = dict(gate_validation=False)
 
     go(

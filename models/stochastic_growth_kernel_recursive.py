@@ -529,6 +529,7 @@ def stochastic_growth_kernel_recursive(
         "solve_time": solve_time,
         "total_fit_time": total_fit_time,
         "num_centers": n_train,
+        "rkhs_coefficients": n_train,
         "rkhs_norm_ray": rkhs_norm_ray,
         "rkhs_norm_2d": rkhs_norm_2d,
         "test_mean_abs_k_rel_error": float(np.mean(np.abs(k_error))),

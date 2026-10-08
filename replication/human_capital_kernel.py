@@ -26,8 +26,7 @@ def run(
         options={"verbose": verbose},
     )
     if not bool(results_df["solution_accepted"].iloc[0]):
-        # Acceptance is wall-clock gated (filtersqp time_limit); a rejected
-        # baseline invalidates the QE figure, so fail loudly here.
+        # A rejected baseline invalidates the QE figure, so fail loudly here.
         raise RuntimeError(
             f"human capital baseline rejected: {results_df['rejection_reason'].iloc[0]}"
         )

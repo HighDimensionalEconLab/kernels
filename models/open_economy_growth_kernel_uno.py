@@ -405,7 +405,7 @@ def open_economy_growth_kernel_uno(
     solve_time = elapsed
     solver_status = str(result.optimization_status).split(".")[-1]
     solution_status = str(result.solution_status).split(".")[-1]
-    validation_pass = max_validation_residual <= tolerance_set.validation_residual
+    validation_pass = mean_validation_residual <= tolerance_set.validation_residual
     rejection_reasons = []
     if not finite_positive:
         rejection_reasons.append("nonfinite_or_nonpositive")

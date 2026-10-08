@@ -154,7 +154,8 @@ def neoclassical_growth_nn(
         use_bias=nn_set.hidden_bias,
         use_output_bias=nn_set.output_bias,
         final_activation=unit_softplus,
-        input_scale=0.01,
+        input_scale=nn_set.time_scale,
+        head_kernel_std=nn_set.head_init_scale,
         output_scale=(k_scale, c_scale),
         g=g_nn,
         dtype=dtype,
@@ -199,7 +200,8 @@ def neoclassical_growth_nn(
             use_bias=nn_set.hidden_bias,
             use_output_bias=nn_set.output_bias,
             final_activation=unit_softplus,
-            input_scale=0.01,
+            input_scale=nn_set.time_scale,
+            head_kernel_std=nn_set.head_init_scale,
             output_scale=(k_scale, c_scale),
             g=g_nn,
             dtype=dtype,
@@ -269,7 +271,11 @@ def neoclassical_growth_nn(
         tolerance_set, max_train_residual, mean_validation_residual
     )
     results = {
-        "parameters": {**p.to_dict(), "learn_g_hat": learn_g_hat},
+        "parameters": {
+            **p.to_dict(),
+            "learn_g_hat": learn_g_hat,
+            "g_hat_init": g_hat_init,
+        },
         "nn_set": asdict(nn_set),
         "data_set": asdict(data_set),
         "lm_set": {

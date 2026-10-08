@@ -51,7 +51,7 @@ def run(
     # so the settle-ball test the recursive policy uses cannot apply. Scored
     # against the benchmark destination (the k_thr-side saddle) per k_0.
     parameters = dict(hyperparameters["parameters"])
-    del parameters["learn_g_hat"]  # solve flag, not a StructuralParameters field
+    del parameters["learn_g_hat"], parameters["g_hat_init"]  # solve settings
     k_thr, k_ss_low, k_ss_high = butterfly_thresholds(
         StructuralParameters.create(dtype=jnp.float64, **parameters)
     )

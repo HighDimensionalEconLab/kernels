@@ -289,7 +289,11 @@ def neoclassical_growth_kernel(
     g_hat_value = float(theta.g_hat) if learn_g_hat else float(g)
 
     results = {
-        "parameters": {**p.to_dict(), "learn_g_hat": learn_g_hat},
+        "parameters": {
+            **p.to_dict(),
+            "learn_g_hat": learn_g_hat,
+            "g_hat_init": g_hat_init,
+        },
         "kernel_set": asdict(kernel_set),
         "data_set": asdict(data_set),
         "lm_set": {

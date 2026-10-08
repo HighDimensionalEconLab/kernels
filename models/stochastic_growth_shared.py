@@ -182,10 +182,9 @@ def simulate_train(sde, policy, initial_log_states, noise, p, data_set):
     )
 
 
-# Natural-log transversality certificate at the terminal date T, normalized
-# by the initial-date certificate, per initial state: the saddle path sits
-# far negative, a capital bubble drives it positive. A failed simulation is a
-# loud +inf.
+# Natural log of exp(-rho_hat T) c(T)^(-sigma_crra) k(T), per initial state:
+# the saddle path sits far negative, a capital bubble drives it positive. A
+# failed simulation is a loud +inf.
 def log_tvc(sde, policy, initial_log_states, noise, T, n_steps, p):
     solution = simulate(sde, policy, initial_log_states, noise, T, n_steps, p)
     terminal_log_states = solution.xs[:, -1, :]

@@ -64,6 +64,10 @@ from models.utilities import (
 # errors and Ito diffusion terms under the bars. The optimizer stops on its
 # own criteria (atol, or the epoch callback's fresh-batch loss test) and its
 # status is reported, never gated.
+# Asset unit of the standardized state, in multiples of initial output.
+ASSET_SCALE_OUTPUT_MULTIPLE = 20.0
+
+
 @dataclass(frozen=True)
 class ToleranceSettings:
     gate_train: bool = True
@@ -281,10 +285,12 @@ def stochastic_open_economy_growth_nn_recursive(
     train_scales = jnp.sqrt(jnp.asarray(train_variances, dtype=dtype))
     test_scales = jnp.sqrt(jnp.asarray(test_variances, dtype=dtype))
     investment_anchor = parameters.delta * k_0
-    # Input scales are reciprocal standard deviations; the asset unit is
-    # 20 x output (a finer unit costs LM steps).
+    # Input scales are reciprocal standard deviations; a finer asset unit
+    # costs LM steps.
     z_sd = max(math.sqrt(z_ergodic_variance), math.sqrt(train_variances[0]))
-    asset_sd = max(math.sqrt(train_variances[2]), 20.0 * output_scale)
+    asset_sd = max(
+        math.sqrt(train_variances[2]), ASSET_SCALE_OUTPUT_MULTIPLE * output_scale
+    )
     rate_sd = max(math.sqrt(rate_ergodic_variance), math.sqrt(train_variances[3]))
     # The investment local_slope gives both outputs an O(output_scale) Jacobian.
     policy_spec = dict(
@@ -412,6 +418,7 @@ def stochastic_open_economy_growth_nn_recursive(
         "train_T": data_set.train_T,
         "nn_set": asdict(nn_set),
         "lm_set": asdict(lm_set),
+        "tolerance_set": asdict(tolerance_set),
     }
     problem_key = cache_key(problem_config)
     run_key = cache_key(run_config)
@@ -637,7 +644,10 @@ def stochastic_open_economy_growth_nn_recursive(
             "z_0": z_0,
             "rate_gap_0": rate_gap_0,
         },
-        "nn_set": asdict(nn_set),
+        "nn_set": {
+            **asdict(nn_set),
+            "asset_scale_output_multiple": ASSET_SCALE_OUTPUT_MULTIPLE,
+        },
         "data_set": asdict(data_set),
         "ic_set": asdict(ic_set),
         "lm_set": {

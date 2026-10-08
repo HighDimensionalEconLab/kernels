@@ -136,6 +136,10 @@ def run(output_dir: str = ".results"):
         fields[f"d_rate_{suffix}_d_gamma_common"] = float(d_rate_common[index])
     fields["compile_gamma_common_sensitivity_time"] = tangent_times[0]
     fields["gamma_common_sensitivity_time"] = statistics.median(tangent_times[1:])
+    fields["tangent_ridge"] = tangent_ridge
+    fields["tangent_build_damping"] = cg_settings.damping_floor
+    fields["tangent_cg_tol"] = 1e-8
+    fields["tangent_cg_maxiter"] = 10 * cg_settings.maxiter
     save_experiment(
         "gamma_common",
         pd.DataFrame([{**scalar_results(results), **fields}]),

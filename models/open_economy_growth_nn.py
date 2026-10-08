@@ -55,6 +55,8 @@ class SequencePathSettings:
     width: int = 32
     depth: int = 3
     hidden_activation: str = "tanh"
+    time_scale: float = 0.01
+    head_init_scale: float = 1e-3
 
 
 def residual_fn(theta, args, p):
@@ -159,7 +161,8 @@ def open_economy_growth_nn(
         depth=nn_set.depth,
         activation=ACTIVATIONS[nn_set.hidden_activation],
         final_activation=final_activation,
-        input_scale=0.01,
+        input_scale=nn_set.time_scale,
+        head_kernel_std=nn_set.head_init_scale,
         output_scale=(k_scale, a_scale, q_scale, c_scale, mu_scale),
         dtype=dtype,
         rngs=nnx.Rngs(init_key),
@@ -193,7 +196,8 @@ def open_economy_growth_nn(
             depth=nn_set.depth,
             activation=ACTIVATIONS[nn_set.hidden_activation],
             final_activation=final_activation,
-            input_scale=0.01,
+            input_scale=nn_set.time_scale,
+            head_kernel_std=nn_set.head_init_scale,
             output_scale=(k_scale, a_scale, q_scale, c_scale, mu_scale),
             dtype=dtype,
         ),

@@ -41,6 +41,8 @@ class PricePolicySettings:
     hidden_activation: str = "tanh"
     hidden_bias: bool = True
     output_bias: bool = True
+    time_scale: float = 0.025
+    head_init_scale: float = 1e-3
 
 
 # No-arbitrage residual dp/dt = r p - x along the dividend path.
@@ -118,7 +120,8 @@ def asset_pricing_nn(
         activation=ACTIVATIONS[nn_set.hidden_activation],
         use_bias=nn_set.hidden_bias,
         use_output_bias=nn_set.output_bias,
-        input_scale=0.025,
+        input_scale=nn_set.time_scale,
+        head_kernel_std=nn_set.head_init_scale,
         dtype=dtype,
         rngs=nnx.Rngs(init_key),
     )
@@ -153,7 +156,8 @@ def asset_pricing_nn(
             activation=ACTIVATIONS[nn_set.hidden_activation],
             use_bias=nn_set.hidden_bias,
             use_output_bias=nn_set.output_bias,
-            input_scale=0.025,
+            input_scale=nn_set.time_scale,
+            head_kernel_std=nn_set.head_init_scale,
             dtype=dtype,
         ),
     )

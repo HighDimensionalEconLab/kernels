@@ -106,6 +106,8 @@ class GrowthPolicySettings:
     hidden_activation: str = "tanh"
     hidden_bias: bool = True
     output_bias: bool = True
+    time_scale: float = 0.01
+    head_init_scale: float = 1e-3
 
 
 def consumption(policy, log_state, p):
@@ -296,8 +298,7 @@ def simulate(policy, initial_log_states, T, n_steps, p):
     return jax.vmap(solve_one)(initial_log_states)
 
 
-# Natural-log transversality certificate at the terminal date T, normalized
-# by the initial-date certificate, per initial state: the saddle path sits
+# Natural log of exp(-rho_hat T) c(T)^(-sigma_crra) k(T), per initial state: the saddle path sits
 # far negative, a capital bubble drives it positive. A failed simulation is a
 # loud +inf.
 def log_tvc(policy, initial_log_states, T, n_steps, p):

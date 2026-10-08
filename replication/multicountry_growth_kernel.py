@@ -29,9 +29,8 @@ SOLVER = multicountry_growth_kernel.multicountry_growth_kernel
 BOND_CONFIGURATIONS = ("initial_debt", "baseline", "initial_assets")
 # Sensitivity dates shared by the two-country and ten-country experiments
 # (multicountry_growth_kernel_sensitivity.py and the NN sensitivity driver).
-# The cross-check on d r*/d gamma_bar -- the same representative-agent
-# perturbation solved through a 1,920-row and a 9,792-row system -- only
-# compares at dates both tables report, so the two lists must stay equal.
+# The cross-check on d r*/d gamma_bar between the two-country and ten-country
+# solves compares only dates both tables report, so the two lists must stay equal.
 SENSITIVITY_TIMES = [0.0, 10.0, 30.0, 80.0]
 LARGE_COUNTRY_COUNT = 10
 LARGE_COUNTRY_PARAMETERS = dict(

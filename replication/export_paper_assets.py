@@ -24,6 +24,8 @@ MANIFEST = {
         "neoclassical_growth_concave_convex_kernel_figures"
     ),
     "phase_diagram_mu_k.pdf": "neoclassical_growth_phase_diagram",
+    "kernel_interpolation_example.pdf": "kernel_interpolation_example",
+    "kernel_interpolation_example_kernels.pdf": "kernel_interpolation_example",
     "asset_pricing_contiguous.pdf": "asset_pricing_kernel_figures",
     "open_economy_growth_transitions.pdf": "open_economy_growth_kernel_figures",
     "neoclassical_human_capital.pdf": "human_capital_kernel_figures",
@@ -32,6 +34,9 @@ MANIFEST = {
     "multicountry_growth_scaling.pdf": "multicountry_growth_scaling_figures",
     "sequential_solver_comparison.tex": "collect_json",
     "neoclassical_growth_solver_comparison.tex": "collect_json",
+    "neoclassical_growth_shooting_newton.tex": "collect_json",
+    "neoclassical_growth_shooting.tex": "collect_json",
+    "neoclassical_growth_shooting_gradients.tex": "collect_json",
     "multicountry_growth_kernel_comparison.tex": "collect_json",
     "open_economy_comparative_statics.tex": "collect_json",
     "equilibrium_selection.tex": "collect_json",

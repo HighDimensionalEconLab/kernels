@@ -20,6 +20,7 @@ echo "==> data -> $output_dir/"
 python -m replication.neoclassical_growth_kernel
 python -m replication.neoclassical_growth_kernel_robustness
 python -m replication.neoclassical_growth_kernel_ridge_grid
+python -m replication.neoclassical_growth_shooting
 python -m replication.neoclassical_growth_kernel_sensitivity
 python -m replication.neoclassical_growth_concave_convex_kernel
 python -m replication.neoclassical_growth_concave_convex_nn
@@ -64,6 +65,7 @@ python -m replication.multicountry_growth_scaling_figures --output_dir "$output_
 python -m replication.stochastic_growth_kernel_recursive_figures --output_dir "$output_dir"
 python -m replication.stochastic_open_economy_growth_kernel_recursive_figures --output_dir "$output_dir"
 python -m replication.neoclassical_growth_phase_diagram --output_dir "$output_dir"
+python -m replication.kernel_interpolation_example --output_dir "$output_dir"
 python -m replication.neoclassical_growth_kernel_ridge_grid_figures --output_dir "$output_dir"
 
 echo "==> paper numbers -> $output_dir/all_results.json"

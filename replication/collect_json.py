@@ -1069,6 +1069,392 @@ def write_ridge_grid_table(out, filename="neoclassical_growth_kernel_ridge_grid.
     print(f"wrote {path}")
 
 
+# Kernel interpolation of the logistic S-curve: the settings and the per-panel
+# errors, learned asymptotes, and Gram condition numbers the extras cite.
+def kernel_interpolation_example(out):
+    j = load(out, "kernel_interpolation_example")
+    panels = {
+        name: {
+            "ell": panel["ell"],
+            "ridged": panel["ridged"],
+            "gram_condition": sci(panel["gram_condition"], 2),
+            "train_max_abs_error": sci(panel["train_max_abs_error"], 2),
+            "train_window_mean_abs_error": sci(panel["train_window_mean_abs_error"], 2),
+            "extrapolation_mean_abs_error": sci(
+                panel["extrapolation_mean_abs_error"], 2
+            ),
+            "terminal_slope": sci(panel["terminal_slope"], 2),
+            "true_terminal_slope": sci(panel["true_terminal_slope"], 2),
+            "asymptote": sig(panel["asymptote"], 3),
+        }
+        for name, panel in j["panels"].items()
+    }
+    return {
+        **select(
+            j,
+            "x_0",
+            "x_ss",
+            "r",
+            "train_T",
+            "train_points",
+            "train_spacing",
+            "test_T",
+            "ridge",
+            "jitter",
+            "kernel_center",
+        ),
+        "inflection": sig(j["inflection"], 3),
+        "transition_time_scale": sig(j["transition_time_scale"], 2),
+        "x_train_T": sig(j["x_train_T"], 3),
+        "panels": panels,
+    }
+
+
+# Classical shooting on the baseline growth model, by Newton (from random
+# guesses by radius around the benchmark c_0 and horizon T) and by bisection
+# with the boundary rule (one radius, by horizon). Both accept a run when the
+# returned c_0's path reaches T with the relative terminal capital miss below
+# the tolerance; Newton otherwise ends in blow_up (an iterate's path failed)
+# or max_iter, bisection in budget_exhausted, terminal_blow_up, or
+# terminal_tolerance. Medians and error means are over the accepted runs, and
+# again over the completed runs (every run that returned a c_0) for the
+# bisection table, where the terminal test fails at long horizons.
+SHOOTING_PREFIX = "neoclassical_growth_shooting"
+
+
+def shooting_cell(out, name):
+    j = load(out, name)
+    results = pd.read_parquet(out / f"{name}_results.parquet")
+    frame = pd.read_parquet(out / f"{name}_test_df.parquet")
+    frame = frame[frame["t"] > 0.0]
+    reasons = results["rejection_reason"]
+    accepted = results[results["solution_accepted"]]
+    # Runs that returned a c_0 at all: for bisection every bracketed search,
+    # whatever the terminal test said; for Newton the converged ones.
+    completed = results[~reasons.isin(["blow_up", "max_iter", "budget_exhausted"])]
+    hp = load(out, f"{name}_hyperparameters")
+
+    def run_mean(runs, column):
+        grouped = frame[frame["seed"].isin(runs["seed"])].groupby("seed")
+        means = grouped[column].apply(lambda s: s.abs().mean())
+        return sig(float(means.mean()), 2) if len(means) else None
+
+    def scalar_mean(runs, column):
+        return sig(float(runs[column].mean()), 2) if len(runs) else None
+
+    def run_median(runs, column):
+        return sig(float(runs[column].median()), 2) if len(runs) else None
+
+    def accepted_mean(column):
+        return run_mean(accepted, column)
+
+    def accepted_median(column):
+        return run_median(accepted, column)
+
+    return {
+        "method": hp["shooting_set"]["method"],
+        "radius": hp["shooting_set"]["radius"],
+        "T": hp["shooting_set"]["T"],
+        "n_draws": int(j["n_seeds"]),
+        "n_accepted": int(j["n_accepted"]),
+        "frac_accepted": sig(j["frac_accepted"]),
+        "n_blow_up": int((reasons == "blow_up").sum()),
+        "n_max_iter": int((reasons == "max_iter").sum()),
+        "n_budget_exhausted": int((reasons == "budget_exhausted").sum()),
+        "n_terminal_blow_up": int((reasons == "terminal_blow_up").sum()),
+        "n_terminal_tolerance": int((reasons == "terminal_tolerance").sum()),
+        "solve_time_median": sig(float(results["solve_time"].median()), 2),
+        "n_iterations_median": accepted_median("n_iterations"),
+        "terminal_k_miss_median": accepted_median("terminal_k_miss"),
+        "terminal_c_gap_median": accepted_median("terminal_c_gap"),
+        "c_0_rel_error_median": accepted_median("c_0_rel_error"),
+        "test_k_rel_error_mean": accepted_mean("k_rel_error"),
+        "test_c_rel_error_mean": accepted_mean("c_rel_error"),
+        "horizon_k_rel_error_mean": scalar_mean(accepted, "horizon_k_rel_error_abs"),
+        "horizon_c_rel_error_mean": scalar_mean(accepted, "horizon_c_rel_error_abs"),
+        "n_completed": int(len(completed)),
+        "terminal_k_miss_completed_median": run_median(completed, "terminal_k_miss"),
+        "c_0_rel_error_completed_median": run_median(completed, "c_0_rel_error"),
+        "test_k_rel_error_completed_mean": run_mean(completed, "k_rel_error"),
+        "test_c_rel_error_completed_mean": run_mean(completed, "c_rel_error"),
+        "horizon_k_rel_error_completed_mean": scalar_mean(
+            completed, "horizon_k_rel_error_abs"
+        ),
+    }
+
+
+def shooting_cells(out):
+    meta = load(out, f"{SHOOTING_PREFIX}_gradients")
+    newton = {
+        f"r{radius:g}_T{T:g}": shooting_cell(
+            out, f"{SHOOTING_PREFIX}_newton_r{radius:g}_T{T:g}"
+        )
+        for radius in meta["newton_radii"]
+        for T in meta["newton_horizons"]
+    }
+    bisection = {
+        f"T{T:g}": shooting_cell(
+            out, f"{SHOOTING_PREFIX}_bisection_r{meta['bisection_radius']:g}_T{T:g}"
+        )
+        for T in meta["bisection_horizons"]
+    }
+    hp = load(
+        out,
+        f"{SHOOTING_PREFIX}_bisection_r{meta['bisection_radius']:g}"
+        f"_T{meta['bisection_horizons'][0]:g}_hyperparameters",
+    )
+    return meta, hp, newton, bisection
+
+
+def neoclassical_growth_shooting(out):
+    meta, hp, newton, bisection = shooting_cells(out)
+    gradients = pd.read_parquet(out / f"{SHOOTING_PREFIX}_gradients.parquet")
+    gradient_cells = {}
+    for row in gradients.itertuples():
+        gradient_cells[f"offset{row.c_0_offset:g}_T{row.T:g}"] = {
+            "T": row.T,
+            "c_0_offset": row.c_0_offset,
+            "k_T": sig(row.k_T, 4),
+            "d_k_T_d_c_0": sig(row.d_k_T_d_c_0, 2),
+            "elasticity_k_T_c_0": sig(row.elasticity_k_T_c_0, 2),
+        }
+    basins = pd.read_parquet(out / f"{SHOOTING_PREFIX}_basins.parquet")
+    basin_cells = {}
+    for row in basins.itertuples():
+        basin_cells[f"T{row.T:g}"] = {
+            "T": row.T,
+            "basin_below": sci(row.basin_below, 2),
+            "basin_above": sci(row.basin_above, 2),
+            "exp_lambda_T": sci(math.exp(meta["unstable_eigenvalue"] * row.T), 2),
+            "basin_below_ratio": sig(
+                row.basin_below * math.exp(meta["unstable_eigenvalue"] * row.T), 2
+            ),
+            "basin_above_ratio": sig(
+                row.basin_above * math.exp(meta["unstable_eigenvalue"] * row.T), 2
+            ),
+        }
+    return {
+        "parameters": {
+            "a": sig(hp["parameters"]["a"], 6),
+            **select(hp["parameters"], "delta", "rho_hat", "sigma_crra", "k_0"),
+        },
+        "shooting_set": {
+            **select(hp["shooting_set"], "rtol", "atol", "terminal_tol"),
+            "newton_max_iter": meta["newton_max_iter"],
+            "bisection_max_iter": meta["bisection_max_iter"],
+            "initial_step_fraction": hp["shooting_set"]["initial_step_fraction"],
+            "expansion_factor": hp["shooting_set"]["expansion_factor"],
+        },
+        "data": {
+            "test_T": hp["data_set"]["test_T"],
+            "test_points": hp["data_set"]["test_points"],
+            "k_ss": sig(hp["data_set"]["k_ss"], 4),
+            "c_ss": sig(hp["data_set"]["c_ss"], 4),
+            "c_0_true": sig(hp["data_set"]["c_0_true"], 4),
+            "c_0_upper_bound": sig(hp["data_set"]["c_0_upper_bound"], 4),
+            "unstable_eigenvalue": sig(meta["unstable_eigenvalue"], 4),
+            "stable_eigenvalue": sig(meta["stable_eigenvalue"], 4),
+            "discount_rate": sig(meta["discount_rate"], 4),
+            "newton_radii": meta["newton_radii"],
+            "newton_horizons": meta["newton_horizons"],
+            "bisection_radius": meta["bisection_radius"],
+            "bisection_horizons": meta["bisection_horizons"],
+            "gradient_horizons": meta["gradient_horizons"],
+            "basin_horizons": meta["basin_horizons"],
+            "c_0_offsets": meta["c_0_offsets"],
+            "n_draws": next(iter(bisection.values()))["n_draws"],
+            "benchmark_T": meta["benchmark_T"],
+            "basin_grid_floor": min(meta["basin_offsets"]),
+            "basin_grid_ceiling": sig(max(meta["basin_offsets"]), 2),
+            # Maximal sustainable capital f(k) = delta k, the boundary steady
+            # state that paths below c_0^* approach.
+            "k_bar": sig(
+                hp["parameters"]["delta"] ** (-1.0 / (1.0 - hp["parameters"]["a"])), 3
+            ),
+            "radius_upper_bound": sig(
+                hp["data_set"]["c_0_upper_bound"] / hp["data_set"]["c_0_true"] - 1.0, 2
+            ),
+            "elasticity_ratio_per_20_years": sig(
+                math.exp(20.0 * meta["unstable_eigenvalue"]), 2
+            ),
+            "newton_steps_median_max": max(
+                newton[f"r{meta['newton_radii'][0]:g}_T{T:g}"]["n_iterations_median"]
+                for T in meta["newton_horizons"]
+                if newton[f"r{meta['newton_radii'][0]:g}_T{T:g}"]["n_iterations_median"]
+                is not None
+            ),
+        },
+        "experiments": {"newton": newton, "bisection": bisection},
+        "basins": basin_cells,
+        "gradients": gradient_cells,
+    }
+
+
+def radius_label(radius):
+    exponent = math.log10(radius)
+    if exponent == round(exponent):
+        return f"$10^{{{round(exponent)}}}$"
+    return f"{radius:g}"
+
+
+def basin_cell(value):
+    return f"{value:.1e}" if value > 0 else "--"
+
+
+# Newton by horizon: the measured basin on each side of c_0^*, the same scaled
+# by e^{lambda_u T} (constant once the basin shrinks at the unstable rate), the
+# converged share from random guesses at each radius, and the accuracy of the
+# converged runs (the same root at every radius, taken from the smallest).
+def write_shooting_newton_table(
+    out, filename="neoclassical_growth_shooting_newton.tex"
+):
+    meta, _, newton, _ = shooting_cells(out)
+    basins = pd.read_parquet(out / f"{SHOOTING_PREFIX}_basins.parquet")
+    radii = meta["newton_radii"]
+    lines = [
+        r"\begin{tabular}{r" + "rrrr" + "r" * len(radii) + "rrrr}",
+        r"\toprule",
+        r"$T$ & Basin below & Basin above & "
+        r"Below $\times e^{\lambda_u T}$ & Above $\times e^{\lambda_u T}$ & "
+        + " & ".join(rf"$\rho = {radius_label(r).strip('$')}$" for r in radii)
+        + r" & Search time (s) & $|c_0 - c_0^{*}| / c_0^{*}$ & "
+        r"Mean rel.\ error: $k$, $[0, 110]$ & $[0, T]$ \\",
+        r"\midrule",
+    ]
+
+    def scaled_basin_cell(value, T):
+        if value <= 0:
+            return "--"
+        return f"{value * math.exp(meta['unstable_eigenvalue'] * T):.2f}"
+
+    for T in meta["newton_horizons"]:
+        basin = basins[basins["T"] == T].iloc[0]
+        first = newton[f"r{radii[0]:g}_T{T:g}"]
+        n = first["n_draws"]
+        shares = " & ".join(
+            f"{newton[f'r{r:g}_T{T:g}']['n_accepted']}/{n}" for r in radii
+        )
+        lines.append(
+            f"{T:g} & {basin_cell(basin['basin_below'])} & "
+            f"{basin_cell(basin['basin_above'])} & "
+            f"{scaled_basin_cell(basin['basin_below'], T)} & "
+            f"{scaled_basin_cell(basin['basin_above'], T)} & {shares} & "
+            f"{comparison_cell(first['solve_time_median'], 'time')} & "
+            f"{comparison_cell(first['c_0_rel_error_median'])} & "
+            f"{comparison_cell(first['test_k_rel_error_mean'])} & "
+            f"{comparison_cell(first['horizon_k_rel_error_mean'])} \\\\"
+        )
+    lines += [r"\bottomrule", r"\end{tabular}", ""]
+    path = out / filename
+    path.write_text("\n".join(lines))
+    print(f"wrote {path}")
+
+
+# Bisection with the boundary rule by horizon, from guesses at one radius;
+# accuracy columns are over every search that returned a c_0, so the c_0 the
+# search finds is visible even where the terminal test fails.
+def write_shooting_table(out, filename="neoclassical_growth_shooting.tex"):
+    meta, _, _, bisection = shooting_cells(out)
+    lines = [
+        r"\begin{tabular}{rrrrrrrr}",
+        r"\toprule",
+        r"$T$ & Converged & $|k(T) - k_{ss}| / k_{ss}$ & $|c_0 - c_0^{*}| / c_0^{*}$ & "
+        r"Search time (s) & Mean rel.\ error: $k$, $[0, 110]$ & $c$, $[0, 110]$ & "
+        r"$k$, $[0, T]$ \\",
+        r"\midrule",
+    ]
+    for T in meta["bisection_horizons"]:
+        c = bisection[f"T{T:g}"]
+        lines.append(
+            f"{T:g} & {c['n_accepted']}/{c['n_draws']} & "
+            f"{comparison_cell(c['terminal_k_miss_completed_median'])} & "
+            f"{comparison_cell(c['c_0_rel_error_completed_median'])} & "
+            f"{comparison_cell(c['solve_time_median'], 'time')} & "
+            f"{comparison_cell(c['test_k_rel_error_completed_mean'])} & "
+            f"{comparison_cell(c['test_c_rel_error_completed_mean'])} & "
+            f"{comparison_cell(c['horizon_k_rel_error_completed_mean'])} \\\\"
+        )
+    lines += [r"\bottomrule", r"\end{tabular}", ""]
+    path = out / filename
+    path.write_text("\n".join(lines))
+    print(f"wrote {path}")
+
+
+# Not part of the paper; kept with models.neoclassical_growth_shooting.shooting_seminorms.
+# # Derivative seminorm by horizon: the saddle path (benchmark quadrature, up to
+# # the benchmark horizon) and forward paths from c_0 at and below c_0^*; "--"
+# # marks a path whose integration failed before T or a horizon beyond the
+# # benchmark's.
+# def write_shooting_seminorm_table(
+#     out, filename="neoclassical_growth_shooting_seminorms.tex"
+# ):
+#     meta = load(out, f"{SHOOTING_PREFIX}_gradients")
+#     seminorms = pd.read_parquet(out / f"{SHOOTING_PREFIX}_seminorms.parquet")
+#     horizons = meta["gradient_horizons"]
+#     lines = [
+#         r"\begin{tabular}{l" + "r" * len(horizons) + "}",
+#         r"\toprule",
+#         r"$c_0 / c_0^{*} - 1$ & "
+#         + " & ".join(f"$T = {T:g}$" for T in horizons)
+#         + r" \\",
+#         r"\midrule",
+#     ]
+#
+#     def cell(frame):
+#         value = float(frame["seminorm"].iloc[0])
+#         return f"{value:.2e}" if math.isfinite(value) else "--"
+#
+#     benchmark = seminorms[seminorms["kind"] == "benchmark"]
+#     lines.append(
+#         "Saddle path (benchmark) & "
+#         + " & ".join(cell(benchmark[benchmark["T"] == T]) for T in horizons)
+#         + r" \\"
+#     )
+#     forward = seminorms[seminorms["kind"] == "forward"]
+#     for offset in meta["seminorm_offsets"]:
+#         label = "0" if offset == 0 else f"$-10^{{{round(math.log10(-offset))}}}$"
+#         rows = forward[forward["c_0_offset"] == offset]
+#         lines.append(
+#             f"{label} & "
+#             + " & ".join(cell(rows[rows["T"] == T]) for T in horizons)
+#             + r" \\"
+#         )
+#     lines += [r"\bottomrule", r"\end{tabular}", ""]
+#     path = out / filename
+#     path.write_text("\n".join(lines))
+#     print(f"wrote {path}")
+
+
+# The elasticity d log k(T) / d log c_0 by relative offset of c_0 above the
+# truth and horizon; "--" marks a path that blew up before T.
+def write_shooting_gradient_table(
+    out, filename="neoclassical_growth_shooting_gradients.tex"
+):
+    meta = load(out, f"{SHOOTING_PREFIX}_gradients")
+    gradients = pd.read_parquet(out / f"{SHOOTING_PREFIX}_gradients.parquet")
+    horizons = meta["gradient_horizons"]
+    lines = [
+        r"\begin{tabular}{l" + "r" * len(horizons) + "}",
+        r"\toprule",
+        r"$(c_0 - c_0^{*}) / c_0^{*}$ & "
+        + " & ".join(f"$T = {T:g}$" for T in horizons)
+        + r" \\",
+        r"\midrule",
+    ]
+    for offset in meta["c_0_offsets"]:
+        cells = []
+        for T in horizons:
+            row = gradients[(gradients["T"] == T) & (gradients["c_0_offset"] == offset)]
+            value = float(row["elasticity_k_T_c_0"].iloc[0])
+            cells.append(f"{value:.1e}" if math.isfinite(value) else "--")
+        label = "0" if offset == 0 else f"$10^{{{round(math.log10(offset))}}}$"
+        lines.append(f"{label} & " + " & ".join(cells) + r" \\")
+    lines += [r"\bottomrule", r"\end{tabular}", ""]
+    path = out / filename
+    path.write_text("\n".join(lines))
+    print(f"wrote {path}")
+
+
 def neoclassical_growth_kernel_uno(out):
     prefix = "neoclassical_growth_kernel_uno"
     hp = load(out, f"{prefix}_baseline_hyperparameters")
@@ -2897,6 +3283,10 @@ def collect(output_dir: str = ".results"):
     write_equilibrium_selection_table(out)
     write_sequential_comparison_table(out)
     write_neoclassical_growth_comparison_table(out)
+    write_shooting_newton_table(out)
+    write_shooting_table(out)
+    write_shooting_gradient_table(out)
+    # write_shooting_seminorm_table(out)
     write_neoclassical_sensitivity_table(out)
     # One table per solver and cross-section width; the kernel and NN
     # numbers stand on their own rather than being differenced.
@@ -2944,6 +3334,7 @@ def collect(output_dir: str = ".results"):
             },
             "neoclassical_growth_kernel": neoclassical_growth_kernel(out),
             "neoclassical_growth_kernel_uno": neoclassical_growth_kernel_uno(out),
+            "neoclassical_growth_shooting": neoclassical_growth_shooting(out),
             "neoclassical_growth_concave_convex_kernel_uno": (
                 neoclassical_growth_concave_convex_kernel(
                     out,
@@ -3003,6 +3394,7 @@ def collect(output_dir: str = ".results"):
             "multicountry_growth_scaling": multicountry_growth_scaling(out),
             "multicountry_growth_matern32": multicountry_growth_matern32(out),
             "multicountry_growth_nn": multicountry_growth_nn(out),
+            "kernel_interpolation_example": kernel_interpolation_example(out),
             "performance_comparisons": performance_comparisons(out),
         }
     )

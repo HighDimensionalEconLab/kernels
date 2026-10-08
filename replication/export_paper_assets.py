@@ -16,6 +16,10 @@ MANIFEST = {
         "neoclassical_growth_kernel_figures"
     ),
     "neoclassical_growth_model_nu_rho.tex": "collect_json",
+    "neoclassical_growth_kernel_ridge_grid.pdf": (
+        "neoclassical_growth_kernel_ridge_grid_figures"
+    ),
+    "neoclassical_growth_kernel_ridge_grid.tex": "collect_json",
     "neoclassical_growth_model_concave_convex_threshold.pdf": (
         "neoclassical_growth_concave_convex_kernel_figures"
     ),

@@ -915,6 +915,7 @@ def neoclassical_growth_kernel(out):
         },
         "experiments": experiments,
         "robustness_table": robustness_table,
+        "ridge_grid": ridge_grid_payload(out),
     }
     # The sensitivity experiment exists only in the float64 pass.
     if (out / f"{prefix}_sensitivity.json").exists():
@@ -926,6 +927,146 @@ def neoclassical_growth_kernel(out):
             load(out, f"{prefix}_sensitivity_hyperparameters")["data_set"],
         )
     return payload
+
+
+# Ridge weight x collocation count grid on the growth model: per-cell medians
+# (with quartiles and converged counts) over the date draws, keyed
+# ridge1em10_N101, and the per-N Gram conditioning. The interpolant's error at
+# each N is the ridge = 1e-10 cell, the smallest weight whose gradient
+# tolerance still resolves the minimum-norm selection.
+RIDGE_GRID_PREFIX = "neoclassical_growth_kernel_ridge_grid"
+
+
+def ridge_grid_cell_key(ridge, train_points):
+    return f"ridge1em{-round(math.log10(ridge))}_N{train_points}"
+
+
+def ridge_grid_payload(out):
+    hp = load(out, f"{RIDGE_GRID_PREFIX}_hyperparameters")
+    grid = hp["ridge_grid"]
+    df = pd.read_parquet(out / f"{RIDGE_GRID_PREFIX}_results.parquet")
+    n_seeds = int(grid["n_seeds"])
+    cells = {}
+    plateau = {}
+    for n in grid["train_points"]:
+        at_n = df[df["train_points"] == n]
+        plateau[n] = float(
+            at_n.loc[at_n["ridge"] == 1e-10, "test_k_rel_error_abs"].median()
+        )
+    ridges = sorted(grid["ridges"])
+    smaller = dict(zip(ridges[1:], ridges[:-1]))
+    for ridge in grid["ridges"]:
+        for n in grid["train_points"]:
+            cell = df[(df["ridge"] == ridge) & (df["train_points"] == n)]
+            if len(cell) != n_seeds:
+                raise RuntimeError(f"ridge grid cell {ridge}, {n} has {len(cell)} rows")
+            k_error = cell["test_k_rel_error_abs"]
+            cells[ridge_grid_cell_key(ridge, n)] = {
+                "ridge": ridge,
+                "train_points": int(n),
+                "test_k_rel_error_abs": sci(k_error.median(), 2),
+                "test_k_rel_error_q25": sci(k_error.quantile(0.25), 2),
+                "test_k_rel_error_q75": sci(k_error.quantile(0.75), 2),
+                "test_k_rel_error_max": sci(k_error.max(), 2),
+                "test_c_rel_error_abs": sci(cell["test_c_rel_error_abs"].median(), 2),
+                "k_error_over_plateau": sig(k_error.median() / plateau[n], 2),
+                "max_train_residual": sci(cell["max_train_residual"].median(), 2),
+                "max_train_residual_over_next_ridge": sig(
+                    cell["max_train_residual"].median()
+                    / df.loc[
+                        (df["ridge"] == smaller[ridge]) & (df["train_points"] == n),
+                        "max_train_residual",
+                    ].median(),
+                    2,
+                )
+                if ridge in smaller
+                else None,
+                "rkhs_norm_squared": sig(cell["rkhs_norm_squared"].median(), 3),
+                "k_distance_to_next_ridge": sci(
+                    cell["k_distance_to_next_ridge"].median(), 2
+                ),
+                "c_distance_to_next_ridge": sci(
+                    cell["c_distance_to_next_ridge"].median(), 2
+                ),
+                "k_distance_to_smallest_ridge": sci(
+                    cell["k_distance_to_smallest_ridge"].median(), 2
+                ),
+                "final_grad_norm": sci(cell["final_grad_norm"].median(), 2),
+                "steps": int(cell["steps"].median()),
+                "steps_max": int(cell["steps"].max()),
+                "converged": int((cell["solver_status"] == "converged").sum()),
+            }
+    by_train_points = {}
+    for n in grid["train_points"]:
+        at_n = df[df["train_points"] == n]
+        by_train_points[f"N{n}"] = {
+            "gram_condition": sci(at_n["gram_condition"].median(), 2),
+            "gram_condition_max": sci(at_n["gram_condition"].max(), 2),
+            "solve_time": sig(at_n["solve_time"].median(), 2),
+            "plateau_k_error": sci(plateau[n], 2),
+        }
+    failures = df[df["solver_status"] != "converged"]
+    return {
+        "settings": {
+            "train_T": grid["train_T"],
+            "train_points": grid["train_points"],
+            "ridges": grid["ridges"],
+            "n_seeds": n_seeds,
+            "n_solves": int(len(df)),
+            "kernel": hp["kernel_set"]["kernel"],
+            "ell": hp["kernel_set"]["ell"],
+            "test_T": hp["data_set"]["test_T"],
+            "test_points": hp["data_set"]["test_points"],
+            **grid["lm_overrides"],
+            "init_damping": hp["lm_set"]["init_damping"],
+            **grid["tolerance_overrides"],
+        },
+        "n_converged": int((df["solver_status"] == "converged").sum()),
+        "n_failures": int(len(failures)),
+        "failures": {
+            f"{ridge_grid_cell_key(row['ridge'], row['train_points'])}_seed{row['seed']}": {
+                "solver_status": row["solver_status"],
+                "max_train_residual": sci(row["max_train_residual"], 2),
+                "test_k_rel_error_abs": sci(row["test_k_rel_error_abs"], 2),
+                "final_grad_norm": sci(row["final_grad_norm"], 2),
+            }
+            for _, row in failures.iterrows()
+        },
+        "cells": cells,
+        "by_train_points": by_train_points,
+    }
+
+
+def write_ridge_grid_table(out, filename="neoclassical_growth_kernel_ridge_grid.tex"):
+    # Rows are ridge weights, columns collocation counts; each cell is the
+    # median mean relative capital error over the draws, with the converged
+    # count in parentheses where it is below the number of draws.
+    hp = load(out, f"{RIDGE_GRID_PREFIX}_hyperparameters")
+    grid = hp["ridge_grid"]
+    df = pd.read_parquet(out / f"{RIDGE_GRID_PREFIX}_results.parquet")
+    counts = grid["train_points"]
+    lines = [
+        rf"\begin{{tabular}}{{l{'r' * len(counts)}}}",
+        r"\toprule",
+        r"$\lambda$ & " + " & ".join(rf"$N = {n}$" for n in counts) + r" \\",
+        r"\midrule",
+    ]
+    for ridge in sorted(grid["ridges"], reverse=True):
+        cells = []
+        for n in counts:
+            cell = df[(df["ridge"] == ridge) & (df["train_points"] == n)]
+            text = f"{cell['test_k_rel_error_abs'].median():.1e}"
+            converged = int((cell["solver_status"] == "converged").sum())
+            if converged < grid["n_seeds"]:
+                text += f" ({converged})"
+            cells.append(text)
+        lines.append(
+            f"$10^{{{round(math.log10(ridge))}}}$ & " + " & ".join(cells) + r" \\"
+        )
+    lines += [r"\bottomrule", r"\end{tabular}", ""]
+    path = out / filename
+    path.write_text("\n".join(lines))
+    print(f"wrote {path}")
 
 
 def neoclassical_growth_kernel_uno(out):
@@ -2751,6 +2892,7 @@ def collect(output_dir: str = ".results"):
         prefix="neoclassical_growth_kernel_uno",
         filename="neoclassical_growth_model_nu_rho_uno.tex",
     )
+    write_ridge_grid_table(out)
     write_open_economy_comparative_statics_table(out)
     write_equilibrium_selection_table(out)
     write_sequential_comparison_table(out)

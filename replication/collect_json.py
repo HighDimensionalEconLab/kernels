@@ -916,6 +916,7 @@ def neoclassical_growth_kernel(out):
         "experiments": experiments,
         "robustness_table": robustness_table,
         "ridge_grid": ridge_grid_payload(out),
+        "ridge_path": ridge_path_payload(out),
     }
     # The sensitivity experiment exists only in the float64 pass.
     if (out / f"{prefix}_sensitivity.json").exists():
@@ -1064,6 +1065,112 @@ def write_ridge_grid_table(out, filename="neoclassical_growth_kernel_ridge_grid.
             f"$10^{{{round(math.log10(ridge))}}}$ & " + " & ".join(cells) + r" \\"
         )
     lines += [r"\bottomrule", r"\end{tabular}", ""]
+    path = out / filename
+    path.write_text("\n".join(lines))
+    print(f"wrote {path}")
+
+
+# Ridge path by kernel on the equally spaced baseline dates: for each kernel
+# the ridge solves at every weight and the constrained solve (exact
+# collocation, minimum RKHS norm). Cells are keyed ridge1em10 / constrained.
+RIDGE_PATH_PREFIX = "neoclassical_growth_kernel_ridge_path"
+
+
+def ridge_path_cell_key(row):
+    if row["solver"] == "constrained":
+        return "constrained"
+    return f"ridge1em{-round(math.log10(row['ridge']))}"
+
+
+def ridge_path_payload(out):
+    hp = load(out, f"{RIDGE_PATH_PREFIX}_hyperparameters")
+    df = pd.read_parquet(out / f"{RIDGE_PATH_PREFIX}_results.parquet")
+    kernels = {}
+    for kernel_key, group in df.groupby("kernel_key", sort=False):
+        first = group.iloc[0]
+        cells = {}
+        for _, row in group.iterrows():
+            cells[ridge_path_cell_key(row)] = {
+                "test_k_rel_error_max": sci(row["test_k_rel_error_max"]),
+                "test_c_rel_error_max": sci(row["test_c_rel_error_max"]),
+                "test_k_rel_error_abs": sci(row["test_k_rel_error_abs"]),
+                "max_train_residual": sci(row["max_train_residual"], 2),
+                "mean_validation_residual": sci(row["mean_validation_residual"], 2),
+                "rkhs_norm_squared": sig(row["rkhs_norm_squared"], 4),
+                "c_0": sig(row["c_0"], 8),
+                "final_grad_norm": sci(row["final_grad_norm"], 2),
+                "solver_status": row["solver_status"],
+            }
+        reference = group[group["solver"] == "ridge"]
+        reference = reference[reference["ridge"] == 1e-10].iloc[0]
+        constrained = group[group["solver"] == "constrained"].iloc[0]
+        kernels[kernel_key] = {
+            "kernel": first["kernel"],
+            "nu": KERNEL_NU[first["kernel"]],
+            "ell": first["ell"],
+            "gram_condition": sci(first["gram_condition"], 2),
+            "constrained_over_ridge1em10": {
+                "test_k_rel_error_max": sig(
+                    constrained["test_k_rel_error_max"]
+                    / reference["test_k_rel_error_max"],
+                    2,
+                ),
+                "test_c_rel_error_max": sig(
+                    constrained["test_c_rel_error_max"]
+                    / reference["test_c_rel_error_max"],
+                    2,
+                ),
+                "rkhs_norm_squared_percent": sig(
+                    100.0
+                    * (
+                        constrained["rkhs_norm_squared"]
+                        / reference["rkhs_norm_squared"]
+                        - 1.0
+                    ),
+                    2,
+                ),
+            },
+            "cells": cells,
+        }
+    at_cap = df[df["solver_status"] == "max_steps"]
+    return {
+        "settings": hp["ridge_path"],
+        "n_solves": int(len(df)),
+        "n_ridge_at_step_cap": int(len(at_cap)),
+        "max_grad_norm_at_step_cap": sci(at_cap["final_grad_norm"].max(), 2),
+        "kernels": kernels,
+    }
+
+
+def write_ridge_path_table(out, filename="neoclassical_growth_ridge_path.tex"):
+    df = pd.read_parquet(out / f"{RIDGE_PATH_PREFIX}_results.parquet")
+    lines = [
+        r"\begin{tabular}{llrrrr}",
+        r"\toprule",
+        r"Kernel & $\lambda$ & Max training residual & $\sum_j \balpha_j^{\top}\mK\balpha_j$ & "
+        r"Max of Rel. Error: $\hat{x}(t)$ & Max of Rel. Error: $\hat{y}(t)$ \\",
+        r"\midrule",
+    ]
+    for kernel_key, group in df.groupby("kernel_key", sort=False):
+        first = group.iloc[0]
+        nu_label = {0.5: "1/2", 1.5: "3/2", 2.5: "5/2", "inf": r"\infty"}[
+            KERNEL_NU[first["kernel"]]
+        ]
+        label = rf"$\nu = {nu_label}$, $\ell = {first['ell']:g}$"
+        for i, (_, row) in enumerate(group.iterrows()):
+            weight = (
+                "constrained"
+                if row["solver"] == "constrained"
+                else f"$10^{{{round(math.log10(row['ridge']))}}}$"
+            )
+            lines.append(
+                f"{label if i == 0 else ''} & {weight} & "
+                f"{row['max_train_residual']:.1e} & {row['rkhs_norm_squared']:.4f} & "
+                f"{row['test_k_rel_error_max']:.1e} & {row['test_c_rel_error_max']:.1e} \\\\"
+            )
+        lines.append(r"\midrule")
+    lines[-1] = r"\bottomrule"
+    lines += [r"\end{tabular}", ""]
     path = out / filename
     path.write_text("\n".join(lines))
     print(f"wrote {path}")
@@ -3273,11 +3380,7 @@ def collect(output_dir: str = ".results"):
     out = pathlib.Path(output_dir)
     validate_replication_contract(out)
     write_nu_rho_table(out)
-    write_nu_rho_table(
-        out,
-        prefix="neoclassical_growth_kernel_uno",
-        filename="neoclassical_growth_model_nu_rho_uno.tex",
-    )
+    write_ridge_path_table(out)
     write_ridge_grid_table(out)
     write_open_economy_comparative_statics_table(out)
     write_equilibrium_selection_table(out)

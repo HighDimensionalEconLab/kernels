@@ -300,6 +300,7 @@ def neoclassical_growth_kernel_uno(
     x = np.array(result.primal_solution, dtype=np.float64)[:n_variables]
     theta = unravel(jnp.asarray(x))
     c_0, mu_0 = theta.c_0, theta.mu_0
+    norm2 = float(objective(jnp.asarray(x), args))
 
     # Paths and residual rows on an evaluation grid through fresh
     # cross-kernel matrices against the training grid.
@@ -441,6 +442,7 @@ def neoclassical_growth_kernel_uno(
         "tolerance_set": asdict(tolerance_set),
         "c_0": float(c_0),
         "mu_0": float(mu_0),
+        "rkhs_norm_squared": norm2,
         "max_train_residual": max_train_residual,
         "max_validation_residual": max_validation_residual,
         "mean_validation_residual": mean_validation_residual,

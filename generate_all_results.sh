@@ -50,6 +50,7 @@ python -m replication.neoclassical_growth_kernel_uno --output_dir "$output_dir"
 python -m replication.neoclassical_growth_concave_convex_kernel_uno --output_dir "$output_dir"
 python -m replication.asset_pricing_kernel_uno --output_dir "$output_dir"
 python -m replication.open_economy_growth_kernel_uno --output_dir "$output_dir"
+python -m replication.neoclassical_growth_kernel_ridge_path --output_dir "$output_dir"
 python -m replication.multicountry_growth_scaling --output_dir "$output_dir"
 python -m replication.multicountry_growth_gamma_common --output_dir "$output_dir"
 

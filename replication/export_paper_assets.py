@@ -40,7 +40,7 @@ MANIFEST = {
     "multicountry_growth_kernel_comparison.tex": "collect_json",
     "open_economy_comparative_statics.tex": "collect_json",
     "equilibrium_selection.tex": "collect_json",
-    "neoclassical_growth_model_nu_rho_uno.tex": "collect_json",
+    "neoclassical_growth_ridge_path.tex": "collect_json",
     "neoclassical_growth_sensitivity.tex": "collect_json",
     "multicountry_growth_sensitivity.tex": "collect_json",
     "multicountry_growth_aggregate_sensitivity.tex": "collect_json",

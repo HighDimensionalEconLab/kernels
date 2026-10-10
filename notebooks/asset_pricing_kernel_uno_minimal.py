@@ -8,6 +8,10 @@ from jax.flatten_util import ravel_pytree
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
+# Run twice for jit-free execution time.
+jax.config.update("jax_compilation_cache_dir", ".jax_cache")
+jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.0)
+jax.config.update("jax_persistent_cache_min_entry_size_bytes", 0)
 
 r = 0.1  # interest rate
 c = 0.02  # dividend flow constant

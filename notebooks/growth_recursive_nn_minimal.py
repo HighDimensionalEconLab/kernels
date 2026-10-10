@@ -104,14 +104,12 @@ def log_state_drift(policy, log_state, p):
 # (f_k - delta - rho_hat) / sigma.
 def euler_residual(policy, log_state, p):
     drift = log_state_drift(policy, log_state, p)
-    log_c, dlog_c_dt = jax.jvp(
+    _, dlog_c_dt = jax.jvp(
         lambda state: jnp.log(consumption(policy, state, p)), (log_state,), (drift,)
     )
     z, k = jnp.exp(log_state)
-    # 0 * log_c is NaN where c <= 0; the tangent alone would stay finite there.
     return (
         dlog_c_dt
-        + 0.0 * log_c
         - (p["a"] * z * k ** (p["a"] - 1.0) - p["delta"] - p["rho_hat"])
         / p["sigma_crra"]
     )

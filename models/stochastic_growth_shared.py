@@ -125,7 +125,7 @@ def euler_residual_terms(policy, log_states, p):
         def log_consumption(state):
             return jnp.log(consumption(policy, state, p))
 
-        log_c, dlog_c_dt = jax.jvp(log_consumption, (log_state,), (state_drift,))
+        _, dlog_c_dt = jax.jvp(log_consumption, (log_state,), (state_drift,))
         l_z, l_zz = jax.jvp(
             lambda state: jax.jvp(log_consumption, (state,), (e_z,))[1],
             (log_state,),
@@ -133,13 +133,9 @@ def euler_residual_terms(policy, log_states, p):
         )
         diffusion_term = 0.5 * p.sigma_z**2 * (l_zz - p.sigma_crra * l_z**2)
         z, k = jnp.exp(log_state)
-        # The zero-scaled primal keeps the residual NaN outside the model's
-        # domain (c <= 0) instead of quietly extending the Euler equation.
-        domain_guard = 0.0 * log_c
         residual = (
             dlog_c_dt
             + diffusion_term
-            + domain_guard
             - (mpk(z, k, p) - p.delta - p.rho_hat) / p.sigma_crra
         )
         return residual, diffusion_term

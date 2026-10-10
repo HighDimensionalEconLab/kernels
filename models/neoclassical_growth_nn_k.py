@@ -55,18 +55,11 @@ def substituted_consumption(model, t, p):
 # Euler in log-consumption form: dlog(c)/dt = (f'(k) - delta - rho_hat) /
 # sigma_crra, with c substituted from the resource constraint.
 def euler_residual(model, t, p):
-    log_c, dlog_c_dt = value_and_grad_fwd(
+    _, dlog_c_dt = value_and_grad_fwd(
         lambda s: jnp.log(substituted_consumption(model, s, p))
     )(t)
     z = p.z_0 * jnp.exp((1.0 - p.a) * p.g * t)
-    # Zero on the feasible domain; keeps the residual NaN when c <= 0, where
-    # the tangent alone would stay finite.
-    domain_guard = 0.0 * log_c
-    return (
-        dlog_c_dt
-        + domain_guard
-        - (mpk(z, model(t)[0], p) - p.delta - p.rho_hat) / p.sigma_crra
-    )
+    return dlog_c_dt - (mpk(z, model(t)[0], p) - p.delta - p.rho_hat) / p.sigma_crra
 
 
 def residual_fn(theta, args, p):

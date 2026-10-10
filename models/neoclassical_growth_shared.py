@@ -125,20 +125,13 @@ def log_state_drift(policy, log_state, p):
 def euler_residuals(policy, log_states, p):
     def residual_scalar(log_state):
         state_drift = log_state_drift(policy, log_state, p)
-        log_c, dlog_c_dt = jax.jvp(
+        _, dlog_c_dt = jax.jvp(
             lambda state: jnp.log(consumption(policy, state, p)),
             (log_state,),
             (state_drift,),
         )
         z, k = jnp.exp(log_state)
-        # Zero on the feasible domain; keeps the residual NaN when c <= 0,
-        # where the tangent alone would stay finite.
-        domain_guard = 0.0 * log_c
-        return (
-            dlog_c_dt
-            + domain_guard
-            - (mpk(z, k, p) - p.delta - p.rho_hat) / p.sigma_crra
-        )
+        return dlog_c_dt - (mpk(z, k, p) - p.delta - p.rho_hat) / p.sigma_crra
 
     return jax.vmap(residual_scalar)(log_states)
 

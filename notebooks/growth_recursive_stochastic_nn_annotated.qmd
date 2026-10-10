@@ -14,6 +14,7 @@ jax.config.update("jax_default_matmul_precision", "highest")
 
 import math
 import time
+from functools import partial
 
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -163,7 +164,7 @@ class InvestmentPolicy(nnx.Module):
 
 ## Model functions and simulation
 
-The residual needs $\nabla\ell \cdot F$, $\ell_z$, and $\ell_{zz}$. All three are forward-mode derivatives of $\ell(x) = \log c(x)$: one [`jax.jvp`](https://docs.jax.dev/en/latest/automatic-differentiation.html) along the drift, and a `jax.jvp` of a `jax.jvp` in the $z$ direction for the second derivative. Paths come from [`tinydiffeq`](https://github.com/HighDimensionalEconLab/tinydiffeq)'s fixed-step `solve_sde`: a PRNG key fixes the Brownian increments of one path, the policy is closed over, and the integrator's own states are saved, so training differentiates straight through the simulation. `jax.vmap` maps one path to many and one state to all the states on a path.
+The residual needs $\nabla\ell \cdot F$, $\ell_z$, and $\ell_{zz}$. All three are forward-mode derivatives of $\ell(x) = \log c(x)$: one [`jax.jvp`](https://docs.jax.dev/en/latest/automatic-differentiation.html) along the drift, and a `jax.jvp` of a `jax.jvp` in the $z$ direction for the second derivative. Paths come from [`tinydiffeq`](https://github.com/HighDimensionalEconLab/tinydiffeq)'s fixed-step `solve_sde`: a PRNG key fixes the Brownian increments of one path, the policy is closed over, and the integrator's own states are saved, so training differentiates straight through the simulation. Both are written for a single path or a single state and vectorized with `jax.vmap` as decorators: `simulate` over the keys of a batch of paths, and `euler_residual` over a flat batch of states.
 
 ```{python}
 def consumption(policy, log_state, p):
@@ -185,29 +186,38 @@ def log_state_diffusion(log_state, p):
     return jnp.stack([p["sigma_z"], 0.0])
 
 
+# Stochastic Euler equation in l = log c. With mu = c^(-sigma) = exp(-sigma l),
+# the co-state equation rho_hat mu = mu (f_k - delta) + L mu divided by
+# -sigma mu is
+#   grad(l) . F + (sigma_z^2 / 2) (l_zz - sigma l_z^2) = (f_k - delta - rho_hat) / sigma,
+# with F the log-state drift, f_k = a z k^(a - 1), and l_z, l_zz derivatives in
+# log z. The residual is left side minus right side:
+#   dlog_c_dt = grad(l) . F, a jvp of l along the drift;
+#   l_z, l_zz from a nested jvp of l in the e_z direction.
+# Vectorized over a flat batch of states.
+@partial(jax.vmap, in_axes=(None, 0, None))
 def euler_residual(policy, log_state, p):
     def log_consumption(state):
         return jnp.log(consumption(policy, state, p))
 
     e_z = jnp.array([1.0, 0.0])
     drift = log_state_drift(policy, log_state, p)
-    log_c, dlog_c_dt = jax.jvp(log_consumption, (log_state,), (drift,))
+    _, dlog_c_dt = jax.jvp(log_consumption, (log_state,), (drift,))
     l_z, l_zz = jax.jvp(
         lambda state: jax.jvp(log_consumption, (state,), (e_z,))[1],
         (log_state,),
         (e_z,),
     )
     z, k = jnp.exp(log_state)
-    # 0 * log_c is NaN where c <= 0; the tangents alone would stay finite there.
     return (
         dlog_c_dt
         + 0.5 * p["sigma_z"] ** 2 * (l_zz - p["sigma_crra"] * l_z**2)
-        + 0.0 * log_c
         - (p["a"] * z * k ** (p["a"] - 1.0) - p["delta"] - p["rho_hat"])
         / p["sigma_crra"]
     )
 
 
+@partial(jax.vmap, in_axes=(None, 0, None, None, None))
 def simulate(policy, key, T, n_steps, p):
     return solve_sde(
         lambda log_state: log_state_drift(policy, log_state, p),
@@ -220,11 +230,6 @@ def simulate(policy, key, T, n_steps, p):
         n_steps=n_steps,
         save_at=SaveAt(steps=True),
     )
-
-
-def euler_residuals_on_paths(policy, keys, T, n_steps, p):
-    solution = jax.vmap(lambda key: simulate(policy, key, T, n_steps, p))(keys)
-    return jax.vmap(jax.vmap(lambda s: euler_residual(policy, s, p)))(solution.xs)
 ```
 
 ## The SAA solve
@@ -235,12 +240,13 @@ The residual vector holds $R/\sqrt{SN}$ at each simulated state, so its squared 
 graphdef, theta_0 = nnx.split(InvestmentPolicy(rngs=nnx.Rngs(SEED)), nnx.Param)
 
 
-# Jitted because the solver also evaluates it eagerly once per solve to size buffers.
 @jax.jit
 def residual_fn(theta, args, p):
     policy = nnx.merge(args["graphdef"], theta)
-    euler = euler_residuals_on_paths(policy, args["keys"], TRAIN_T, TRAIN_STEPS, p)
-    return (euler / jnp.sqrt(euler.size)).reshape(-1)
+    # Adaptive: the simulated states depend on theta and are differentiated through.
+    log_states = simulate(policy, args["keys"], TRAIN_T, TRAIN_STEPS, p).xs
+    euler = euler_residual(policy, log_states.reshape(-1, 2), p)
+    return euler / jnp.sqrt(euler.size)
 
 
 @jax.jit
@@ -279,16 +285,11 @@ There is no closed-form benchmark, so the test is the Euler residual itself on h
 
 ```{python}
 test_keys = jax.random.split(test_key, TEST_PATHS)
-test_solution = jax.vmap(lambda key: simulate(policy, key, TEST_T, TEST_STEPS, p))(
-    test_keys
-)
-euler_test = jax.vmap(jax.vmap(lambda s: euler_residual(policy, s, p)))(
-    test_solution.xs
-)
+test_solution = simulate(policy, test_keys, TEST_T, TEST_STEPS, p)
+euler_test = euler_residual(policy, test_solution.xs.reshape(-1, 2), p)
 
-terminal_log_states = jax.vmap(
-    lambda key: simulate(policy, key, TVC_T, TVC_STEPS, p).xs[-1]
-)(jax.random.split(tvc_key, TEST_PATHS))
+tvc_keys = jax.random.split(tvc_key, TEST_PATHS)
+terminal_log_states = simulate(policy, tvc_keys, TVC_T, TVC_STEPS, p).xs[:, -1]
 c_T = jax.vmap(lambda s: consumption(policy, s, p))(terminal_log_states)
 c_init = consumption(policy, log_state_initial, p)
 log_tvc = (-rho_hat * TVC_T - sigma_crra * jnp.log(c_T) + terminal_log_states[:, 1]) - (
@@ -316,7 +317,7 @@ ax_z.set(xlabel="t", ylabel="z", title="TFP")
 ax_z.legend(fontsize=8)
 ax_k.plot(ts, k_test.T, "C0", linewidth=0.6, alpha=0.5)
 ax_k.set(xlabel="t", ylabel="k", title="capital")
-ax_r.plot(ts, euler_test.T, "C0", linewidth=0.6, alpha=0.5)
+ax_r.plot(ts, euler_test.reshape(TEST_PATHS, -1).T, "C0", linewidth=0.6, alpha=0.5)
 ax_r.axhline(0.0, color="k", linestyle="--", linewidth=0.8)
 ax_r.set(xlabel="t", ylabel="residual", title="Euler residual")
 fig.tight_layout()

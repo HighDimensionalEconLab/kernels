@@ -1,5 +1,6 @@
 import math
 import time
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -109,35 +110,40 @@ def log_state_diffusion(log_state, p):
     return jnp.stack([p["sigma_z"], 0.0])
 
 
-# Stochastic Euler equation with l = log c: the drift of l along the state
-# plus the Ito correction (sigma_z^2 / 2)(l_zz - sigma l_z^2) from the drift of
-# u'(c) = exp(-sigma l), against the Euler rate (f_k - delta - rho_hat) / sigma.
-# Both derivatives of l in z come from nested jax.jvp in the e_z direction.
+# Stochastic Euler equation in l = log c. With mu = c^(-sigma) = exp(-sigma l),
+# the co-state equation rho_hat mu = mu (f_k - delta) + L mu divided by
+# -sigma mu is
+#   grad(l) . F + (sigma_z^2 / 2) (l_zz - sigma l_z^2) = (f_k - delta - rho_hat) / sigma,
+# with F the log-state drift, f_k = a z k^(a - 1), and l_z, l_zz derivatives in
+# log z. The residual is left side minus right side:
+#   dlog_c_dt = grad(l) . F, a jvp of l along the drift;
+#   l_z, l_zz from a nested jvp of l in the e_z direction.
+# Vectorized over a flat batch of states.
+@partial(jax.vmap, in_axes=(None, 0, None))
 def euler_residual(policy, log_state, p):
     def log_consumption(state):
         return jnp.log(consumption(policy, state, p))
 
     e_z = jnp.array([1.0, 0.0])
     drift = log_state_drift(policy, log_state, p)
-    log_c, dlog_c_dt = jax.jvp(log_consumption, (log_state,), (drift,))
+    _, dlog_c_dt = jax.jvp(log_consumption, (log_state,), (drift,))
     l_z, l_zz = jax.jvp(
         lambda state: jax.jvp(log_consumption, (state,), (e_z,))[1],
         (log_state,),
         (e_z,),
     )
     z, k = jnp.exp(log_state)
-    # 0 * log_c is NaN where c <= 0; the tangents alone would stay finite there.
     return (
         dlog_c_dt
         + 0.5 * p["sigma_z"] ** 2 * (l_zz - p["sigma_crra"] * l_z**2)
-        + 0.0 * log_c
         - (p["a"] * z * k ** (p["a"] - 1.0) - p["delta"] - p["rho_hat"])
         / p["sigma_crra"]
     )
 
 
-# Fixed-step Euler-Maruyama closed-loop simulation of one path from the initial
-# state, saving the integrator's own states; the key fixes the Brownian path.
+# Fixed-step Euler-Maruyama closed-loop simulation from the initial state, one
+# path per key, saving the integrator's own states.
+@partial(jax.vmap, in_axes=(None, 0, None, None, None))
 def simulate(policy, key, T, n_steps, p):
     return solve_sde(
         lambda log_state: log_state_drift(policy, log_state, p),
@@ -152,22 +158,18 @@ def simulate(policy, key, T, n_steps, p):
     )
 
 
-def euler_residuals_on_paths(policy, keys, T, n_steps, p):
-    solution = jax.vmap(lambda key: simulate(policy, key, T, n_steps, p))(keys)
-    return jax.vmap(jax.vmap(lambda s: euler_residual(policy, s, p)))(solution.xs)
-
-
 graphdef, theta_0 = nnx.split(InvestmentPolicy(rngs=nnx.Rngs(SEED)), nnx.Param)
 
 
 # Sample-average approximation: Euler residuals on the closed-loop paths the
-# current policy generates under the Brownian paths in args["keys"]. Jitted
-# because the solver also evaluates it eagerly once per solve to size buffers.
+# current policy generates under the Brownian paths in args["keys"].
 @jax.jit
 def residual_fn(theta, args, p):
     policy = nnx.merge(args["graphdef"], theta)
-    euler = euler_residuals_on_paths(policy, args["keys"], TRAIN_T, TRAIN_STEPS, p)
-    return (euler / jnp.sqrt(euler.size)).reshape(-1)
+    # Adaptive: the simulated states depend on theta and are differentiated through.
+    log_states = simulate(policy, args["keys"], TRAIN_T, TRAIN_STEPS, p).xs
+    euler = euler_residual(policy, log_states.reshape(-1, 2), p)
+    return euler / jnp.sqrt(euler.size)
 
 
 @jax.jit
@@ -202,17 +204,16 @@ solve_time = time.perf_counter() - start
 policy = nnx.merge(graphdef, theta)
 
 # Held-out Brownian paths, never seen in training.
-euler_test = euler_residuals_on_paths(
-    policy, jax.random.split(test_key, TEST_PATHS), TEST_T, TEST_STEPS, p
-)
+test_keys = jax.random.split(test_key, TEST_PATHS)
+test_log_states = simulate(policy, test_keys, TEST_T, TEST_STEPS, p).xs
+euler_test = euler_residual(policy, test_log_states.reshape(-1, 2), p)
 
 # Log transversality diagnostic at T on each of many long paths, normalized by
 # its initial-date value: (-rho_hat T - sigma log c(T) + log k(T)) - (-sigma
 # log c(0) + log k(0)). On the saddle path every realization sits far negative;
 # a capital bubble drives it up, so the worst path is reported.
-terminal_log_states = jax.vmap(
-    lambda key: simulate(policy, key, TVC_T, TVC_STEPS, p).xs[-1]
-)(jax.random.split(tvc_key, TEST_PATHS))
+tvc_keys = jax.random.split(tvc_key, TEST_PATHS)
+terminal_log_states = simulate(policy, tvc_keys, TVC_T, TVC_STEPS, p).xs[:, -1]
 c_T = jax.vmap(lambda s: consumption(policy, s, p))(terminal_log_states)
 c_init = consumption(policy, log_state_initial, p)
 log_tvc = (-rho_hat * TVC_T - sigma_crra * jnp.log(c_T) + terminal_log_states[:, 1]) - (

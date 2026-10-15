@@ -58,11 +58,12 @@ def kernel_key(kernel, ell):
     return f"{nu[kernel]}_ell{ell:g}"
 
 
-# Maxima over the test window excluding the pinned t = 0 point, as in
-# collect_json.rel_error_extrema.
+# Maxima over the full test window, as in collect_json.rel_error_extrema.
 def rel_error_max(test_df):
-    df = test_df[test_df["t"] > 0.0]
-    return float(df["k_rel_error"].abs().max()), float(df["c_rel_error"].abs().max())
+    return (
+        float(test_df["k_rel_error"].abs().max()),
+        float(test_df["c_rel_error"].abs().max()),
+    )
 
 
 def run(output_dir: str = ".results"):

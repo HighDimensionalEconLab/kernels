@@ -102,12 +102,9 @@ def load(out, name):
 
 
 # Rel-error maxima and means recomputed from an experiment's saved test_df
-# frame, excluding the pinned t = 0 point (its near-zero capital error is an
-# initial-condition artifact, not accuracy), medianed across seeds when
-# present.
+# frame over the full test grid, medianed across seeds when present.
 def rel_error_extrema(out, name):
     df = pd.read_parquet(out / f"{name}_test_df.parquet")
-    df = df[df["t"] > 0.0]
     if "seed" in df.columns:
         results = pd.read_parquet(out / f"{name}_results.parquet")
         df = df[df["seed"].isin(results.loc[results["solution_accepted"], "seed"])]
@@ -219,13 +216,12 @@ def accepted_cell(j):
     return f"{int(j['n_accepted'])}/{int(total)}"
 
 
-# Mean and largest |error| of one column of a saved test_df frame with the
-# pinned t = 0 point dropped, restricted to accepted runs: per-run mean and
-# max, combined by median over seeds or by mean of means and overall max over
-# a sweep of initial conditions.
+# Mean and largest |error| of one column of a saved test_df frame over the
+# full test grid, restricted to accepted runs: per-run mean and max, combined
+# by median over seeds or by mean of means and overall max over a sweep of
+# initial conditions.
 def frame_error_cells(out, name, column, run_key=None, aggregate="seeds"):
     df = pd.read_parquet(out / f"{name}_test_df.parquet")
-    df = df[df["t"] > 0.0]
     if run_key is None:
         errors = df[column].abs()
         return float(errors.mean()), float(errors.max())
@@ -241,7 +237,7 @@ def frame_error_cells(out, name, column, run_key=None, aggregate="seeds"):
 
 # Sequential kernel-vs-NN comparison across models. Error columns are the
 # mean and largest relative errors against each model's benchmark on the test
-# grid with t > 0: the price for asset pricing and capital otherwise. NN
+# grid: the price for asset pricing and capital otherwise. NN
 # entries are medians over accepted seeds; the concave-convex sweep
 # aggregates over its 70 initial conditions (mean of the per-run means,
 # largest entry overall).
@@ -482,9 +478,9 @@ def write_equilibrium_selection_table(out):
         r"\midrule",
     ]
     quantity_rows = [
-        (r"$\lVert x \rVert_K^2$", lambda c: c["rkhs2_k"]),
-        (r"$\lVert y \rVert_K^2$", lambda c: c["rkhs2_c"]),
-        (r"$\lVert \mu \rVert_K^2$", lambda c: c["rkhs2_mu"]),
+        (r"$\lVert \dot{x} \rVert_K^2$", lambda c: c["rkhs2_k"]),
+        (r"$\lVert \dot{y} \rVert_K^2$", lambda c: c["rkhs2_c"]),
+        (r"$\lVert \dot{\mu} \rVert_K^2$", lambda c: c["rkhs2_mu"]),
     ]
     for label, get in quantity_rows:
         cells = []
@@ -647,6 +643,7 @@ def multicountry_sensitivity_payload(value, parameters, reference=None):
                     cross_solver_gaps.append(abs(derivative - reference(field)))
     payload = {
         "times": list(MULTICOUNTRY_SENSITIVITY_TIMES),
+        "table_times": list(MULTICOUNTRY_SENSITIVITY_TABLE_TIMES),
         "levels": levels,
         "derivatives": derivatives,
         # Closed-form steady state of country 1 and its productivity derivative.
@@ -1233,7 +1230,6 @@ def shooting_cell(out, name):
     j = load(out, name)
     results = pd.read_parquet(out / f"{name}_results.parquet")
     frame = pd.read_parquet(out / f"{name}_test_df.parquet")
-    frame = frame[frame["t"] > 0.0]
     reasons = results["rejection_reason"]
     accepted = results[results["solution_accepted"]]
     # Runs that returned a c_0 at all: for bisection every bracketed search,
@@ -3180,7 +3176,7 @@ def performance_comparisons(out):
             float(frame["max_benchmark_error"].median()),
         )
 
-    multicountry_kernel = load(out, "multicountry_growth_kernel_initial_debt")
+    multicountry_kernel = load(out, "multicountry_growth_kernel_baseline")
     multicountry_nn_frame = accepted("multicountry_growth_nn")
     multicountry_kernel_time = med(multicountry_kernel["solve_time"])
     multicountry_nn_time = float(multicountry_nn_frame["solve_time"].median())

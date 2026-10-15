@@ -31,14 +31,17 @@ NUMBER = re.compile(r"\$?(-?\d{1,3}(?:\{,\}\d{3})+|-?\d+(?:\.\d+)?)\$?\s*$")
 def resolve(payload, path):
     node = payload
     for part in path.strip().strip("/").split("/"):
-        if not isinstance(node, dict) or part not in node:
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        elif isinstance(node, list) and part.isdigit() and int(part) < len(node):
+            node = node[int(part)]
+        else:
             return False, None
-        node = node[part]
     return True, node
 
 
 def value_token(tex, end):
-    window = tex[max(0, end - 60) : end]
+    window = TAG.sub("", tex[max(0, end - 140) : end])
     m = SCI.search(window)
     if m:
         return ("sci", float(m.group(1)), int(m.group(2)))

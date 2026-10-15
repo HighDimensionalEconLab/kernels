@@ -50,7 +50,11 @@ def residual_fn(theta, args, p):
     )
     price, dprice_dt = paths["price"]
     residual = dprice_dt - (p.r * price - dividends(args.batch["t"], p))
-    return residual, {"p": price, "dp_dt": dprice_dt, "residual": residual}
+    return residual / jnp.sqrt(residual.size), {
+        "p": price,
+        "dp_dt": dprice_dt,
+        "residual": residual,
+    }
 
 
 @jax.jit
@@ -274,10 +278,9 @@ def asset_pricing_kernel_uno(
         "max_validation_residual": max_validation_residual,
         "mean_validation_residual": mean_validation_residual,
         "max_test_residual": float(jnp.max(jnp.abs(test_residual))),
-        # min/max error statistics exclude the pinned t = 0 point ([1:]).
         "p_rel_error_mean": float(p_rel_error.mean()),
-        "p_rel_error_max": float(p_rel_error[1:].max()),
-        "p_rel_error_min": float(p_rel_error[1:].min()),
+        "p_rel_error_max": float(p_rel_error.max()),
+        "p_rel_error_min": float(p_rel_error.min()),
         "solve_time": solve_time,
         "solver_status": solver_status,
         "solution_status": solution_status,

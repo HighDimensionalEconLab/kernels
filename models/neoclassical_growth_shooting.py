@@ -516,10 +516,10 @@ def neoclassical_growth_shooting(
     k_hb, c_hb = (np.asarray(x) for x in benchmark(jnp.asarray(t_horizon)))
     horizon_k_rel_error = np.where(
         horizon_valid, np.abs(horizon[:, 0] - k_hb) / np.abs(k_hb), np.nan
-    )[1:]
+    )
     horizon_c_rel_error = np.where(
         horizon_valid, np.abs(horizon[:, 1] - c_hb) / np.abs(c_hb), np.nan
-    )[1:]
+    )
 
     results = {
         "parameters": p.to_dict(),
@@ -546,10 +546,10 @@ def neoclassical_growth_shooting(
         else np.nan,
         "test_points_finite": int(valid.sum()),
         "horizon_k_rel_error_abs": float(np.nanmean(horizon_k_rel_error))
-        if horizon_valid[1:].any()
+        if horizon_valid.any()
         else np.nan,
         "horizon_c_rel_error_abs": float(np.nanmean(horizon_c_rel_error))
-        if horizon_valid[1:].any()
+        if horizon_valid.any()
         else np.nan,
         "horizon_points_finite": int(horizon_valid.sum()),
         "solve_time": solve_time,

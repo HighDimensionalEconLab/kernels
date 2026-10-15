@@ -53,7 +53,11 @@ def residual_fn(theta, args, p):
     )
     price, dprice_dt = paths["price"]
     residual = dprice_dt - (p.r * price - dividends(args.batch["t"], p))
-    return residual, {"p": price, "dp_dt": dprice_dt, "residual": residual}
+    return residual / jnp.sqrt(residual.size), {
+        "p": price,
+        "dp_dt": dprice_dt,
+        "residual": residual,
+    }
 
 
 def asset_pricing_kernel(
@@ -64,8 +68,8 @@ def asset_pricing_kernel(
     use_float64: bool = True,
     kernel_set: KernelSettings = KernelSettings(),
     data_set: DataSettings = DataSettings(),
-    # atol bounds the unscaled residual norm; gtol must resolve the weakly
-    # penalized free p_0. Convergence requires gtol AND atol.
+    # atol is on the 1/sqrt(n)-scaled residual norm; gtol must resolve the
+    # weakly penalized free p_0. Convergence requires gtol AND atol.
     lm_set: OptimizerSettings = OptimizerSettings(
         init_damping=1e-8,
         damping_decrease=0.5,
@@ -190,10 +194,9 @@ def asset_pricing_kernel(
         "max_validation_residual": max_validation_residual,
         "mean_validation_residual": mean_validation_residual,
         "max_test_residual": float(jnp.max(jnp.abs(test_residual))),
-        # min/max error statistics exclude the pinned t = 0 point ([1:]).
         "p_rel_error_mean": float(p_rel_error.mean()),
-        "p_rel_error_max": float(p_rel_error[1:].max()),
-        "p_rel_error_min": float(p_rel_error[1:].min()),
+        "p_rel_error_max": float(p_rel_error.max()),
+        "p_rel_error_min": float(p_rel_error.min()),
         "solve_time": elapsed,
         "train_loss": float(result.info.resid_loss),
         "final_damping": float(result.lm_state.damping),
